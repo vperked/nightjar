@@ -98,8 +98,8 @@ class DiscordWebhook:
             True if message was sent successfully, False otherwise
         """
         embed = {
-            'title': title[:256],  # Discord limit
-            'description': description[:4096] if description else "",  # Discord limit
+            'title': title[:256],
+            'description': description[:4096] if description else "",
         }
         
         if color is not None:
@@ -107,7 +107,7 @@ class DiscordWebhook:
         
         if fields:
             embed['fields'] = []
-            for field in fields[:25]:  # Discord limit of 25 fields
+            for field in fields[:25]:
                 embed['fields'].append({
                     'name': field.get('name', '')[:256],
                     'value': field.get('value', '')[:1024],

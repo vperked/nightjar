@@ -242,13 +242,20 @@ class SystemMonitor:
         """
         processes = []
         
-        for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'memory_info']):
+        for proc in psutil.process_iter(['pid', 'name', 'memory_percent', 'memory_info']):
             try:
-                proc_info = proc.info
-                cpu_percent = proc.cpu_percent(interval=0.1)
-                proc_info['cpu_percent'] = min(cpu_percent / CPU_COUNT, 100.0) if CPU_COUNT > 0 else min(cpu_percent, 100.0)
+                proc_info = proc.info.copy()
                 proc_info['memory_percent'] = proc.memory_percent()
+                proc_info['cpu_percent'] = 0.0
                 processes.append(proc_info)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        
+        for proc_info in processes:
+            try:
+                proc = psutil.Process(proc_info['pid'])
+                cpu_percent = proc.cpu_percent()
+                proc_info['cpu_percent'] = min(cpu_percent / self.cpu_monitor.cpu_count, 100.0) if self.cpu_monitor.cpu_count > 0 else min(cpu_percent, 100.0)
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
         

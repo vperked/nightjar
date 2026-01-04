@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <meta name="theme-color" content="#0a0000">
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>Server Monitor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        @keyframes pulse-glow {
+            0%, 100% { 
+                opacity: 1;
+                filter: brightness(1);
+            }
+            50% { 
+                opacity: 0.85;
+                filter: brightness(1.2);
+            }
+        }
+        
+        @keyframes fade-in {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        body {
+            background: radial-gradient(ellipse at top, #1a0000 0%, #0a0000 50%, #000000 100%);
+            background-attachment: fixed;
+        }
+        
+        .loading-circle {
+            border: 3px solid rgba(220, 38, 38, 0.1);
+            border-top: 3px solid #dc2626;
+            border-radius: 50%;
+            width: 48px;
+            height: 48px;
+            animation: spin 1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+            margin: 0 auto;
+        }
+        
+        .card {
+            background: linear-gradient(135deg, 
+                rgba(20, 0, 0, 0.8) 0%, 
+                rgba(10, 0, 0, 0.6) 100%);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(220, 38, 38, 0.15);
+            box-shadow: 
+                0 4px 24px rgba(0, 0, 0, 0.4),
+                inset 0 1px 0 rgba(255, 255, 255, 0.05);
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            animation: fade-in 0.5s ease-out;
+        }
+        
+        .card:hover {
+            border-color: rgba(220, 38, 38, 0.3);
+            box-shadow: 
+                0 8px 32px rgba(220, 38, 38, 0.15),
+                0 0 0 1px rgba(220, 38, 38, 0.1),
+                inset 0 1px 0 rgba(255, 255, 255, 0.08);
+            transform: translateY(-4px) scale(1.01);
+        }
+        
+        .card-title {
+            color: #fecaca;
+            font-weight: 600;
+            letter-spacing: 0.025em;
+            border-bottom: 1px solid rgba(220, 38, 38, 0.15);
+            padding-bottom: 0.875rem;
+            margin-bottom: 1.25rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .card-title::before {
+            content: '';
+            width: 4px;
+            height: 20px;
+            background: linear-gradient(180deg, #dc2626 0%, #991b1b 100%);
+            border-radius: 4px;
+            box-shadow: 0 0 8px rgba(220, 38, 38, 0.5);
+        }
+        
+        .stat-value {
+            color: #ffffff;
+            font-weight: 700;
+            text-shadow: 0 2px 12px rgba(220, 38, 38, 0.4);
+            letter-spacing: -0.025em;
+        }
+        
+        .progress-bar-bg {
+            background: rgba(20, 0, 0, 0.8);
+            border: 1px solid rgba(220, 38, 38, 0.1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .progress-bar-bg::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, 
+                transparent 0%, 
+                rgba(220, 38, 38, 0.05) 50%, 
+                transparent 100%);
+        }
+        
+        .progress-fill {
+            height: 100%;
+            border-radius: inherit;
+            transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .progress-fill::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg,
+                transparent 0%,
+                rgba(255, 255, 255, 0.2) 50%,
+                transparent 100%);
+            animation: shimmer 2s infinite;
+        }
+        
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+        
+        .label {
+            color: #9ca3af;
+            font-weight: 500;
+            font-size: 0.875rem;
+        }
+        
+        .value {
+            color: #f3f4f6;
+            font-weight: 600;
+        }
+        
+        .error-box {
+            background: linear-gradient(135deg, 
+                rgba(127, 29, 29, 0.9) 0%, 
+                rgba(153, 27, 27, 0.8) 100%);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            box-shadow: 0 4px 24px rgba(239, 68, 68, 0.2);
+        }
+        
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ef4444;
+            box-shadow: 0 0 12px rgba(239, 68, 68, 0.6);
+            animation: pulse-glow 2s ease-in-out infinite;
+        }
+        
+        .header-gradient {
+            background: linear-gradient(135deg, #dc2626 0%, #ef4444 50%, #f87171 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            animation: pulse-glow 3s ease-in-out infinite;
+        }
+        
+        .metric-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, 
+                rgba(220, 38, 38, 0.2) 0%, 
+                rgba(153, 27, 27, 0.1) 100%);
+            border: 1px solid rgba(220, 38, 38, 0.2);
+            font-size: 1.25rem;
+        }
+        
+        .process-item {
+            padding: 0.5rem;
+            border-radius: 6px;
+            background: rgba(20, 0, 0, 0.4);
+            border: 1px solid rgba(220, 38, 38, 0.08);
+            transition: all 0.2s ease;
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .process-item:hover {
+            background: rgba(20, 0, 0, 0.6);
+            border-color: rgba(220, 38, 38, 0.15);
+        }
+        
+        @media (max-width: 768px) {
+            .process-item {
+                padding: 0.4rem;
+                min-height: 40px;
+            }
+        }
+        
+        /* Mobile optimizations */
+        @media (max-width: 768px) {
+            body {
+                font-size: 14px;
+            }
+            
+            .card {
+                animation: fade-in 0.3s ease-out;
+            }
+            
+            .card:hover {
+                transform: none;
+            }
+            
+            .header-gradient {
+                font-size: 2.5rem;
+                line-height: 1.1;
+            }
+            
+            .stat-value {
+                font-size: 2rem !important;
+            }
+            
+            .status-indicator {
+                width: 6px;
+                height: 6px;
+            }
+            
+            .metric-icon {
+                width: 32px;
+                height: 32px;
+                font-size: 1rem;
+            }
+            
+            .card-title::before {
+                width: 3px;
+                height: 16px;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .header-gradient {
+                font-size: 2rem;
+            }
+            
+            .stat-value {
+                font-size: 1.75rem !important;
+            }
+            
+            .card-title {
+                font-size: 1rem;
+            }
+        }
+        
+        /* Touch target optimization */
+        @media (hover: none) {
+            .card:hover {
+                transform: translateY(-2px) scale(1.005);
+            }
+            
+            .process-item:hover {
+                background: rgba(20, 0, 0, 0.4);
+            }
+            
+            /* Better tap feedback */
+            .card:active {
+                transform: scale(0.99);
+            }
+        }
+        
+        /* Improve tap highlight color */
+        * {
+            -webkit-tap-highlight-color: rgba(220, 38, 38, 0.2);
+        }
+        
+        /* Optimize scrolling on mobile */
+        body {
+            -webkit-overflow-scrolling: touch;
+        }
+        
+        /* Prevent text selection on UI elements */
+        .card-title, .label, .status-indicator {
+            -webkit-user-select: none;
+            user-select: none;
+        }
+    </style>
+</head>
+<body class="text-white min-h-screen antialiased">
+    <div class="container mx-auto px-4 sm:px-6 py-6 sm:py-10 max-w-7xl">
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 sm:mb-12 pb-6 sm:pb-8 border-b border-red-900/30 gap-4 sm:gap-0">
+            <div class="flex-1">
+                <h1 class="text-4xl sm:text-5xl lg:text-6xl font-extrabold header-gradient mb-2">
+                    Server Monitor
+                </h1>
+                <p class="text-gray-400 text-xs sm:text-sm font-medium tracking-wide">Real-time shitbox performance metrics</p>
+            </div>
+            <div class="flex items-center gap-3 sm:gap-4">
+                <div class="status-indicator"></div>
+                <div class="text-right">
+                    <div class="text-xs text-gray-500 font-medium uppercase tracking-wider mb-1">Status</div>
+                    <span id="lastUpdate" class="text-gray-300 text-xs sm:text-sm font-semibold">Loading...</span>
+                </div>
+            </div>
+        </div>
+
+        <div id="loading" class="text-center py-12 sm:py-20">
+            <div class="loading-circle"></div>
+            <p class="mt-6 text-gray-400 font-medium text-sm sm:text-base">Loading system stats...</p>
+        </div>
+
+        <div id="content" class="hidden">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-7 mb-6 sm:mb-8">
+                <div class="card rounded-xl sm:rounded-2xl p-5 sm:p-7">
+                    <h2 class="card-title text-lg sm:text-xl">System</h2>
+                    <div class="space-y-3 sm:space-y-4">
+                        <div class="flex justify-between items-center py-1 sm:py-2">
+                            <span class="label text-xs sm:text-sm">Hostname</span>
+                            <span id="hostname" class="value font-mono text-xs sm:text-sm">-</span>
+                        </div>
+                        <div class="flex justify-between items-center py-1 sm:py-2">
+                            <span class="label text-xs sm:text-sm">Platform</span>
+                            <span id="platform" class="value font-mono text-xs sm:text-sm">-</span>
+                        </div>
+                        <div class="flex justify-between items-center py-1 sm:py-2">
+                            <span class="label text-xs sm:text-sm">Uptime</span>
+                            <span id="uptime" class="value font-mono text-xs sm:text-sm">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card rounded-xl sm:rounded-2xl p-5 sm:p-7">
+                    <h2 class="card-title text-lg sm:text-xl">CPU</h2>
+                    <div class="space-y-3 sm:space-y-4">
+                        <div class="flex justify-between items-baseline">
+                            <span class="label text-xs sm:text-sm">Usage</span>
+                            <span id="cpuPercent" class="stat-value font-mono text-3xl sm:text-4xl">-</span>
+                        </div>
+                        <div class="w-full progress-bar-bg rounded-full h-2.5 sm:h-3 mt-3 sm:mt-4 overflow-hidden">
+                            <div id="cpuBar" class="progress-fill bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500" style="width: 0%"></div>
+                        </div>
+                        <div class="text-xs sm:text-sm label mt-2 sm:mt-3 pt-1 sm:pt-2">
+                            <span id="cpuCores" class="font-mono text-gray-300">-</span> cores
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card rounded-xl sm:rounded-2xl p-5 sm:p-7">
+                    <h2 class="card-title text-lg sm:text-xl">Memory</h2>
+                    <div class="space-y-3 sm:space-y-4">
+                        <div class="flex justify-between items-baseline">
+                            <span class="label text-xs sm:text-sm">Usage</span>
+                            <span id="memoryPercent" class="stat-value font-mono text-3xl sm:text-4xl">-</span>
+                        </div>
+                        <div class="w-full progress-bar-bg rounded-full h-2.5 sm:h-3 mt-3 sm:mt-4 overflow-hidden">
+                            <div id="memoryBar" class="progress-fill bg-gradient-to-r from-cyan-500 via-blue-500 to-indigo-500" style="width: 0%"></div>
+                        </div>
+                        <div class="text-xs sm:text-sm label mt-2 sm:mt-3 pt-1 sm:pt-2">
+                            <span id="memoryUsed" class="font-mono text-gray-300">-</span> / <span id="memoryTotal" class="font-mono text-gray-300">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card rounded-xl sm:rounded-2xl p-5 sm:p-7">
+                    <h2 class="card-title text-lg sm:text-xl">Disk</h2>
+                    <div class="space-y-3 sm:space-y-4">
+                        <div class="flex justify-between items-baseline">
+                            <span class="label text-xs sm:text-sm">Usage</span>
+                            <span id="diskPercent" class="stat-value font-mono text-3xl sm:text-4xl">-</span>
+                        </div>
+                        <div class="w-full progress-bar-bg rounded-full h-2.5 sm:h-3 mt-3 sm:mt-4 overflow-hidden">
+                            <div id="diskBar" class="progress-fill bg-gradient-to-r from-emerald-500 via-green-500 to-teal-500" style="width: 0%"></div>
+                        </div>
+                        <div class="text-xs sm:text-sm label mt-2 sm:mt-3 pt-1 sm:pt-2">
+                            <span id="diskUsed" class="font-mono text-gray-300">-</span> / <span id="diskTotal" class="font-mono text-gray-300">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="gpuCard" class="card rounded-xl sm:rounded-2xl p-5 sm:p-7 hidden">
+                    <h2 class="card-title text-lg sm:text-xl">GPU</h2>
+                    <div class="space-y-3 sm:space-y-4">
+                        <div class="flex justify-between items-center py-1 sm:py-2">
+                            <span class="label text-xs sm:text-sm">Name</span>
+                            <span id="gpuName" class="value font-mono text-xs sm:text-sm break-all">-</span>
+                        </div>
+                        <div class="flex justify-between items-baseline">
+                            <span class="label text-xs sm:text-sm">Usage</span>
+                            <span id="gpuPercent" class="stat-value font-mono text-3xl sm:text-4xl">-</span>
+                        </div>
+                        <div class="w-full progress-bar-bg rounded-full h-2.5 sm:h-3 mt-3 sm:mt-4 overflow-hidden">
+                            <div id="gpuBar" class="progress-fill bg-gradient-to-r from-orange-500 via-red-500 to-pink-500" style="width: 0%"></div>
+                        </div>
+                        <div class="text-xs sm:text-sm label mt-2 sm:mt-3 pt-1 sm:pt-2">
+                            <span id="gpuMemory" class="font-mono text-gray-300">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="tempCard" class="card rounded-xl sm:rounded-2xl p-5 sm:p-7 hidden">
+                    <h2 class="card-title text-lg sm:text-xl">Temperature</h2>
+                    <div class="space-y-3 sm:space-y-4">
+                        <div class="flex justify-between items-baseline">
+                            <span class="label text-xs sm:text-sm">CPU Temp</span>
+                            <span id="cpuTemp" class="stat-value font-mono text-3xl sm:text-4xl">-</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-7">
+                <div class="card rounded-xl sm:rounded-2xl p-5 sm:p-7">
+                    <h2 class="card-title text-lg sm:text-xl">Network</h2>
+                    <div class="space-y-4 sm:space-y-5" id="networkInfo">
+                        <div class="flex justify-between items-center py-2 sm:py-3 px-3 sm:px-4 rounded-lg bg-gradient-to-r from-red-500/10 to-rose-500/10 border border-red-500/20">
+                            <div class="flex items-center gap-2 sm:gap-3">
+                                <div class="metric-icon">
+                                    <span>↑</span>
+                                </div>
+                                <span class="label text-xs sm:text-sm">Upload</span>
+                            </div>
+                            <span id="networkUpload" class="value font-mono text-sm sm:text-lg">-</span>
+                        </div>
+                        <div class="flex justify-between items-center py-2 sm:py-3 px-3 sm:px-4 rounded-lg bg-gradient-to-r from-red-600/10 to-red-500/10 border border-red-600/20">
+                            <div class="flex items-center gap-2 sm:gap-3">
+                                <div class="metric-icon">
+                                    <span>↓</span>
+                                </div>
+                                <span class="label text-xs sm:text-sm">Download</span>
+                            </div>
+                            <span id="networkDownload" class="value font-mono text-sm sm:text-lg">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card rounded-xl sm:rounded-2xl p-5 sm:p-7">
+                    <h2 class="card-title text-lg sm:text-xl">Processes</h2>
+                    <div class="space-y-4 sm:space-y-5">
+                        <div class="flex justify-between items-center py-1 sm:py-2">
+                            <span class="label text-xs sm:text-sm">Total Running</span>
+                            <span id="processCount" class="value font-mono text-xl sm:text-2xl font-bold">-</span>
+                        </div>
+                        <div class="pt-3 sm:pt-4 border-t border-red-900/20">
+                            <h3 class="text-xs sm:text-sm font-semibold text-red-300 mb-2 sm:mb-3 uppercase tracking-wide">Top by CPU</h3>
+                            <div id="topCpuProcesses" class="space-y-1.5 sm:space-y-2">
+                                <div class="text-xs sm:text-sm text-gray-400">Loading...</div>
+                            </div>
+                        </div>
+                        <div class="pt-3 sm:pt-4 border-t border-red-900/20">
+                            <h3 class="text-xs sm:text-sm font-semibold text-rose-300 mb-2 sm:mb-3 uppercase tracking-wide">Top by Memory</h3>
+                            <div id="topMemoryProcesses" class="space-y-1.5 sm:space-y-2">
+                                <div class="text-xs sm:text-sm text-gray-400">Loading...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="error" class="error-box hidden rounded-xl sm:rounded-2xl p-4 sm:p-5 mt-4 sm:mt-6">
+            <p class="text-red-100 font-semibold text-sm sm:text-base" id="errorMessage"></p>
+        </div>
+    </div>
+
+    <script src="/js/main.js"></script>
+    <script>
+        if (typeof fetchStats === 'undefined') {
+            console.error('main.js failed to load');
+            document.getElementById('error').classList.remove('hidden');
+            document.getElementById('errorMessage').textContent = 'Failed to load JavaScript. Please refresh the page.';
+        }
+    </script>
+</body>
+</html>
+

@@ -59,7 +59,6 @@ class SensorsMonitor:
         if not self.is_available():
             return None
         
-        # Try to find CPU thermal zone
         cpu_temp = None
         for zone in self.thermal_zones:
             zone_type = zone['type'].lower()
@@ -73,8 +72,6 @@ class SensorsMonitor:
                 except (IOError, OSError, ValueError):
                     continue
         
-        # If no CPU-specific zone found, try to get the highest temperature
-        # (often the CPU is the hottest component)
         if cpu_temp is None:
             max_temp = None
             for zone in self.thermal_zones:
@@ -130,12 +127,10 @@ class SensorsMonitor:
         if not self.is_linux:
             return fans
         
-        # Try to find fan sensors in /sys/class/hwmon
         hwmon_base = '/sys/class/hwmon'
         if os.path.exists(hwmon_base):
             hwmon_dirs = glob.glob(os.path.join(hwmon_base, 'hwmon*'))
             for hwmon_dir in hwmon_dirs:
-                # Look for fan input files
                 fan_files = glob.glob(os.path.join(hwmon_dir, 'fan*_input'))
                 for fan_file in fan_files:
                     try:
@@ -144,7 +139,6 @@ class SensorsMonitor:
                         
                         fan_name = os.path.basename(fan_file).replace('_input', '')
                         
-                        # Try to get fan label
                         label_file = fan_file.replace('_input', '_label')
                         fan_label = fan_name
                         if os.path.exists(label_file):
@@ -162,7 +156,6 @@ class SensorsMonitor:
                     except (IOError, OSError, ValueError):
                         continue
         
-        # Also try /sys/class/hwmon/*/device/fan*_input (alternative location)
         if not fans:
             for hwmon_dir in hwmon_dirs:
                 device_dir = os.path.join(hwmon_dir, 'device')
@@ -175,7 +168,6 @@ class SensorsMonitor:
                             
                             fan_name = os.path.basename(fan_file).replace('_input', '')
                             
-                            # Try to get fan label
                             label_file = fan_file.replace('_input', '_label')
                             fan_label = fan_name
                             if os.path.exists(label_file):

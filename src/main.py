@@ -10,6 +10,7 @@ from discord.webhook import DiscordWebhook
 from util.util import format_bytes, format_bytes_per_second
 from cache.cache import clear_cache_on_startup, clear_cache_on_exit
 from logger import get_logger
+from web.server import set_monitors, start_server, stop_server
 import os
 import time
 import psutil
@@ -96,6 +97,17 @@ def main():
     logger.info(f"Processes: CPU threshold {process_cpu_threshold:.1f}% | Memory threshold {process_memory_threshold:.1f}%")
     logger.info(f"Network: Bandwidth threshold {network_bandwidth_threshold:.1f} MB/s")
     logger.info(f"Settings: Check every {check_interval:.1f}s | Cooldown {alert_cooldown:.1f}s")
+    
+    web_port = int(os.getenv('WEB_PORT', '8080'))
+    logger.info("Starting web server...")
+    try:
+        set_monitors(cpu_monitor, memory_monitor, system_monitor, gpu_monitor,
+                    disk_monitor, network_monitor, sensors_monitor)
+        start_server(port=web_port)
+        logger.info(f"Web server started successfully on port {web_port}")
+        logger.info(f"Access the web UI at http://localhost:{web_port}")
+    except Exception as e:
+        logger.warning(f"Failed to start web server: {e}")
     
     if webhook:
         logger.info("Sending system info to Discord...")
@@ -472,6 +484,10 @@ def main():
             except (KeyboardInterrupt, Exception):
                 logger.warning("Shutdown notification skipped")
         logger.info("Shutting down...")
+        try:
+            stop_server()
+        except Exception as e:
+            logger.warning(f"Error stopping web server: {e}")
         shutdown_time = time.time() - shutdown_start
         logger.info(f"Shutdown complete ({shutdown_time:.2f}s)")
         

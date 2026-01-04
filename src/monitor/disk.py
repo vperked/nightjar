@@ -58,7 +58,6 @@ class DiskMonitor:
                 }
                 partitions.append(partition_info)
             except (PermissionError, OSError):
-                # Skip partitions we don't have permission to access
                 continue
         return partitions
     

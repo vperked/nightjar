@@ -81,8 +81,8 @@ class MemoryMonitor:
             'used': swap.used,
             'free': swap.free,
             'percent': swap.percent,
-            'sin': getattr(swap, 'sin', 0),  # Bytes swapped in
-            'sout': getattr(swap, 'sout', 0),  # Bytes swapped out
+            'sin': getattr(swap, 'sin', 0),
+            'sout': getattr(swap, 'sout', 0),
         }
     
     def get_swap_info_human(self) -> Dict[str, str]:

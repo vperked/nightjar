@@ -90,7 +90,6 @@ class GpuMonitor:
         if gpu_count == 0 or gpu_index < 0 or gpu_index >= gpu_count:
             return {}
         
-        # Get GPU name
         name = self._run_nvidia_smi('name', format='csv,noheader')
         if name:
             names = name.split('\n')
@@ -101,14 +100,12 @@ class GpuMonitor:
         else:
             gpu_name = 'N/A'
         
-        # Get driver version
         driver_version = self._run_nvidia_smi('driver_version', format='csv,noheader')
         if driver_version:
             driver_version = driver_version.split('\n')[0].strip() if driver_version else 'N/A'
         else:
             driver_version = 'N/A'
         
-        # Get UUID
         uuid = self._run_nvidia_smi('uuid', format='csv,noheader')
         if uuid:
             uuids = uuid.split('\n')
