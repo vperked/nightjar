@@ -11,6 +11,7 @@ from util.util import format_bytes, format_bytes_per_second
 from cache.cache import clear_cache_on_startup, clear_cache_on_exit
 from logger import get_logger
 from web.server import set_monitors, start_server, stop_server
+from typing import Optional, Tuple, Dict, List
 import os
 import time
 import psutil
@@ -19,6 +20,81 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = get_logger()
+
+
+def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core: List[float],
+                               top_processes: List[Dict], load_avg: Optional[Tuple[float, float, float]],
+                               fan_speeds: Optional[List[Dict]] = None) -> str:
+    """
+    Analyze the likely reason for high CPU temperature.
+    
+    Args:
+        cpu_percent: Overall CPU usage percentage
+        cpu_freq: CPU frequency information dictionary
+        cpu_per_core: Per-core CPU usage percentages
+        top_processes: List of top CPU-consuming processes
+        load_avg: System load average tuple (1min, 5min, 15min) or None
+        fan_speeds: Optional list of fan speed information
+        
+    Returns:
+        Human-readable string describing the likely cause
+    """
+    reasons = []
+    
+    if cpu_percent >= 80:
+        reasons.append(f"Very high CPU usage ({cpu_percent:.1f}%)")
+    elif cpu_percent >= 60:
+        reasons.append(f"High CPU usage ({cpu_percent:.1f}%)")
+    elif cpu_percent >= 40:
+        reasons.append(f"Moderate CPU usage ({cpu_percent:.1f}%)")
+    
+    freq_current = cpu_freq.get('current', 0)
+    freq_max = cpu_freq.get('max', 0)
+    if freq_max > 0:
+        freq_percent = (freq_current / freq_max) * 100
+        if freq_percent >= 95:
+            reasons.append(f"CPU running at maximum frequency ({freq_current:.0f} MHz)")
+        elif freq_percent >= 85:
+            reasons.append(f"CPU running at high frequency ({freq_percent:.0f}% of max)")
+    
+    if cpu_per_core:
+        max_core = max(cpu_per_core)
+        if max_core >= 90:
+            high_cores = sum(1 for core in cpu_per_core if core >= 80)
+            if high_cores == 1:
+                reasons.append("Single core under heavy load (single-threaded workload)")
+            elif high_cores <= len(cpu_per_core) // 2:
+                reasons.append(f"{high_cores} cores under heavy load")
+    
+    if top_processes:
+        high_cpu_procs = [p for p in top_processes[:3] if p.get('cpu_percent', 0) > 10]
+        if high_cpu_procs:
+            proc_names = [p.get('name', 'Unknown') for p in high_cpu_procs]
+            if len(proc_names) == 1:
+                reasons.append(f"Process '{proc_names[0]}' using {high_cpu_procs[0].get('cpu_percent', 0):.1f}% CPU")
+            else:
+                reasons.append(f"Multiple processes consuming CPU: {', '.join(proc_names[:2])}")
+    
+    if load_avg:
+        load_1min = load_avg[0]
+        cpu_count = len(cpu_per_core) if cpu_per_core else 1
+        if load_1min > cpu_count * 1.5:
+            reasons.append(f"High system load ({load_1min:.1f} vs {cpu_count} cores)")
+        elif load_1min > cpu_count:
+            reasons.append(f"Elevated system load ({load_1min:.1f} vs {cpu_count} cores)")
+    
+    if fan_speeds:
+        avg_fan_speed = sum(f.get('speed_rpm', 0) for f in fan_speeds) / len(fan_speeds) if fan_speeds else 0
+        if avg_fan_speed > 0 and avg_fan_speed < 1000:
+            reasons.append("Low fan speeds detected (possible cooling issue)")
+    
+    if not reasons:
+        if cpu_percent > 30:
+            reasons.append("Sustained CPU activity")
+        else:
+            reasons.append("Possible ambient temperature increase or cooling system issue")
+    
+    return " | ".join(reasons[:3])
 
 
 def main():
@@ -50,6 +126,7 @@ def main():
     gpu_threshold = float(os.getenv('GPU_THRESHOLD', '80.0'))
     disk_threshold = float(os.getenv('DISK_THRESHOLD', '80.0'))
     temp_threshold = float(os.getenv('TEMP_THRESHOLD', '80.0'))
+    temp_alert_duration = float(os.getenv('TEMP_ALERT_DURATION', '30.0'))
     network_bandwidth_threshold = float(os.getenv('NETWORK_BANDWIDTH_THRESHOLD', '1000.0'))
     process_cpu_threshold = float(os.getenv('PROCESS_CPU_THRESHOLD', '50.0'))
     process_memory_threshold = float(os.getenv('PROCESS_MEMORY_THRESHOLD', '10.0'))
@@ -61,6 +138,7 @@ def main():
     gpu_threshold = max(0.0, min(100.0, gpu_threshold))
     disk_threshold = max(0.0, min(100.0, disk_threshold))
     temp_threshold = max(0.0, temp_threshold)
+    temp_alert_duration = max(0.0, temp_alert_duration)
     process_cpu_threshold = max(0.0, min(100.0, process_cpu_threshold))
     process_memory_threshold = max(0.0, min(100.0, process_memory_threshold))
     check_interval = max(0.1, check_interval)
@@ -92,7 +170,7 @@ def main():
     
     if sensors_monitor.is_available():
         cpu_temp = sensors_monitor.get_cpu_temperature()
-        logger.info(f"Sensors: {sensors_monitor.format_temperature(cpu_temp)} | Threshold: {temp_threshold:.1f}°C")
+        logger.info(f"Sensors: {sensors_monitor.format_temperature(cpu_temp)} | Threshold: {temp_threshold:.1f}°C | Alert Duration: {temp_alert_duration:.1f}s")
     
     logger.info(f"Processes: CPU threshold {process_cpu_threshold:.1f}% | Memory threshold {process_memory_threshold:.1f}%")
     logger.info(f"Network: Bandwidth threshold {network_bandwidth_threshold:.1f} MB/s")
@@ -132,6 +210,7 @@ def main():
     last_gpu_alert_time = 0
     last_disk_alert_time = 0
     last_temp_alert_time = 0
+    temp_high_start_time = None
     last_process_alert_time = {}
     cpu_alert_sent = False
     memory_alert_sent = False
@@ -324,41 +403,60 @@ def main():
                     disk_alert_sent = False
             
             if cpu_temp is not None and cpu_temp >= temp_threshold:
+                if temp_high_start_time is None:
+                    temp_high_start_time = current_time
+                
+                temp_high_duration = current_time - temp_high_start_time
                 time_since_last_alert = current_time - last_temp_alert_time
                 
-                if not temp_alert_sent or time_since_last_alert >= alert_cooldown:
-                    if webhook:
-                        logger.warning(f"[ALERT] Temperature: {cpu_temp:.1f}°C (threshold: {temp_threshold:.1f}°C)")
-                        all_temps = sensors_monitor.get_all_temperatures()
-                        fans = sensors_monitor.get_fan_speeds()
-                        fields = [
-                            {'name': 'CPU Temperature', 'value': f'{cpu_temp:.1f}°C', 'inline': True},
-                            {'name': 'Threshold', 'value': f'{temp_threshold:.1f}°C', 'inline': True},
-                        ]
-                        if fans:
-                            fan_info = '\n'.join([f"{fan['label']}: {fan['speed_rpm']} RPM" for fan in fans[:3]])
-                            fields.append({'name': 'Fan Speeds', 'value': fan_info[:1024], 'inline': False})
-                        success = webhook.send_embed(
-                            title='Temperature Alert',
-                            description=f'CPU temperature has exceeded the threshold of {temp_threshold:.1f}°C',
-                            color=0xdc3545,
-                            fields=fields,
-                            footer='Server Monitor',
-                            timestamp=True
-                        )
-                        if success:
-                            logger.info("    Discord alert sent")
+                if temp_high_duration >= temp_alert_duration:
+                    if not temp_alert_sent or time_since_last_alert >= alert_cooldown:
+                        if webhook:
+                            cpu_freq_info = cpu_monitor.get_cpu_freq()
+                            load_avg = cpu_monitor.get_cpu_load_average()
+                            top_cpu_procs = process_monitor.get_top_processes(limit=5, sort_by='cpu')
+                            fans = sensors_monitor.get_fan_speeds()
+                            
+                            reason = analyze_temperature_reason(
+                                cpu_percent=cpu_percent,
+                                cpu_freq=cpu_freq_info,
+                                cpu_per_core=cpu_per_core,
+                                top_processes=top_cpu_procs,
+                                load_avg=load_avg,
+                                fan_speeds=fans
+                            )
+                            
+                            logger.warning(f"[ALERT] Temperature: {cpu_temp:.1f}°C (threshold: {temp_threshold:.1f}°C) for {temp_high_duration:.0f}s")
+                            logger.info(f"    Likely cause: {reason}")
+                            
+                            success = webhook.send_temperature_alert(
+                                temperature=cpu_temp,
+                                threshold=temp_threshold,
+                                duration=temp_high_duration,
+                                reason=reason,
+                                cpu_percent=cpu_percent,
+                                cpu_freq=cpu_freq_info,
+                                top_processes=top_cpu_procs,
+                                fan_speeds=fans
+                            )
+                            if success:
+                                logger.info("    Discord alert sent")
+                            else:
+                                logger.warning("    Discord alert failed")
                         else:
-                            logger.warning("    Discord alert failed")
+                            logger.warning(f"Temperature: {cpu_temp:.1f}°C (threshold: {temp_threshold:.1f}°C) for {temp_high_duration:.0f}s")
+                        
+                        last_temp_alert_time = current_time
+                        temp_alert_sent = True
                     else:
-                        logger.warning(f"Temperature: {cpu_temp:.1f}°C (threshold: {temp_threshold:.1f}°C)")
-                    
-                    last_temp_alert_time = current_time
-                    temp_alert_sent = True
+                        remaining_cooldown = alert_cooldown - time_since_last_alert
+                        logger.debug(f"Temperature alert cooldown: {remaining_cooldown:.0f}s")
                 else:
-                    remaining_cooldown = alert_cooldown - time_since_last_alert
-                    logger.debug(f"Temperature alert cooldown: {remaining_cooldown:.0f}s")
+                    remaining_duration = temp_alert_duration - temp_high_duration
+                    logger.debug(f"Temperature high ({cpu_temp:.1f}°C) but needs to persist for {remaining_duration:.0f}s more before alert")
             else:
+                if temp_high_start_time is not None:
+                    temp_high_start_time = None
                 if temp_alert_sent:
                     temp_alert_sent = False
             

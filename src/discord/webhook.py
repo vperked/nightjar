@@ -437,6 +437,113 @@ class DiscordWebhook:
             timestamp=True
         )
     
+    def send_temperature_alert(self, temperature: float, threshold: float = 80.0,
+                               duration: Optional[float] = None,
+                               reason: Optional[str] = None,
+                               cpu_percent: Optional[float] = None,
+                               cpu_freq: Optional[Dict] = None,
+                               top_processes: Optional[List[Dict]] = None,
+                               fan_speeds: Optional[List[Dict]] = None) -> bool:
+        """
+        Send a CPU temperature alert to Discord.
+        
+        Args:
+            temperature: Current CPU temperature in Celsius
+            threshold: Temperature threshold that triggered the alert
+            duration: How long the temperature has been above threshold (in seconds)
+            reason: Human-readable reason for the temperature spike
+            cpu_percent: Current CPU usage percentage
+            cpu_freq: Optional dictionary containing CPU frequency info
+            top_processes: Optional list of top CPU-consuming processes
+            fan_speeds: Optional list of fan speed information
+            
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        color = 0xff6b00 if temperature >= threshold * 1.1 else 0xdc3545
+        
+        fields = [
+            {
+                'name': 'CPU Temperature',
+                'value': f'{temperature:.1f}°C',
+                'inline': True
+            },
+            {
+                'name': 'Threshold',
+                'value': f'{threshold:.1f}°C',
+                'inline': True
+            }
+        ]
+        
+        if duration is not None:
+            duration_str = f"{duration:.0f}s" if duration < 60 else f"{duration/60:.1f}min"
+            fields.append({
+                'name': 'Duration Above Threshold',
+                'value': duration_str,
+                'inline': True
+            })
+        
+        if reason:
+            fields.append({
+                'name': 'Likely Cause',
+                'value': reason[:1024],
+                'inline': False
+            })
+        
+        if cpu_percent is not None:
+            fields.append({
+                'name': 'CPU Usage',
+                'value': f'{cpu_percent:.1f}%',
+                'inline': True
+            })
+        
+        if cpu_freq and cpu_freq.get('current', 0) > 0:
+            freq_current = cpu_freq.get('current', 0)
+            freq_max = cpu_freq.get('max', 0)
+            freq_percent = (freq_current / freq_max * 100) if freq_max > 0 else 0
+            fields.append({
+                'name': 'CPU Frequency',
+                'value': f'{freq_current:.0f} MHz ({freq_percent:.0f}% of max)',
+                'inline': True
+            })
+        
+        if top_processes:
+            process_list = []
+            for proc in top_processes[:5]:
+                name = proc.get('name', 'Unknown')
+                cpu_usage = proc.get('cpu_percent', 0)
+                if cpu_usage > 1.0: 
+                    process_list.append(f"{name}: {cpu_usage:.1f}%")
+            if process_list:
+                fields.append({
+                    'name': 'Top CPU Processes',
+                    'value': '\n'.join(process_list)[:1024],
+                    'inline': False
+                })
+        
+        if fan_speeds:
+            fan_info = '\n'.join([f"{fan['label']}: {fan['speed_rpm']} RPM" 
+                                 for fan in fan_speeds[:3]])
+            if fan_info:
+                fields.append({
+                    'name': 'Fan Speeds',
+                    'value': fan_info[:1024],
+                    'inline': False
+                })
+        
+        description = f'CPU temperature has exceeded the threshold of {threshold:.1f}°C'
+        if duration is not None and duration > 0:
+            description += f' for {duration:.0f} seconds'
+        
+        return self.send_embed(
+            title='Temperature Alert',
+            description=description,
+            color=color,
+            fields=fields,
+            footer='Server Monitor',
+            timestamp=True
+        )
+    
     def send_gpu_alert(self, gpu_utilization: float, threshold: float = 80.0,
                       gpu_info: Optional[Dict] = None,
                       memory_info: Optional[Dict] = None,
