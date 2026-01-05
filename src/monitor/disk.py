@@ -1,5 +1,6 @@
 import psutil
 import time
+import os
 from typing import Dict, List, Optional
 from util.util import format_bytes
 
@@ -274,4 +275,120 @@ class DiskMonitor:
                 return partition
         
         return None
+    
+    def get_directory_size(self, path: str) -> Optional[Dict]:
+        """
+        Get the total size of a directory and all its contents recursively.
+        
+        Args:
+            path: Directory path to check
+            
+        Returns:
+            Dictionary containing directory size information, or None if path doesn't exist
+        """
+        if not os.path.exists(path):
+            return None
+        
+        if not os.path.isdir(path):
+            try:
+                size = os.path.getsize(path)
+                return {
+                    'path': path,
+                    'size': size,
+                    'is_file': True,
+                    'is_directory': False,
+                }
+            except (OSError, PermissionError):
+                return None
+        
+        total_size = 0
+        file_count = 0
+        dir_count = 0
+        
+        try:
+            for dirpath, dirnames, filenames in os.walk(path):
+                dir_count += len(dirnames)
+                
+                for filename in filenames:
+                    filepath = os.path.join(dirpath, filename)
+                    try:
+                        total_size += os.path.getsize(filepath)
+                        file_count += 1
+                    except (OSError, PermissionError):
+                        continue
+        except (OSError, PermissionError) as e:
+            return None
+        
+        return {
+            'path': path,
+            'size': total_size,
+            'is_file': False,
+            'is_directory': True,
+            'file_count': file_count,
+            'dir_count': dir_count,
+        }
+    
+    def get_directory_size_human(self, path: str) -> Optional[Dict]:
+        """
+        Get directory size in human-readable format.
+        
+        Args:
+            path: Directory path to check
+            
+        Returns:
+            Dictionary with formatted size values, or None if unavailable
+        """
+        size_info = self.get_directory_size(path)
+        if size_info is None:
+            return None
+        
+        return {
+            'path': path,
+            'size': format_bytes(size_info['size']),
+            'size_bytes': size_info['size'],
+            'is_file': size_info.get('is_file', False),
+            'is_directory': size_info.get('is_directory', False),
+            'file_count': size_info.get('file_count', 0),
+            'dir_count': size_info.get('dir_count', 0),
+        }
+    
+    def get_subdirectories_sizes(self, parent_path: str) -> List[Dict]:
+        """
+        Get sizes of all immediate subdirectories within a parent directory.
+        
+        Args:
+            parent_path: Parent directory path
+            
+        Returns:
+            List of dictionaries containing subdirectory size information
+        """
+        if not os.path.exists(parent_path) or not os.path.isdir(parent_path):
+            return []
+        
+        subdirs = []
+        try:
+            for item in os.listdir(parent_path):
+                item_path = os.path.join(parent_path, item)
+                if os.path.isdir(item_path):
+                    size_info = self.get_directory_size(item_path)
+                    if size_info:
+                        subdirs.append(size_info)
+        except (OSError, PermissionError):
+            return []
+        
+        subdirs.sort(key=lambda x: x['size'], reverse=True)
+        return subdirs
+    
+    def get_subdirectories_sizes_human(self, parent_path: str) -> List[Dict]:
+        """
+        Get sizes of all immediate subdirectories in human-readable format.
+        
+        Args:
+            parent_path: Parent directory path
+            
+        Returns:
+            List of dictionaries with formatted subdirectory sizes
+        """
+        subdirs = self.get_subdirectories_sizes(parent_path)
+        return [self.get_directory_size_human(subdir['path']) for subdir in subdirs if subdir]
 

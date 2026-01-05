@@ -6,13 +6,16 @@ from monitor.disk import DiskMonitor
 from monitor.network import NetworkMonitor
 from monitor.sensors import SensorsMonitor
 from monitor.processes import ProcessMonitor
+from monitor.freeze import FreezeMonitor
 from discord.webhook import DiscordWebhook
 from util.util import format_bytes, format_bytes_per_second
+from util.systemd import install_systemd_service, check_systemd_available, is_root
 from cache.cache import clear_cache_on_startup, clear_cache_on_exit
 from logger import get_logger
 from web.server import set_monitors, start_server, stop_server
 from typing import Optional, Tuple, Dict, List
 import os
+import sys
 import time
 import psutil
 from dotenv import load_dotenv
@@ -99,6 +102,29 @@ def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core:
 
 def main():
     """Main function for comprehensive server monitoring with Discord alerts."""
+    install_systemd = os.getenv('INSTALL_SYSTEMD', 'false').lower() in ('true', '1', 'yes')
+    if '--install-systemd' in sys.argv or install_systemd:
+        logger.info("Systemd installation requested...")
+        if check_systemd_available():
+            service_name = os.getenv('SYSTEMD_SERVICE_NAME', 'server-monitor')
+            force = '--force' in sys.argv or os.getenv('SYSTEMD_FORCE_INSTALL', 'false').lower() in ('true', '1', 'yes')
+            success = install_systemd_service(service_name=service_name, force=force)
+            if success:
+                logger.info("Systemd service installed successfully!")
+                logger.info("The service will start automatically on system boot.")
+                logger.info("You can start it now with: sudo systemctl start server-monitor")
+                logger.info("To check status: sudo systemctl status server-monitor")
+                logger.info("To view logs: sudo journalctl -u server-monitor -f")
+                sys.exit(0)
+            else:
+                logger.error("Failed to install systemd service.")
+                logger.info("Make sure you're running with sudo: sudo python src/main.py --install-systemd")
+                sys.exit(1)
+        else:
+            logger.error("Systemd is not available on this system.")
+            logger.info("Systemd installation is only supported on Linux systems with systemd.")
+            sys.exit(1)
+    
     clear_cache_on_startup(verbose=True)
     
     logger.info("Starting Server Monitor...")
@@ -132,6 +158,13 @@ def main():
     process_memory_threshold = float(os.getenv('PROCESS_MEMORY_THRESHOLD', '10.0'))
     check_interval = float(os.getenv('CHECK_INTERVAL', '5.0'))
     alert_cooldown = float(os.getenv('ALERT_COOLDOWN', '300.0'))
+    freeze_threshold = float(os.getenv('FREEZE_THRESHOLD', '30.0'))
+    freeze_heartbeat_timeout = float(os.getenv('FREEZE_HEARTBEAT_TIMEOUT', '60.0'))
+    
+    media_directory = os.getenv('MEDIA_DIRECTORY', '/home/media')
+    media_directory_threshold_gb = float(os.getenv('MEDIA_DIRECTORY_THRESHOLD_GB', '500.0'))
+    media_directory_threshold_bytes = int(media_directory_threshold_gb * 1024 * 1024 * 1024)  # Convert GB to bytes
+    media_check_interval = int(os.getenv('MEDIA_CHECK_INTERVAL', '10'))  # Check every N loop iterations
     
     cpu_threshold = max(0.0, min(100.0, cpu_threshold))
     memory_threshold = max(0.0, min(100.0, memory_threshold))
@@ -143,6 +176,12 @@ def main():
     process_memory_threshold = max(0.0, min(100.0, process_memory_threshold))
     check_interval = max(0.1, check_interval)
     alert_cooldown = max(0.0, alert_cooldown)
+    freeze_threshold = max(10.0, freeze_threshold)
+    freeze_heartbeat_timeout = max(20.0, freeze_heartbeat_timeout)
+    
+    freeze_monitor = FreezeMonitor(check_interval=check_interval)
+    freeze_monitor.set_freeze_threshold(freeze_threshold)
+    freeze_monitor.set_heartbeat_timeout(freeze_heartbeat_timeout)
     
     logger.info("Gathering system information...")
     start_time = time.time()
@@ -174,6 +213,11 @@ def main():
     
     logger.info(f"Processes: CPU threshold {process_cpu_threshold:.1f}% | Memory threshold {process_memory_threshold:.1f}%")
     logger.info(f"Network: Bandwidth threshold {network_bandwidth_threshold:.1f} MB/s")
+    logger.info(f"Freeze Detection: Threshold {freeze_threshold:.1f}s | Heartbeat timeout {freeze_heartbeat_timeout:.1f}s")
+    if os.path.exists(media_directory):
+        logger.info(f"Directory Monitoring: {media_directory} | Threshold: {media_directory_threshold_gb:.1f} GB")
+    else:
+        logger.warning(f"Directory Monitoring: {media_directory} not found, skipping directory monitoring")
     logger.info(f"Settings: Check every {check_interval:.1f}s | Cooldown {alert_cooldown:.1f}s")
     
     web_port = int(os.getenv('WEB_PORT', '8080'))
@@ -210,6 +254,7 @@ def main():
     last_gpu_alert_time = 0
     last_disk_alert_time = 0
     last_temp_alert_time = 0
+    last_freeze_alert_time = 0
     temp_high_start_time = None
     last_process_alert_time = {}
     cpu_alert_sent = False
@@ -218,13 +263,21 @@ def main():
     disk_alert_sent = False
     temp_alert_sent = False
     network_alert_sent = False
+    freeze_alert_sent = False
+    media_alert_sent = False
+    last_media_alert_time = 0
     process_check_counter = 0
     network_check_counter = 0
+    freeze_check_counter = 0
+    media_check_counter = 0
     NETWORK_CHECK_INTERVAL = 2
     PROCESS_CHECK_INTERVAL = 3
+    FREEZE_CHECK_INTERVAL = 1  # Check for freezes every loop iteration
     
     try:
         while True:
+            freeze_monitor.update_heartbeat()
+            
             cpu_percent = cpu_monitor.get_cpu_percent(interval=1.0)
             cpu_per_core = cpu_monitor.get_cpu_percent_per_core(interval=0.1)
             memory_percent = memory_monitor.get_memory_percent()
@@ -248,6 +301,8 @@ def main():
             
             network_bandwidth = None
             network_check_counter += 1
+            disk_io_data = None
+            network_io_data = None
             if network_check_counter >= NETWORK_CHECK_INTERVAL:
                 network_check_counter = 0
                 try:
@@ -257,10 +312,23 @@ def main():
                         mb_per_sec = 1024 * 1024
                         if mb_per_sec > 0:
                             network_bandwidth = total_bandwidth / mb_per_sec
+                    network_io_data = network_monitor.get_total_network_io()
                 except (ValueError, ZeroDivisionError) as e:
                     pass
                 except Exception as e:
                     pass
+            
+            try:
+                disk_io_data = system_monitor.get_disk_io()
+            except Exception:
+                pass
+            
+            freeze_monitor.update_metrics(
+                cpu_percent=cpu_percent,
+                memory_percent=memory_percent,
+                disk_io=disk_io_data,
+                network_io=network_io_data
+            )
             
             current_time = time.time()
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -569,6 +637,95 @@ def main():
                 except Exception as e:
                     pass
             
+            freeze_check_counter += 1
+            if freeze_check_counter >= FREEZE_CHECK_INTERVAL:
+                freeze_check_counter = 0
+                try:
+                    freeze_status = freeze_monitor.check_freeze_status()
+                    if freeze_status['is_frozen']:
+                        time_since_last_alert = current_time - last_freeze_alert_time
+                        
+                        if not freeze_alert_sent or time_since_last_alert >= alert_cooldown:
+                            if webhook:
+                                logger.warning(f"[ALERT] System Freeze Detected: {', '.join(freeze_status['reasons'])}")
+                                try:
+                                    current_system_info = {
+                                        'uptime': system_monitor.get_uptime(),
+                                        'cpu': {'cpu_percent': cpu_percent},
+                                        'memory': {'memory_percent': memory_percent}
+                                    }
+                                except Exception:
+                                    current_system_info = None
+                                
+                                success = webhook.send_freeze_alert(
+                                    freeze_status=freeze_status,
+                                    system_info=current_system_info
+                                )
+                                if success:
+                                    logger.info("    Discord freeze alert sent")
+                                else:
+                                    logger.warning("    Discord freeze alert failed")
+                            else:
+                                logger.warning(f"System Freeze Detected: {', '.join(freeze_status['reasons'])}")
+                            
+                            last_freeze_alert_time = current_time
+                            freeze_alert_sent = True
+                        else:
+                            remaining_cooldown = alert_cooldown - time_since_last_alert
+                            logger.debug(f"Freeze alert cooldown: {remaining_cooldown:.0f}s")
+                    else:
+                        if freeze_alert_sent:
+                            freeze_alert_sent = False
+                except Exception as e:
+                    logger.debug(f"Error checking freeze status: {e}")
+            
+            media_check_counter += 1
+            if media_check_counter >= media_check_interval and os.path.exists(media_directory):
+                media_check_counter = 0
+                try:
+                    media_size_info = disk_monitor.get_directory_size(media_directory)
+                    if media_size_info and media_size_info['size'] >= media_directory_threshold_bytes:
+                        time_since_last_alert = current_time - last_media_alert_time
+                        
+                        if not media_alert_sent or time_since_last_alert >= alert_cooldown:
+                            subdirs = disk_monitor.get_subdirectories_sizes(media_directory)
+                            subdirs_human = []
+                            for subdir in subdirs:
+                                subdir_human = disk_monitor.get_directory_size_human(subdir['path'])
+                                if subdir_human:
+                                    subdir_human['size_bytes'] = subdir['size']
+                                    subdirs_human.append(subdir_human)
+                            
+                            if webhook:
+                                from util.util import format_bytes
+                                size_formatted = format_bytes(media_size_info['size'])
+                                logger.warning(f"[ALERT] Directory {media_directory}: {size_formatted} (threshold: {format_bytes(media_directory_threshold_bytes)})")
+                                success = webhook.send_directory_size_alert(
+                                    directory_path=media_directory,
+                                    size_bytes=media_size_info['size'],
+                                    threshold_bytes=media_directory_threshold_bytes,
+                                    subdirectories=subdirs_human
+                                )
+                                if success:
+                                    logger.info("    Discord directory alert sent")
+                                else:
+                                    logger.warning("    Discord directory alert failed")
+                            else:
+                                from util.util import format_bytes
+                                size_formatted = format_bytes(media_size_info['size'])
+                                logger.warning(f"Directory {media_directory}: {size_formatted} (threshold: {format_bytes(media_directory_threshold_bytes)})")
+                            
+                            last_media_alert_time = current_time
+                            media_alert_sent = True
+                        else:
+                            remaining_cooldown = alert_cooldown - time_since_last_alert
+                            logger.debug(f"Directory alert cooldown: {remaining_cooldown:.0f}s")
+                    else:
+                        if media_alert_sent:
+                            media_alert_sent = False
+                except Exception as e:
+                    logger.debug(f"Error checking directory size: {e}")
+            
             time.sleep(check_interval)
             
     except KeyboardInterrupt:
@@ -582,6 +739,10 @@ def main():
             except (KeyboardInterrupt, Exception):
                 logger.warning("Shutdown notification skipped")
         logger.info("Shutting down...")
+        try:
+            freeze_monitor.stop_watchdog()
+        except Exception as e:
+            logger.debug(f"Error stopping freeze monitor: {e}")
         try:
             stop_server()
         except Exception as e:

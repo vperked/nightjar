@@ -771,6 +771,169 @@ class DiscordWebhook:
             timestamp=True
         )
     
+    def send_directory_size_alert(self, directory_path: str, size_bytes: int, 
+                                  threshold_bytes: int, subdirectories: Optional[List[Dict]] = None) -> bool:
+        """
+        Send a directory size alert to Discord.
+        
+        Args:
+            directory_path: Path to the directory that exceeded threshold
+            size_bytes: Current size of the directory in bytes
+            threshold_bytes: Size threshold that triggered the alert in bytes
+            subdirectories: Optional list of subdirectory size information
+            
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        from util.util import format_bytes
+        
+        size_formatted = format_bytes(size_bytes)
+        threshold_formatted = format_bytes(threshold_bytes)
+        
+        color = 0xff6b00 if size_bytes >= threshold_bytes * 1.1 else 0xdc3545
+        
+        fields = [
+            {
+                'name': 'Directory Path',
+                'value': directory_path,
+                'inline': False
+            },
+            {
+                'name': 'Current Size',
+                'value': size_formatted,
+                'inline': True
+            },
+            {
+                'name': 'Threshold',
+                'value': threshold_formatted,
+                'inline': True
+            },
+            {
+                'name': 'Over Threshold By',
+                'value': format_bytes(size_bytes - threshold_bytes),
+                'inline': True
+            }
+        ]
+        
+        if subdirectories:
+            top_subdirs = subdirectories[:5]
+            subdir_list = []
+            for subdir in top_subdirs:
+                subdir_name = os.path.basename(subdir.get('path', 'Unknown'))
+                subdir_size = subdir.get('size_bytes', subdir.get('size', 0))
+                if isinstance(subdir_size, str):
+                    subdir_size = subdir.get('size_bytes', 0)
+                subdir_list.append(f"{subdir_name}: {format_bytes(subdir_size)}")
+            
+            if subdir_list:
+                fields.append({
+                    'name': 'Largest Subdirectories',
+                    'value': '\n'.join(subdir_list)[:1024],
+                    'inline': False
+                })
+        
+        description = f'Directory "{os.path.basename(directory_path)}" has exceeded the size threshold of {threshold_formatted}'
+        
+        return self.send_embed(
+            title='📁 Directory Size Alert',
+            description=description,
+            color=color,
+            fields=fields,
+            footer='Server Monitor - Directory Monitoring',
+            timestamp=True
+        )
+    
+    def send_freeze_alert(self, freeze_status: Dict, system_info: Optional[Dict] = None) -> bool:
+        """
+        Send a system freeze detection alert to Discord.
+        
+        Args:
+            freeze_status: Dictionary containing freeze detection information
+            system_info: Optional dictionary containing system information
+            
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        reasons = freeze_status.get('reasons', [])
+        time_since_heartbeat = freeze_status.get('time_since_heartbeat', 0)
+        time_since_metric_update = freeze_status.get('time_since_metric_update', 0)
+        responsive = freeze_status.get('responsive', False)
+        
+        color = 0xff0000  # Red for critical freeze
+        
+        fields = [
+            {
+                'name': 'Freeze Detected',
+                'value': '⚠️ System appears to be frozen or unresponsive',
+                'inline': False
+            }
+        ]
+        
+        if reasons:
+            reasons_text = '\n'.join([f"• {reason}" for reason in reasons])
+            fields.append({
+                'name': 'Detection Reasons',
+                'value': reasons_text[:1024],
+                'inline': False
+            })
+        
+        fields.append({
+            'name': 'Time Since Last Heartbeat',
+            'value': f'{time_since_heartbeat:.1f} seconds',
+            'inline': True
+        })
+        
+        fields.append({
+            'name': 'Time Since Last Metric Update',
+            'value': f'{time_since_metric_update:.1f} seconds',
+            'inline': True
+        })
+        
+        fields.append({
+            'name': 'System Responsive',
+            'value': '✅ Yes' if responsive else '❌ No',
+            'inline': True
+        })
+        
+        if system_info:
+            uptime = system_info.get('uptime', {})
+            if uptime:
+                fields.append({
+                    'name': 'System Uptime',
+                    'value': uptime.get('formatted', 'N/A'),
+                    'inline': True
+                })
+            
+            cpu_info = system_info.get('cpu', {})
+            if cpu_info:
+                fields.append({
+                    'name': 'Last Known CPU Usage',
+                    'value': f"{cpu_info.get('cpu_percent', 0):.1f}%",
+                    'inline': True
+                })
+            
+            memory_info = system_info.get('memory', {})
+            if memory_info:
+                mem_percent = memory_info.get('memory_percent', 0)
+                fields.append({
+                    'name': 'Last Known Memory Usage',
+                    'value': f"{mem_percent:.1f}%",
+                    'inline': True
+                })
+        
+        description = 'The monitoring system has detected that the PC may be frozen or unresponsive.'
+        if reasons:
+            description += f'\n\n**Primary Issue:** {reasons[0]}'
+        
+        return self.send_embed(
+            title='🚨 System Freeze Detected',
+            description=description,
+            color=color,
+            fields=fields,
+            footer='Server Monitor - Freeze Detection',
+            timestamp=True
+        )
+    
     def _format_memory_info(self, mem_dict: Dict) -> Dict[str, str]:
         """
         Helper method to format memory information for display.
