@@ -112,8 +112,15 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
         for candidate in env_file_candidates:
             logger.warning(f"  - {candidate}")
     
-    default_path = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-    env_path = os.environ.get('PATH', default_path)
+    python_path = str(python_exec).replace('\\', '/')
+    main_script_path = str(main_script).replace('\\', '/')
+    working_dir_path = str(working_dir).replace('\\', '/')
+    
+    venv_bin = str(project_root / 'venv' / 'bin').replace('\\', '/')
+    if os.path.exists(venv_bin):
+        minimal_path = f"{venv_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    else:
+        minimal_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     
     service_content = f"""[Unit]
 Description=Server Monitor - System resource monitoring with Discord alerts
@@ -123,8 +130,8 @@ After=network.target
 Type=simple
 User={service_user}
 Group={service_user}
-WorkingDirectory={working_dir}
-Environment="PATH={env_path}\""""
+WorkingDirectory={working_dir_path}
+Environment="PATH={minimal_path}\""""
     
     if env_file:
         service_content += f"\nEnvironmentFile={env_file}"
@@ -133,7 +140,7 @@ Environment="PATH={env_path}\""""
         logger.info("You may need to set environment variables directly in the service file or create a .env file.")
     
     service_content += f"""
-ExecStart={python_exec} {main_script}
+ExecStart={python_path} {main_script_path}
 Restart=always
 RestartSec=10
 StandardOutput=journal
