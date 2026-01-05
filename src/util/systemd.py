@@ -112,6 +112,9 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
         for candidate in env_file_candidates:
             logger.warning(f"  - {candidate}")
     
+    default_path = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    env_path = os.environ.get('PATH', default_path)
+    
     service_content = f"""[Unit]
 Description=Server Monitor - System resource monitoring with Discord alerts
 After=network.target
@@ -121,7 +124,7 @@ Type=simple
 User={service_user}
 Group={service_user}
 WorkingDirectory={working_dir}
-Environment="PATH={os.environ.get('PATH', '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')}"""
+Environment="PATH={env_path}\""""
     
     if env_file:
         service_content += f"\nEnvironmentFile={env_file}"

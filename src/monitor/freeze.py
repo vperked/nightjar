@@ -152,10 +152,6 @@ class FreezeMonitor:
             else:
                 freeze_reasons.append(f"System calls taking too long ({responsiveness['check_time']:.2f}s)")
         
-        if time_since_metric_update > self.freeze_threshold and not responsiveness['responsive']:
-            is_frozen = True
-            freeze_reasons.append(f"Metrics not updating ({time_since_metric_update:.1f}s > {self.freeze_threshold:.1f}s) and system unresponsive")
-        
         return {
             'is_frozen': is_frozen,
             'reasons': freeze_reasons,
