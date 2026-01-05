@@ -859,20 +859,16 @@ class DiscordWebhook:
         time_since_metric_update = freeze_status.get('time_since_metric_update', 0)
         responsive = freeze_status.get('responsive', False)
         
-        color = 0xff0000  # Red for critical freeze
+        color = 0x000000
         
-        fields = [
-            {
-                'name': 'Freeze Detected',
-                'value': '⚠️ System appears to be frozen or unresponsive',
-                'inline': False
-            }
-        ]
+        primary_reason = reasons[0] if reasons else "System freeze detected"
+        
+        fields = []
         
         if reasons:
-            reasons_text = '\n'.join([f"• {reason}" for reason in reasons])
+            reasons_text = '\n'.join([f"• {reason}" for reason in reasons[:3]])
             fields.append({
-                'name': 'Detection Reasons',
+                'name': 'Detection Reason',
                 'value': reasons_text[:1024],
                 'inline': False
             })
@@ -884,14 +880,8 @@ class DiscordWebhook:
         })
         
         fields.append({
-            'name': 'Time Since Last Metric Update',
-            'value': f'{time_since_metric_update:.1f} seconds',
-            'inline': True
-        })
-        
-        fields.append({
             'name': 'System Responsive',
-            'value': '✅ Yes' if responsive else '❌ No',
+            'value': 'Yes' if responsive else 'No',
             'inline': True
         })
         
@@ -921,16 +911,14 @@ class DiscordWebhook:
                     'inline': True
                 })
         
-        description = 'The monitoring system has detected that the PC may be frozen or unresponsive.'
-        if reasons:
-            description += f'\n\n**Primary Issue:** {reasons[0]}'
+        description = f'System freeze has been detected: {primary_reason}'
         
         return self.send_embed(
-            title='🚨 System Freeze Detected',
+            title='System Freeze Alert',
             description=description,
             color=color,
             fields=fields,
-            footer='Server Monitor - Freeze Detection',
+            footer='Server Monitor',
             timestamp=True
         )
     
