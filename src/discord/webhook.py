@@ -1059,6 +1059,7 @@ class DiscordWebhook:
     def send_torrent_list(self, downloading_torrents: List[Dict], seeding_torrents: List[Dict]) -> bool:
         """
         Send a list of currently downloading and seeding torrents to Discord.
+        Only shows torrents with active speeds (> 0).
         
         Args:
             downloading_torrents: List of dictionaries containing downloading torrent information
@@ -1067,47 +1068,50 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        if not downloading_torrents and not seeding_torrents:
+        active_downloading = [t for t in downloading_torrents if t.get('dlspeed', 0) > 0]
+        active_seeding = [t for t in seeding_torrents if t.get('upspeed', 0) > 0]
+        
+        if not active_downloading and not active_seeding:
             return True
         
         fields = []
         
-        if downloading_torrents:
+        if active_downloading:
             download_list = []
-            for i, torrent in enumerate(downloading_torrents[:10], 1):
+            for i, torrent in enumerate(active_downloading[:10], 1):
                 name = torrent.get('name', 'Unknown')[:50]
                 progress = torrent.get('progress_percent', 0.0)
                 speed = format_bytes_per_second(torrent.get('dlspeed', 0))
                 download_list.append(f"{i}. **{name}**\n   {progress:.1f}% @ {speed}")
             
-            if len(downloading_torrents) > 10:
-                download_list.append(f"\n*... and {len(downloading_torrents) - 10} more*")
+            if len(active_downloading) > 10:
+                download_list.append(f"\n*... and {len(active_downloading) - 10} more*")
             
             fields.append({
-                'name': f'Downloading ({len(downloading_torrents)})',
+                'name': f'Downloading ({len(active_downloading)})',
                 'value': '\n'.join(download_list)[:1024],
                 'inline': False
             })
         
-        if seeding_torrents:
+        if active_seeding:
             seed_list = []
-            for i, torrent in enumerate(seeding_torrents[:10], 1):
+            for i, torrent in enumerate(active_seeding[:10], 1):
                 name = torrent.get('name', 'Unknown')[:50]
                 ratio = torrent.get('ratio', 0.0)
                 speed = format_bytes_per_second(torrent.get('upspeed', 0))
                 seed_list.append(f"{i}. **{name}**\n   Ratio: {ratio:.2f} @ {speed}")
             
-            if len(seeding_torrents) > 10:
-                seed_list.append(f"\n*... and {len(seeding_torrents) - 10} more*")
+            if len(active_seeding) > 10:
+                seed_list.append(f"\n*... and {len(active_seeding) - 10} more*")
             
             fields.append({
-                'name': f'Seeding ({len(seeding_torrents)})',
+                'name': f'Seeding ({len(active_seeding)})',
                 'value': '\n'.join(seed_list)[:1024],
                 'inline': False
             })
         
-        total_downloading = len(downloading_torrents)
-        total_seeding = len(seeding_torrents)
+        total_downloading = len(active_downloading)
+        total_seeding = len(active_seeding)
         description = f"**{total_downloading}** downloading, **{total_seeding}** seeding"
         
         return self.send_embed(
