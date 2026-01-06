@@ -320,6 +320,21 @@ def main():
         logger.info(f"Directory Monitoring: {media_directory} | Threshold: {media_directory_threshold_gb:.1f} GB")
     else:
         logger.warning(f"Directory Monitoring: {media_directory} not found, skipping directory monitoring")
+    
+    if qbittorrent_monitor.password:
+        logger.debug("Checking qBittorrent connection...")
+        if qbittorrent_monitor.is_available():
+            try:
+                summary = qbittorrent_monitor.get_torrent_summary()
+                logger.info(f"qBittorrent: Connected | {summary['total']} torrents ({summary['downloading']} downloading, {summary['seeding']} seeding)")
+            except Exception as e:
+                logger.warning(f"qBittorrent: Connected but error getting summary: {e}")
+        else:
+            error_msg = getattr(qbittorrent_monitor, '_last_error', None) or "Unknown error"
+            logger.warning(f"qBittorrent: Not available - {error_msg}")
+    else:
+        logger.info("qBittorrent: Not configured (set QBITTORRENT_PASSWORD to enable)")
+    
     logger.info(f"Settings: Check every {check_interval:.1f}s | Cooldown {alert_cooldown:.1f}s")
     
     web_port = int(os.getenv('WEB_PORT', '8080'))
