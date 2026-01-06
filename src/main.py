@@ -249,6 +249,19 @@ def main():
     except ValueError:
         logger.info("Discord webhook not configured")
     
+    qbittorrent_webhook = None
+    qbittorrent_webhook_url = os.getenv('QBITTORRENT_WEBHOOK')
+    if qbittorrent_webhook_url:
+        try:
+            qbittorrent_webhook = DiscordWebhook(webhook_url=qbittorrent_webhook_url)
+            logger.info("qBittorrent Discord webhook connected")
+        except ValueError:
+            logger.warning("qBittorrent webhook URL invalid")
+        except Exception as e:
+            logger.warning(f"Failed to connect to qBittorrent webhook: {e}")
+    else:
+        logger.debug("qBittorrent webhook not configured (set QBITTORRENT_WEBHOOK to enable)")
+    
     cpu_threshold = float(os.getenv('CPU_THRESHOLD', '80.0'))
     memory_threshold = float(os.getenv('MEMORY_THRESHOLD', '80.0'))
     gpu_threshold = float(os.getenv('GPU_THRESHOLD', '80.0'))
@@ -366,14 +379,14 @@ def main():
         except Exception as e:
             logger.error(f"Error sending system info: {e}")
         
-        if qbittorrent_connected:
+        if qbittorrent_connected and qbittorrent_webhook:
             try:
                 downloading = qbittorrent_monitor.get_downloading_torrents()
                 seeding = qbittorrent_monitor.get_seeding_torrents()
                 
                 if downloading or seeding:
                     logger.info(f"Sending qBittorrent status to Discord ({len(downloading)} downloading, {len(seeding)} seeding)...")
-                    success = webhook.send_torrent_list(downloading, seeding)
+                    success = qbittorrent_webhook.send_torrent_list(downloading, seeding)
                     if success:
                         logger.info("qBittorrent status sent to Discord")
                     else:
@@ -942,9 +955,9 @@ def main():
                             
                             if is_seeding and progress >= 1.0:
                                 if not tracked_torrents[torrent_hash]['notified_download'] and prev_was_downloading:
-                                    if webhook:
+                                    if qbittorrent_webhook:
                                         logger.info(f"[qBittorrent] Download complete: {torrent.get('name', 'Unknown')}")
-                                        success = webhook.send_download_complete_alert(torrent)
+                                        success = qbittorrent_webhook.send_download_complete_alert(torrent)
                                         if success:
                                             logger.info("    Discord download complete notification sent")
                                         else:
@@ -953,9 +966,9 @@ def main():
                             
                             if is_seeding and not prev_was_seeding:
                                 if not tracked_torrents[torrent_hash]['notified_seeding']:
-                                    if webhook:
+                                    if qbittorrent_webhook:
                                         logger.info(f"[qBittorrent] Torrent seeding: {torrent.get('name', 'Unknown')}")
-                                        success = webhook.send_seeding_notification(torrent)
+                                        success = qbittorrent_webhook.send_seeding_notification(torrent)
                                         if success:
                                             logger.info("    Discord seeding notification sent")
                                         else:
