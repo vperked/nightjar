@@ -990,7 +990,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='Download Complete',
             description=f'Torrent download has completed: **{name[:100]}**',
-            color=0x00ff00,
+            color=0xdc3545,
             fields=fields,
             footer='Server Monitor - qBittorrent',
             timestamp=True
@@ -1050,7 +1050,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='Torrent Seeding',
             description=f'Torrent is now seeding: **{name[:100]}**',
-            color=0x0099ff,
+            color=0xdc3545,
             fields=fields,
             footer='Server Monitor - qBittorrent',
             timestamp=True
@@ -1078,46 +1078,50 @@ class DiscordWebhook:
         
         if active_downloading:
             download_list = []
-            for i, torrent in enumerate(active_downloading[:10], 1):
-                name = torrent.get('name', 'Unknown')[:50]
+            for torrent in active_downloading[:10]:
+                name = torrent.get('name', 'Unknown')
+                if len(name) > 60:
+                    name = name[:57] + '...'
                 progress = torrent.get('progress_percent', 0.0)
                 speed = format_bytes_per_second(torrent.get('dlspeed', 0))
-                download_list.append(f"{i}. **{name}**\n   {progress:.1f}% @ {speed}")
+                download_list.append(f"`{name}`\n{progress:.1f}% • {speed}")
             
             if len(active_downloading) > 10:
-                download_list.append(f"\n*... and {len(active_downloading) - 10} more*")
+                download_list.append(f"\n*+{len(active_downloading) - 10} more*")
             
             fields.append({
-                'name': f'Downloading ({len(active_downloading)})',
-                'value': '\n'.join(download_list)[:1024],
+                'name': f'📥 Downloading ({len(active_downloading)})',
+                'value': '\n\n'.join(download_list)[:1024],
                 'inline': False
             })
         
         if active_seeding:
             seed_list = []
-            for i, torrent in enumerate(active_seeding[:10], 1):
-                name = torrent.get('name', 'Unknown')[:50]
+            for torrent in active_seeding[:10]:
+                name = torrent.get('name', 'Unknown')
+                if len(name) > 60:
+                    name = name[:57] + '...'
                 ratio = torrent.get('ratio', 0.0)
                 speed = format_bytes_per_second(torrent.get('upspeed', 0))
-                seed_list.append(f"{i}. **{name}**\n   Ratio: {ratio:.2f} @ {speed}")
+                seed_list.append(f"`{name}`\nRatio: {ratio:.2f} • {speed}")
             
             if len(active_seeding) > 10:
-                seed_list.append(f"\n*... and {len(active_seeding) - 10} more*")
+                seed_list.append(f"\n*+{len(active_seeding) - 10} more*")
             
             fields.append({
-                'name': f'Seeding ({len(active_seeding)})',
-                'value': '\n'.join(seed_list)[:1024],
+                'name': f'📤 Seeding ({len(active_seeding)})',
+                'value': '\n\n'.join(seed_list)[:1024],
                 'inline': False
             })
         
         total_downloading = len(active_downloading)
         total_seeding = len(active_seeding)
-        description = f"**{total_downloading}** downloading, **{total_seeding}** seeding"
+        description = f"{total_downloading} downloading • {total_seeding} seeding"
         
         return self.send_embed(
             title='qBittorrent Status',
             description=description,
-            color=0x0099ff,
+            color=0xdc3545,
             fields=fields,
             footer='Server Monitor - qBittorrent',
             timestamp=True
