@@ -27,7 +27,10 @@ logger = get_logger()
 
 def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core: List[float],
                                top_processes: List[Dict], load_avg: Optional[Tuple[float, float, float]],
-                               fan_speeds: Optional[List[Dict]] = None) -> str:
+                               fan_speeds: Optional[List[Dict]] = None, 
+                               disk_io: Optional[Dict] = None,
+                               network_io: Optional[Dict] = None,
+                               gpu_temp: Optional[float] = None) -> str:
     """
     Analyze the likely reason for high CPU temperature.
     
@@ -38,6 +41,9 @@ def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core:
         top_processes: List of top CPU-consuming processes
         load_avg: System load average tuple (1min, 5min, 15min) or None
         fan_speeds: Optional list of fan speed information
+        disk_io: Optional disk I/O statistics
+        network_io: Optional network I/O statistics
+        gpu_temp: Optional GPU temperature for comparison
         
     Returns:
         Human-readable string describing the likely cause
@@ -69,14 +75,62 @@ def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core:
             elif high_cores <= len(cpu_per_core) // 2:
                 reasons.append(f"{high_cores} cores under heavy load")
     
+    download_processes = []
+    download_keywords = ['qbittorrent', 'transmission', 'deluge', 'rtorrent', 'aria2', 
+                        'wget', 'curl', 'sabnzbd', 'nzbget', 'youtube-dl', 'yt-dlp',
+                        'plex', 'jellyfin', 'emby', 'radarr', 'sonarr', 'lidarr',
+                        'jackett', 'prowlarr', 'download', 'torrent']
+    
     if top_processes:
-        high_cpu_procs = [p for p in top_processes[:3] if p.get('cpu_percent', 0) > 10]
+        for proc in top_processes:
+            proc_name = proc.get('name', '').lower()
+            proc_cmdline = ' '.join(proc.get('cmdline', [])).lower() if proc.get('cmdline') else ''
+            for keyword in download_keywords:
+                if keyword in proc_name or keyword in proc_cmdline:
+                    download_processes.append(proc)
+                    break
+    
+    if download_processes:
+        download_names = [p.get('name', 'Unknown') for p in download_processes[:3]]
+        if len(download_names) == 1:
+            reasons.append(f"Download/media activity: {download_names[0]}")
+        else:
+            reasons.append(f"Download/media activity: {', '.join(download_names[:2])}")
+    
+    download_processes = []
+    download_keywords = ['qbittorrent', 'transmission', 'deluge', 'rtorrent', 'aria2', 
+                        'wget', 'curl', 'sabnzbd', 'nzbget', 'youtube-dl', 'yt-dlp',
+                        'plex', 'jellyfin', 'emby', 'radarr', 'sonarr', 'lidarr',
+                        'jackett', 'prowlarr', 'download', 'torrent']
+    
+    if top_processes:
+        for proc in top_processes:
+            proc_name = proc.get('name', '').lower()
+            proc_cmdline = ' '.join(proc.get('cmdline', [])).lower() if proc.get('cmdline') else ''
+            for keyword in download_keywords:
+                if keyword in proc_name or keyword in proc_cmdline:
+                    download_processes.append(proc)
+                    break
+    
+    if download_processes:
+        download_names = [p.get('name', 'Unknown') for p in download_processes[:3]]
+        if len(download_names) == 1:
+            reasons.append(f"Download/media activity: {download_names[0]}")
+        else:
+            reasons.append(f"Download/media activity: {', '.join(download_names[:2])}")
+    
+    if top_processes:
+        high_cpu_procs = [p for p in top_processes[:5] if p.get('cpu_percent', 0) > 5 and p not in download_processes]
         if high_cpu_procs:
-            proc_names = [p.get('name', 'Unknown') for p in high_cpu_procs]
-            if len(proc_names) == 1:
-                reasons.append(f"Process '{proc_names[0]}' using {high_cpu_procs[0].get('cpu_percent', 0):.1f}% CPU")
+            proc_details = []
+            for proc in high_cpu_procs[:3]:
+                name = proc.get('name', 'Unknown')
+                cpu_usage = proc.get('cpu_percent', 0)
+                proc_details.append(f"{name} ({cpu_usage:.1f}%)")
+            if len(proc_details) == 1:
+                reasons.append(f"Process: {proc_details[0]}")
             else:
-                reasons.append(f"Multiple processes consuming CPU: {', '.join(proc_names[:2])}")
+                reasons.append(f"Top processes: {', '.join(proc_details)}")
     
     if load_avg:
         load_1min = load_avg[0]
@@ -87,17 +141,63 @@ def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core:
             reasons.append(f"Elevated system load ({load_1min:.1f} vs {cpu_count} cores)")
     
     if fan_speeds:
-        avg_fan_speed = sum(f.get('speed_rpm', 0) for f in fan_speeds) / len(fan_speeds) if fan_speeds else 0
-        if avg_fan_speed > 0 and avg_fan_speed < 1000:
-            reasons.append("Low fan speeds detected (possible cooling issue)")
+        fan_speed_list = [f.get('speed_rpm', 0) for f in fan_speeds if f.get('speed_rpm', 0) > 0]
+        if fan_speed_list:
+            avg_fan_speed = sum(fan_speed_list) / len(fan_speed_list)
+            min_fan_speed = min(fan_speed_list)
+            if min_fan_speed < 500:
+                reasons.append(f"Very low fan speeds (min: {min_fan_speed:.0f} RPM) - cooling issue likely")
+            elif avg_fan_speed < 1000:
+                reasons.append(f"Low fan speeds (avg: {avg_fan_speed:.0f} RPM) - possible cooling issue")
+        else:
+            reasons.append("No fan speed data available - cannot verify cooling")
+    
+    if disk_io:
+        read_bytes = disk_io.get('read_bytes', 0)
+        write_bytes = disk_io.get('write_bytes', 0)
+        if write_bytes > 5 * 1024 * 1024 * 1024:
+            gb_written = write_bytes / (1024 * 1024 * 1024)
+            if download_processes:
+                reasons.append(f"Writing downloaded data to disk ({gb_written:.1f} GB written)")
+            else:
+                reasons.append(f"High disk write activity ({gb_written:.1f} GB written)")
+        elif read_bytes > 5 * 1024 * 1024 * 1024:
+            gb_read = read_bytes / (1024 * 1024 * 1024)
+            reasons.append(f"High disk read activity ({gb_read:.1f} GB read)")
+        elif read_bytes > 0 or write_bytes > 0:
+            total_io = read_bytes + write_bytes
+            if total_io > 10 * 1024 * 1024 * 1024:
+                reasons.append("High disk I/O activity detected")
+    
+    if network_io:
+        bytes_sent = network_io.get('bytes_sent', 0)
+        bytes_recv = network_io.get('bytes_recv', 0)
+        if bytes_recv > 50 * 1024 * 1024:
+            mb_recv = bytes_recv / (1024 * 1024)
+            if download_processes:
+                reasons.append(f"Active download in progress ({mb_recv:.1f} MB received)")
+            else:
+                reasons.append(f"High network download activity ({mb_recv:.1f} MB received)")
+        elif bytes_sent > 50 * 1024 * 1024:
+            mb_sent = bytes_sent / (1024 * 1024)
+            reasons.append(f"High network upload activity ({mb_sent:.1f} MB sent)")
+        total_net = bytes_sent + bytes_recv
+        if total_net > 100 * 1024 * 1024 and not download_processes:
+            reasons.append("High network activity detected")
+    
+    if gpu_temp is not None and gpu_temp > 0:
+        if gpu_temp > 70:
+            reasons.append(f"GPU also hot ({gpu_temp:.1f}°C) - possible ambient temperature or case airflow issue")
     
     if not reasons:
         if cpu_percent > 30:
-            reasons.append("Sustained CPU activity")
+            reasons.append(f"Sustained CPU activity ({cpu_percent:.1f}%) without specific high-load process")
+        elif cpu_percent > 10:
+            reasons.append(f"Low-moderate CPU usage ({cpu_percent:.1f}%) with high temperature - check cooling system")
         else:
-            reasons.append("Possible ambient temperature increase or cooling system issue")
+            reasons.append(f"Very low CPU usage ({cpu_percent:.1f}%) with high temperature - likely cooling system failure or ambient temperature issue")
     
-    return " | ".join(reasons[:3])
+    return " | ".join(reasons[:4])
 
 
 def main():
@@ -485,13 +585,35 @@ def main():
                             top_cpu_procs = process_monitor.get_top_processes(limit=5, sort_by='cpu')
                             fans = sensors_monitor.get_fan_speeds()
                             
+                            gpu_temp = None
+                            if gpu_monitor.nvidia_smi_available and gpu_monitor.get_gpu_count() > 0:
+                                gpu_data_temp = gpu_monitor.get_gpu_comprehensive(0)
+                                gpu_temp = gpu_data_temp.get('temperature')
+                            
+                            temp_disk_io = disk_io_data
+                            if temp_disk_io is None:
+                                try:
+                                    temp_disk_io = system_monitor.get_disk_io()
+                                except Exception:
+                                    pass
+                            
+                            temp_network_io = network_io_data
+                            if temp_network_io is None:
+                                try:
+                                    temp_network_io = network_monitor.get_total_network_io()
+                                except Exception:
+                                    pass
+                            
                             reason = analyze_temperature_reason(
                                 cpu_percent=cpu_percent,
                                 cpu_freq=cpu_freq_info,
                                 cpu_per_core=cpu_per_core,
                                 top_processes=top_cpu_procs,
                                 load_avg=load_avg,
-                                fan_speeds=fans
+                                fan_speeds=fans,
+                                disk_io=temp_disk_io,
+                                network_io=temp_network_io,
+                                gpu_temp=gpu_temp
                             )
                             
                             logger.warning(f"[ALERT] Temperature: {cpu_temp:.1f}°C (threshold: {temp_threshold:.1f}°C) for {temp_high_duration:.0f}s")
