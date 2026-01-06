@@ -321,12 +321,14 @@ def main():
     else:
         logger.warning(f"Directory Monitoring: {media_directory} not found, skipping directory monitoring")
     
+    qbittorrent_connected = False
     if qbittorrent_monitor.password:
         logger.debug("Checking qBittorrent connection...")
         if qbittorrent_monitor.is_available():
             try:
                 summary = qbittorrent_monitor.get_torrent_summary()
                 logger.info(f"qBittorrent: Connected | {summary['total']} torrents ({summary['downloading']} downloading, {summary['seeding']} seeding)")
+                qbittorrent_connected = True
             except Exception as e:
                 logger.warning(f"qBittorrent: Connected but error getting summary: {e}")
         else:
@@ -363,6 +365,23 @@ def main():
             raise
         except Exception as e:
             logger.error(f"Error sending system info: {e}")
+        
+        if qbittorrent_connected:
+            try:
+                downloading = qbittorrent_monitor.get_downloading_torrents()
+                seeding = qbittorrent_monitor.get_seeding_torrents()
+                
+                if downloading or seeding:
+                    logger.info(f"Sending qBittorrent status to Discord ({len(downloading)} downloading, {len(seeding)} seeding)...")
+                    success = webhook.send_torrent_list(downloading, seeding)
+                    if success:
+                        logger.info("qBittorrent status sent to Discord")
+                    else:
+                        logger.warning("Failed to send qBittorrent status to Discord")
+                else:
+                    logger.debug("No active torrents to report")
+            except Exception as e:
+                logger.warning(f"Error sending qBittorrent status to Discord: {e}")
     
     logger.info("Starting continuous monitoring (Press Ctrl+C to stop)")
     
