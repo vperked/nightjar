@@ -1090,7 +1090,7 @@ class DiscordWebhook:
                 download_list.append(f"\n*+{len(active_downloading) - 10} more*")
             
             fields.append({
-                'name': f'📥 Downloading ({len(active_downloading)})',
+                'name': f'Downloading ({len(active_downloading)})',
                 'value': '\n\n'.join(download_list)[:1024],
                 'inline': False
             })
@@ -1109,7 +1109,7 @@ class DiscordWebhook:
                 seed_list.append(f"\n*+{len(active_seeding) - 10} more*")
             
             fields.append({
-                'name': f'📤 Seeding ({len(active_seeding)})',
+                'name': f'Seeding ({len(active_seeding)})',
                 'value': '\n\n'.join(seed_list)[:1024],
                 'inline': False
             })
