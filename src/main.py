@@ -539,6 +539,15 @@ def main():
                 if not disk_alert_sent or time_since_last_alert >= alert_cooldown:
                     if webhook:
                         logger.warning(f"[ALERT] Disk: {disk_percent:.1f}% (threshold: {disk_threshold:.1f}%)")
+                        
+                        largest_dirs = []
+                        try:
+                            root_partition = disk_monitor.get_disk_usage('/')
+                            if root_partition and root_partition['percent'] >= disk_threshold:
+                                largest_dirs = disk_monitor.get_largest_directories_human('/', limit=5)
+                        except Exception as e:
+                            logger.debug(f"Could not get largest directories: {e}")
+                        
                         fields = [
                             {'name': 'Disk Usage', 'value': f'{disk_percent:.1f}%', 'inline': True},
                             {'name': 'Threshold', 'value': f'{disk_threshold:.1f}%', 'inline': True},
@@ -546,6 +555,20 @@ def main():
                             {'name': 'Used', 'value': format_bytes(total_disk['used']), 'inline': True},
                             {'name': 'Free', 'value': format_bytes(total_disk['free']), 'inline': True},
                         ]
+                        
+                        if largest_dirs:
+                            dir_list = []
+                            for i, dir_info in enumerate(largest_dirs, 1):
+                                dir_name = os.path.basename(dir_info['path'])
+                                dir_size = dir_info['size']
+                                dir_list.append(f"{i}. `{dir_name}`: {dir_size}")
+                            
+                            fields.append({
+                                'name': 'Largest Directories',
+                                'value': '\n'.join(dir_list) if dir_list else 'Unable to determine',
+                                'inline': False
+                            })
+                        
                         success = webhook.send_embed(
                             title='Disk Usage Alert',
                             description=f'Disk usage has exceeded the threshold of {disk_threshold:.1f}%',

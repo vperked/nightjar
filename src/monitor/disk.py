@@ -391,4 +391,41 @@ class DiskMonitor:
         """
         subdirs = self.get_subdirectories_sizes(parent_path)
         return [self.get_directory_size_human(subdir['path']) for subdir in subdirs if subdir]
+    
+    def get_largest_directories(self, path: str = '/', limit: int = 10) -> List[Dict]:
+        """
+        Get the largest directories on a given path (typically root of a partition).
+        
+        Args:
+            path: Root path to analyze (default: '/')
+            limit: Maximum number of directories to return (default: 10)
+            
+        Returns:
+            List of dictionaries containing directory size information, sorted by size (largest first)
+        """
+        if not os.path.exists(path) or not os.path.isdir(path):
+            return []
+        
+        subdirs = self.get_subdirectories_sizes(path)
+        subdirs.sort(key=lambda x: x['size'], reverse=True)
+        return subdirs[:limit]
+    
+    def get_largest_directories_human(self, path: str = '/', limit: int = 10) -> List[Dict]:
+        """
+        Get the largest directories in human-readable format.
+        
+        Args:
+            path: Root path to analyze (default: '/')
+            limit: Maximum number of directories to return (default: 10)
+            
+        Returns:
+            List of dictionaries with formatted directory sizes
+        """
+        largest = self.get_largest_directories(path, limit)
+        result = []
+        for dir_info in largest:
+            human = self.get_directory_size_human(dir_info['path'])
+            if human:
+                result.append(human)
+        return result
 

@@ -250,8 +250,42 @@ def install_systemd_service(service_name: str = 'server-monitor',
         else:
             logger.info(f"Service {service_name} enabled successfully.")
         
-        logger.info(f"\nService installed successfully!")
-        logger.info(f"To start the service: sudo systemctl start {service_name}")
+        logger.info(f"Starting {service_name} service...")
+        result = subprocess.run(
+            ['systemctl', 'start', f'{service_name}.service'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"Failed to start service: {result.stderr}")
+            logger.error("Service file created but service failed to start.")
+            logger.error("Please check the service file and logs:")
+            logger.error(f"  cat /etc/systemd/system/{service_name}.service")
+            logger.error(f"  sudo journalctl -u {service_name} -n 50")
+            return False
+        
+        import time
+        time.sleep(2)
+        
+        logger.info(f"Checking {service_name} service status...")
+        result = subprocess.run(
+            ['systemctl', 'is-active', f'{service_name}.service'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode != 0 or result.stdout.strip() != 'active':
+            logger.error(f"Service is not active. Status: {result.stdout.strip()}")
+            logger.error("Please check the logs:")
+            logger.error(f"  sudo journalctl -u {service_name} -n 50")
+            logger.error(f"  sudo systemctl status {service_name}")
+            return False
+        
+        logger.info(f"\nService installed and started successfully!")
+        logger.info(f"Service is running and will start automatically on system boot.")
         logger.info(f"To check status: sudo systemctl status {service_name}")
         logger.info(f"To view logs: sudo journalctl -u {service_name} -f")
         
