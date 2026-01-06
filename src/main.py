@@ -7,6 +7,7 @@ from monitor.network import NetworkMonitor
 from monitor.sensors import SensorsMonitor
 from monitor.processes import ProcessMonitor
 from monitor.freeze import FreezeMonitor
+from monitor.qbittorrent import QBittorrentMonitor
 from discord.webhook import DiscordWebhook
 from util.util import format_bytes, format_bytes_per_second
 from util.systemd import install_systemd_service, check_systemd_available, is_root
@@ -237,6 +238,7 @@ def main():
     network_monitor = NetworkMonitor()
     sensors_monitor = SensorsMonitor()
     process_monitor = ProcessMonitor()
+    qbittorrent_monitor = QBittorrentMonitor()
     logger.info("Monitors initialized")
     
     webhook = None
@@ -370,9 +372,12 @@ def main():
     network_check_counter = 0
     freeze_check_counter = 0
     media_check_counter = 0
+    qbittorrent_check_counter = 0
     NETWORK_CHECK_INTERVAL = 2
     PROCESS_CHECK_INTERVAL = 3
-    FREEZE_CHECK_INTERVAL = 1  # Check for freezes every loop iteration
+    FREEZE_CHECK_INTERVAL = 1
+    QBITTORRENT_CHECK_INTERVAL = 2
+    tracked_torrents = {}
     
     try:
         while True:
@@ -870,6 +875,67 @@ def main():
                             media_alert_sent = False
                 except Exception as e:
                     logger.debug(f"Error checking directory size: {e}")
+            
+            qbittorrent_check_counter += 1
+            if qbittorrent_check_counter >= QBITTORRENT_CHECK_INTERVAL:
+                qbittorrent_check_counter = 0
+                if qbittorrent_monitor.is_available():
+                    try:
+                        all_torrents = qbittorrent_monitor.get_all_torrents()
+                        current_torrents = {torrent['hash']: torrent for torrent in all_torrents}
+                        
+                        for torrent_hash, torrent in current_torrents.items():
+                            state = torrent.get('state', '').lower()
+                            progress = torrent.get('progress', 0.0)
+                            
+                            is_seeding = state in ['uploading', 'stalledup', 'queuedup']
+                            was_downloading = state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']
+                            
+                            if torrent_hash not in tracked_torrents:
+                                tracked_torrents[torrent_hash] = {
+                                    'state': state,
+                                    'progress': progress,
+                                    'name': torrent.get('name', 'Unknown'),
+                                    'notified_download': False,
+                                    'notified_seeding': False
+                                }
+                                continue
+                            
+                            prev_state = tracked_torrents[torrent_hash]['state']
+                            prev_progress = tracked_torrents[torrent_hash]['progress']
+                            prev_was_seeding = prev_state in ['uploading', 'stalledup', 'queuedup']
+                            prev_was_downloading = prev_state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']
+                            
+                            if is_seeding and progress >= 1.0:
+                                if not tracked_torrents[torrent_hash]['notified_download'] and prev_was_downloading:
+                                    if webhook:
+                                        logger.info(f"[qBittorrent] Download complete: {torrent.get('name', 'Unknown')}")
+                                        success = webhook.send_download_complete_alert(torrent)
+                                        if success:
+                                            logger.info("    Discord download complete notification sent")
+                                        else:
+                                            logger.warning("    Discord download complete notification failed")
+                                    tracked_torrents[torrent_hash]['notified_download'] = True
+                            
+                            if is_seeding and not prev_was_seeding:
+                                if not tracked_torrents[torrent_hash]['notified_seeding']:
+                                    if webhook:
+                                        logger.info(f"[qBittorrent] Torrent seeding: {torrent.get('name', 'Unknown')}")
+                                        success = webhook.send_seeding_notification(torrent)
+                                        if success:
+                                            logger.info("    Discord seeding notification sent")
+                                        else:
+                                            logger.warning("    Discord seeding notification failed")
+                                    tracked_torrents[torrent_hash]['notified_seeding'] = True
+                            
+                            tracked_torrents[torrent_hash]['state'] = state
+                            tracked_torrents[torrent_hash]['progress'] = progress
+                        
+                        for torrent_hash in list(tracked_torrents.keys()):
+                            if torrent_hash not in current_torrents:
+                                del tracked_torrents[torrent_hash]
+                    except Exception as e:
+                        logger.debug(f"Error checking qBittorrent: {e}")
             
             time.sleep(check_interval)
             

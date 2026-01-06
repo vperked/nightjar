@@ -3,7 +3,7 @@ import requests
 from typing import Dict, Optional, List
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from util.util import format_bytes
+from util.util import format_bytes, format_bytes_per_second
 from logger import get_logger
 
 load_dotenv()
@@ -938,4 +938,121 @@ class DiscordWebhook:
             'free': format_bytes(mem_dict.get('free', 0)),
             'available': format_bytes(mem_dict.get('available', 0)),
         }
+    
+    def send_download_complete_alert(self, torrent_info: Dict) -> bool:
+        """
+        Send a notification when a torrent download completes.
+        
+        Args:
+            torrent_info: Dictionary containing torrent information
+            
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        name = torrent_info.get('name', 'Unknown')
+        size = torrent_info.get('size', 0)
+        save_path = torrent_info.get('save_path', 'N/A')
+        ratio = torrent_info.get('ratio', 0.0)
+        uploaded = torrent_info.get('uploaded', 0)
+        
+        fields = [
+            {
+                'name': 'Torrent Name',
+                'value': name[:256],
+                'inline': False
+            },
+            {
+                'name': 'Size',
+                'value': format_bytes(size),
+                'inline': True
+            },
+            {
+                'name': 'Save Path',
+                'value': save_path[:256] if save_path != 'N/A' else 'N/A',
+                'inline': False
+            }
+        ]
+        
+        if ratio > 0:
+            fields.append({
+                'name': 'Ratio',
+                'value': f'{ratio:.2f}',
+                'inline': True
+            })
+        
+        if uploaded > 0:
+            fields.append({
+                'name': 'Uploaded',
+                'value': format_bytes(uploaded),
+                'inline': True
+            })
+        
+        return self.send_embed(
+            title='Download Complete',
+            description=f'Torrent download has completed: **{name[:100]}**',
+            color=0x00ff00,
+            fields=fields,
+            footer='Server Monitor - qBittorrent',
+            timestamp=True
+        )
+    
+    def send_seeding_notification(self, torrent_info: Dict) -> bool:
+        """
+        Send a notification when a torrent starts seeding.
+        
+        Args:
+            torrent_info: Dictionary containing torrent information
+            
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        name = torrent_info.get('name', 'Unknown')
+        size = torrent_info.get('size', 0)
+        upload_speed = torrent_info.get('upspeed', 0)
+        ratio = torrent_info.get('ratio', 0.0)
+        seeds = torrent_info.get('seeds', 0)
+        peers = torrent_info.get('peers', 0)
+        save_path = torrent_info.get('save_path', 'N/A')
+        
+        fields = [
+            {
+                'name': 'Torrent Name',
+                'value': name[:256],
+                'inline': False
+            },
+            {
+                'name': 'Size',
+                'value': format_bytes(size),
+                'inline': True
+            },
+            {
+                'name': 'Upload Speed',
+                'value': format_bytes_per_second(upload_speed),
+                'inline': True
+            },
+            {
+                'name': 'Ratio',
+                'value': f'{ratio:.2f}',
+                'inline': True
+            },
+            {
+                'name': 'Seeds / Peers',
+                'value': f'{seeds} / {peers}',
+                'inline': True
+            },
+            {
+                'name': 'Save Path',
+                'value': save_path[:256] if save_path != 'N/A' else 'N/A',
+                'inline': False
+            }
+        ]
+        
+        return self.send_embed(
+            title='Torrent Seeding',
+            description=f'Torrent is now seeding: **{name[:100]}**',
+            color=0x0099ff,
+            fields=fields,
+            footer='Server Monitor - qBittorrent',
+            timestamp=True
+        )
 
