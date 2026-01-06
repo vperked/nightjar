@@ -34,9 +34,12 @@ def get_python_executable() -> str:
     Get the path to the Python executable.
     
     Returns:
-        Path to Python executable
+        Path to Python executable (absolute path)
     """
-    return sys.executable
+    python_exec = sys.executable
+    if not os.path.isabs(python_exec):
+        python_exec = os.path.abspath(python_exec)
+    return python_exec
 
 
 def get_main_script_path() -> Path:
@@ -44,10 +47,11 @@ def get_main_script_path() -> Path:
     Get the path to the main.py script.
     
     Returns:
-        Path to main.py
+        Path to main.py (absolute path)
     """
     project_root = get_project_root()
-    return project_root / 'src' / 'main.py'
+    main_script = project_root / 'src' / 'main.py'
+    return main_script.resolve()
 
 
 def is_root() -> bool:
@@ -113,8 +117,16 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
             logger.warning(f"  - {candidate}")
     
     python_path = str(python_exec).replace('\\', '/')
-    main_script_path = str(main_script).replace('\\', '/')
-    working_dir_path = str(working_dir).replace('\\', '/')
+    main_script_path = str(main_script.resolve()).replace('\\', '/')
+    working_dir_path = str(working_dir.resolve()).replace('\\', '/')
+    
+    if not os.path.exists(python_path):
+        logger.error(f"Python executable not found: {python_path}")
+        raise FileNotFoundError(f"Python executable not found: {python_path}")
+    
+    if not os.path.exists(main_script_path):
+        logger.error(f"Main script not found: {main_script_path}")
+        raise FileNotFoundError(f"Main script not found: {main_script_path}")
     
     venv_bin = str(project_root / 'venv' / 'bin').replace('\\', '/')
     if os.path.exists(venv_bin):
@@ -133,11 +145,10 @@ Group={service_user}
 WorkingDirectory={working_dir_path}
 Environment="PATH={minimal_path}\""""
     
-    if env_file:
+    if env_file and os.path.exists(env_file):
         service_content += f"\nEnvironmentFile={env_file}"
-    else:
-        logger.warning("No .env file found. Service will run without environment file.")
-        logger.info("You may need to set environment variables directly in the service file or create a .env file.")
+    elif env_file:
+        logger.warning(f"EnvironmentFile specified ({env_file}) but file does not exist. Skipping EnvironmentFile line.")
     
     service_content += f"""
 ExecStart={python_path} {main_script_path}
