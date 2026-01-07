@@ -128,6 +128,19 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
         logger.error(f"Main script not found: {main_script_path}")
         raise FileNotFoundError(f"Main script not found: {main_script_path}")
     
+    if not os.path.exists(working_dir_path):
+        logger.warning(f"Working directory does not exist: {working_dir_path}")
+        working_dir_path = str(main_script.parent.resolve()).replace('\\', '/')
+        logger.info(f"Using script directory as working directory: {working_dir_path}")
+    elif not os.access(working_dir_path, os.R_OK | os.X_OK):
+        logger.warning(f"Working directory not accessible: {working_dir_path}")
+        working_dir_path = str(main_script.parent.resolve()).replace('\\', '/')
+        logger.info(f"Using script directory as working directory: {working_dir_path}")
+    
+    if not os.path.exists(working_dir_path) or not os.access(working_dir_path, os.R_OK | os.X_OK):
+        logger.warning(f"Script directory also not accessible, using /tmp as fallback")
+        working_dir_path = '/tmp'
+    
     venv_bin = str(project_root / 'venv' / 'bin').replace('\\', '/')
     if os.path.exists(venv_bin):
         minimal_path = f"{venv_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
