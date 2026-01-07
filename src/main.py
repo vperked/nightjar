@@ -25,6 +25,18 @@ load_dotenv()
 
 logger = get_logger()
 
+EMBED_SEND_DELAY = 0.2
+MAX_TRACKED_TORRENTS = 1000
+
+_env_cache = {}
+
+
+def get_cached_env(key: str, default: str = None) -> Optional[str]:
+    """Get environment variable with caching to avoid repeated lookups."""
+    if key not in _env_cache:
+        _env_cache[key] = os.getenv(key, default)
+    return _env_cache[key]
+
 
 def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core: List[float],
                                top_processes: List[Dict], load_avg: Optional[Tuple[float, float, float]],
@@ -75,28 +87,6 @@ def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core:
                 reasons.append("Single core under heavy load (single-threaded workload)")
             elif high_cores <= len(cpu_per_core) // 2:
                 reasons.append(f"{high_cores} cores under heavy load")
-    
-    download_processes = []
-    download_keywords = ['qbittorrent', 'transmission', 'deluge', 'rtorrent', 'aria2', 
-                        'wget', 'curl', 'sabnzbd', 'nzbget', 'youtube-dl', 'yt-dlp',
-                        'plex', 'jellyfin', 'emby', 'radarr', 'sonarr', 'lidarr',
-                        'jackett', 'prowlarr', 'download', 'torrent']
-    
-    if top_processes:
-        for proc in top_processes:
-            proc_name = proc.get('name', '').lower()
-            proc_cmdline = ' '.join(proc.get('cmdline', [])).lower() if proc.get('cmdline') else ''
-            for keyword in download_keywords:
-                if keyword in proc_name or keyword in proc_cmdline:
-                    download_processes.append(proc)
-                    break
-    
-    if download_processes:
-        download_names = [p.get('name', 'Unknown') for p in download_processes[:3]]
-        if len(download_names) == 1:
-            reasons.append(f"Download/media activity: {download_names[0]}")
-        else:
-            reasons.append(f"Download/media activity: {', '.join(download_names[:2])}")
     
     download_processes = []
     download_keywords = ['qbittorrent', 'transmission', 'deluge', 'rtorrent', 'aria2', 
@@ -201,14 +191,274 @@ def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core:
     return " | ".join(reasons[:4])
 
 
+def get_env_float(key: str, default: float) -> float:
+    """Safely get float from environment variable, handling empty strings and None."""
+    value = os.getenv(key, str(default))
+    if not value or value.strip() == '':
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def get_env_int(key: str, default: int) -> int:
+    """Safely get int from environment variable, handling empty strings and None."""
+    value = os.getenv(key, str(default))
+    if not value or value.strip() == '':
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def get_env_bool(key: str, default: bool = False) -> bool:
+    """Safely get boolean from environment variable, handling empty strings and None."""
+    value = os.getenv(key, str(default).lower())
+    if not value or value.strip() == '':
+        return default
+    value_lower = value.strip().lower()
+    if value_lower in ('true', '1', 'yes', 'on'):
+        return True
+    elif value_lower in ('false', '0', 'no', 'off', ''):
+        return False
+    else:
+        logger.warning(f"Invalid boolean value '{value}' for {key}, defaulting to {default}")
+        return default
+
+
+def run_self_test() -> bool:
+    """Run a lightweight self-test for core monitors without starting the loop."""
+    logger.info("Running self-test...")
+    results = []
+    
+    def add_result(name: str, ok: bool, msg: str = ""):
+        status = "OK" if ok else "FAIL"
+        logger.info(f"[{status}] {name} {('- ' + msg) if msg else ''}")
+        results.append(ok)
+    
+    try:
+        cpu_monitor = CpuMonitor()
+        memory_monitor = MemoryMonitor()
+        system_monitor = SystemMonitor()
+        gpu_monitor = GpuMonitor()
+        disk_monitor = DiskMonitor()
+        network_monitor = NetworkMonitor()
+        sensors_monitor = SensorsMonitor()
+    except Exception as e:
+        logger.error(f"Failed to initialize monitors: {e}")
+        return False
+    
+    try:
+        cpu_monitor.get_cpu_percent(interval=0.1)
+        add_result("CPU monitor", True)
+    except Exception as e:
+        add_result("CPU monitor", False, str(e))
+    
+    try:
+        memory_monitor.get_memory_info_human()
+        add_result("Memory monitor", True)
+    except Exception as e:
+        add_result("Memory monitor", False, str(e))
+    
+    try:
+        disk_monitor.get_total_disk_usage()
+        add_result("Disk monitor", True)
+    except Exception as e:
+        add_result("Disk monitor", False, str(e))
+    
+    try:
+        network_monitor.get_bandwidth_usage(interval=0.1)
+        add_result("Network monitor", True)
+    except Exception as e:
+        add_result("Network monitor", False, str(e))
+    
+    try:
+        system_monitor.get_system_info()
+        add_result("System monitor", True)
+    except Exception as e:
+        add_result("System monitor", False, str(e))
+    
+    try:
+        if gpu_monitor.nvidia_smi_available and gpu_monitor.get_gpu_count() > 0:
+            gpu_monitor.get_gpu_info(0)
+        add_result("GPU monitor", True)
+    except Exception as e:
+        add_result("GPU monitor", False, str(e))
+    
+    try:
+        if sensors_monitor.is_available():
+            sensors_monitor.get_cpu_temperature()
+        add_result("Sensors monitor", True)
+    except Exception as e:
+        add_result("Sensors monitor", False, str(e))
+    
+    media_monitor_enabled = get_env_bool('MEDIA_MONITOR_ENABLED', False)
+    media_directory = get_cached_env('MEDIA_DIRECTORY', '/home/media')
+    if media_monitor_enabled:
+        try:
+            if os.path.exists(media_directory):
+                disk_monitor.get_directory_size(media_directory)
+                add_result("Media directory monitor", True)
+            else:
+                add_result("Media directory monitor", False, f"Path not found: {media_directory}")
+        except Exception as e:
+            add_result("Media directory monitor", False, str(e))
+    
+    qbittorrent_monitor_enabled = get_env_bool('QBITTORRENT_MONITOR', False)
+    if qbittorrent_monitor_enabled:
+        try:
+            qb = QBittorrentMonitor()
+            if qb.password and qb.is_available():
+                add_result("qBittorrent monitor", True)
+            else:
+                add_result("qBittorrent monitor", False, "Not available (check password/connection)")
+        except Exception as e:
+            add_result("qBittorrent monitor", False, str(e))
+    
+    webhook_url = get_cached_env('WEBHOOK')
+    if webhook_url:
+        try:
+            test_webhook = DiscordWebhook(webhook_url=webhook_url)
+            titles = [
+                'CPU Usage Alert',
+                'Memory Usage Alert',
+                'Disk Usage Alert',
+                'Network Bandwidth Alert',
+                'Temperature Alert',
+                'Process CPU Alert',
+                'Directory Size Alert',
+                'Download Complete',
+                'Torrent Seeding',
+                'qBittorrent Status'
+            ]
+            descriptions = [
+                'CPU usage has exceeded the threshold of 80.0%',
+                'Memory usage has exceeded the threshold of 80.0%',
+                'Disk usage has exceeded the threshold of 85.0%',
+                'Network bandwidth has exceeded the threshold of 100.0 MB/s',
+                'CPU temperature has exceeded the threshold of 80.0°C for 75 seconds',
+                'Process "python3" has exceeded the cpu threshold of 80.0%',
+                'Directory "media" has exceeded the size threshold of 500.0 GB',
+                'Torrent download has completed: Ubuntu ISO',
+                'Torrent is now seeding: Big File',
+                '2 downloading • 1 seeding'
+            ]
+            sample_fields = [
+                [
+                    {'name': 'Overall CPU Usage', 'value': '92.5%', 'inline': True},
+                    {'name': 'Threshold', 'value': '80.0%', 'inline': True},
+                    {'name': 'Per-Core Usage', 'value': 'Core 0: 95.2%\nCore 1: 88.3%', 'inline': False}
+                ],
+                [
+                    {'name': 'Memory Usage', 'value': '87.3%', 'inline': True},
+                    {'name': 'Threshold', 'value': '80.0%', 'inline': True},
+                    {'name': 'Memory Details', 'value': 'Used: 28.3 GB\nAvailable: 4.1 GB\nTotal: 32.4 GB', 'inline': False}
+                ],
+                [
+                    {'name': 'Disk Usage', 'value': '91.2%', 'inline': True},
+                    {'name': 'Threshold', 'value': '85.0%', 'inline': True},
+                    {'name': 'Total Disk', 'value': '1.8 TB', 'inline': False},
+                    {'name': 'Used', 'value': '1.6 TB', 'inline': True},
+                    {'name': 'Free', 'value': '200 GB', 'inline': True},
+                    {'name': 'Largest Directories', 'value': 'torrents: 470 GB\ntv: 445 GB\nmovies: 120 GB', 'inline': False}
+                ],
+                [
+                    {'name': 'Total Bandwidth', 'value': '120.0 MB/s', 'inline': True},
+                    {'name': 'Threshold', 'value': '100.0 MB/s', 'inline': True},
+                    {'name': 'Upload Speed', 'value': '30.0 MB/s', 'inline': True},
+                    {'name': 'Download Speed', 'value': '90.0 MB/s', 'inline': True}
+                ],
+                [
+                    {'name': 'CPU Temperature', 'value': '86.4°C', 'inline': True},
+                    {'name': 'Threshold', 'value': '80.0°C', 'inline': True},
+                    {'name': 'Duration Above Threshold', 'value': '75s', 'inline': True},
+                    {'name': 'Likely Cause', 'value': 'Download/media activity: qbittorrent', 'inline': False},
+                    {'name': 'CPU Usage', 'value': '78.2%', 'inline': True}
+                ],
+                [
+                    {'name': 'Process', 'value': 'python3 (PID: 1234)', 'inline': False},
+                    {'name': 'CPU Usage', 'value': '92.1%', 'inline': True},
+                    {'name': 'Threshold', 'value': '80.0%', 'inline': True},
+                    {'name': 'Resource Usage', 'value': 'CPU: 92.1%\nMemory: 3.2%', 'inline': True},
+                    {'name': 'User', 'value': 'server', 'inline': True}
+                ],
+                [
+                    {'name': 'Directory Path', 'value': '/home/media', 'inline': False},
+                    {'name': 'Current Size', 'value': '917.0 GB', 'inline': True},
+                    {'name': 'Threshold', 'value': '500.0 GB', 'inline': True},
+                    {'name': 'Over Threshold By', 'value': '417.0 GB', 'inline': True},
+                    {'name': 'Largest Subdirectories', 'value': 'torrents: 469.9 GB\ntv: 445.4 GB\nmovies: 1.7 GB', 'inline': False}
+                ],
+                [
+                    {'name': 'Torrent Name', 'value': 'Ubuntu ISO', 'inline': False},
+                    {'name': 'Size', 'value': '3.2 GB', 'inline': True},
+                    {'name': 'Save Path', 'value': '/home/media/torrents', 'inline': False},
+                    {'name': 'Ratio', 'value': '1.25', 'inline': True},
+                    {'name': 'Uploaded', 'value': '4.0 GB', 'inline': True}
+                ],
+                [
+                    {'name': 'Torrent Name', 'value': 'Big File', 'inline': False},
+                    {'name': 'Size', 'value': '12.0 GB', 'inline': True},
+                    {'name': 'Upload Speed', 'value': '5.0 MB/s', 'inline': True},
+                    {'name': 'Ratio', 'value': '0.85', 'inline': True},
+                    {'name': 'Seeds / Peers', 'value': '45 / 8', 'inline': True},
+                    {'name': 'Save Path', 'value': '/home/media/torrents', 'inline': False}
+                ],
+                [
+                    {'name': 'Downloading (2)', 'value': '`Ubuntu ISO`\n82.5% • 12.0 MB/s\n\n`Movie`\n45.0% • 6.5 MB/s', 'inline': False},
+                    {'name': 'Seeding (1)', 'value': '`Linux Distro`\nRatio: 3.12 • 2.1 MB/s', 'inline': False}
+                ]
+            ]
+            total = len(titles)
+            sent = 0
+            failures = 0
+            for title, desc, fields in zip(titles, descriptions, sample_fields):
+                try:
+                    ok = test_webhook.send_embed(
+                        title=title,
+                        description=desc,
+                        fields=fields,
+                        footer='Server Monitor',
+                        timestamp=True
+                    )
+                    if ok:
+                        sent += 1
+                    else:
+                        failures += 1
+                    time.sleep(EMBED_SEND_DELAY)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    failures += 1
+                    logger.warning(f"Embed send error for {title}: {e}")
+            add_result("Discord embeds", failures == 0, f"sent {sent}/{total}, failed {failures}")
+        except Exception as e:
+            add_result("Discord embeds", False, str(e))
+    else:
+        add_result("Discord embeds", True, "Skipped (WEBHOOK not set)")
+    
+    success = all(results) if results else True
+    if success:
+        logger.info("Self-test completed successfully.")
+    else:
+        logger.warning("Self-test completed with failures. See logs above.")
+    return success
+
+
 def main():
     """Main function for comprehensive server monitoring with Discord alerts."""
-    install_systemd = os.getenv('INSTALL_SYSTEMD', 'false').lower() in ('true', '1', 'yes')
+    if '--test' in sys.argv:
+        ok = run_self_test()
+        sys.exit(0 if ok else 1)
+    
+    install_systemd = get_env_bool('INSTALL_SYSTEMD', False)
     if '--install-systemd' in sys.argv or install_systemd:
         logger.info("Systemd installation requested...")
         if check_systemd_available():
-            service_name = os.getenv('SYSTEMD_SERVICE_NAME', 'server-monitor')
-            force = '--force' in sys.argv or os.getenv('SYSTEMD_FORCE_INSTALL', 'false').lower() in ('true', '1', 'yes')
+            service_name = get_cached_env('SYSTEMD_SERVICE_NAME', 'server-monitor')
+            force = '--force' in sys.argv or get_env_bool('SYSTEMD_FORCE_INSTALL', False)
             success = install_systemd_service(service_name=service_name, force=force)
             if success:
                 logger.info("Systemd service installed successfully!")
@@ -230,6 +480,8 @@ def main():
     
     logger.info("Starting Server Monitor...")
     logger.info("Initializing monitors...")
+    qbittorrent_monitor_enabled = get_env_bool('QBITTORRENT_MONITOR', False)
+    
     cpu_monitor = CpuMonitor()
     memory_monitor = MemoryMonitor()
     system_monitor = SystemMonitor()
@@ -238,8 +490,23 @@ def main():
     network_monitor = NetworkMonitor()
     sensors_monitor = SensorsMonitor()
     process_monitor = ProcessMonitor()
-    qbittorrent_monitor = QBittorrentMonitor()
+    qbittorrent_monitor = None
+    if qbittorrent_monitor_enabled:
+        qbittorrent_monitor = QBittorrentMonitor()
+        logger.info("qBittorrent monitoring enabled")
+    else:
+        logger.info("qBittorrent monitoring disabled (set QBITTORRENT_MONITOR=true to enable)")
     logger.info("Monitors initialized")
+    
+    self_test_on_start = get_env_bool('SELF_TEST_ON_START', True)
+    if self_test_on_start:
+        logger.info("Running startup self-test (set SELF_TEST_ON_START=false to skip)...")
+        try:
+            run_self_test()
+        except Exception as e:
+            logger.warning(f"Startup self-test failed: {e}")
+    else:
+        logger.info("Startup self-test skipped")
     
     webhook = None
     logger.info("Connecting to Discord webhook...")
@@ -250,36 +517,39 @@ def main():
         logger.info("Discord webhook not configured")
     
     qbittorrent_webhook = None
-    qbittorrent_webhook_url = os.getenv('QBITTORRENT_WEBHOOK')
-    if qbittorrent_webhook_url:
-        try:
-            qbittorrent_webhook = DiscordWebhook(webhook_url=qbittorrent_webhook_url)
-            logger.info("qBittorrent Discord webhook connected")
-        except ValueError:
-            logger.warning("qBittorrent webhook URL invalid")
-        except Exception as e:
-            logger.warning(f"Failed to connect to qBittorrent webhook: {e}")
-    else:
-        logger.debug("qBittorrent webhook not configured (set QBITTORRENT_WEBHOOK to enable)")
+    if qbittorrent_monitor_enabled:
+        qbittorrent_webhook_url = get_cached_env('QBITTORRENT_WEBHOOK')
+        if qbittorrent_webhook_url:
+            try:
+                qbittorrent_webhook = DiscordWebhook(webhook_url=qbittorrent_webhook_url)
+                logger.info("qBittorrent Discord webhook connected")
+            except ValueError:
+                logger.warning("qBittorrent webhook URL invalid")
+            except Exception as e:
+                logger.warning(f"Failed to connect to qBittorrent webhook: {e}")
+        else:
+            logger.debug("qBittorrent webhook not configured (set QBITTORRENT_WEBHOOK to enable)")
     
-    cpu_threshold = float(os.getenv('CPU_THRESHOLD', '80.0'))
-    memory_threshold = float(os.getenv('MEMORY_THRESHOLD', '80.0'))
-    gpu_threshold = float(os.getenv('GPU_THRESHOLD', '80.0'))
-    disk_threshold = float(os.getenv('DISK_THRESHOLD', '80.0'))
-    temp_threshold = float(os.getenv('TEMP_THRESHOLD', '80.0'))
-    temp_alert_duration = float(os.getenv('TEMP_ALERT_DURATION', '30.0'))
-    network_bandwidth_threshold = float(os.getenv('NETWORK_BANDWIDTH_THRESHOLD', '1000.0'))
-    process_cpu_threshold = float(os.getenv('PROCESS_CPU_THRESHOLD', '50.0'))
-    process_memory_threshold = float(os.getenv('PROCESS_MEMORY_THRESHOLD', '10.0'))
-    check_interval = float(os.getenv('CHECK_INTERVAL', '5.0'))
-    alert_cooldown = float(os.getenv('ALERT_COOLDOWN', '300.0'))
-    freeze_threshold = float(os.getenv('FREEZE_THRESHOLD', '30.0'))
-    freeze_heartbeat_timeout = float(os.getenv('FREEZE_HEARTBEAT_TIMEOUT', '60.0'))
+    cpu_threshold = get_env_float('CPU_THRESHOLD', 80.0)
+    memory_threshold = get_env_float('MEMORY_THRESHOLD', 80.0)
+    gpu_threshold = get_env_float('GPU_THRESHOLD', 80.0)
+    disk_threshold = get_env_float('DISK_THRESHOLD', 80.0)
+    temp_threshold = get_env_float('TEMP_THRESHOLD', 80.0)
+    temp_alert_duration = get_env_float('TEMP_ALERT_DURATION', 30.0)
+    network_bandwidth_threshold = get_env_float('NETWORK_BANDWIDTH_THRESHOLD', 1000.0)
+    process_cpu_threshold = get_env_float('PROCESS_CPU_THRESHOLD', 50.0)
+    process_memory_threshold = get_env_float('PROCESS_MEMORY_THRESHOLD', 10.0)
+    check_interval = get_env_float('CHECK_INTERVAL', 5.0)
+    alert_cooldown = get_env_float('ALERT_COOLDOWN', 300.0)
+    freeze_threshold = get_env_float('FREEZE_THRESHOLD', 30.0)
+    freeze_heartbeat_timeout = get_env_float('FREEZE_HEARTBEAT_TIMEOUT', 60.0)
+    freeze_monitor_enabled = get_env_bool('FREEZE_MONITOR_ENABLED', False)
     
-    media_directory = os.getenv('MEDIA_DIRECTORY', '/home/media')
-    media_directory_threshold_gb = float(os.getenv('MEDIA_DIRECTORY_THRESHOLD_GB', '500.0'))
-    media_directory_threshold_bytes = int(media_directory_threshold_gb * 1024 * 1024 * 1024)  # Convert GB to bytes
-    media_check_interval = int(os.getenv('MEDIA_CHECK_INTERVAL', '10'))  # Check every N loop iterations
+    media_directory = get_cached_env('MEDIA_DIRECTORY', '/home/media')
+    media_directory_threshold_gb = get_env_float('MEDIA_DIRECTORY_THRESHOLD_GB', 500.0)
+    media_directory_threshold_bytes = int(media_directory_threshold_gb * 1024 * 1024 * 1024)
+    media_check_interval = get_env_int('MEDIA_CHECK_INTERVAL', 10)
+    media_monitor_enabled = get_env_bool('MEDIA_MONITOR_ENABLED', False)
     
     cpu_threshold = max(0.0, min(100.0, cpu_threshold))
     memory_threshold = max(0.0, min(100.0, memory_threshold))
@@ -294,9 +564,11 @@ def main():
     freeze_threshold = max(10.0, freeze_threshold)
     freeze_heartbeat_timeout = max(20.0, freeze_heartbeat_timeout)
     
-    freeze_monitor = FreezeMonitor(check_interval=check_interval)
-    freeze_monitor.set_freeze_threshold(freeze_threshold)
-    freeze_monitor.set_heartbeat_timeout(freeze_heartbeat_timeout)
+    freeze_monitor = None
+    if freeze_monitor_enabled:
+        freeze_monitor = FreezeMonitor(check_interval=check_interval)
+        freeze_monitor.set_freeze_threshold(freeze_threshold)
+        freeze_monitor.set_heartbeat_timeout(freeze_heartbeat_timeout)
     
     logger.info("Gathering system information...")
     start_time = time.time()
@@ -328,31 +600,40 @@ def main():
     
     logger.info(f"Processes: CPU threshold {process_cpu_threshold:.1f}% | Memory threshold {process_memory_threshold:.1f}%")
     logger.info(f"Network: Bandwidth threshold {network_bandwidth_threshold:.1f} MB/s")
-    logger.info(f"Freeze Detection: Threshold {freeze_threshold:.1f}s | Heartbeat timeout {freeze_heartbeat_timeout:.1f}s")
-    if os.path.exists(media_directory):
-        logger.info(f"Directory Monitoring: {media_directory} | Threshold: {media_directory_threshold_gb:.1f} GB")
+    if freeze_monitor_enabled:
+        logger.info(f"Freeze Detection: Threshold {freeze_threshold:.1f}s | Heartbeat timeout {freeze_heartbeat_timeout:.1f}s")
     else:
-        logger.warning(f"Directory Monitoring: {media_directory} not found, skipping directory monitoring")
+        logger.info("Freeze Detection: disabled")
+    if media_monitor_enabled:
+        if os.path.exists(media_directory):
+            logger.info(f"Directory Monitoring: {media_directory} | Threshold: {media_directory_threshold_gb:.1f} GB")
+        else:
+            logger.warning(f"Directory Monitoring enabled but path not found: {media_directory}. Skipping directory monitoring.")
+    else:
+        logger.info("Directory Monitoring disabled (set MEDIA_MONITOR_ENABLED=true to enable)")
     
     qbittorrent_connected = False
-    if qbittorrent_monitor.password:
-        logger.debug("Checking qBittorrent connection...")
-        if qbittorrent_monitor.is_available():
-            try:
-                summary = qbittorrent_monitor.get_torrent_summary()
-                logger.info(f"qBittorrent: Connected | {summary['total']} torrents ({summary['downloading']} downloading, {summary['seeding']} seeding)")
-                qbittorrent_connected = True
-            except Exception as e:
-                logger.warning(f"qBittorrent: Connected but error getting summary: {e}")
+    if qbittorrent_monitor:
+        if qbittorrent_monitor.password:
+            logger.debug("Checking qBittorrent connection...")
+            if qbittorrent_monitor.is_available():
+                try:
+                    summary = qbittorrent_monitor.get_torrent_summary()
+                    logger.info(f"qBittorrent: Connected | {summary['total']} torrents ({summary['downloading']} downloading, {summary['seeding']} seeding)")
+                    qbittorrent_connected = True
+                except Exception as e:
+                    logger.warning(f"qBittorrent: Connected but error getting summary: {e}")
+            else:
+                error_msg = getattr(qbittorrent_monitor, '_last_error', None) or "Unknown error"
+                logger.warning(f"qBittorrent: Not available - {error_msg}")
         else:
-            error_msg = getattr(qbittorrent_monitor, '_last_error', None) or "Unknown error"
-            logger.warning(f"qBittorrent: Not available - {error_msg}")
+            logger.info("qBittorrent: Not configured (set QBITTORRENT_PASSWORD to enable)")
     else:
-        logger.info("qBittorrent: Not configured (set QBITTORRENT_PASSWORD to enable)")
+        logger.info("qBittorrent: Monitoring disabled")
     
     logger.info(f"Settings: Check every {check_interval:.1f}s | Cooldown {alert_cooldown:.1f}s")
     
-    web_port = int(os.getenv('WEB_PORT', '8080'))
+    web_port = get_env_int('WEB_PORT', 8080)
     logger.info("Starting web server...")
     try:
         set_monitors(cpu_monitor, memory_monitor, system_monitor, gpu_monitor,
@@ -428,7 +709,8 @@ def main():
     
     try:
         while True:
-            freeze_monitor.update_heartbeat()
+            if freeze_monitor_enabled and freeze_monitor:
+                freeze_monitor.update_heartbeat()
             
             cpu_percent = cpu_monitor.get_cpu_percent(interval=1.0)
             cpu_per_core = cpu_monitor.get_cpu_percent_per_core(interval=0.1)
@@ -475,12 +757,13 @@ def main():
             except Exception:
                 pass
             
-            freeze_monitor.update_metrics(
-                cpu_percent=cpu_percent,
-                memory_percent=memory_percent,
-                disk_io=disk_io_data,
-                network_io=network_io_data
-            )
+            if freeze_monitor_enabled and freeze_monitor:
+                freeze_monitor.update_metrics(
+                    cpu_percent=cpu_percent,
+                    memory_percent=memory_percent,
+                    disk_io=disk_io_data,
+                    network_io=network_io_data
+                )
             
             current_time = time.time()
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -624,7 +907,6 @@ def main():
                         success = webhook.send_embed(
                             title='Disk Usage Alert',
                             description=f'Disk usage has exceeded the threshold of {disk_threshold:.1f}%',
-                            color=0xdc3545,
                             fields=fields,
                             footer='Server Monitor',
                             timestamp=True
@@ -750,7 +1032,6 @@ def main():
                         success = webhook.send_embed(
                             title='Network Bandwidth Alert',
                             description=f'Network bandwidth has exceeded the threshold of {network_bandwidth_threshold:.1f} MB/s',
-                            color=0xdc3545,
                             fields=fields,
                             footer='Server Monitor',
                             timestamp=True
@@ -834,50 +1115,51 @@ def main():
                 except Exception as e:
                     pass
             
-            freeze_check_counter += 1
-            if freeze_check_counter >= FREEZE_CHECK_INTERVAL:
-                freeze_check_counter = 0
-                try:
-                    freeze_status = freeze_monitor.check_freeze_status()
-                    if freeze_status['is_frozen']:
-                        time_since_last_alert = current_time - last_freeze_alert_time
-                        
-                        if not freeze_alert_sent or time_since_last_alert >= alert_cooldown:
-                            if webhook:
-                                logger.warning(f"[ALERT] System Freeze Detected: {', '.join(freeze_status['reasons'])}")
-                                try:
-                                    current_system_info = {
-                                        'uptime': system_monitor.get_uptime(),
-                                        'cpu': {'cpu_percent': cpu_percent},
-                                        'memory': {'memory_percent': memory_percent}
-                                    }
-                                except Exception:
-                                    current_system_info = None
-                                
-                                success = webhook.send_freeze_alert(
-                                    freeze_status=freeze_status,
-                                    system_info=current_system_info
-                                )
-                                if success:
-                                    logger.info("    Discord freeze alert sent")
-                                else:
-                                    logger.warning("    Discord freeze alert failed")
-                            else:
-                                logger.warning(f"System Freeze Detected: {', '.join(freeze_status['reasons'])}")
+            if freeze_monitor_enabled and freeze_monitor:
+                freeze_check_counter += 1
+                if freeze_check_counter >= FREEZE_CHECK_INTERVAL:
+                    freeze_check_counter = 0
+                    try:
+                        freeze_status = freeze_monitor.check_freeze_status()
+                        if freeze_status['is_frozen']:
+                            time_since_last_alert = current_time - last_freeze_alert_time
                             
-                            last_freeze_alert_time = current_time
-                            freeze_alert_sent = True
+                            if not freeze_alert_sent or time_since_last_alert >= alert_cooldown:
+                                if webhook:
+                                    logger.warning(f"[ALERT] System Freeze Detected: {', '.join(freeze_status['reasons'])}")
+                                    try:
+                                        current_system_info = {
+                                            'uptime': system_monitor.get_uptime(),
+                                            'cpu': {'cpu_percent': cpu_percent},
+                                            'memory': {'memory_percent': memory_percent}
+                                        }
+                                    except Exception:
+                                        current_system_info = None
+                                    
+                                    success = webhook.send_freeze_alert(
+                                        freeze_status=freeze_status,
+                                        system_info=current_system_info
+                                    )
+                                    if success:
+                                        logger.info("    Discord freeze alert sent")
+                                    else:
+                                        logger.warning("    Discord freeze alert failed")
+                                else:
+                                    logger.warning(f"System Freeze Detected: {', '.join(freeze_status['reasons'])}")
+                                
+                                last_freeze_alert_time = current_time
+                                freeze_alert_sent = True
+                            else:
+                                remaining_cooldown = alert_cooldown - time_since_last_alert
+                                logger.debug(f"Freeze alert cooldown: {remaining_cooldown:.0f}s")
                         else:
-                            remaining_cooldown = alert_cooldown - time_since_last_alert
-                            logger.debug(f"Freeze alert cooldown: {remaining_cooldown:.0f}s")
-                    else:
-                        if freeze_alert_sent:
-                            freeze_alert_sent = False
-                except Exception as e:
-                    logger.debug(f"Error checking freeze status: {e}")
+                            if freeze_alert_sent:
+                                freeze_alert_sent = False
+                    except Exception as e:
+                        logger.debug(f"Error checking freeze status: {e}")
             
             media_check_counter += 1
-            if media_check_counter >= media_check_interval and os.path.exists(media_directory):
+            if media_monitor_enabled and media_check_counter >= media_check_interval and os.path.exists(media_directory):
                 media_check_counter = 0
                 try:
                     media_size_info = disk_monitor.get_directory_size(media_directory)
@@ -923,66 +1205,73 @@ def main():
                 except Exception as e:
                     logger.debug(f"Error checking directory size: {e}")
             
-            qbittorrent_check_counter += 1
-            if qbittorrent_check_counter >= QBITTORRENT_CHECK_INTERVAL:
-                qbittorrent_check_counter = 0
-                if qbittorrent_monitor.is_available():
-                    try:
-                        all_torrents = qbittorrent_monitor.get_all_torrents()
-                        current_torrents = {torrent['hash']: torrent for torrent in all_torrents}
-                        
-                        for torrent_hash, torrent in current_torrents.items():
-                            state = torrent.get('state', '').lower()
-                            progress = torrent.get('progress', 0.0)
+            if qbittorrent_monitor:
+                qbittorrent_check_counter += 1
+                if qbittorrent_check_counter >= QBITTORRENT_CHECK_INTERVAL:
+                    qbittorrent_check_counter = 0
+                    if qbittorrent_monitor.is_available():
+                        try:
+                            all_torrents = qbittorrent_monitor.get_all_torrents()
+                            current_torrents = {torrent['hash']: torrent for torrent in all_torrents}
                             
-                            is_seeding = state in ['uploading', 'stalledup', 'queuedup']
-                            was_downloading = state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']
+                            for torrent_hash, torrent in current_torrents.items():
+                                state = torrent.get('state', '').lower()
+                                progress = torrent.get('progress', 0.0)
+                                
+                                is_seeding = state in ['uploading', 'stalledup', 'queuedup']
+                                was_downloading = state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']
+                                
+                                if torrent_hash not in tracked_torrents:
+                                    tracked_torrents[torrent_hash] = {
+                                        'state': state,
+                                        'progress': progress,
+                                        'name': torrent.get('name', 'Unknown'),
+                                        'notified_download': False,
+                                        'notified_seeding': False
+                                    }
+                                    continue
+                                
+                                prev_state = tracked_torrents[torrent_hash]['state']
+                                prev_progress = tracked_torrents[torrent_hash]['progress']
+                                prev_was_seeding = prev_state in ['uploading', 'stalledup', 'queuedup']
+                                prev_was_downloading = prev_state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']
+                                
+                                if is_seeding and progress >= 1.0:
+                                    if not tracked_torrents[torrent_hash]['notified_download'] and prev_was_downloading:
+                                        if qbittorrent_webhook:
+                                            logger.info(f"[qBittorrent] Download complete: {torrent.get('name', 'Unknown')}")
+                                            success = qbittorrent_webhook.send_download_complete_alert(torrent)
+                                            if success:
+                                                logger.info("    Discord download complete notification sent")
+                                            else:
+                                                logger.warning("    Discord download complete notification failed")
+                                        tracked_torrents[torrent_hash]['notified_download'] = True
+                                
+                                if is_seeding and not prev_was_seeding:
+                                    if not tracked_torrents[torrent_hash]['notified_seeding']:
+                                        if qbittorrent_webhook:
+                                            logger.info(f"[qBittorrent] Torrent seeding: {torrent.get('name', 'Unknown')}")
+                                            success = qbittorrent_webhook.send_seeding_notification(torrent)
+                                            if success:
+                                                logger.info("    Discord seeding notification sent")
+                                            else:
+                                                logger.warning("    Discord seeding notification failed")
+                                        tracked_torrents[torrent_hash]['notified_seeding'] = True
+                                
+                                tracked_torrents[torrent_hash]['state'] = state
+                                tracked_torrents[torrent_hash]['progress'] = progress
                             
-                            if torrent_hash not in tracked_torrents:
-                                tracked_torrents[torrent_hash] = {
-                                    'state': state,
-                                    'progress': progress,
-                                    'name': torrent.get('name', 'Unknown'),
-                                    'notified_download': False,
-                                    'notified_seeding': False
-                                }
-                                continue
+                            for torrent_hash in list(tracked_torrents.keys()):
+                                if torrent_hash not in current_torrents:
+                                    del tracked_torrents[torrent_hash]
                             
-                            prev_state = tracked_torrents[torrent_hash]['state']
-                            prev_progress = tracked_torrents[torrent_hash]['progress']
-                            prev_was_seeding = prev_state in ['uploading', 'stalledup', 'queuedup']
-                            prev_was_downloading = prev_state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']
-                            
-                            if is_seeding and progress >= 1.0:
-                                if not tracked_torrents[torrent_hash]['notified_download'] and prev_was_downloading:
-                                    if qbittorrent_webhook:
-                                        logger.info(f"[qBittorrent] Download complete: {torrent.get('name', 'Unknown')}")
-                                        success = qbittorrent_webhook.send_download_complete_alert(torrent)
-                                        if success:
-                                            logger.info("    Discord download complete notification sent")
-                                        else:
-                                            logger.warning("    Discord download complete notification failed")
-                                    tracked_torrents[torrent_hash]['notified_download'] = True
-                            
-                            if is_seeding and not prev_was_seeding:
-                                if not tracked_torrents[torrent_hash]['notified_seeding']:
-                                    if qbittorrent_webhook:
-                                        logger.info(f"[qBittorrent] Torrent seeding: {torrent.get('name', 'Unknown')}")
-                                        success = qbittorrent_webhook.send_seeding_notification(torrent)
-                                        if success:
-                                            logger.info("    Discord seeding notification sent")
-                                        else:
-                                            logger.warning("    Discord seeding notification failed")
-                                    tracked_torrents[torrent_hash]['notified_seeding'] = True
-                            
-                            tracked_torrents[torrent_hash]['state'] = state
-                            tracked_torrents[torrent_hash]['progress'] = progress
-                        
-                        for torrent_hash in list(tracked_torrents.keys()):
-                            if torrent_hash not in current_torrents:
-                                del tracked_torrents[torrent_hash]
-                    except Exception as e:
-                        logger.debug(f"Error checking qBittorrent: {e}")
+                            if len(tracked_torrents) > MAX_TRACKED_TORRENTS:
+                                logger.warning(f"Tracked torrents dict too large ({len(tracked_torrents)}), clearing old entries")
+                                oldest_hashes = sorted(tracked_torrents.keys())[:len(tracked_torrents) - MAX_TRACKED_TORRENTS]
+                                for old_hash in oldest_hashes:
+                                    del tracked_torrents[old_hash]
+                        except Exception as e:
+                            logger.debug(f"Error checking qBittorrent: {e}")
             
             time.sleep(check_interval)
             
@@ -997,10 +1286,11 @@ def main():
             except (KeyboardInterrupt, Exception):
                 logger.warning("Shutdown notification skipped")
         logger.info("Shutting down...")
-        try:
-            freeze_monitor.stop_watchdog()
-        except Exception as e:
-            logger.debug(f"Error stopping freeze monitor: {e}")
+        if freeze_monitor_enabled and freeze_monitor:
+            try:
+                freeze_monitor.stop_watchdog()
+            except Exception as e:
+                logger.debug(f"Error stopping freeze monitor: {e}")
         try:
             stop_server()
         except Exception as e:

@@ -5,6 +5,7 @@ import signal
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Dict
 from logger import get_logger
 
 logger = get_logger('WebServer')
@@ -37,9 +38,9 @@ def set_monitors(cpu, memory, system, gpu, disk, network, sensors):
 class WebRequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler for serving the web UI and API."""
     
-    def log_message(self, format, *args):
+    def log_message(self, format_str, *args):
         """Override to use our logger instead of default logging."""
-        logger.info(f"{self.address_string()} - {format % args}")
+        logger.info(f"{self.address_string()} - {format_str % args}")
     
     def do_GET(self):
         """Handle GET requests."""
@@ -168,7 +169,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             except (ConnectionAbortedError, BrokenPipeError, OSError):
                 logger.debug("Connection aborted while sending error response")
     
-    def get_system_stats(self):
+    def get_system_stats(self) -> Dict:
         """Collect current system statistics."""
         global cpu_monitor, memory_monitor, system_monitor, gpu_monitor
         global disk_monitor, network_monitor, sensors_monitor

@@ -210,10 +210,38 @@ def install_systemd_service(service_name: str = 'server-monitor',
         
         service_file = Path(f'/etc/systemd/system/{service_name}.service')
         
-        if service_file.exists() and not force:
-            logger.warning(f"Service file {service_file} already exists.")
-            logger.info("Use force=True to overwrite, or remove the existing service first.")
-            return False
+        # Check if service already exists
+        service_exists = service_file.exists()
+        service_running = False
+        
+        if service_exists:
+            # Check if service is currently running
+            result = subprocess.run(
+                ['systemctl', 'is-active', f'{service_name}.service'],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            service_running = result.returncode == 0 and result.stdout.strip() == 'active'
+            
+            if service_running:
+                logger.info(f"Service {service_name} is currently running. Stopping it...")
+                stop_result = subprocess.run(
+                    ['systemctl', 'stop', f'{service_name}.service'],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                if stop_result.returncode != 0:
+                    logger.warning(f"Failed to stop existing service: {stop_result.stderr}")
+                    if not force:
+                        logger.warning("Use force=True to overwrite anyway.")
+                        return False
+                else:
+                    logger.info("Service stopped successfully.")
+            
+            if not force:
+                logger.info(f"Service file {service_file} already exists. Replacing it...")
         
         logger.info(f"Writing systemd service file to {service_file}...")
         service_file.write_text(service_content)
@@ -250,7 +278,8 @@ def install_systemd_service(service_name: str = 'server-monitor',
         else:
             logger.info(f"Service {service_name} enabled successfully.")
         
-        logger.info(f"Starting {service_name} service...")
+        start_action = "Restarting" if service_running else "Starting"
+        logger.info(f"{start_action} {service_name} service...")
         result = subprocess.run(
             ['systemctl', 'start', f'{service_name}.service'],
             capture_output=True,
