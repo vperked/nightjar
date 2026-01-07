@@ -185,6 +185,8 @@ Systemd service management:
 - Automatic installation
 - Service replacement (if already exists)
 - User and environment configuration
+- Permission checking and interactive fixing
+- Smart working directory selection based on user permissions
 
 #### `util/error_handling.py`
 Standardized error handling utilities:
@@ -257,6 +259,8 @@ sudo python3 src/main.py --install-systemd
 
 # Force systemd service replacement
 sudo python3 src/main.py --install-systemd --force
+
+# Note: The installer will check permissions and prompt to fix them if needed
 ```
 
 ## 📊 Monitoring Features
@@ -356,6 +360,13 @@ This will:
 - Check `WEB_PORT` is not blocked by firewall
 - Verify port is not already in use
 - Check logs for server startup errors
+
+**Systemd service fails with "Permission denied" (CHDIR error):**
+- The installer will automatically detect permission issues
+- When prompted, answer 'y' to fix permissions automatically
+- Or manually fix with: `sudo chown -R jay:jay /path/to/serverMonitor`
+- The service uses smart directory selection based on user permissions
+- For non-root users, it will use the script directory or user's home directory
 
 ## 📚 Dependencies
 
