@@ -227,15 +227,31 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
         raise FileNotFoundError(f"Main script not found: {main_script_path}")
     
     script_dir = str(main_script.parent.resolve()).replace('\\', '/')
+    project_root_path = str(project_root.resolve()).replace('\\', '/')
     
     if service_user == 'root':
-        working_dir_path = str(project_root.resolve()).replace('\\', '/')
+        working_dir_path = project_root_path
         if not os.path.exists(working_dir_path):
             logger.warning(f"Project root not accessible, using script directory: {script_dir}")
             working_dir_path = script_dir
     else:
-        working_dir_path = script_dir
-        logger.info(f"Using script directory as working directory for non-root user: {working_dir_path}")
+        if check_directory_access(script_dir, service_user):
+            working_dir_path = script_dir
+            logger.info(f"Using script directory as working directory: {working_dir_path}")
+        elif check_directory_access(project_root_path, service_user):
+            working_dir_path = project_root_path
+            logger.info(f"Using project root as working directory: {working_dir_path}")
+        else:
+            logger.warning(f"Service user '{service_user}' cannot access script directory or project root")
+            try:
+                import pwd
+                user_info = pwd.getpwnam(service_user)
+                home_dir = user_info.pw_dir
+                working_dir_path = home_dir
+                logger.info(f"Falling back to service user home directory: {working_dir_path}")
+            except (ImportError, KeyError):
+                working_dir_path = '/tmp'
+                logger.warning(f"Could not determine home directory, using /tmp as fallback")
     
     logger.info(f"Working directory: {working_dir_path} (service user: {service_user})")
     
