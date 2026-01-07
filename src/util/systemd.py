@@ -66,6 +66,105 @@ def is_root() -> bool:
     return os.geteuid() == 0 if hasattr(os, 'geteuid') else False
 
 
+def check_directory_access(directory: str, username: str) -> bool:
+    """
+    Check if a directory is accessible by a specific user.
+    
+    Args:
+        directory: Directory path to check
+        username: Username to check access for
+        
+    Returns:
+        True if accessible, False otherwise
+    """
+    if not os.path.exists(directory):
+        return False
+    
+    if username == 'root':
+        return os.access(directory, os.R_OK | os.X_OK)
+    
+    try:
+        result = subprocess.run(
+            ['su', '-s', '/bin/bash', '-c', f'test -r "{directory}" && test -x "{directory}"', username],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        try:
+            import pwd
+            import stat
+            user_info = pwd.getpwnam(username)
+            dir_stat = os.stat(directory)
+            dir_mode = stat.S_IMODE(dir_stat.st_mode)
+            
+            if dir_stat.st_uid == user_info.pw_uid:
+                return bool(dir_mode & stat.S_IRUSR and dir_mode & stat.S_IXUSR)
+            elif dir_stat.st_gid == user_info.pw_gid:
+                return bool(dir_mode & stat.S_IRGRP and dir_mode & stat.S_IXGRP)
+            else:
+                return bool(dir_mode & stat.S_IROTH and dir_mode & stat.S_IXOTH)
+        except (ImportError, KeyError, OSError):
+            return False
+
+
+def fix_directory_permissions(directory: str, username: str) -> bool:
+    """
+    Fix directory permissions so the specified user can access it.
+    Also fixes parent directories to ensure the path is accessible.
+    
+    Args:
+        directory: Directory path to fix
+        username: Username that needs access
+        
+    Returns:
+        True if permissions were fixed, False otherwise
+    """
+    try:
+        import pwd
+        user_info = pwd.getpwnam(username)
+        uid = user_info.pw_uid
+        gid = user_info.pw_gid
+    except (ImportError, KeyError):
+        logger.error(f"Could not get user info for {username}")
+        return False
+    
+    try:
+        path = Path(directory).resolve()
+        
+        parent_paths = []
+        current = path
+        while current != current.parent:
+            parent_paths.append(current)
+            current = current.parent
+        parent_paths.reverse()
+        
+        for p in parent_paths:
+            if not os.path.exists(p):
+                continue
+            
+            try:
+                current_stat = p.stat()
+                
+                if current_stat.st_uid != uid:
+                    os.chown(p, uid, gid)
+                    logger.info(f"Changed ownership of {p} to {username}")
+                
+                os.chmod(p, 0o755)
+            except OSError as e:
+                logger.warning(f"Could not fix permissions on {p}: {e}")
+                if p == path:
+                    return False
+        
+        logger.info(f"Fixed permissions on {directory} and parent directories")
+        return True
+    except OSError as e:
+        logger.error(f"Failed to fix permissions on {directory}: {e}")
+        return False
+
+
 def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
     """
     Generate systemd service file content.
@@ -118,7 +217,6 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
     
     python_path = str(python_exec).replace('\\', '/')
     main_script_path = str(main_script.resolve()).replace('\\', '/')
-    working_dir_path = str(working_dir.resolve()).replace('\\', '/')
     
     if not os.path.exists(python_path):
         logger.error(f"Python executable not found: {python_path}")
@@ -128,18 +226,18 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
         logger.error(f"Main script not found: {main_script_path}")
         raise FileNotFoundError(f"Main script not found: {main_script_path}")
     
-    if not os.path.exists(working_dir_path):
-        logger.warning(f"Working directory does not exist: {working_dir_path}")
-        working_dir_path = str(main_script.parent.resolve()).replace('\\', '/')
-        logger.info(f"Using script directory as working directory: {working_dir_path}")
-    elif not os.access(working_dir_path, os.R_OK | os.X_OK):
-        logger.warning(f"Working directory not accessible: {working_dir_path}")
-        working_dir_path = str(main_script.parent.resolve()).replace('\\', '/')
-        logger.info(f"Using script directory as working directory: {working_dir_path}")
+    script_dir = str(main_script.parent.resolve()).replace('\\', '/')
     
-    if not os.path.exists(working_dir_path) or not os.access(working_dir_path, os.R_OK | os.X_OK):
-        logger.warning(f"Script directory also not accessible, using /tmp as fallback")
-        working_dir_path = '/tmp'
+    if service_user == 'root':
+        working_dir_path = str(project_root.resolve()).replace('\\', '/')
+        if not os.path.exists(working_dir_path):
+            logger.warning(f"Project root not accessible, using script directory: {script_dir}")
+            working_dir_path = script_dir
+    else:
+        working_dir_path = script_dir
+        logger.info(f"Using script directory as working directory for non-root user: {working_dir_path}")
+    
+    logger.info(f"Working directory: {working_dir_path} (service user: {service_user})")
     
     venv_bin = str(project_root / 'venv' / 'bin').replace('\\', '/')
     if os.path.exists(venv_bin):
@@ -218,6 +316,40 @@ def install_systemd_service(service_name: str = 'server-monitor',
         if not os.path.exists(python_exec):
             logger.error(f"Python executable not found at: {python_exec}")
             return False
+        
+        if is_root():
+            service_user = os.environ.get('SUDO_USER', 'root')
+        else:
+            service_user = os.environ.get('USER', 'root')
+        
+        main_script = get_main_script_path()
+        script_dir = str(main_script.parent.resolve()).replace('\\', '/')
+        project_root = get_project_root()
+        
+        if service_user == 'root':
+            working_dir_path = str(project_root.resolve()).replace('\\', '/')
+            if not os.path.exists(working_dir_path):
+                working_dir_path = script_dir
+        else:
+            working_dir_path = script_dir
+        
+        if service_user != 'root' and not check_directory_access(working_dir_path, service_user):
+            logger.warning(f"Service user '{service_user}' does not have access to working directory: {working_dir_path}")
+            logger.info("The service will fail to start without proper permissions.")
+            
+            try:
+                response = input(f"Would you like to fix permissions on '{working_dir_path}' for user '{service_user}'? (y/n): ").strip().lower()
+                if response in ('y', 'yes'):
+                    if fix_directory_permissions(working_dir_path, service_user):
+                        logger.info("Permissions fixed successfully!")
+                    else:
+                        logger.error("Failed to fix permissions. You may need to fix them manually.")
+                        logger.info(f"Try: sudo chown -R {service_user}:{service_user} {working_dir_path}")
+                        logger.info(f"      sudo chmod -R 755 {working_dir_path}")
+                else:
+                    logger.warning("Skipping permission fix. Service may fail to start.")
+            except (EOFError, KeyboardInterrupt):
+                logger.warning("Permission fix skipped. Service may fail to start.")
         
         service_content = get_systemd_service_content(service_name)
         
