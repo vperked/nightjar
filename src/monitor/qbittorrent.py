@@ -50,10 +50,18 @@ class QBittorrentMonitor:
                     username=self.username,
                     password=self.password
                 )
-            except Exception as e:
+            except (qbittorrentapi.exceptions.APIConnectionError, 
+                    qbittorrentapi.exceptions.LoginFailed,
+                    ConnectionError, OSError) as e:
                 error_msg = str(e)
                 error_type = type(e).__name__
                 logger.debug(f"Failed to create qBittorrent client ({error_type}): {error_msg}")
+                self._last_error = f"{error_type}: {error_msg}"
+                return None
+            except Exception as e:
+                error_msg = str(e)
+                error_type = type(e).__name__
+                logger.warning(f"Unexpected error creating qBittorrent client ({error_type}): {error_msg}")
                 self._last_error = f"{error_type}: {error_msg}"
                 return None
         
@@ -170,8 +178,18 @@ class QBittorrentMonitor:
                 result.append(torrent_dict)
             
             return result
+        except (qbittorrentapi.exceptions.APIConnectionError,
+                qbittorrentapi.exceptions.LoginFailed,
+                qbittorrentapi.exceptions.APIError) as e:
+            logger.debug(f"qBittorrent API error getting torrents: {e}")
+            self._last_error = str(e)
+            return []
+        except (AttributeError, TypeError) as e:
+            logger.debug(f"Error processing torrent data: {e}")
+            self._last_error = str(e)
+            return []
         except Exception as e:
-            logger.debug(f"Failed to get torrents: {e}")
+            logger.warning(f"Unexpected error getting torrents: {e}")
             self._last_error = str(e)
             return []
     

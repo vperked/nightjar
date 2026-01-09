@@ -6,6 +6,12 @@ import psutil
 
 CPU_COUNT = psutil.cpu_count(logical=True)
 
+# Byte conversion constants
+BYTES_PER_KB = 1024
+BYTES_PER_MB = 1024 * 1024
+BYTES_PER_GB = 1024 * 1024 * 1024
+BYTES_PER_TB = 1024 * 1024 * 1024 * 1024
+
 
 def format_bytes(bytes_value: int, precision: int = 2) -> str:
     """
@@ -22,9 +28,9 @@ def format_bytes(bytes_value: int, precision: int = 2) -> str:
         return "0 B"
     
     for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
-        if bytes_value < 1024.0:
+        if bytes_value < BYTES_PER_KB:
             return f"{bytes_value:.{precision}f} {unit}"
-        bytes_value /= 1024.0
+        bytes_value /= BYTES_PER_KB
     return f"{bytes_value:.{precision}f} EB"
 
 
@@ -43,9 +49,9 @@ def format_bytes_per_second(bytes_per_sec: float, precision: int = 2) -> str:
         return "0 B/s"
     
     for unit in ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s']:
-        if bytes_per_sec < 1024.0:
+        if bytes_per_sec < BYTES_PER_KB:
             return f"{bytes_per_sec:.{precision}f} {unit}"
-        bytes_per_sec /= 1024.0
+        bytes_per_sec /= BYTES_PER_KB
     return f"{bytes_per_sec:.{precision}f} PB/s"
 
 
@@ -60,10 +66,10 @@ def format_megabytes(mb_value: int, precision: int = 2) -> str:
     Returns:
         Formatted string (e.g., "1.50 GB")
     """
-    if mb_value < 1024:
+    if mb_value < BYTES_PER_KB:
         return f"{mb_value} MB"
     else:
-        return f"{mb_value / 1024:.{precision}f} GB"
+        return f"{mb_value / BYTES_PER_KB:.{precision}f} GB"
 
 
 def format_temperature(temp_celsius: float, precision: int = 1) -> str:

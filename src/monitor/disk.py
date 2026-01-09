@@ -2,7 +2,7 @@ import psutil
 import time
 import os
 import platform
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 from util.util import format_bytes
 
 
@@ -124,7 +124,6 @@ class DiskMonitor:
                     'is_nvme': is_nvme,
                 }
                 
-                # Filter out partitions that shouldn't be monitored
                 if filter_monitorable and not self._should_monitor_partition(partition_info):
                     continue
                 
@@ -283,7 +282,7 @@ class DiskMonitor:
     
     def monitor_disk_usage(self, path: str = '/', interval: float = 1.0,
                           duration: Optional[float] = None,
-                          callback: Optional[callable] = None) -> List[Dict]:
+                          callback: Optional[Callable[[Dict], None]] = None) -> List[Dict]:
         """
         Continuously monitor disk usage for a specific path.
         

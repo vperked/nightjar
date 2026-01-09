@@ -2,6 +2,8 @@
 
 A comprehensive server monitoring system with Discord alerts, web dashboard, and system resource tracking.
 
+> **Latest Update:** January 2026 - Code review fixes and improvements applied
+
 ## 📁 Directory Structure
 
 ```
@@ -156,6 +158,8 @@ Sends rich embed alerts to Discord for:
 - Detailed field information
 - Timestamps and footers
 - Error handling and retry logic
+- Rate limiting (30 calls per 60 seconds) to prevent Discord API limits
+- Fallback logging to file when Discord is unavailable
 
 ### Web Dashboard (`web/server.py`)
 
@@ -169,6 +173,7 @@ Provides a web interface at `http://localhost:8080` (configurable):
 **API Endpoints:**
 - `GET /` - Web dashboard
 - `GET /api/stats` - JSON API for system statistics
+- `GET /health` - Health check endpoint (returns status and timestamp)
 - `GET /js/main.js` - JavaScript frontend
 
 ### Utilities
@@ -243,6 +248,9 @@ All configuration is done via environment variables (`.env` file):
 ### Web Server
 - `WEB_PORT` - Web dashboard port (default: 8080)
 
+### Error Recovery
+- `ALERT_LOG_PATH` - Path for fallback alert logging when Discord fails (default: /var/log/server-monitor-alerts.log)
+
 See `env.recommended` for complete configuration options.
 
 ## 🔧 Command Line Options
@@ -296,12 +304,22 @@ When temperature alerts trigger, the system analyzes and reports likely causes:
 - **Observer Pattern**: Monitors collect data, main loop processes alerts
 - **Singleton Pattern**: Web server uses global monitor instances
 - **Factory Pattern**: Monitor initialization based on configuration
+- **Dependency Injection**: Main function supports optional monitor instances for testing
+
+### Code Quality
+- **Type Hints**: Comprehensive type annotations throughout
+- **Constants**: Magic numbers replaced with named constants
+- **Error Handling**: Specific exception types with proper logging
+- **Code Reuse**: Helper functions eliminate duplication
+- **Package Structure**: Proper `__init__.py` files for all packages
 
 ### Error Handling
-- Specific exceptions for known error types
+- Specific exceptions for known error types (ValueError, OSError, ConnectionError, etc.)
 - Broad Exception catching for unexpected errors (with proper logging)
 - Connection errors logged at debug level (expected transient)
 - Critical errors logged at error level
+- Fallback alert logging to file when Discord webhook fails
+- Graceful degradation: individual monitor failures don't stop the entire system
 
 ### Threading
 - Main monitoring loop runs in main thread
@@ -315,6 +333,10 @@ When temperature alerts trigger, the system analyzes and reports likely causes:
 - Path traversal protection in web server
 - Input validation on monitor methods
 - No sensitive data logged
+- Environment variable validation (length checks, format validation)
+- Path validation for media directory (prevents access to /proc, /sys, path traversal)
+- Subprocess calls use list form (not shell=True) to prevent injection
+- All subprocess calls have timeout protection
 
 ## 📝 Logging
 
@@ -336,6 +358,20 @@ This will:
 - Verify monitor data collection
 - Send sample Discord embeds (if webhook configured)
 - Report any failures
+
+### Dependency Injection for Testing
+The `main()` function supports dependency injection for easier testing:
+```python
+from monitor.cpu import CpuMonitor
+from monitor.memory import MemoryMonitor
+
+# Create mock monitors
+mock_cpu = MockCpuMonitor()
+mock_memory = MockMemoryMonitor()
+
+# Pass to main() for testing
+main(cpu_monitor=mock_cpu, memory_monitor=mock_memory)
+```
 
 ## 🐛 Troubleshooting
 
@@ -368,6 +404,16 @@ This will:
 - The service uses smart directory selection based on user permissions
 - For non-root users, it will use the script directory or user's home directory
 
+**Discord webhook rate limiting:**
+- The system automatically rate limits Discord calls (30 per 60 seconds)
+- If rate limited, alerts are logged to fallback file (see `ALERT_LOG_PATH`)
+- Check `/var/log/server-monitor-alerts.log` for alerts that couldn't be sent
+
+**Health check endpoint:**
+- Access `http://localhost:8080/health` to check if the monitor is running
+- Returns JSON with status and timestamp
+- Useful for external monitoring tools
+
 ## 📚 Dependencies
 
 - `psutil` - System and process utilities
@@ -384,6 +430,27 @@ The codebase follows clean code principles:
 - Type hints where applicable
 - Input validation
 - Thread-safe operations
+- Constants instead of magic numbers
+- Helper functions for repetitive operations
+- Proper package structure with `__init__.py` files
+- Dependency injection support for testing
+- Rate limiting for external API calls
+- Comprehensive cleanup in finally blocks
+
+### Recent Improvements (2026)
+- ✅ Fixed duplicate qBittorrent monitoring code
+- ✅ Added null checks for optional monitors
+- ✅ Implemented cached environment variable access
+- ✅ Standardized exception handling across all modules
+- ✅ Added rate limiting for Discord webhooks
+- ✅ Implemented fallback alert logging
+- ✅ Added health check endpoint
+- ✅ Improved threshold validation with helper functions
+- ✅ Added dependency injection to main() for testing
+- ✅ Standardized boolean function naming (is_* prefix)
+- ✅ Enhanced security with environment variable validation
+- ✅ Optimized process list caching to reduce redundant iterations
+- ✅ Added proper package structure with __init__.py files
 
 ## 📄 License
 

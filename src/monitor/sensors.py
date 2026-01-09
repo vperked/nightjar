@@ -131,59 +131,53 @@ class SensorsMonitor:
         if os.path.exists(hwmon_base):
             hwmon_dirs = glob.glob(os.path.join(hwmon_base, 'hwmon*'))
             for hwmon_dir in hwmon_dirs:
-                fan_files = glob.glob(os.path.join(hwmon_dir, 'fan*_input'))
-                for fan_file in fan_files:
-                    try:
-                        with open(fan_file, 'r') as f:
-                            speed = int(f.read().strip())
-                        
-                        fan_name = os.path.basename(fan_file).replace('_input', '')
-                        
-                        label_file = fan_file.replace('_input', '_label')
-                        fan_label = fan_name
-                        if os.path.exists(label_file):
-                            try:
-                                with open(label_file, 'r') as lf:
-                                    fan_label = lf.read().strip()
-                            except (IOError, OSError):
-                                pass
-                        
-                        fans.append({
-                            'name': fan_name,
-                            'label': fan_label,
-                            'speed_rpm': speed,
-                        })
-                    except (IOError, OSError, ValueError):
-                        continue
+                fans.extend(self._scan_fan_directory(hwmon_dir, hwmon_dir))
         
         if not fans:
             for hwmon_dir in hwmon_dirs:
                 device_dir = os.path.join(hwmon_dir, 'device')
                 if os.path.exists(device_dir):
-                    fan_files = glob.glob(os.path.join(device_dir, 'fan*_input'))
-                    for fan_file in fan_files:
-                        try:
-                            with open(fan_file, 'r') as f:
-                                speed = int(f.read().strip())
-                            
-                            fan_name = os.path.basename(fan_file).replace('_input', '')
-                            
-                            label_file = fan_file.replace('_input', '_label')
-                            fan_label = fan_name
-                            if os.path.exists(label_file):
-                                try:
-                                    with open(label_file, 'r') as lf:
-                                        fan_label = lf.read().strip()
-                                except (IOError, OSError):
-                                    pass
-                            
-                            fans.append({
-                                'name': fan_name,
-                                'label': fan_label,
-                                'speed_rpm': speed,
-                            })
-                        except (IOError, OSError, ValueError):
-                            continue
+                    fans.extend(self._scan_fan_directory(device_dir, hwmon_dir))
+        
+        return fans
+    
+    def _scan_fan_directory(self, scan_dir: str, base_path: str) -> List[Dict]:
+        """
+        Scan a directory for fan speed files and extract fan information.
+        
+        Args:
+            scan_dir: Directory to scan for fan*_input files
+            base_path: Base path for constructing label file paths
+            
+        Returns:
+            List of fan dictionaries with 'name', 'label', and 'speed_rpm' keys
+        """
+        fans = []
+        fan_files = glob.glob(os.path.join(scan_dir, 'fan*_input'))
+        
+        for fan_file in fan_files:
+            try:
+                with open(fan_file, 'r') as f:
+                    speed = int(f.read().strip())
+                
+                fan_name = os.path.basename(fan_file).replace('_input', '')
+                
+                label_file = fan_file.replace('_input', '_label')
+                fan_label = fan_name
+                if os.path.exists(label_file):
+                    try:
+                        with open(label_file, 'r') as lf:
+                            fan_label = lf.read().strip()
+                    except (IOError, OSError):
+                        pass
+                
+                fans.append({
+                    'name': fan_name,
+                    'label': fan_label,
+                    'speed_rpm': speed,
+                })
+            except (IOError, OSError, ValueError):
+                continue
         
         return fans
     

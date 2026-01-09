@@ -1,6 +1,6 @@
 import psutil
 import time
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Callable
 from util.util import format_bytes
 
 
@@ -119,7 +119,7 @@ class MemoryMonitor:
         }
     
     def monitor_continuous(self, interval: float = 1.0, duration: Optional[float] = None,
-                          callback: Optional[callable] = None) -> List[Dict]:
+                          callback: Optional[Callable[[Dict], None]] = None) -> List[Dict]:
         """
         Continuously monitor memory usage.
         

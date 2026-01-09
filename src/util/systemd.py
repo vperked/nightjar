@@ -371,17 +371,16 @@ def install_systemd_service(service_name: str = 'server-monitor',
         
         service_file = Path(f'/etc/systemd/system/{service_name}.service')
         
-        # Check if service already exists
         service_exists = service_file.exists()
         service_running = False
         
         if service_exists:
-            # Check if service is currently running
             result = subprocess.run(
                 ['systemctl', 'is-active', f'{service_name}.service'],
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=10
             )
             service_running = result.returncode == 0 and result.stdout.strip() == 'active'
             
@@ -391,7 +390,8 @@ def install_systemd_service(service_name: str = 'server-monitor',
                     ['systemctl', 'stop', f'{service_name}.service'],
                     capture_output=True,
                     text=True,
-                    check=False
+                    check=False,
+                    timeout=30
                 )
                 if stop_result.returncode != 0:
                     logger.warning(f"Failed to stop existing service: {stop_result.stderr}")
@@ -416,7 +416,8 @@ def install_systemd_service(service_name: str = 'server-monitor',
             ['systemctl', 'daemon-reload'],
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            timeout=30
         )
         
         if result.returncode != 0:
@@ -430,7 +431,8 @@ def install_systemd_service(service_name: str = 'server-monitor',
             ['systemctl', 'enable', f'{service_name}.service'],
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            timeout=10
         )
         
         if result.returncode != 0:
@@ -445,7 +447,8 @@ def install_systemd_service(service_name: str = 'server-monitor',
             ['systemctl', 'start', f'{service_name}.service'],
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            timeout=30
         )
         
         if result.returncode != 0:
@@ -464,7 +467,8 @@ def install_systemd_service(service_name: str = 'server-monitor',
             ['systemctl', 'is-active', f'{service_name}.service'],
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            timeout=10
         )
         
         if result.returncode != 0 or result.stdout.strip() != 'active':
@@ -515,14 +519,16 @@ def uninstall_systemd_service(service_name: str = 'server-monitor') -> bool:
         subprocess.run(
             ['systemctl', 'stop', f'{service_name}.service'],
             capture_output=True,
-            check=False
+            check=False,
+            timeout=30
         )
         
         logger.info(f"Disabling {service_name} service...")
         subprocess.run(
             ['systemctl', 'disable', f'{service_name}.service'],
             capture_output=True,
-            check=False
+            check=False,
+            timeout=10
         )
         
         if service_file.exists():
@@ -534,7 +540,8 @@ def uninstall_systemd_service(service_name: str = 'server-monitor') -> bool:
         subprocess.run(
             ['systemctl', 'daemon-reload'],
             capture_output=True,
-            check=False
+            check=False,
+            timeout=30
         )
         
         logger.info(f"Service {service_name} uninstalled successfully.")
@@ -548,7 +555,7 @@ def uninstall_systemd_service(service_name: str = 'server-monitor') -> bool:
         return False
 
 
-def check_systemd_available() -> bool:
+def is_systemd_available() -> bool:
     """
     Check if systemd is available on the system.
     
@@ -566,7 +573,8 @@ def check_systemd_available() -> bool:
             ['systemctl', '--version'],
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            timeout=5
         )
         return result.returncode == 0
     except FileNotFoundError:

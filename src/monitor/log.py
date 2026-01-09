@@ -1,9 +1,12 @@
 import os
 import platform
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 from util.util import format_bytes
-from logger import LOG_FILE, LOG_MAX_BYTES
+from logger import LOG_FILE, LOG_MAX_BYTES, get_logger
+
+logger = get_logger()
 
 
 class LogMonitor:
@@ -180,4 +183,92 @@ class LogMonitor:
             threshold_mb: Threshold in MB
         """
         self.threshold_bytes = threshold_mb * 1024 * 1024
+    
+    def cleanup_log(self, log_info: Dict) -> bool:
+        """
+        Clean up a log file that exceeds the threshold.
+        For regular files, truncates to threshold size keeping the most recent data.
+        For journal logs, uses journalctl to vacuum to threshold size.
+        
+        Args:
+            log_info: Dictionary containing log file information
+            
+        Returns:
+            True if cleanup was successful, False otherwise
+        """
+        if not log_info:
+            return False
+        
+        log_path = log_info.get('path', '')
+        size_bytes = log_info.get('size_bytes', 0)
+        
+        if size_bytes <= self.threshold_bytes:
+            return True
+        
+        try:
+            if log_path == self.journal_log_path or (self.journal_log_path and log_path.startswith(self.journal_log_path)):
+                return self._cleanup_journal_log()
+            else:
+                path = Path(log_path)
+                return self._cleanup_regular_log(path)
+        except (OSError, PermissionError, subprocess.SubprocessError) as e:
+            logger.debug(f"Error cleaning up log {log_path}: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Unexpected error cleaning up log {log_path}: {e}")
+            return False
+    
+    def _cleanup_regular_log(self, log_path: Path) -> bool:
+        """
+        Truncate a regular log file to threshold size, keeping the most recent data.
+        
+        Args:
+            log_path: Path to the log file
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if not log_path.exists():
+                return False
+            
+            current_size = log_path.stat().st_size
+            if current_size <= self.threshold_bytes:
+                return True
+            
+            excess_bytes = current_size - self.threshold_bytes
+            
+            with open(log_path, 'rb') as f:
+                f.seek(excess_bytes)
+                tail_data = f.read()
+            
+            with open(log_path, 'wb') as f:
+                f.write(tail_data)
+            
+            return True
+        except (OSError, PermissionError, IOError):
+            return False
+    
+    def _cleanup_journal_log(self) -> bool:
+        """
+        Clean up journald logs using journalctl vacuum command.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_linux:
+            return False
+        
+        try:
+            threshold_mb = self.threshold_bytes / (1024 * 1024)
+            result = subprocess.run(
+                ['journalctl', '--vacuum-size', f'{threshold_mb:.0f}M'],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+            return False
 

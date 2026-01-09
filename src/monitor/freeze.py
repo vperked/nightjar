@@ -3,6 +3,9 @@ import time
 import threading
 from typing import Dict, Optional, Callable
 from datetime import datetime
+from logger import get_logger
+
+logger = get_logger()
 
 
 class FreezeMonitor:
@@ -66,7 +69,10 @@ class FreezeMonitor:
                 if (current_disk_read != self.last_disk_io.get('read_bytes', 0) or
                     current_disk_write != self.last_disk_io.get('write_bytes', 0)):
                     metrics_changed = True
-            self.last_disk_io = disk_io.copy()
+            self.last_disk_io = {
+                'read_bytes': disk_io.get('read_bytes', 0),
+                'write_bytes': disk_io.get('write_bytes', 0)
+            }
         
         if network_io:
             current_net_sent = network_io.get('bytes_sent', 0)
@@ -77,7 +83,10 @@ class FreezeMonitor:
                 if (current_net_sent != self.last_network_io.get('bytes_sent', 0) or
                     current_net_recv != self.last_network_io.get('bytes_recv', 0)):
                     metrics_changed = True
-            self.last_network_io = network_io.copy()
+            self.last_network_io = {
+                'bytes_sent': network_io.get('bytes_sent', 0),
+                'bytes_recv': network_io.get('bytes_recv', 0)
+            }
         
         self.last_metric_update = current_time
     
@@ -114,9 +123,13 @@ class FreezeMonitor:
                 responsive = False
                 error_message = f"System calls taking too long (CPU: {cpu_time:.2f}s, Mem: {mem_time:.2f}s, Proc: {proc_time:.2f}s)"
             
-        except Exception as e:
+        except (OSError, psutil.Error, AttributeError) as e:
             responsive = False
             error_message = f"Exception during responsiveness check: {str(e)}"
+            total_time = time.time() - start_time
+        except Exception as e:
+            responsive = False
+            error_message = f"Unexpected error during responsiveness check: {str(e)}"
             total_time = time.time() - start_time
         
         return {
@@ -204,7 +217,7 @@ class FreezeMonitor:
             }
         }
     
-    def start_watchdog(self, callback: Optional[Callable] = None):
+    def start_watchdog(self, callback: Optional[Callable[[Dict], None]] = None):
         """
         Start a watchdog thread that monitors for freezes.
         
@@ -229,8 +242,10 @@ class FreezeMonitor:
                 if freeze_status['is_frozen'] and callback:
                     try:
                         callback(freeze_status)
-                    except Exception:
-                        pass
+                    except (TypeError, ValueError) as e:
+                        logger.debug(f"Error in freeze callback: {e}")
+                    except Exception as e:
+                        logger.warning(f"Unexpected error in freeze callback: {e}")
         
         self._watchdog_thread = threading.Thread(target=watchdog_loop, daemon=True)
         self._watchdog_thread.start()

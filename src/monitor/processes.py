@@ -1,6 +1,6 @@
 import psutil
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 from datetime import datetime
 from util.util import format_bytes, CPU_COUNT
 
@@ -168,7 +168,7 @@ class ProcessMonitor:
             return {}
     
     def monitor_process(self, pid: int, interval: float = 1.0, duration: Optional[float] = None,
-                       callback: Optional[callable] = None) -> List[Dict]:
+                       callback: Optional[Callable[[Dict], None]] = None) -> List[Dict]:
         """
         Continuously monitor a specific process.
         

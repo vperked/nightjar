@@ -1,8 +1,11 @@
 import psutil
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 from datetime import datetime
 from util.util import format_bytes, format_bytes_per_second
+from logger import get_logger
+
+logger = get_logger()
 
 
 class NetworkMonitor:
@@ -145,6 +148,7 @@ class NetworkMonitor:
             Dictionary containing bandwidth usage
         """
         if interval <= 0:
+            logger.warning("Invalid interval for bandwidth calculation")
             return {}
         
         if interface:
@@ -213,7 +217,7 @@ class NetworkMonitor:
     
     def monitor_bandwidth(self, interface: Optional[str] = None,
                          interval: float = 1.0, duration: Optional[float] = None,
-                         callback: Optional[callable] = None) -> List[Dict]:
+                         callback: Optional[Callable[[Dict], None]] = None) -> List[Dict]:
         """
         Continuously monitor bandwidth usage.
         

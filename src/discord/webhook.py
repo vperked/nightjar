@@ -1,7 +1,9 @@
 import os
 import requests
+import time
 from typing import Dict, Optional, List
 from datetime import datetime, timezone
+from collections import deque
 from dotenv import load_dotenv
 from util.util import format_bytes, format_bytes_per_second
 from logger import get_logger
@@ -9,6 +11,33 @@ from logger import get_logger
 load_dotenv()
 
 logger = get_logger('DiscordWebhook')
+
+
+class RateLimiter:
+    """Simple rate limiter for Discord webhook calls."""
+    
+    def __init__(self, max_calls: int = 30, period: float = 60.0):
+        """
+        Initialize rate limiter.
+        
+        Args:
+            max_calls: Maximum number of calls allowed in the period
+            period: Time period in seconds
+        """
+        self.max_calls = max_calls
+        self.period = period
+        self.calls = deque()
+    
+    def wait_if_needed(self):
+        """Wait if rate limit would be exceeded."""
+        now = time.time()
+        while self.calls and self.calls[0] < now - self.period:
+            self.calls.popleft()
+        if len(self.calls) >= self.max_calls:
+            sleep_time = self.period - (now - self.calls[0])
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+        self.calls.append(time.time())
 
 
 class DiscordWebhook:
@@ -29,6 +58,8 @@ class DiscordWebhook:
                 "Webhook URL not provided. Set WEBHOOK environment variable "
                 "or pass webhook_url parameter."
             )
+        self.rate_limiter = RateLimiter(max_calls=30, period=60.0)
+        self.alert_log_path = os.getenv('ALERT_LOG_PATH', '/var/log/server-monitor-alerts.log')
     
     def _handle_webhook_error(self, error: Exception) -> bool:
         """
@@ -51,6 +82,21 @@ class DiscordWebhook:
         else:
             logger.error(f"Unexpected Discord webhook error: {error}")
         return False
+    
+    def _log_fallback(self, message: str):
+        """
+        Log alert to file as fallback when Discord webhook fails.
+        
+        Args:
+            message: Message content to log
+        """
+        try:
+            timestamp = datetime.now(timezone.utc).isoformat()
+            log_entry = f"{timestamp}: {message}\n"
+            with open(self.alert_log_path, 'a') as f:
+                f.write(log_entry)
+        except (OSError, PermissionError) as e:
+            logger.debug(f"Could not write to alert log file {self.alert_log_path}: {e}")
     
     def build_embed_payload(self, title: str, description: str = "", color: Optional[int] = None,
                             fields: Optional[List[Dict[str, str]]] = None,
@@ -104,12 +150,18 @@ class DiscordWebhook:
             payload['avatar_url'] = avatar_url
         
         try:
+            self.rate_limiter.wait_if_needed()
             response = requests.post(self.webhook_url, json=payload, timeout=10)
             response.raise_for_status()
             return True
         except KeyboardInterrupt:
             raise
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, 
+                requests.exceptions.HTTPError, requests.exceptions.RequestException) as e:
+            self._log_fallback(str(payload)[:2000])
+            return self._handle_webhook_error(e)
         except Exception as e:
+            self._log_fallback(str(payload)[:2000])
             return self._handle_webhook_error(e)
     
     def send_embed(self, title: str, description: str = "", color: Optional[int] = None,
@@ -139,12 +191,18 @@ class DiscordWebhook:
         )
         
         try:
+            self.rate_limiter.wait_if_needed()
             response = requests.post(self.webhook_url, json=payload, timeout=10)
             response.raise_for_status()
             return True
         except KeyboardInterrupt:
             raise
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, 
+                requests.exceptions.HTTPError, requests.exceptions.RequestException) as e:
+            self._log_fallback(f"{title}: {description[:100]}" if description else title)
+            return self._handle_webhook_error(e)
         except Exception as e:
+            self._log_fallback(f"{title}: {description[:100]}" if description else title)
             return self._handle_webhook_error(e)
     
     def send_cpu_alert(self, cpu_percent: float, threshold: float = 80.0,
@@ -943,7 +1001,7 @@ class DiscordWebhook:
             timestamp=True
         )
     
-    def send_log_size_alert(self, log_info: Dict, threshold_bytes: int, threshold_formatted: str) -> bool:
+    def send_log_size_alert(self, log_info: Dict, threshold_bytes: int, threshold_formatted: str, cleanup_performed: bool = False) -> bool:
         """
         Send an alert when a log file exceeds the size threshold.
         
@@ -951,6 +1009,7 @@ class DiscordWebhook:
             log_info: Dictionary containing log file information
             threshold_bytes: Threshold in bytes
             threshold_formatted: Formatted threshold string
+            cleanup_performed: Whether automatic cleanup was performed
             
         Returns:
             True if message was sent successfully, False otherwise
@@ -961,6 +1020,10 @@ class DiscordWebhook:
         file_count = log_info.get('file_count')
         
         color = 0xdc3545
+        
+        description = f'Log file has exceeded the size threshold of {threshold_formatted}'
+        if cleanup_performed:
+            description += ' (auto-cleaned)'
         
         fields = [
             {
@@ -988,16 +1051,24 @@ class DiscordWebhook:
             })
         
         excess_bytes = size_bytes - threshold_bytes
-        excess_formatted = format_bytes(excess_bytes)
-        fields.append({
-            'name': 'Excess Size',
-            'value': excess_formatted,
-            'inline': True
-        })
+        if excess_bytes > 0:
+            excess_formatted = format_bytes(excess_bytes)
+            fields.append({
+                'name': 'Excess Size',
+                'value': excess_formatted,
+                'inline': True
+            })
+        
+        if cleanup_performed:
+            fields.append({
+                'name': 'Status',
+                'value': 'Auto-cleaned',
+                'inline': True
+            })
         
         return self.send_embed(
             title='Log Size Alert',
-            description=f'Log file has exceeded the size threshold of {threshold_formatted}',
+            description=description,
             color=color,
             fields=fields,
             footer='Server Monitor',

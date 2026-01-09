@@ -49,6 +49,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self.serve_html()
             elif self.path == '/api/stats':
                 self.serve_stats()
+            elif self.path == '/health':
+                self.serve_health()
             elif self.path == '/favicon.ico':
                 self.send_no_content()
             elif self.path.startswith('/js/'):
@@ -168,6 +170,36 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(error_response)
             except (ConnectionAbortedError, BrokenPipeError, OSError):
                 logger.debug("Connection aborted while sending error response")
+    
+    def serve_health(self):
+        """Serve health check endpoint."""
+        try:
+            import time
+            health_data = {
+                'status': 'ok',
+                'timestamp': time.time()
+            }
+            response = json.dumps(health_data).encode('utf-8')
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Content-length', str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+        except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
+            logger.debug(f"Connection error serving health: {e}")
+        except Exception as e:
+            logger.error(f"Error serving health: {e}")
+            try:
+                error_response = json.dumps({'status': 'error', 'error': str(e)}).encode('utf-8')
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Content-length', str(len(error_response)))
+                self.end_headers()
+                self.wfile.write(error_response)
+            except (ConnectionAbortedError, BrokenPipeError, OSError):
+                logger.debug("Connection aborted while sending health error response")
     
     def get_system_stats(self) -> Dict:
         """Collect current system statistics."""
