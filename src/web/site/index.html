@@ -51,6 +51,17 @@
             }
         }
         
+        html {
+            /* Hide scrollbar but allow scrolling */
+            scrollbar-width: none; /* Firefox */
+            -ms-overflow-style: none; /* IE and Edge */
+        }
+        
+        /* Hide scrollbar for Chrome, Safari and Opera */
+        html::-webkit-scrollbar {
+            display: none;
+        }
+        
         body {
             background: 
                 radial-gradient(circle at 20% 80%, rgba(255, 255, 255, 0.03) 0%, transparent 50%),
@@ -59,6 +70,14 @@
             background-attachment: fixed;
             background-size: 100% 100%;
             min-height: 100vh;
+            /* Hide scrollbar but allow scrolling */
+            scrollbar-width: none; /* Firefox */
+            -ms-overflow-style: none; /* IE and Edge */
+        }
+        
+        /* Hide scrollbar for Chrome, Safari and Opera */
+        body::-webkit-scrollbar {
+            display: none;
         }
         
         .loading-circle {
