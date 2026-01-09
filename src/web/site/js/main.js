@@ -114,49 +114,6 @@ async function fetchStats() {
 
         document.getElementById('processCount').textContent = data.processes?.total || 0;
 
-        const topCpuDiv = document.getElementById('topCpuProcesses');
-        const topMemoryDiv = document.getElementById('topMemoryProcesses');
-        
-        if (data.top_processes_cpu && data.top_processes_cpu.length > 0) {
-            topCpuDiv.innerHTML = data.top_processes_cpu.map((proc, index) => {
-                const name = proc.name || 'Unknown';
-                const cpu = (proc.cpu_percent || 0).toFixed(1);
-                const barWidth = Math.min(cpu, 100);
-                const barColor = cpu >= 80 ? 'bg-gray-800' : cpu >= 60 ? 'bg-gray-600' : 'bg-gray-400';
-                return `<div class="process-item flex-col items-start gap-2 text-xs" style="animation-delay: ${index * 0.05}s">
-                    <div class="flex justify-between w-full items-center">
-                        <span class="value font-mono truncate flex-1 mr-2 text-sm">${name}</span>
-                        <span class="text-white font-bold font-mono flex-shrink-0 text-sm">${cpu}%</span>
-                    </div>
-                    <div class="w-full h-1.5 bg-black/30 rounded-full overflow-hidden">
-                        <div class="${barColor} h-full rounded-full transition-all duration-500" style="width: ${barWidth}%"></div>
-                    </div>
-                </div>`;
-            }).join('');
-        } else {
-            topCpuDiv.innerHTML = '<div class="text-xs sm:text-sm text-gray-500">Not available</div>';
-        }
-        
-        if (data.top_processes_memory && data.top_processes_memory.length > 0) {
-            topMemoryDiv.innerHTML = data.top_processes_memory.map((proc, index) => {
-                const name = proc.name || 'Unknown';
-                const mem = (proc.memory_percent || 0).toFixed(1);
-                const barWidth = Math.min(mem * 10, 100);
-                const barColor = mem >= 8 ? 'bg-gray-800' : mem >= 5 ? 'bg-gray-600' : 'bg-gray-400';
-                return `<div class="process-item flex-col items-start gap-2 text-xs" style="animation-delay: ${index * 0.05}s">
-                    <div class="flex justify-between w-full items-center">
-                        <span class="value font-mono truncate flex-1 mr-2 text-sm">${name}</span>
-                        <span class="text-white font-bold font-mono flex-shrink-0 text-sm">${mem}%</span>
-                    </div>
-                    <div class="w-full h-1.5 bg-black/30 rounded-full overflow-hidden">
-                        <div class="${barColor} h-full rounded-full transition-all duration-500" style="width: ${barWidth}%"></div>
-                    </div>
-                </div>`;
-            }).join('');
-        } else {
-            topMemoryDiv.innerHTML = '<div class="text-xs sm:text-sm text-gray-500">Not available</div>';
-        }
-
         const now = new Date();
         const timeStr = now.toLocaleTimeString('en-US', { 
             hour: '2-digit', 

@@ -5,7 +5,7 @@ import signal
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 from logger import get_logger
 
 logger = get_logger('WebServer')
@@ -19,6 +19,19 @@ network_monitor = None
 sensors_monitor = None
 httpd = None
 server_thread = None
+
+_process_cache = {
+    'top_cpu': [],
+    'top_memory': [],
+    'last_update': 0.0,
+    'cache_interval': 2.0
+}
+
+_network_cache = {
+    'data': {},
+    'last_update': 0.0,
+    'cache_interval': 0.5
+}
 
 
 def set_monitors(cpu, memory, system, gpu, disk, network, sensors):
@@ -307,11 +320,13 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 logger.debug("Connection aborted while sending health error response")
     
     def get_system_stats(self) -> Dict:
-        """Collect current system statistics."""
+        """Collect current system statistics with caching for performance."""
         global cpu_monitor, memory_monitor, system_monitor, gpu_monitor
         global disk_monitor, network_monitor, sensors_monitor
+        global _process_cache, _network_cache
         
         stats = {}
+        current_time = time.time()
         
         if system_monitor:
             try:
@@ -323,7 +338,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         if cpu_monitor:
             try:
                 stats['cpu'] = cpu_monitor.get_cpu_info()
-                stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0.05)
+                stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0.1)
             except Exception as e:
                 logger.warning(f"Error getting CPU info: {e}")
         
@@ -360,20 +375,45 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         
         if network_monitor:
             try:
-                bandwidth = network_monitor.get_bandwidth_usage(interval=0.2)
-                if bandwidth:
-                    stats['network'] = bandwidth
+                time_since_network_update = current_time - _network_cache['last_update']
+                if time_since_network_update >= _network_cache['cache_interval']:
+                    bandwidth = network_monitor.get_bandwidth_usage(interval=0.1)
+                    if bandwidth:
+                        _network_cache['data'] = bandwidth
+                        _network_cache['last_update'] = current_time
+                        stats['network'] = bandwidth
+                    else:
+                        stats['network'] = _network_cache['data']
+                else:
+                    stats['network'] = _network_cache['data']
             except Exception as e:
                 logger.warning(f"Error getting network info: {e}")
+                stats['network'] = _network_cache.get('data', {})
         
         if system_monitor:
             try:
                 stats['processes'] = system_monitor.get_process_count()
+                
+                time_since_process_update = current_time - _process_cache['last_update']
+                if time_since_process_update >= _process_cache['cache_interval']:
+                    try:
+                        _process_cache['top_cpu'] = system_monitor.get_top_processes(limit=5, sort_by='cpu')
+                        _process_cache['top_memory'] = system_monitor.get_top_processes(limit=5, sort_by='memory')
+                        _process_cache['last_update'] = current_time
+                    except Exception as e:
+                        logger.debug(f"Error updating process cache: {e}")
+                
+                stats['top_processes_cpu'] = _process_cache['top_cpu']
+                stats['top_processes_memory'] = _process_cache['top_memory']
             except Exception as e:
-                logger.warning(f"Error getting process count: {e}")
-        
-        stats['top_processes_cpu'] = []
-        stats['top_processes_memory'] = []
+                logger.warning(f"Error getting process info: {e}")
+                stats['processes'] = {'total': 0}
+                stats['top_processes_cpu'] = _process_cache.get('top_cpu', [])
+                stats['top_processes_memory'] = _process_cache.get('top_memory', [])
+        else:
+            stats['processes'] = {'total': 0}
+            stats['top_processes_cpu'] = []
+            stats['top_processes_memory'] = []
         
         return stats
 
