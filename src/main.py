@@ -504,7 +504,6 @@ def main():
         logger.info("qBittorrent monitoring enabled")
     else:
         logger.info("qBittorrent monitoring disabled (set QBITTORRENT_MONITOR=true to enable)")
-    qbittorrent_monitor = QBittorrentMonitor()
     log_monitor = LogMonitor()
     logger.info("Monitors initialized")
     
@@ -544,6 +543,8 @@ def main():
     memory_threshold = get_env_float('MEMORY_THRESHOLD', 80.0)
     gpu_threshold = get_env_float('GPU_THRESHOLD', 80.0)
     disk_threshold = get_env_float('DISK_THRESHOLD', 80.0)
+    disk_early_warning_threshold = get_env_float('DISK_EARLY_WARNING_THRESHOLD', 75.0)
+    monitor_individual_partitions = get_env_bool('MONITOR_INDIVIDUAL_PARTITIONS', True)
     temp_threshold = get_env_float('TEMP_THRESHOLD', 80.0)
     temp_alert_duration = get_env_float('TEMP_ALERT_DURATION', 30.0)
     network_bandwidth_threshold = get_env_float('NETWORK_BANDWIDTH_THRESHOLD', 1000.0)
@@ -560,15 +561,15 @@ def main():
     media_directory_threshold_bytes = int(media_directory_threshold_gb * 1024 * 1024 * 1024)
     media_check_interval = get_env_int('MEDIA_CHECK_INTERVAL', 10)
     media_monitor_enabled = get_env_bool('MEDIA_MONITOR_ENABLED', False)
-    media_directory = os.getenv('MEDIA_DIRECTORY', '/home/media')
-    media_directory_threshold_gb = float(os.getenv('MEDIA_DIRECTORY_THRESHOLD_GB', '500.0'))
-    media_directory_threshold_bytes = int(media_directory_threshold_gb * 1024 * 1024 * 1024)
-    media_check_interval = int(os.getenv('MEDIA_CHECK_INTERVAL', '10'))
     
     cpu_threshold = max(0.0, min(100.0, cpu_threshold))
     memory_threshold = max(0.0, min(100.0, memory_threshold))
     gpu_threshold = max(0.0, min(100.0, gpu_threshold))
     disk_threshold = max(0.0, min(100.0, disk_threshold))
+    disk_early_warning_threshold = max(0.0, min(100.0, disk_early_warning_threshold))
+    if disk_early_warning_threshold >= disk_threshold:
+        disk_early_warning_threshold = max(0.0, disk_threshold - 5.0)
+        logger.warning(f"Early warning threshold adjusted to {disk_early_warning_threshold:.1f}% (must be less than main threshold)")
     temp_threshold = max(0.0, temp_threshold)
     temp_alert_duration = max(0.0, temp_alert_duration)
     process_cpu_threshold = max(0.0, min(100.0, process_cpu_threshold))
@@ -598,7 +599,9 @@ def main():
     logger.info(f"Uptime: {system_summary['uptime']}")
     logger.info(f"CPU: {cpu_monitor.cpu_count} logical, {cpu_monitor.cpu_count_physical} physical | Threshold: {cpu_threshold:.1f}%")
     logger.info(f"Memory: {memory_info['total']} | Threshold: {memory_threshold:.1f}%")
-    logger.info(f"Disk: {total_disk['percent']:.1f}% used | Threshold: {disk_threshold:.1f}%")
+    logger.info(f"Disk: {total_disk['percent']:.1f}% used | Threshold: {disk_threshold:.1f}% | Early Warning: {disk_early_warning_threshold:.1f}%")
+    if monitor_individual_partitions:
+        logger.info(f"Individual partition monitoring: Enabled")
     
     if gpu_monitor.nvidia_smi_available:
         gpu_count = gpu_monitor.get_gpu_count()
@@ -702,6 +705,8 @@ def main():
     last_memory_alert_time = 0
     last_gpu_alert_time = 0
     last_disk_alert_time = 0
+    last_partition_alert_times = {}
+    partition_alert_sent = {}
     last_temp_alert_time = 0
     last_freeze_alert_time = 0
     temp_high_start_time = None
@@ -947,6 +952,86 @@ def main():
             else:
                 if disk_alert_sent:
                     disk_alert_sent = False
+            
+            if monitor_individual_partitions:
+                try:
+                    all_partitions = disk_monitor.get_all_partitions()
+                    nvme_partitions = disk_monitor.get_nvme_partitions()
+                    
+                    for partition in all_partitions:
+                        partition_key = partition.get('mountpoint', partition.get('device', 'unknown'))
+                        percent = partition['percent']
+                        
+                        last_alert_time = last_partition_alert_times.get(partition_key, 0)
+                        time_since_last_alert = current_time - last_alert_time
+                        
+                        if percent >= disk_threshold:
+                            if not partition_alert_sent.get(partition_key, False) or time_since_last_alert >= alert_cooldown:
+                                if webhook:
+                                    logger.warning(f"[ALERT] Partition {partition_key}: {percent:.1f}% (threshold: {disk_threshold:.1f}%)")
+                                    success = webhook.send_partition_alert(
+                                        partition=partition,
+                                        threshold=disk_threshold,
+                                        is_early_warning=False
+                                    )
+                                    if success:
+                                        logger.info(f"    Discord partition alert sent for {partition_key}")
+                                    else:
+                                        logger.warning(f"    Discord partition alert failed for {partition_key}")
+                                else:
+                                    logger.warning(f"Partition {partition_key}: {percent:.1f}% (threshold: {disk_threshold:.1f}%)")
+                                
+                                last_partition_alert_times[partition_key] = current_time
+                                partition_alert_sent[partition_key] = True
+                            else:
+                                remaining_cooldown = alert_cooldown - time_since_last_alert
+                                logger.debug(f"Partition {partition_key} alert cooldown: {remaining_cooldown:.0f}s")
+                        elif percent >= disk_early_warning_threshold:
+                            if not partition_alert_sent.get(partition_key, False) or time_since_last_alert >= alert_cooldown:
+                                if webhook:
+                                    logger.warning(f"[WARNING] Partition {partition_key}: {percent:.1f}% (early warning: {disk_early_warning_threshold:.1f}%)")
+                                    success = webhook.send_partition_alert(
+                                        partition=partition,
+                                        threshold=disk_early_warning_threshold,
+                                        is_early_warning=True
+                                    )
+                                    if success:
+                                        logger.info(f"    Discord partition early warning sent for {partition_key}")
+                                    else:
+                                        logger.warning(f"    Discord partition early warning failed for {partition_key}")
+                                
+                                last_partition_alert_times[partition_key] = current_time
+                                partition_alert_sent[partition_key] = True
+                        else:
+                            if partition_alert_sent.get(partition_key, False):
+                                partition_alert_sent[partition_key] = False
+                    
+                    if nvme_partitions:
+                        for nvme_partition in nvme_partitions:
+                            nvme_key = nvme_partition.get('mountpoint', nvme_partition.get('device', 'unknown'))
+                            nvme_percent = nvme_partition['percent']
+                            
+                            if nvme_percent >= disk_early_warning_threshold:
+                                last_alert_time = last_partition_alert_times.get(nvme_key, 0)
+                                time_since_last_alert = current_time - last_alert_time
+                                
+                                if not partition_alert_sent.get(nvme_key, False) or time_since_last_alert >= alert_cooldown:
+                                    if webhook:
+                                        logger.warning(f"[WARNING] NVMe {nvme_key}: {nvme_percent:.1f}% (early warning: {disk_early_warning_threshold:.1f}%)")
+                                        success = webhook.send_partition_alert(
+                                            partition=nvme_partition,
+                                            threshold=disk_early_warning_threshold,
+                                            is_early_warning=True
+                                        )
+                                        if success:
+                                            logger.info(f"    Discord NVMe early warning sent for {nvme_key}")
+                                        else:
+                                            logger.warning(f"    Discord NVMe early warning failed for {nvme_key}")
+                                    
+                                    last_partition_alert_times[nvme_key] = current_time
+                                    partition_alert_sent[nvme_key] = True
+                except Exception as e:
+                    logger.debug(f"Error checking individual partitions: {e}")
             
             if cpu_temp is not None and cpu_temp >= temp_threshold:
                 if temp_high_start_time is None:

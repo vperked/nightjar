@@ -855,6 +855,94 @@ class DiscordWebhook:
             timestamp=True
         )
     
+    def send_partition_alert(self, partition: Dict, threshold: float, is_early_warning: bool = False) -> bool:
+        """
+        Send an alert when a partition/drive exceeds usage threshold.
+        
+        Args:
+            partition: Dictionary containing partition information
+            threshold: Threshold percentage that was exceeded
+            is_early_warning: If True, this is an early warning (not critical yet)
+            
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        device = partition.get('device', 'Unknown')
+        mountpoint = partition.get('mountpoint', 'Unknown')
+        percent = partition.get('percent', 0.0)
+        total = partition.get('total', 0)
+        used = partition.get('used', 0)
+        free = partition.get('free', 0)
+        is_nvme = partition.get('is_nvme', False)
+        fstype = partition.get('fstype', 'Unknown')
+        
+        title = 'Drive Early Warning' if is_early_warning else 'Drive Usage Alert'
+        if is_nvme:
+            title = f'NVMe {title}'
+        
+        description = f'{"Drive" if not is_nvme else "NVMe drive"} usage is {"approaching" if is_early_warning else "exceeding"} threshold'
+        
+        fields = [
+            {
+                'name': 'Device',
+                'value': device[:256],
+                'inline': True
+            },
+            {
+                'name': 'Mount Point',
+                'value': mountpoint[:256],
+                'inline': True
+            },
+            {
+                'name': 'Usage',
+                'value': f'{percent:.1f}%',
+                'inline': True
+            },
+            {
+                'name': 'Threshold',
+                'value': f'{threshold:.1f}%',
+                'inline': True
+            },
+            {
+                'name': 'Total Space',
+                'value': format_bytes(total),
+                'inline': True
+            },
+            {
+                'name': 'Used Space',
+                'value': format_bytes(used),
+                'inline': True
+            },
+            {
+                'name': 'Free Space',
+                'value': format_bytes(free),
+                'inline': True
+            }
+        ]
+        
+        if is_nvme:
+            fields.append({
+                'name': 'Drive Type',
+                'value': 'NVMe SSD',
+                'inline': True
+            })
+        
+        if fstype and fstype != 'Unknown':
+            fields.append({
+                'name': 'File System',
+                'value': fstype,
+                'inline': True
+            })
+        
+        return self.send_embed(
+            title=title,
+            description=description,
+            color=self.DEFAULT_EMBED_COLOR,
+            fields=fields,
+            footer='Server Monitor - Storage Monitoring',
+            timestamp=True
+        )
+    
     def send_log_size_alert(self, log_info: Dict, threshold_bytes: int, threshold_formatted: str) -> bool:
         """
         Send an alert when a log file exceeds the size threshold.

@@ -1,6 +1,7 @@
 import psutil
 import time
 import os
+import platform
 from typing import Dict, List, Optional
 from util.util import format_bytes
 
@@ -36,6 +37,23 @@ class DiskMonitor:
         except OSError:
             return None
     
+    def _is_nvme_device(self, device: str) -> bool:
+        """
+        Check if a device is an NVMe drive.
+        
+        Args:
+            device: Device path (e.g., '/dev/nvme0n1p1', 'C:')
+            
+        Returns:
+            True if device appears to be NVMe, False otherwise
+        """
+        device_lower = device.lower()
+        if platform.system() == 'Linux':
+            return 'nvme' in device_lower
+        elif platform.system() == 'Windows':
+            return False
+        return False
+    
     def get_all_partitions(self) -> List[Dict]:
         """
         Get information about all disk partitions.
@@ -47,6 +65,7 @@ class DiskMonitor:
         for partition in psutil.disk_partitions():
             try:
                 usage = psutil.disk_usage(partition.mountpoint)
+                is_nvme = self._is_nvme_device(partition.device)
                 partition_info = {
                     'device': partition.device,
                     'mountpoint': partition.mountpoint,
@@ -56,11 +75,36 @@ class DiskMonitor:
                     'used': usage.used,
                     'free': usage.free,
                     'percent': usage.percent,
+                    'is_nvme': is_nvme,
                 }
                 partitions.append(partition_info)
             except (PermissionError, OSError):
                 continue
         return partitions
+    
+    def get_nvme_partitions(self) -> List[Dict]:
+        """
+        Get all NVMe partitions.
+        
+        Returns:
+            List of dictionaries containing NVMe partition information
+        """
+        all_partitions = self.get_all_partitions()
+        return [p for p in all_partitions if p.get('is_nvme', False)]
+    
+    def get_partitions_by_usage(self, min_percent: float = 0.0, max_percent: float = 100.0) -> List[Dict]:
+        """
+        Get partitions filtered by usage percentage.
+        
+        Args:
+            min_percent: Minimum usage percentage (inclusive)
+            max_percent: Maximum usage percentage (inclusive)
+            
+        Returns:
+            List of partitions within the specified usage range
+        """
+        all_partitions = self.get_all_partitions()
+        return [p for p in all_partitions if min_percent <= p['percent'] <= max_percent]
     
     def get_disk_usage_human(self, path: str = '/') -> Optional[Dict[str, str]]:
         """
