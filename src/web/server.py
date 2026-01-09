@@ -30,7 +30,19 @@ _process_cache = {
 _network_cache = {
     'data': {},
     'last_update': 0.0,
-    'cache_interval': 1.0  # Increased from 0.5 to reduce load
+    'cache_interval': 1.0
+}
+
+_gpu_cache = {
+    'data': {},
+    'last_update': 0.0,
+    'cache_interval': 3.0
+}
+
+_disk_cache = {
+    'data': {},
+    'last_update': 0.0,
+    'cache_interval': 5.0
 }
 
 
@@ -323,7 +335,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         """Collect current system statistics with caching for performance."""
         global cpu_monitor, memory_monitor, system_monitor, gpu_monitor
         global disk_monitor, network_monitor, sensors_monitor
-        global _process_cache, _network_cache
+        global _process_cache, _network_cache, _gpu_cache, _disk_cache
         
         stats = {}
         current_time = time.time()
@@ -338,7 +350,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         if cpu_monitor:
             try:
                 stats['cpu'] = cpu_monitor.get_cpu_info()
-                stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0.05)
+                stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0.01)
             except Exception as e:
                 logger.warning(f"Error getting CPU info: {e}")
         
@@ -350,19 +362,32 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         
         if disk_monitor:
             try:
-                stats['disk'] = {
-                    'total': disk_monitor.get_total_disk_usage()
-                }
+                time_since_disk_update = current_time - _disk_cache['last_update']
+                if time_since_disk_update >= _disk_cache['cache_interval']:
+                    disk_data = disk_monitor.get_total_disk_usage()
+                    _disk_cache['data'] = {'total': disk_data}
+                    _disk_cache['last_update'] = current_time
+                    stats['disk'] = _disk_cache['data']
+                else:
+                    stats['disk'] = _disk_cache['data']
             except Exception as e:
                 logger.warning(f"Error getting disk info: {e}")
+                stats['disk'] = _disk_cache.get('data', {})
         
         if gpu_monitor:
             try:
                 if gpu_monitor.nvidia_smi_available and gpu_monitor.get_gpu_count() > 0:
-                    gpu_data = gpu_monitor.get_gpu_comprehensive(0)
-                    stats['gpu'] = gpu_data
+                    time_since_gpu_update = current_time - _gpu_cache['last_update']
+                    if time_since_gpu_update >= _gpu_cache['cache_interval']:
+                        gpu_data = gpu_monitor.get_gpu_comprehensive(0)
+                        _gpu_cache['data'] = gpu_data
+                        _gpu_cache['last_update'] = current_time
+                        stats['gpu'] = _gpu_cache['data']
+                    else:
+                        stats['gpu'] = _gpu_cache['data']
             except Exception as e:
                 logger.warning(f"Error getting GPU info: {e}")
+                stats['gpu'] = _gpu_cache.get('data', {})
         
         if sensors_monitor:
             try:
@@ -377,7 +402,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             try:
                 time_since_network_update = current_time - _network_cache['last_update']
                 if time_since_network_update >= _network_cache['cache_interval']:
-                    bandwidth = network_monitor.get_bandwidth_usage(interval=0.05)
+                    bandwidth = network_monitor.get_bandwidth_usage(interval=0.01)
                     if bandwidth:
                         _network_cache['data'] = bandwidth
                         _network_cache['last_update'] = current_time

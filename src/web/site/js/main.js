@@ -20,9 +20,16 @@ function toggleTheme() {
 
 function applyTheme() {
     document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
-    const themeIcon = document.getElementById('themeIcon');
-    if (themeIcon) {
-        themeIcon.textContent = isDarkMode ? '🌙' : '☀️';
+    const moonIcon = document.getElementById('moonIcon');
+    const sunIcon = document.getElementById('sunIcon');
+    if (moonIcon && sunIcon) {
+        if (isDarkMode) {
+            moonIcon.classList.remove('hidden');
+            sunIcon.classList.add('hidden');
+        } else {
+            moonIcon.classList.add('hidden');
+            sunIcon.classList.remove('hidden');
+        }
     }
 }
 
