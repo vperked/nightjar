@@ -307,6 +307,13 @@ def run_self_test() -> bool:
         except Exception as e:
             add_result("Media directory monitor", False, str(e))
     
+    try:
+        log_monitor = LogMonitor()
+        log_sizes = log_monitor.get_all_log_sizes()
+        add_result("Log monitor", True)
+    except Exception as e:
+        add_result("Log monitor", False, str(e))
+    
     qbittorrent_monitor_enabled = get_env_bool('QBITTORRENT_MONITOR', False)
     if qbittorrent_monitor_enabled:
         try:

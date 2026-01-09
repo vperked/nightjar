@@ -50,8 +50,10 @@ class QBittorrentMonitor:
                     password=self.password
                 )
             except Exception as e:
-                logger.debug(f"Failed to create qBittorrent client: {e}")
-                self._last_error = str(e)
+                error_msg = str(e)
+                error_type = type(e).__name__
+                logger.debug(f"Failed to create qBittorrent client ({error_type}): {error_msg}")
+                self._last_error = f"{error_type}: {error_msg}"
                 return None
         
         return self.client
@@ -88,18 +90,26 @@ class QBittorrentMonitor:
             self._last_error = None
             return True
         except qbittorrentapi.exceptions.LoginFailed as e:
-            logger.warning(f"qBittorrent login failed: {e}")
-            self._last_error = f"Login failed: {e}"
+            error_msg = str(e)
+            logger.warning(f"qBittorrent login failed: {error_msg}")
+            logger.debug(f"Login failed details - Host: {self.host}:{self.port}, User: {self.username}")
+            self._last_error = f"Login failed: {error_msg}"
             self._connected = False
             return False
         except qbittorrentapi.exceptions.APIConnectionError as e:
-            logger.warning(f"qBittorrent connection error: {e}")
-            self._last_error = f"Connection error: {e}"
+            error_msg = str(e)
+            error_type = type(e).__name__
+            logger.warning(f"qBittorrent connection error: {error_type}: {error_msg}")
+            logger.debug(f"Connection error details - Host: {self.host}:{self.port}, Error: {repr(e)}")
+            self._last_error = f"Connection error: {error_type}: {error_msg}"
             self._connected = False
             return False
         except Exception as e:
-            logger.warning(f"qBittorrent error: {e}")
-            self._last_error = str(e)
+            error_msg = str(e)
+            error_type = type(e).__name__
+            logger.warning(f"qBittorrent error ({error_type}): {error_msg}")
+            logger.debug(f"Error details - Host: {self.host}:{self.port}, Error: {repr(e)}")
+            self._last_error = f"{error_type}: {error_msg}"
             self._connected = False
             return False
     
