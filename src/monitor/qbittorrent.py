@@ -29,8 +29,9 @@ class QBittorrentMonitor:
         self.client = None
         self._connected = False
         self._last_error = None
+        self._connection_logged = False
         
-        logger.info(f"qBittorrent monitor initialized: {self.host}:{self.port} (user: {self.username})")
+        logger.debug(f"qBittorrent monitor initialized: {self.host}:{self.port} (user: {self.username})")
         if not self.password:
             logger.warning("qBittorrent password not configured. Set QBITTORRENT_PASSWORD environment variable.")
     
@@ -74,6 +75,7 @@ class QBittorrentMonitor:
                 logger.debug("qBittorrent session expired, reconnecting...")
                 self._connected = False
                 self.client = None
+                self._connection_logged = False
         
         logger.debug(f"Attempting to connect to qBittorrent at {self.host}:{self.port}...")
         client = self._get_client()
@@ -85,7 +87,11 @@ class QBittorrentMonitor:
             logger.debug(f"Logging in to qBittorrent as {self.username}...")
             client.auth_log_in()
             version = client.app_version()
-            logger.info(f"qBittorrent connected successfully (version: {version})")
+            if not self._connection_logged:
+                logger.info(f"qBittorrent connected successfully (version: {version})")
+                self._connection_logged = True
+            else:
+                logger.debug(f"qBittorrent reconnected (version: {version})")
             self._connected = True
             self._last_error = None
             return True

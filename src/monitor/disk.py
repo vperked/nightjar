@@ -54,9 +54,55 @@ class DiskMonitor:
             return False
         return False
     
-    def get_all_partitions(self) -> List[Dict]:
+    def _should_monitor_partition(self, partition: Dict) -> bool:
+        """
+        Check if a partition should be monitored.
+        Filters out snap mounts, loop devices, and other special filesystems.
+        
+        Args:
+            partition: Partition dictionary
+            
+        Returns:
+            True if partition should be monitored, False otherwise
+        """
+        mountpoint = partition.get('mountpoint', '')
+        device = partition.get('device', '')
+        fstype = partition.get('fstype', '')
+        opts = partition.get('opts', '')
+        
+        mountpoint_lower = mountpoint.lower()
+        device_lower = device.lower()
+        fstype_lower = fstype.lower()
+        opts_lower = opts.lower()
+        
+        if '/snap/' in mountpoint_lower:
+            return False
+        
+        if 'loop' in device_lower:
+            return False
+        
+        if 'ro' in opts_lower and 'rw' not in opts_lower:
+            return False
+        
+        excluded_fstypes = ['squashfs', 'tmpfs', 'devtmpfs', 'proc', 'sysfs', 'devpts', 
+                           'cgroup', 'cgroup2', 'pstore', 'bpf', 'tracefs', 'debugfs',
+                           'securityfs', 'configfs', 'fusectl', 'hugetlbfs', 'mqueue',
+                           'overlay', 'rpc_pipefs', 'systemd-1']
+        if fstype_lower in excluded_fstypes:
+            return False
+        
+        total = partition.get('total', 0)
+        if total > 0 and total < 100 * 1024 * 1024:
+            return False
+        
+        return True
+    
+    def get_all_partitions(self, filter_monitorable: bool = True) -> List[Dict]:
         """
         Get information about all disk partitions.
+        
+        Args:
+            filter_monitorable: If True, filter out partitions that shouldn't be monitored
         
         Returns:
             List of dictionaries containing partition information
@@ -77,6 +123,11 @@ class DiskMonitor:
                     'percent': usage.percent,
                     'is_nvme': is_nvme,
                 }
+                
+                # Filter out partitions that shouldn't be monitored
+                if filter_monitorable and not self._should_monitor_partition(partition_info):
+                    continue
+                
                 partitions.append(partition_info)
             except (PermissionError, OSError):
                 continue
