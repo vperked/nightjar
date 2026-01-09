@@ -78,7 +78,7 @@ class GpuMonitor:
         Get information about a specific GPU.
         
         Args:
-            gpu_index: Index of the GPU (default: 0)
+            gpu_index: Index of the GPU (0-based). Must be non-negative.
             
         Returns:
             Dictionary containing GPU information

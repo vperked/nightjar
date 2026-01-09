@@ -13,6 +13,7 @@ logger = get_logger('DiscordWebhook')
 
 class DiscordWebhook:
     """Discord webhook client for sending messages."""
+    DEFAULT_EMBED_COLOR = 0xDC3545
     
     def __init__(self, webhook_url: Optional[str] = None):
         """
@@ -43,11 +44,42 @@ class DiscordWebhook:
             logger.warning("Discord webhook timeout")
         elif isinstance(error, requests.exceptions.ConnectionError):
             logger.warning("Discord connection failed")
+        elif isinstance(error, requests.exceptions.HTTPError):
+            logger.warning(f"Discord webhook HTTP error: {error}")
         elif isinstance(error, requests.exceptions.RequestException):
-            logger.warning(f"Discord webhook error - {error}")
+            logger.warning(f"Discord webhook request error: {error}")
         else:
-            logger.warning(f"Discord webhook error - {error}")
+            logger.error(f"Unexpected Discord webhook error: {error}")
         return False
+    
+    def build_embed_payload(self, title: str, description: str = "", color: Optional[int] = None,
+                            fields: Optional[List[Dict[str, str]]] = None,
+                            footer: Optional[str] = None, timestamp: bool = True) -> Dict:
+        resolved_color = self.DEFAULT_EMBED_COLOR if color is None else color
+        embed = {
+            'title': title[:256],
+            'description': description[:4096] if description else "",
+            'color': resolved_color
+        }
+        
+        if fields:
+            embed['fields'] = []
+            for field in fields[:25]:
+                embed['fields'].append({
+                    'name': field.get('name', '')[:256],
+                    'value': field.get('value', '')[:1024],
+                    'inline': field.get('inline', False)
+                })
+        
+        if footer:
+            embed['footer'] = {
+                'text': footer[:2048]
+            }
+        
+        if timestamp:
+            embed['timestamp'] = datetime.now(timezone.utc).isoformat()
+        
+        return {'embeds': [embed]}
     
     def send_message(self, content: str, username: Optional[str] = None, 
                     avatar_url: Optional[str] = None) -> bool:
@@ -97,34 +129,14 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        embed = {
-            'title': title[:256],
-            'description': description[:4096] if description else "",
-        }
-        
-        if color is not None:
-            embed['color'] = color
-        
-        if fields:
-            embed['fields'] = []
-            for field in fields[:25]:
-                embed['fields'].append({
-                    'name': field.get('name', '')[:256],
-                    'value': field.get('value', '')[:1024],
-                    'inline': field.get('inline', False)
-                })
-        
-        if footer:
-            embed['footer'] = {
-                'text': footer[:2048]
-            }
-        
-        if timestamp:
-            embed['timestamp'] = datetime.now(timezone.utc).isoformat()
-        
-        payload = {
-            'embeds': [embed]
-        }
+        payload = self.build_embed_payload(
+            title=title,
+            description=description,
+            color=color,
+            fields=fields,
+            footer=footer,
+            timestamp=timestamp
+        )
         
         try:
             response = requests.post(self.webhook_url, json=payload, timeout=10)
@@ -148,7 +160,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0xdc3545
+        color = 0x000000 if cpu_percent >= threshold else 0xdc3545
         
         fields = [
             {
@@ -175,7 +187,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='CPU Usage Alert',
             description=f'CPU usage has exceeded the threshold of {threshold:.1f}%',
-            color=color,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -224,7 +236,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='System CPU Information',
             description='Current CPU statistics and usage',
-            color=0xdc3545,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -245,7 +257,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0xdc3545
+        color = 0x000000 if memory_percent >= threshold else 0xdc3545
         
         fields = [
             {
@@ -282,7 +294,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='Memory Usage Alert',
             description=f'Memory usage has exceeded the threshold of {threshold:.1f}%',
-            color=color,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -349,7 +361,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='System Memory Information',
             description='Current memory statistics and usage',
-            color=0xdc3545,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -431,7 +443,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='System Information',
             description='Comprehensive system status and statistics',
-            color=0xdc3545,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -460,7 +472,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0xdc3545
+        color = 0xff6b00 if temperature >= threshold * 1.1 else 0xdc3545
         
         fields = [
             {
@@ -538,7 +550,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='Temperature Alert',
             description=description,
-            color=color,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -563,7 +575,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0xdc3545
+        color = 0x000000 if gpu_utilization >= threshold else 0xdc3545
         
         fields = [
             {
@@ -617,7 +629,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='GPU Usage Alert',
             description=f'GPU utilization has exceeded the threshold of {threshold:.1f}%',
-            color=color,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -689,7 +701,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='GPU Information',
             description='Current GPU statistics and usage',
-            color=0xdc3545,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -765,7 +777,7 @@ class DiscordWebhook:
         return self.send_embed(
             title=f'Process {resource_name} Alert',
             description=f'Process "{name}" has exceeded the {resource_name.lower()} threshold of {threshold:.1f}%',
-            color=0xdc3545,
+            color=0x000000,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -790,7 +802,7 @@ class DiscordWebhook:
         size_formatted = format_bytes(size_bytes)
         threshold_formatted = format_bytes(threshold_bytes)
         
-        color = 0xdc3545
+        color = 0xff6b00 if size_bytes >= threshold_bytes * 1.1 else 0xdc3545
         
         fields = [
             {
@@ -835,9 +847,9 @@ class DiscordWebhook:
         description = f'Directory "{os.path.basename(directory_path)}" has exceeded the size threshold of {threshold_formatted}'
         
         return self.send_embed(
-            title='📁 Directory Size Alert',
+            title='Directory Size Alert',
             description=description,
-            color=color,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor - Directory Monitoring',
             timestamp=True
@@ -920,7 +932,7 @@ class DiscordWebhook:
         time_since_metric_update = freeze_status.get('time_since_metric_update', 0)
         responsive = freeze_status.get('responsive', False)
         
-        color = 0xdc3545
+        color = 0x000000
         
         primary_reason = reasons[0] if reasons else "System freeze detected"
         
@@ -977,7 +989,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='System Freeze Alert',
             description=description,
-            color=color,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -1051,7 +1063,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='Download Complete',
             description=f'Torrent download has completed: **{name[:100]}**',
-            color=0xdc3545,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor - qBittorrent',
             timestamp=True
@@ -1111,7 +1123,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='Torrent Seeding',
             description=f'Torrent is now seeding: **{name[:100]}**',
-            color=0xdc3545,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor - qBittorrent',
             timestamp=True
@@ -1182,7 +1194,7 @@ class DiscordWebhook:
         return self.send_embed(
             title='qBittorrent Status',
             description=description,
-            color=0xdc3545,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor - qBittorrent',
             timestamp=True

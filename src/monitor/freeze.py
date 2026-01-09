@@ -27,6 +27,7 @@ class FreezeMonitor:
         self.heartbeat_timeout = 60.0
         self._watchdog_thread = None
         self._watchdog_running = False
+        self._watchdog_lock = threading.Lock()
         
     def update_heartbeat(self):
         """Update the heartbeat timestamp (call this in the main monitoring loop)."""
@@ -210,13 +211,18 @@ class FreezeMonitor:
         Args:
             callback: Optional callback function to call when freeze is detected
         """
-        if self._watchdog_running:
-            return
-        
-        self._watchdog_running = True
+        with self._watchdog_lock:
+            if self._watchdog_running:
+                return
+            
+            self._watchdog_running = True
         
         def watchdog_loop():
-            while self._watchdog_running and self.monitoring_active:
+            while True:
+                with self._watchdog_lock:
+                    if not self._watchdog_running or not self.monitoring_active:
+                        break
+                
                 time.sleep(self.check_interval * 2)
                 
                 freeze_status = self.check_freeze_status()
@@ -231,8 +237,9 @@ class FreezeMonitor:
     
     def stop_watchdog(self):
         """Stop the watchdog thread."""
-        self._watchdog_running = False
-        self.monitoring_active = False
+        with self._watchdog_lock:
+            self._watchdog_running = False
+            self.monitoring_active = False
         if self._watchdog_thread:
             self._watchdog_thread.join(timeout=5.0)
 

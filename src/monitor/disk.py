@@ -281,11 +281,14 @@ class DiskMonitor:
         Get the total size of a directory and all its contents recursively.
         
         Args:
-            path: Directory path to check
+            path: Directory path to check. Must be a non-empty string.
             
         Returns:
             Dictionary containing directory size information, or None if path doesn't exist
         """
+        if not path or not isinstance(path, str):
+            return None
+        
         if not os.path.exists(path):
             return None
         
