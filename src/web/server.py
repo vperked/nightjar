@@ -30,7 +30,7 @@ _process_cache = {
 _network_cache = {
     'data': {},
     'last_update': 0.0,
-    'cache_interval': 1.0
+    'cache_interval': 2.0  # Increased from 1.0 to reduce frequent updates
 }
 
 _gpu_cache = {
@@ -43,6 +43,12 @@ _disk_cache = {
     'data': {},
     'last_update': 0.0,
     'cache_interval': 5.0
+}
+
+_cpu_cache = {
+    'data': {},
+    'last_update': 0.0,
+    'cache_interval': 1.0  # Cache CPU stats for 1 second
 }
 
 
@@ -335,7 +341,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         """Collect current system statistics with caching for performance."""
         global cpu_monitor, memory_monitor, system_monitor, gpu_monitor
         global disk_monitor, network_monitor, sensors_monitor
-        global _process_cache, _network_cache, _gpu_cache, _disk_cache
+        global _process_cache, _network_cache, _gpu_cache, _disk_cache, _cpu_cache
         
         stats = {}
         current_time = time.time()
@@ -349,10 +355,18 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         
         if cpu_monitor:
             try:
-                stats['cpu'] = cpu_monitor.get_cpu_info()
-                stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0.01)
+                time_since_cpu_update = current_time - _cpu_cache['last_update']
+                if time_since_cpu_update >= _cpu_cache['cache_interval']:
+                    stats['cpu'] = cpu_monitor.get_cpu_info()
+                    # Use interval=0 for non-blocking call (uses cached values from psutil)
+                    stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0)
+                    _cpu_cache['data'] = stats['cpu']
+                    _cpu_cache['last_update'] = current_time
+                else:
+                    stats['cpu'] = _cpu_cache['data']
             except Exception as e:
                 logger.warning(f"Error getting CPU info: {e}")
+                stats['cpu'] = _cpu_cache.get('data', {})
         
         if memory_monitor:
             try:
@@ -402,7 +416,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             try:
                 time_since_network_update = current_time - _network_cache['last_update']
                 if time_since_network_update >= _network_cache['cache_interval']:
-                    bandwidth = network_monitor.get_bandwidth_usage(interval=0.01)
+                    # Use interval=0 for non-blocking call
+                    bandwidth = network_monitor.get_bandwidth_usage(interval=0)
                     if bandwidth:
                         _network_cache['data'] = bandwidth
                         _network_cache['last_update'] = current_time

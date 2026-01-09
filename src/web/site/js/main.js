@@ -139,7 +139,9 @@ async function fetchStats(showLoading = false) {
 
     // Show loading state
     if (showLoading || !content.classList.contains('hidden')) {
-        if (refreshIcon) refreshIcon.classList.add('spinning');
+        if (refreshIcon) {
+            refreshIcon.classList.add('spinning');
+        }
         isRefreshing = true;
     }
     
@@ -275,7 +277,9 @@ async function fetchStats(showLoading = false) {
         }
     } finally {
         isRefreshing = false;
-        if (refreshIcon) refreshIcon.classList.remove('spinning');
+        if (refreshIcon) {
+            refreshIcon.classList.remove('spinning');
+        }
     }
 }
 
