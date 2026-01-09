@@ -1,18 +1,93 @@
+// Theme management
+let isDarkMode = true;
+
+function initTheme() {
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme) {
+        isDarkMode = savedTheme === 'dark';
+    } else {
+        // Check system preference
+        isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    }
+    applyTheme();
+}
+
+function toggleTheme() {
+    isDarkMode = !isDarkMode;
+    localStorage.setItem('theme', isDarkMode ? 'dark' : 'light');
+    applyTheme();
+}
+
+function applyTheme() {
+    document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
+    const themeIcon = document.getElementById('themeIcon');
+    if (themeIcon) {
+        themeIcon.textContent = isDarkMode ? '🌙' : '☀️';
+    }
+}
+
+// Toast notifications
+function showToast(message, type = 'info', duration = 3000) {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.setAttribute('role', 'alert');
+    toast.setAttribute('aria-live', 'polite');
+    toast.textContent = message;
+    
+    document.body.appendChild(toast);
+    
+    // Trigger animation
+    setTimeout(() => toast.classList.add('show'), 10);
+    
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+    }, duration);
+}
+
+// Progress bar color with thresholds - preserves original gradients
 function updateBarColor(element, percent, type = 'default') {
     const baseClasses = 'progress-fill';
+    let gradientClass = '';
+    let warningClass = '';
     
+    // Define base gradients for each type
+    const gradients = {
+        'cpu': 'bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500',
+        'memory': 'bg-gradient-to-r from-cyan-500 via-blue-500 to-indigo-500',
+        'disk': 'bg-gradient-to-r from-emerald-500 via-green-500 to-teal-500',
+        'gpu': 'bg-gradient-to-r from-orange-500 via-red-500 to-pink-500',
+        'default': 'bg-gradient-to-r from-gray-500 via-gray-600 to-gray-700'
+    };
+    
+    gradientClass = gradients[type] || gradients['default'];
+    
+    // Add warning/critical styling based on thresholds
     if (percent >= 90) {
-        element.className = `${baseClasses} bg-gradient-to-r from-gray-700 via-gray-800 to-gray-900`;
-        element.style.boxShadow = '0 0 20px rgba(0, 0, 0, 0.8)';
+        warningClass = 'progress-critical';
+        element.style.boxShadow = '0 0 20px rgba(239, 68, 68, 0.6), 0 0 40px rgba(239, 68, 68, 0.3)';
     } else if (percent >= 80) {
-        element.className = `${baseClasses} bg-gradient-to-r from-gray-600 via-gray-700 to-gray-800`;
-        element.style.boxShadow = '0 0 16px rgba(0, 0, 0, 0.6)';
-    } else if (percent >= 70) {
-        element.className = `${baseClasses} bg-gradient-to-r from-gray-500 via-gray-600 to-gray-700`;
-        element.style.boxShadow = '0 0 12px rgba(0, 0, 0, 0.5)';
+        warningClass = 'progress-warning';
+        element.style.boxShadow = '0 0 16px rgba(251, 191, 36, 0.5), 0 0 32px rgba(251, 191, 36, 0.2)';
     } else {
-        element.className = `${baseClasses} bg-gradient-to-r from-gray-300 via-gray-400 to-gray-500`;
-        element.style.boxShadow = '0 0 12px rgba(255, 255, 255, 0.3)';
+        element.style.boxShadow = '';
+    }
+    
+    element.className = `${baseClasses} ${gradientClass} ${warningClass}`;
+}
+
+// Add threshold indicator to card
+function updateThresholdIndicator(cardId, percent, thresholds = { warning: 80, critical: 90 }) {
+    const card = document.getElementById(cardId);
+    if (!card) return;
+    
+    // Remove existing indicators
+    card.classList.remove('threshold-warning', 'threshold-critical');
+    
+    if (percent >= thresholds.critical) {
+        card.classList.add('threshold-critical');
+    } else if (percent >= thresholds.warning) {
+        card.classList.add('threshold-warning');
     }
 }
 
@@ -42,13 +117,26 @@ function fetchWithTimeout(url, timeout = 15000) {
         .finally(() => clearTimeout(timeoutId));
 }
 
-async function fetchStats() {
+let refreshInterval = null;
+let isRefreshing = false;
+
+async function fetchStats(showLoading = false) {
+    if (isRefreshing) return;
+    
     const loading = document.getElementById('loading');
     const content = document.getElementById('content');
     const error = document.getElementById('error');
     const errorMessage = document.getElementById('errorMessage');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const refreshIcon = document.getElementById('refreshIcon');
 
-    // Only show loading if we don't have content yet
+    // Show loading state
+    if (showLoading || !content.classList.contains('hidden')) {
+        if (refreshIcon) refreshIcon.classList.add('spinning');
+        isRefreshing = true;
+    }
+    
+    // Only show full loading if we don't have content yet
     const hasContent = !content.classList.contains('hidden');
     if (!hasContent) {
         loading.classList.remove('hidden');
@@ -62,32 +150,40 @@ async function fetchStats() {
         }
         const data = await response.json();
 
+        // System info
         document.getElementById('hostname').textContent = data.system?.hostname || 'N/A';
         document.getElementById('platform').textContent = `${data.system?.platform || 'N/A'} ${data.system?.platform_release || ''}`.trim();
         document.getElementById('uptime').textContent = data.uptime?.formatted || 'N/A';
 
+        // CPU
         const cpuPercent = data.cpu?.cpu_percent || 0;
         document.getElementById('cpuPercent').textContent = cpuPercent.toFixed(1) + '%';
         document.getElementById('cpuBar').style.width = cpuPercent + '%';
         updateBarColor(document.getElementById('cpuBar'), cpuPercent, 'cpu');
+        updateThresholdIndicator('cpuCard', cpuPercent);
         document.getElementById('cpuCores').textContent = `${data.cpu?.cpu_count_logical || 0} logical, ${data.cpu?.cpu_count_physical || 0} physical`;
 
+        // Memory
         const memoryPercent = data.memory?.memory_percent || 0;
         const memoryInfo = data.memory?.virtual_memory || {};
         document.getElementById('memoryPercent').textContent = memoryPercent.toFixed(1) + '%';
         document.getElementById('memoryBar').style.width = memoryPercent + '%';
         updateBarColor(document.getElementById('memoryBar'), memoryPercent, 'memory');
+        updateThresholdIndicator('memoryCard', memoryPercent);
         document.getElementById('memoryUsed').textContent = formatBytes(memoryInfo.used || 0);
         document.getElementById('memoryTotal').textContent = formatBytes(memoryInfo.total || 0);
 
+        // Disk
         const diskInfo = data.disk?.total || {};
         const diskPercent = diskInfo.percent || 0;
         document.getElementById('diskPercent').textContent = diskPercent.toFixed(1) + '%';
         document.getElementById('diskBar').style.width = diskPercent + '%';
         updateBarColor(document.getElementById('diskBar'), diskPercent, 'disk');
+        updateThresholdIndicator('diskCard', diskPercent);
         document.getElementById('diskUsed').textContent = formatBytes(diskInfo.used || 0);
         document.getElementById('diskTotal').textContent = formatBytes(diskInfo.total || 0);
 
+        // GPU
         if (data.gpu && data.gpu.utilization) {
             const gpuPercent = data.gpu.utilization.gpu || 0;
             document.getElementById('gpuCard').classList.remove('hidden');
@@ -95,12 +191,14 @@ async function fetchStats() {
             document.getElementById('gpuPercent').textContent = gpuPercent.toFixed(1) + '%';
             document.getElementById('gpuBar').style.width = gpuPercent + '%';
             updateBarColor(document.getElementById('gpuBar'), gpuPercent, 'gpu');
+            updateThresholdIndicator('gpuCard', gpuPercent);
             const gpuMem = data.gpu.memory || {};
             document.getElementById('gpuMemory').textContent = `${formatBytes((gpuMem.used || 0) * 1024 * 1024)} / ${formatBytes((gpuMem.total || 0) * 1024 * 1024)}`;
         } else {
             document.getElementById('gpuCard').classList.add('hidden');
         }
 
+        // Temperature
         if (data.temperature && data.temperature > 0) {
             document.getElementById('tempCard').classList.remove('hidden');
             document.getElementById('cpuTemp').textContent = data.temperature.toFixed(1) + '°C';
@@ -108,12 +206,21 @@ async function fetchStats() {
             document.getElementById('tempCard').classList.add('hidden');
         }
 
+        // Network
         const networkInfo = data.network || {};
         document.getElementById('networkUpload').textContent = formatBytesPerSecond(networkInfo.bytes_sent_per_sec || 0);
         document.getElementById('networkDownload').textContent = formatBytesPerSecond(networkInfo.bytes_recv_per_sec || 0);
+        
+        // Network details
+        updateNetworkDetails(networkInfo);
 
+        // Processes
         document.getElementById('processCount').textContent = data.processes?.total || 0;
+        
+        // Top processes
+        updateTopProcesses(data.top_processes_cpu || [], data.top_processes_memory || []);
 
+        // Update timestamp
         const now = new Date();
         const timeStr = now.toLocaleTimeString('en-US', { 
             hour: '2-digit', 
@@ -126,6 +233,10 @@ async function fetchStats() {
         loading.classList.add('hidden');
         content.classList.remove('hidden');
         error.classList.add('hidden');
+        
+        // Store data for charts
+        updateCharts(data);
+        
     } catch (err) {
         loading.classList.add('hidden');
         
@@ -140,12 +251,13 @@ async function fetchStats() {
             errorMsg += err.message + '. ';
             console.error('Error fetching stats:', err);
         }
-        errorMsg += 'Retrying...';
-        errorMessage.textContent = errorMsg;
+        
+        showToast(errorMsg, 'error', 5000);
         
         // Only show error if we don't have content, otherwise silently retry
         if (content.classList.contains('hidden')) {
             error.classList.remove('hidden');
+            errorMessage.textContent = errorMsg + 'Retrying...';
             setTimeout(() => {
                 error.classList.add('hidden');
                 fetchStats();
@@ -154,17 +266,167 @@ async function fetchStats() {
             // If we have content, retry silently without showing error
             setTimeout(fetchStats, 2000);
         }
+    } finally {
+        isRefreshing = false;
+        if (refreshIcon) refreshIcon.classList.remove('spinning');
     }
 }
 
-// Wait for DOM to be ready before initializing
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        fetchStats();
-        setInterval(fetchStats, 5000);
-    });
-} else {
-    fetchStats();
-    setInterval(fetchStats, 5000);
+function updateNetworkDetails(networkInfo) {
+    const detailsContainer = document.getElementById('networkDetails');
+    if (!detailsContainer) return;
+    
+    // Show interface name if available
+    const interfaceName = networkInfo.interface_name || 'N/A';
+    const interfaceEl = document.getElementById('networkInterface');
+    if (interfaceEl) {
+        interfaceEl.textContent = interfaceName;
+    }
+    
+    // Show latency if available (would need to be added to backend)
+    // For now, just show connection status
+    const statusEl = document.getElementById('networkStatus');
+    if (statusEl) {
+        statusEl.textContent = networkInfo.bytes_sent_per_sec > 0 || networkInfo.bytes_recv_per_sec > 0 ? 'Active' : 'Idle';
+    }
 }
 
+function updateTopProcesses(topCpu, topMemory) {
+    const cpuList = document.getElementById('topProcessesCpu');
+    const memoryList = document.getElementById('topProcessesMemory');
+    
+    if (cpuList) {
+        cpuList.innerHTML = '';
+        if (topCpu && topCpu.length > 0) {
+            topCpu.forEach((proc, index) => {
+                const item = createProcessItem(proc, 'cpu', index + 1);
+                cpuList.appendChild(item);
+            });
+        } else {
+            cpuList.innerHTML = '<div class="text-gray-500 text-sm py-2">No data available</div>';
+        }
+    }
+    
+    if (memoryList) {
+        memoryList.innerHTML = '';
+        if (topMemory && topMemory.length > 0) {
+            topMemory.forEach((proc, index) => {
+                const item = createProcessItem(proc, 'memory', index + 1);
+                memoryList.appendChild(item);
+            });
+        } else {
+            memoryList.innerHTML = '<div class="text-gray-500 text-sm py-2">No data available</div>';
+        }
+    }
+}
+
+function createProcessItem(proc, type, rank) {
+    const item = document.createElement('div');
+    item.className = 'process-item';
+    item.setAttribute('role', 'listitem');
+    
+    const percent = type === 'cpu' ? (proc.cpu_percent || 0) : (proc.memory_percent || 0);
+    const name = proc.name || 'Unknown';
+    const pid = proc.pid || 'N/A';
+    
+    item.innerHTML = `
+        <div class="flex items-center justify-between w-full">
+            <div class="flex items-center gap-3 flex-1 min-w-0">
+                <span class="text-gray-400 font-mono text-xs">#${rank}</span>
+                <div class="flex-1 min-w-0">
+                    <div class="font-semibold text-sm truncate" title="${name}">${name}</div>
+                    <div class="text-xs text-gray-500 font-mono">PID: ${pid}</div>
+                </div>
+            </div>
+            <div class="text-right">
+                <div class="font-bold text-sm">${percent.toFixed(1)}%</div>
+                <div class="text-xs text-gray-500">${type === 'cpu' ? 'CPU' : 'Mem'}</div>
+            </div>
+        </div>
+    `;
+    
+    return item;
+}
+
+// Simple chart data storage (for future enhancement)
+const chartData = {
+    cpu: [],
+    memory: [],
+    disk: [],
+    maxPoints: 50
+};
+
+function updateCharts(data) {
+    const now = Date.now();
+    
+    // Store data points
+    chartData.cpu.push({ time: now, value: data.cpu?.cpu_percent || 0 });
+    chartData.memory.push({ time: now, value: data.memory?.memory_percent || 0 });
+    chartData.disk.push({ time: now, value: data.disk?.total?.percent || 0 });
+    
+    // Keep only last N points
+    Object.keys(chartData).forEach(key => {
+        if (key !== 'maxPoints' && chartData[key].length > chartData.maxPoints) {
+            chartData[key].shift();
+        }
+    });
+    
+    // Update mini charts if they exist
+    updateMiniChart('cpuChart', chartData.cpu);
+    updateMiniChart('memoryChart', chartData.memory);
+    updateMiniChart('diskChart', chartData.disk);
+}
+
+function updateMiniChart(canvasId, data) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !data || data.length < 2) return;
+    
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    
+    ctx.clearRect(0, 0, width, height);
+    
+    // Set chart color based on canvas ID
+    let chartColor = '#3b82f6';
+    if (canvasId === 'cpuChart') chartColor = '#a855f7'; // purple
+    else if (canvasId === 'memoryChart') chartColor = '#06b6d4'; // cyan
+    else if (canvasId === 'diskChart') chartColor = '#10b981'; // emerald
+    
+    ctx.strokeStyle = chartColor;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    
+    const maxValue = 100;
+    const stepX = width / (data.length - 1);
+    
+    data.forEach((point, index) => {
+        const x = index * stepX;
+        const y = height - (point.value / maxValue) * height;
+        
+        if (index === 0) {
+            ctx.moveTo(x, y);
+        } else {
+            ctx.lineTo(x, y);
+        }
+    });
+    
+    ctx.stroke();
+}
+
+function manualRefresh() {
+    fetchStats(true);
+}
+
+// Initialize on page load
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+        initTheme();
+        fetchStats();
+        refreshInterval = setInterval(fetchStats, 5000);
+    });
+} else {
+    initTheme();
+    fetchStats();
+    refreshInterval = setInterval(fetchStats, 5000);
+}

@@ -24,13 +24,13 @@ _process_cache = {
     'top_cpu': [],
     'top_memory': [],
     'last_update': 0.0,
-    'cache_interval': 2.0
+    'cache_interval': 5.0  # Increased from 2.0 to reduce load
 }
 
 _network_cache = {
     'data': {},
     'last_update': 0.0,
-    'cache_interval': 0.5
+    'cache_interval': 1.0  # Increased from 0.5 to reduce load
 }
 
 
@@ -338,7 +338,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         if cpu_monitor:
             try:
                 stats['cpu'] = cpu_monitor.get_cpu_info()
-                stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0.1)
+                stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0.05)
             except Exception as e:
                 logger.warning(f"Error getting CPU info: {e}")
         
@@ -377,7 +377,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             try:
                 time_since_network_update = current_time - _network_cache['last_update']
                 if time_since_network_update >= _network_cache['cache_interval']:
-                    bandwidth = network_monitor.get_bandwidth_usage(interval=0.1)
+                    bandwidth = network_monitor.get_bandwidth_usage(interval=0.05)
                     if bandwidth:
                         _network_cache['data'] = bandwidth
                         _network_cache['last_update'] = current_time

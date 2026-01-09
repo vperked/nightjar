@@ -232,6 +232,7 @@ class SystemMonitor:
     def get_top_processes(self, limit: int = 10, sort_by: str = 'cpu') -> List[Dict]:
         """
         Get top processes by CPU or memory usage.
+        Optimized to minimize blocking calls by only checking CPU for likely candidates.
         
         Args:
             limit: Number of processes to return
@@ -241,27 +242,41 @@ class SystemMonitor:
             List of process dictionaries
         """
         processes = []
-        
-        for proc in psutil.process_iter(['pid', 'name', 'memory_percent', 'memory_info']):
-            try:
-                proc_info = proc.info.copy()
-                proc_info['memory_percent'] = proc.memory_percent()
-                proc_info['cpu_percent'] = 0.0
-                processes.append(proc_info)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        
-        for proc_info in processes:
-            try:
-                proc = psutil.Process(proc_info['pid'])
-                cpu_percent = proc.cpu_percent()
-                proc_info['cpu_percent'] = min(cpu_percent / self.cpu_monitor.cpu_count, 100.0) if self.cpu_monitor.cpu_count > 0 else min(cpu_percent, 100.0)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        
         if sort_by == 'cpu':
+            for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
+                try:
+                    proc_info = proc.info.copy()
+                    if proc_info.get('memory_percent') is None:
+                        proc_info['memory_percent'] = proc.memory_percent()
+                    proc_info['cpu_percent'] = 0.0
+                    processes.append(proc_info)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+            
+            processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
+            candidates = processes[:min(limit * 5, 50, len(processes))]
+            
+            for proc_info in candidates:
+                try:
+                    proc = psutil.Process(proc_info['pid'])
+                    cpu_percent = proc.cpu_percent(interval=None)
+                    proc_info['cpu_percent'] = min(cpu_percent / self.cpu_monitor.cpu_count, 100.0) if self.cpu_monitor.cpu_count > 0 else min(cpu_percent, 100.0)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    proc_info['cpu_percent'] = 0.0
+                    continue
+            
             processes.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
-        elif sort_by == 'memory':
+        else:
+            for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
+                try:
+                    proc_info = proc.info.copy()
+                    if proc_info.get('memory_percent') is None:
+                        proc_info['memory_percent'] = proc.memory_percent()
+                    proc_info['cpu_percent'] = 0.0
+                    processes.append(proc_info)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+            
             processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
         
         return processes[:limit]
