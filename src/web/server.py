@@ -3,6 +3,7 @@ import threading
 import socket
 import signal
 import time
+import psutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Dict, Optional
@@ -30,7 +31,9 @@ _process_cache = {
 _network_cache = {
     'data': {},
     'last_update': 0.0,
-    'cache_interval': 2.0  # Increased from 1.0 to reduce frequent updates
+    'cache_interval': 2.0,  # Increased from 1.0 to reduce frequent updates
+    'last_io': None,  # Store previous I/O counters for rate calculation
+    'last_io_time': 0.0
 }
 
 _gpu_cache = {
@@ -416,14 +419,42 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             try:
                 time_since_network_update = current_time - _network_cache['last_update']
                 if time_since_network_update >= _network_cache['cache_interval']:
-                    # Use interval=0 for non-blocking call
-                    bandwidth = network_monitor.get_bandwidth_usage(interval=0)
-                    if bandwidth:
-                        _network_cache['data'] = bandwidth
-                        _network_cache['last_update'] = current_time
-                        stats['network'] = bandwidth
+                    # Get current I/O counters (non-blocking)
+                    current_io = psutil.net_io_counters()
+                    if current_io is None:
+                        stats['network'] = _network_cache.get('data', {})
                     else:
-                        stats['network'] = _network_cache['data']
+                        # Calculate rate from previous measurement if available
+                        if _network_cache['last_io'] is not None and _network_cache['last_io_time'] > 0:
+                            time_diff = current_time - _network_cache['last_io_time']
+                            if time_diff > 0:
+                                bandwidth = {
+                                    'interface_name': 'system-wide',
+                                    'bytes_sent_per_sec': (current_io.bytes_sent - _network_cache['last_io'].bytes_sent) / time_diff,
+                                    'bytes_recv_per_sec': (current_io.bytes_recv - _network_cache['last_io'].bytes_recv) / time_diff,
+                                    'packets_sent_per_sec': (current_io.packets_sent - _network_cache['last_io'].packets_sent) / time_diff,
+                                    'packets_recv_per_sec': (current_io.packets_recv - _network_cache['last_io'].packets_recv) / time_diff,
+                                }
+                                _network_cache['data'] = bandwidth
+                                _network_cache['last_update'] = current_time
+                                stats['network'] = bandwidth
+                            else:
+                                stats['network'] = _network_cache.get('data', {})
+                        else:
+                            # First measurement - initialize cache but return empty rates
+                            bandwidth = {
+                                'interface_name': 'system-wide',
+                                'bytes_sent_per_sec': 0,
+                                'bytes_recv_per_sec': 0,
+                                'packets_sent_per_sec': 0,
+                                'packets_recv_per_sec': 0,
+                            }
+                            _network_cache['data'] = bandwidth
+                            stats['network'] = bandwidth
+                        
+                        # Store current values for next calculation
+                        _network_cache['last_io'] = current_io
+                        _network_cache['last_io_time'] = current_time
                 else:
                     stats['network'] = _network_cache['data']
             except Exception as e:
