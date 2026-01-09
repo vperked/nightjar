@@ -2,21 +2,17 @@ function updateBarColor(element, percent, type = 'default') {
     const baseClasses = 'progress-fill';
     
     if (percent >= 90) {
-        element.className = `${baseClasses} bg-gradient-to-r from-red-600 via-red-700 to-red-800`;
-    } else if (percent >= 75) {
-        element.className = `${baseClasses} bg-gradient-to-r from-orange-500 via-red-500 to-red-600`;
+        element.className = `${baseClasses} bg-gradient-to-r from-gray-700 via-gray-800 to-gray-900`;
+        element.style.boxShadow = '0 0 20px rgba(0, 0, 0, 0.8)';
+    } else if (percent >= 80) {
+        element.className = `${baseClasses} bg-gradient-to-r from-gray-600 via-gray-700 to-gray-800`;
+        element.style.boxShadow = '0 0 16px rgba(0, 0, 0, 0.6)';
+    } else if (percent >= 70) {
+        element.className = `${baseClasses} bg-gradient-to-r from-gray-500 via-gray-600 to-gray-700`;
+        element.style.boxShadow = '0 0 12px rgba(0, 0, 0, 0.5)';
     } else {
-        if (type === 'cpu') {
-            element.className = `${baseClasses} bg-gradient-to-r from-red-500 via-rose-500 to-pink-500`;
-        } else if (type === 'memory') {
-            element.className = `${baseClasses} bg-gradient-to-r from-red-600 via-red-500 to-rose-500`;
-        } else if (type === 'disk') {
-            element.className = `${baseClasses} bg-gradient-to-r from-rose-500 via-pink-500 to-red-400`;
-        } else if (type === 'gpu') {
-            element.className = `${baseClasses} bg-gradient-to-r from-orange-500 via-red-500 to-rose-600`;
-        } else {
-            element.className = `${baseClasses} bg-gradient-to-r from-red-500 via-rose-500 to-pink-500`;
-        }
+        element.className = `${baseClasses} bg-gradient-to-r from-gray-300 via-gray-400 to-gray-500`;
+        element.style.boxShadow = '0 0 12px rgba(255, 255, 255, 0.3)';
     }
 }
 
@@ -122,12 +118,19 @@ async function fetchStats() {
         const topMemoryDiv = document.getElementById('topMemoryProcesses');
         
         if (data.top_processes_cpu && data.top_processes_cpu.length > 0) {
-            topCpuDiv.innerHTML = data.top_processes_cpu.map(proc => {
+            topCpuDiv.innerHTML = data.top_processes_cpu.map((proc, index) => {
                 const name = proc.name || 'Unknown';
                 const cpu = (proc.cpu_percent || 0).toFixed(1);
-                return `<div class="process-item justify-between text-xs">
-                    <span class="value font-mono truncate flex-1 mr-2">${name}</span>
-                    <span class="text-red-300 font-semibold font-mono flex-shrink-0">${cpu}%</span>
+                const barWidth = Math.min(cpu, 100);
+                const barColor = cpu >= 80 ? 'bg-gray-800' : cpu >= 60 ? 'bg-gray-600' : 'bg-gray-400';
+                return `<div class="process-item flex-col items-start gap-2 text-xs" style="animation-delay: ${index * 0.05}s">
+                    <div class="flex justify-between w-full items-center">
+                        <span class="value font-mono truncate flex-1 mr-2 text-sm">${name}</span>
+                        <span class="text-white font-bold font-mono flex-shrink-0 text-sm">${cpu}%</span>
+                    </div>
+                    <div class="w-full h-1.5 bg-black/30 rounded-full overflow-hidden">
+                        <div class="${barColor} h-full rounded-full transition-all duration-500" style="width: ${barWidth}%"></div>
+                    </div>
                 </div>`;
             }).join('');
         } else {
@@ -135,19 +138,33 @@ async function fetchStats() {
         }
         
         if (data.top_processes_memory && data.top_processes_memory.length > 0) {
-            topMemoryDiv.innerHTML = data.top_processes_memory.map(proc => {
+            topMemoryDiv.innerHTML = data.top_processes_memory.map((proc, index) => {
                 const name = proc.name || 'Unknown';
                 const mem = (proc.memory_percent || 0).toFixed(1);
-                return `<div class="process-item justify-between text-xs">
-                    <span class="value font-mono truncate flex-1 mr-2">${name}</span>
-                    <span class="text-rose-300 font-semibold font-mono flex-shrink-0">${mem}%</span>
+                const barWidth = Math.min(mem * 10, 100);
+                const barColor = mem >= 8 ? 'bg-gray-800' : mem >= 5 ? 'bg-gray-600' : 'bg-gray-400';
+                return `<div class="process-item flex-col items-start gap-2 text-xs" style="animation-delay: ${index * 0.05}s">
+                    <div class="flex justify-between w-full items-center">
+                        <span class="value font-mono truncate flex-1 mr-2 text-sm">${name}</span>
+                        <span class="text-white font-bold font-mono flex-shrink-0 text-sm">${mem}%</span>
+                    </div>
+                    <div class="w-full h-1.5 bg-black/30 rounded-full overflow-hidden">
+                        <div class="${barColor} h-full rounded-full transition-all duration-500" style="width: ${barWidth}%"></div>
+                    </div>
                 </div>`;
             }).join('');
         } else {
             topMemoryDiv.innerHTML = '<div class="text-xs sm:text-sm text-gray-500">Not available</div>';
         }
 
-        document.getElementById('lastUpdate').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString('en-US', { 
+            hour: '2-digit', 
+            minute: '2-digit', 
+            second: '2-digit',
+            hour12: false
+        });
+        document.getElementById('lastUpdate').textContent = timeStr;
 
         loading.classList.add('hidden');
         content.classList.remove('hidden');

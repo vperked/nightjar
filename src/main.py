@@ -967,6 +967,46 @@ def main(
                     if webhook:
                         logger.warning(f"[ALERT] Disk: {disk_percent:.1f}% (threshold: {disk_threshold:.1f}%)")
                         
+                        fields = [
+                            {'name': 'Overall Usage', 'value': f'{disk_percent:.1f}%', 'inline': True},
+                            {'name': 'Threshold', 'value': f'{disk_threshold:.1f}%', 'inline': True},
+                            {'name': 'Total Capacity', 'value': format_bytes(total_disk['total']), 'inline': False},
+                            {'name': 'Used', 'value': format_bytes(total_disk['used']), 'inline': True},
+                            {'name': 'Free', 'value': format_bytes(total_disk['free']), 'inline': True},
+                        ]
+                        
+                        try:
+                            all_partitions = disk_monitor.get_all_partitions()
+                            if all_partitions:
+                                partition_lines = []
+                                for partition in all_partitions[:6]:
+                                    mount = partition['mountpoint']
+                                    if len(mount) > 20:
+                                        mount = mount[:17] + '...'
+                                    device = partition['device']
+                                    if len(device) > 15:
+                                        device = '...' + device[-12:]
+                                    percent = partition['percent']
+                                    used = format_bytes(partition['used'])
+                                    total = format_bytes(partition['total'])
+                                    
+                                    bar_filled = int(percent / 10)
+                                    bar_empty = 10 - bar_filled
+                                    bar = '█' * bar_filled + '░' * bar_empty
+                                    
+                                    partition_lines.append(
+                                        f"`{mount:20s}` {bar} {percent:5.1f}%\n"
+                                        f"└ {used} / {total}"
+                                    )
+                                
+                                fields.append({
+                                    'name': 'Partition Breakdown',
+                                    'value': '\n\n'.join(partition_lines) if partition_lines else 'No partitions found',
+                                    'inline': False
+                                })
+                        except Exception as e:
+                            logger.debug(f"Could not get partition details: {e}")
+                        
                         largest_dirs = []
                         try:
                             root_partition = disk_monitor.get_disk_usage('/')
@@ -974,14 +1014,6 @@ def main(
                                 largest_dirs = disk_monitor.get_largest_directories_human('/', limit=5)
                         except Exception as e:
                             logger.debug(f"Could not get largest directories: {e}")
-                        
-                        fields = [
-                            {'name': 'Disk Usage', 'value': f'{disk_percent:.1f}%', 'inline': True},
-                            {'name': 'Threshold', 'value': f'{disk_threshold:.1f}%', 'inline': True},
-                            {'name': 'Total Disk', 'value': format_bytes(total_disk['total']), 'inline': False},
-                            {'name': 'Used', 'value': format_bytes(total_disk['used']), 'inline': True},
-                            {'name': 'Free', 'value': format_bytes(total_disk['free']), 'inline': True},
-                        ]
                         
                         if largest_dirs:
                             dir_list = []
@@ -991,7 +1023,7 @@ def main(
                                 dir_list.append(f"{i}. `{dir_name}`: {dir_size}")
                             
                             fields.append({
-                                'name': 'Largest Directories',
+                                'name': 'Largest Directories (root)',
                                 'value': '\n'.join(dir_list) if dir_list else 'Unable to determine',
                                 'inline': False
                             })

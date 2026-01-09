@@ -172,16 +172,117 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 logger.debug("Connection aborted while sending error response")
     
     def serve_health(self):
-        """Serve health check endpoint."""
+        """Serve health check endpoint with comprehensive system checks."""
         try:
             import time
-            health_data = {
-                'status': 'ok',
-                'timestamp': time.time()
-            }
-            response = json.dumps(health_data).encode('utf-8')
+            import psutil
+            from datetime import datetime
             
-            self.send_response(200)
+            health_status = 'ok'
+            checks = {}
+            issues = []
+            
+            if cpu_monitor:
+                try:
+                    cpu_percent = cpu_monitor.get_cpu_percent(interval=0.1)
+                    checks['cpu'] = {
+                        'status': 'ok',
+                        'usage_percent': round(cpu_percent, 1)
+                    }
+                    if cpu_percent > 95:
+                        issues.append('CPU usage very high')
+                        health_status = 'degraded'
+                except Exception as e:
+                    checks['cpu'] = {'status': 'error', 'error': str(e)}
+                    issues.append('CPU monitor failed')
+                    health_status = 'error'
+            
+            if memory_monitor:
+                try:
+                    memory_percent = memory_monitor.get_memory_percent()
+                    memory_info = memory_monitor.get_memory_info()
+                    checks['memory'] = {
+                        'status': 'ok',
+                        'usage_percent': round(memory_percent, 1),
+                        'available_gb': round(memory_info.get('available', 0) / (1024**3), 2)
+                    }
+                    if memory_percent > 95:
+                        issues.append('Memory usage very high')
+                        health_status = 'degraded'
+                    if memory_info.get('available', 0) < 100 * 1024 * 1024:
+                        issues.append('Low memory available (<100MB)')
+                        health_status = 'degraded'
+                except Exception as e:
+                    checks['memory'] = {'status': 'error', 'error': str(e)}
+                    issues.append('Memory monitor failed')
+                    health_status = 'error'
+            
+            if disk_monitor:
+                try:
+                    disk_usage = disk_monitor.get_total_disk_usage()
+                    disk_percent = disk_usage.get('percent', 0)
+                    free_gb = disk_usage.get('free', 0) / (1024**3)
+                    checks['disk'] = {
+                        'status': 'ok',
+                        'usage_percent': round(disk_percent, 1),
+                        'free_gb': round(free_gb, 2)
+                    }
+                    if disk_percent > 95:
+                        issues.append('Disk usage very high (>95%)')
+                        health_status = 'degraded'
+                    if free_gb < 1.0:
+                        issues.append('Low disk space (<1GB free)')
+                        health_status = 'degraded'
+                except Exception as e:
+                    checks['disk'] = {'status': 'error', 'error': str(e)}
+                    issues.append('Disk monitor failed')
+                    health_status = 'error'
+            
+            try:
+                boot_time = psutil.boot_time()
+                uptime_seconds = time.time() - boot_time
+                uptime_hours = uptime_seconds / 3600
+                checks['system'] = {
+                    'status': 'ok',
+                    'uptime_hours': round(uptime_hours, 1),
+                    'boot_time': datetime.fromtimestamp(boot_time).isoformat()
+                }
+            except Exception as e:
+                checks['system'] = {'status': 'error', 'error': str(e)}
+                issues.append('System info check failed')
+                if health_status == 'ok':
+                    health_status = 'degraded'
+            
+            if sensors_monitor:
+                try:
+                    if sensors_monitor.is_available():
+                        cpu_temp = sensors_monitor.get_cpu_temperature()
+                        checks['temperature'] = {
+                            'status': 'ok',
+                            'cpu_temp_celsius': round(cpu_temp, 1) if cpu_temp else None
+                        }
+                        if cpu_temp and cpu_temp > 90:
+                            issues.append('CPU temperature very high (>90°C)')
+                            health_status = 'degraded'
+                    else:
+                        checks['temperature'] = {'status': 'unavailable'}
+                except Exception as e:
+                    checks['temperature'] = {'status': 'error', 'error': str(e)}
+            
+            health_data = {
+                'status': health_status,
+                'timestamp': time.time(),
+                'timestamp_iso': datetime.now().isoformat(),
+                'checks': checks
+            }
+            
+            if issues:
+                health_data['issues'] = issues
+            
+            response = json.dumps(health_data, indent=2).encode('utf-8')
+            
+            status_code = 200 if health_status == 'ok' else (503 if health_status == 'degraded' else 500)
+            self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Content-length', str(len(response)))
@@ -192,7 +293,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Error serving health: {e}")
             try:
-                error_response = json.dumps({'status': 'error', 'error': str(e)}).encode('utf-8')
+                error_response = json.dumps({
+                    'status': 'error',
+                    'error': str(e),
+                    'timestamp': time.time()
+                }).encode('utf-8')
                 self.send_response(500)
                 self.send_header('Content-type', 'application/json')
                 self.send_header('Content-length', str(len(error_response)))

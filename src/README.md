@@ -4,7 +4,7 @@ A comprehensive server monitoring system with Discord alerts, web dashboard, and
 
 > **Latest Update:** January 2026 - Code review fixes and improvements applied
 
-## 📁 Directory Structure
+## Directory Structure
 
 ```
 src/
@@ -173,8 +173,37 @@ Provides a web interface at `http://localhost:8080` (configurable):
 **API Endpoints:**
 - `GET /` - Web dashboard
 - `GET /api/stats` - JSON API for system statistics
-- `GET /health` - Health check endpoint (returns status and timestamp)
+- `GET /health` - Comprehensive health check endpoint with system status
 - `GET /js/main.js` - JavaScript frontend
+
+**Health Check Endpoint (`/health`):**
+Returns detailed health status with checks for:
+- **CPU**: Usage percentage (warns if >95%)
+- **Memory**: Usage percentage and available memory (warns if >95% or <100MB available)
+- **Disk**: Usage percentage and free space (warns if >95% or <1GB free)
+- **System**: Uptime and boot time
+- **Temperature**: CPU temperature if sensors available (warns if >90°C)
+
+Response status codes:
+- `200 OK` - All systems healthy
+- `503 Service Unavailable` - System degraded (high resource usage)
+- `500 Internal Server Error` - Critical failure
+
+Example response:
+```json
+{
+  "status": "ok",
+  "timestamp": 1767940917.3821733,
+  "timestamp_iso": "2026-01-09T12:34:56.789",
+  "checks": {
+    "cpu": {"status": "ok", "usage_percent": 45.2},
+    "memory": {"status": "ok", "usage_percent": 62.1, "available_gb": 12.5},
+    "disk": {"status": "ok", "usage_percent": 78.3, "free_gb": 450.2},
+    "system": {"status": "ok", "uptime_hours": 120.5},
+    "temperature": {"status": "ok", "cpu_temp_celsius": 65.3}
+  }
+}
+```
 
 ### Utilities
 
@@ -205,7 +234,7 @@ Cache management:
 - Exit cache cleanup
 - Directory cache management
 
-## ⚙️ Configuration
+## Configuration
 
 All configuration is done via environment variables (`.env` file):
 
@@ -271,7 +300,7 @@ sudo python3 src/main.py --install-systemd --force
 # Note: The installer will check permissions and prompt to fix them if needed
 ```
 
-## 📊 Monitoring Features
+## Monitoring Features
 
 ### Automatic Alerts
 The system automatically sends Discord alerts when:
@@ -297,7 +326,7 @@ When temperature alerts trigger, the system analyzes and reports likely causes:
 - Network activity
 - Process activity
 
-## 🏗️ Architecture
+## Architecture
 
 ### Design Patterns
 - **Modular Monitors**: Each system component has its own monitor class
@@ -438,19 +467,19 @@ The codebase follows clean code principles:
 - Comprehensive cleanup in finally blocks
 
 ### Recent Improvements (2026)
-- ✅ Fixed duplicate qBittorrent monitoring code
-- ✅ Added null checks for optional monitors
-- ✅ Implemented cached environment variable access
-- ✅ Standardized exception handling across all modules
-- ✅ Added rate limiting for Discord webhooks
-- ✅ Implemented fallback alert logging
-- ✅ Added health check endpoint
-- ✅ Improved threshold validation with helper functions
-- ✅ Added dependency injection to main() for testing
-- ✅ Standardized boolean function naming (is_* prefix)
-- ✅ Enhanced security with environment variable validation
-- ✅ Optimized process list caching to reduce redundant iterations
-- ✅ Added proper package structure with __init__.py files
+- Fixed duplicate qBittorrent monitoring code
+- Added null checks for optional monitors
+- Implemented cached environment variable access
+- Standardized exception handling across all modules
+- Added rate limiting for Discord webhooks
+- Implemented fallback alert logging
+- Added health check endpoint
+- Improved threshold validation with helper functions
+- Added dependency injection to main() for testing
+- Standardized boolean function naming (is_* prefix)
+- Enhanced security with environment variable validation
+- Optimized process list caching to reduce redundant iterations
+- Added proper package structure with __init__.py files
 
 ## 📄 License
 
