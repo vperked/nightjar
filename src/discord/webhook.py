@@ -148,7 +148,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0x000000 if cpu_percent >= threshold else 0xdc3545
+        color = 0xdc3545
         
         fields = [
             {
@@ -245,7 +245,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0x000000 if memory_percent >= threshold else 0xdc3545
+        color = 0xdc3545
         
         fields = [
             {
@@ -460,7 +460,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0xff6b00 if temperature >= threshold * 1.1 else 0xdc3545
+        color = 0xdc3545
         
         fields = [
             {
@@ -563,7 +563,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0x000000 if gpu_utilization >= threshold else 0xdc3545
+        color = 0xdc3545
         
         fields = [
             {
@@ -765,7 +765,7 @@ class DiscordWebhook:
         return self.send_embed(
             title=f'Process {resource_name} Alert',
             description=f'Process "{name}" has exceeded the {resource_name.lower()} threshold of {threshold:.1f}%',
-            color=0x000000,
+            color=0xdc3545,
             fields=fields,
             footer='Server Monitor',
             timestamp=True
@@ -790,7 +790,7 @@ class DiscordWebhook:
         size_formatted = format_bytes(size_bytes)
         threshold_formatted = format_bytes(threshold_bytes)
         
-        color = 0xff6b00 if size_bytes >= threshold_bytes * 1.1 else 0xdc3545
+        color = 0xdc3545
         
         fields = [
             {
@@ -843,6 +843,67 @@ class DiscordWebhook:
             timestamp=True
         )
     
+    def send_log_size_alert(self, log_info: Dict, threshold_bytes: int, threshold_formatted: str) -> bool:
+        """
+        Send an alert when a log file exceeds the size threshold.
+        
+        Args:
+            log_info: Dictionary containing log file information
+            threshold_bytes: Threshold in bytes
+            threshold_formatted: Formatted threshold string
+            
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        log_path = log_info.get('path', 'Unknown')
+        size_bytes = log_info.get('size_bytes', 0)
+        size_formatted = log_info.get('size_formatted', 'N/A')
+        file_count = log_info.get('file_count')
+        
+        color = 0xdc3545
+        
+        fields = [
+            {
+                'name': 'Log Path',
+                'value': log_path[:256],
+                'inline': False
+            },
+            {
+                'name': 'Current Size',
+                'value': size_formatted,
+                'inline': True
+            },
+            {
+                'name': 'Threshold',
+                'value': threshold_formatted,
+                'inline': True
+            }
+        ]
+        
+        if file_count is not None:
+            fields.append({
+                'name': 'File Count',
+                'value': str(file_count),
+                'inline': True
+            })
+        
+        excess_bytes = size_bytes - threshold_bytes
+        excess_formatted = format_bytes(excess_bytes)
+        fields.append({
+            'name': 'Excess Size',
+            'value': excess_formatted,
+            'inline': True
+        })
+        
+        return self.send_embed(
+            title='Log Size Alert',
+            description=f'Log file has exceeded the size threshold of {threshold_formatted}',
+            color=color,
+            fields=fields,
+            footer='Server Monitor',
+            timestamp=True
+        )
+    
     def send_freeze_alert(self, freeze_status: Dict, system_info: Optional[Dict] = None) -> bool:
         """
         Send a system freeze detection alert to Discord.
@@ -859,7 +920,7 @@ class DiscordWebhook:
         time_since_metric_update = freeze_status.get('time_since_metric_update', 0)
         responsive = freeze_status.get('responsive', False)
         
-        color = 0x000000
+        color = 0xdc3545
         
         primary_reason = reasons[0] if reasons else "System freeze detected"
         

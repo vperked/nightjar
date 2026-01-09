@@ -8,6 +8,7 @@ from monitor.sensors import SensorsMonitor
 from monitor.processes import ProcessMonitor
 from monitor.freeze import FreezeMonitor
 from monitor.qbittorrent import QBittorrentMonitor
+from monitor.log import LogMonitor
 from discord.webhook import DiscordWebhook
 from util.util import format_bytes, format_bytes_per_second
 from util.systemd import install_systemd_service, check_systemd_available, is_root
@@ -239,6 +240,7 @@ def main():
     sensors_monitor = SensorsMonitor()
     process_monitor = ProcessMonitor()
     qbittorrent_monitor = QBittorrentMonitor()
+    log_monitor = LogMonitor()
     logger.info("Monitors initialized")
     
     webhook = None
@@ -278,8 +280,8 @@ def main():
     
     media_directory = os.getenv('MEDIA_DIRECTORY', '/home/media')
     media_directory_threshold_gb = float(os.getenv('MEDIA_DIRECTORY_THRESHOLD_GB', '500.0'))
-    media_directory_threshold_bytes = int(media_directory_threshold_gb * 1024 * 1024 * 1024)  # Convert GB to bytes
-    media_check_interval = int(os.getenv('MEDIA_CHECK_INTERVAL', '10'))  # Check every N loop iterations
+    media_directory_threshold_bytes = int(media_directory_threshold_gb * 1024 * 1024 * 1024)
+    media_check_interval = int(os.getenv('MEDIA_CHECK_INTERVAL', '10'))
     
     cpu_threshold = max(0.0, min(100.0, cpu_threshold))
     memory_threshold = max(0.0, min(100.0, memory_threshold))
@@ -333,6 +335,11 @@ def main():
         logger.info(f"Directory Monitoring: {media_directory} | Threshold: {media_directory_threshold_gb:.1f} GB")
     else:
         logger.warning(f"Directory Monitoring: {media_directory} not found, skipping directory monitoring")
+    
+    log_threshold_mb = float(os.getenv('LOG_THRESHOLD_MB', '100.0'))
+    log_check_interval = int(os.getenv('LOG_CHECK_INTERVAL', '20'))
+    log_monitor.set_threshold(log_threshold_mb)
+    logger.info(f"Log Monitoring: Threshold: {log_threshold_mb:.1f} MB | Check interval: {log_check_interval} cycles")
     
     qbittorrent_connected = False
     if qbittorrent_monitor.password:
@@ -419,6 +426,8 @@ def main():
     network_check_counter = 0
     freeze_check_counter = 0
     media_check_counter = 0
+    log_check_counter = 0
+    last_log_alert_time = {}
     qbittorrent_check_counter = 0
     NETWORK_CHECK_INTERVAL = 2
     PROCESS_CHECK_INTERVAL = 3
@@ -922,6 +931,38 @@ def main():
                             media_alert_sent = False
                 except Exception as e:
                     logger.debug(f"Error checking directory size: {e}")
+            
+            log_check_counter += 1
+            if log_check_counter >= log_check_interval:
+                log_check_counter = 0
+                try:
+                    all_log_sizes = log_monitor.get_all_log_sizes()
+                    exceeded_logs = all_log_sizes.get('exceeded_logs', [])
+                    
+                    for log_info in exceeded_logs:
+                        log_path = log_info.get('path', 'Unknown')
+                        last_alert_time = last_log_alert_time.get(log_path, 0)
+                        time_since_last_alert = current_time - last_alert_time
+                        
+                        if time_since_last_alert >= alert_cooldown:
+                            if webhook:
+                                threshold_formatted = all_log_sizes.get('threshold_formatted', 'N/A')
+                                logger.warning(f"[ALERT] Log file {log_path}: {log_info.get('size_formatted', 'N/A')} (threshold: {threshold_formatted})")
+                                success = webhook.send_log_size_alert(
+                                    log_info=log_info,
+                                    threshold_bytes=all_log_sizes.get('threshold_bytes', 0),
+                                    threshold_formatted=threshold_formatted
+                                )
+                                if success:
+                                    logger.info(f"    Discord log alert sent for {log_path}")
+                                else:
+                                    logger.warning(f"    Discord log alert failed for {log_path}")
+                            else:
+                                logger.warning(f"Log file {log_path}: {log_info.get('size_formatted', 'N/A')} exceeds threshold")
+                            
+                            last_log_alert_time[log_path] = current_time
+                except Exception as e:
+                    logger.debug(f"Error checking log sizes: {e}")
             
             qbittorrent_check_counter += 1
             if qbittorrent_check_counter >= QBITTORRENT_CHECK_INTERVAL:
