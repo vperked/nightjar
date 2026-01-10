@@ -211,8 +211,11 @@ class LogMonitor:
             else:
                 path = Path(log_path)
                 return self._cleanup_regular_log(path)
-        except (OSError, PermissionError, subprocess.SubprocessError) as e:
-            logger.debug(f"Error cleaning up log {log_path}: {e}")
+        except PermissionError as e:
+            logger.error(f"Permission denied cleaning log {log_path}: {e}. Try running with sudo/root permissions.")
+            return False
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.error(f"Error cleaning up log {log_path}: {e}")
             return False
         except Exception as e:
             logger.warning(f"Unexpected error cleaning up log {log_path}: {e}")
@@ -221,6 +224,7 @@ class LogMonitor:
     def _cleanup_regular_log(self, log_path: Path) -> bool:
         """
         Truncate a regular log file to threshold size, keeping the most recent data.
+        Tries multiple methods: truncate command, then file operations.
         
         Args:
             log_path: Path to the log file
@@ -230,6 +234,7 @@ class LogMonitor:
         """
         try:
             if not log_path.exists():
+                logger.warning(f"Log file does not exist: {log_path}")
                 return False
             
             current_size = log_path.stat().st_size
@@ -238,15 +243,48 @@ class LogMonitor:
             
             excess_bytes = current_size - self.threshold_bytes
             
-            with open(log_path, 'rb') as f:
-                f.seek(excess_bytes)
-                tail_data = f.read()
+            if self.is_linux:
+                log_path_str = str(log_path)
+                is_system_log = any(log_path_str.startswith(sys_path) for sys_path in self.system_log_paths)
+                
+                if is_system_log:
+                    try:
+                        result = subprocess.run(
+                            ['truncate', '-s', '0', log_path_str],
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                            check=False
+                        )
+                        if result.returncode == 0:
+                            new_size = log_path.stat().st_size
+                            logger.info(f"System log cleared: {log_path} from {format_bytes(current_size)} to {format_bytes(new_size)}")
+                            return True
+                        else:
+                            logger.debug(f"truncate command failed, trying file operations: {result.stderr}")
+                    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+                        logger.debug(f"truncate command not available or failed: {e}, using file operations")
             
-            with open(log_path, 'wb') as f:
-                f.write(tail_data)
-            
-            return True
-        except (OSError, PermissionError, IOError):
+            try:
+                with open(log_path, 'rb') as f:
+                    f.seek(excess_bytes)
+                    tail_data = f.read()
+                
+                with open(log_path, 'wb') as f:
+                    f.write(tail_data)
+                
+                new_size = log_path.stat().st_size
+                logger.info(f"Log truncated using file operations: {log_path} from {format_bytes(current_size)} to {format_bytes(new_size)}")
+                return True
+            except (OSError, IOError) as e:
+                logger.error(f"File operation failed for {log_path}: {e}")
+                return False
+                
+        except PermissionError as e:
+            logger.error(f"Permission denied cleaning log {log_path}: {e}. Try running with sudo/root permissions.")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error cleaning log {log_path}: {e}")
             return False
     
     def _cleanup_journal_log(self) -> bool:

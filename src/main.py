@@ -1500,6 +1500,7 @@ def main(
                         time_since_last_alert = current_time - last_alert_time
                         
                         if time_since_last_alert >= alert_cooldown:
+                            original_size = log_info.get('size_bytes', 0)
                             cleanup_success = log_monitor.cleanup_log(log_info)
                             cleanup_performed = False
                             
@@ -1507,11 +1508,15 @@ def main(
                                 logger.info(f"    Log cleanup successful for {log_path}")
                                 cleanup_performed = True
                                 cleaned_logs.add(log_path)
+                                
                                 size_after = log_monitor.get_log_size(log_path)
                                 if size_after:
                                     log_info = size_after
+                                    logger.info(f"    Log size after cleanup: {log_info.get('size_formatted', 'N/A')}")
+                                else:
+                                    logger.warning(f"    Could not get log size after cleanup for {log_path}")
                             else:
-                                logger.warning(f"    Log cleanup failed for {log_path}")
+                                logger.error(f"    Log cleanup failed for {log_path} - check permissions (may need root/sudo)")
                             
                             if webhook:
                                 threshold_formatted = all_log_sizes.get('threshold_formatted', 'N/A')

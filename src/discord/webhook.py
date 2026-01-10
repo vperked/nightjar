@@ -1021,9 +1021,10 @@ class DiscordWebhook:
         
         color = 0xdc3545
         
-        description = f'Log file has exceeded the size threshold of {threshold_formatted}'
         if cleanup_performed:
-            description += ' (auto-cleaned)'
+            description = f'Log file exceeded threshold and was auto-cleaned'
+        else:
+            description = f'Log file has exceeded the size threshold of {threshold_formatted}'
         
         fields = [
             {
@@ -1051,7 +1052,7 @@ class DiscordWebhook:
             })
         
         excess_bytes = size_bytes - threshold_bytes
-        if excess_bytes > 0:
+        if excess_bytes > 0 and not cleanup_performed:
             excess_formatted = format_bytes(excess_bytes)
             fields.append({
                 'name': 'Excess Size',
@@ -1062,7 +1063,7 @@ class DiscordWebhook:
         if cleanup_performed:
             fields.append({
                 'name': 'Status',
-                'value': 'Auto-cleaned',
+                'value': '✅ Auto-cleaned',
                 'inline': True
             })
         
