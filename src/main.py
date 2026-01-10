@@ -696,9 +696,8 @@ def main(
     
     log_threshold_mb = get_env_float('LOG_THRESHOLD_MB', 100.0)
     log_check_interval = get_env_int('LOG_CHECK_INTERVAL', 20)
-    log_auto_clean = get_env_bool('LOG_AUTO_CLEAN', False)
     log_monitor.set_threshold(log_threshold_mb)
-    logger.info(f"Log Monitoring: Threshold: {log_threshold_mb:.1f} MB | Check interval: {log_check_interval} cycles | Auto-clean: {log_auto_clean}")
+    logger.info(f"Log Monitoring: Threshold: {log_threshold_mb:.1f} MB | Check interval: {log_check_interval} cycles | Auto-clean: Enabled")
     
     qbittorrent_connected = False
     if qbittorrent_monitor:
@@ -792,6 +791,7 @@ def main(
     media_check_counter = 0
     log_check_counter = 0
     last_log_alert_time = {}
+    cleaned_logs = set()
     qbittorrent_check_counter = 0
     NETWORK_CHECK_INTERVAL = 2
     PROCESS_CHECK_INTERVAL = 3
@@ -1492,21 +1492,26 @@ def main(
                     
                     for log_info in exceeded_logs:
                         log_path = log_info.get('path', 'Unknown')
+                        
+                        if log_path in cleaned_logs:
+                            continue
+                        
                         last_alert_time = last_log_alert_time.get(log_path, 0)
                         time_since_last_alert = current_time - last_alert_time
                         
                         if time_since_last_alert >= alert_cooldown:
+                            cleanup_success = log_monitor.cleanup_log(log_info)
                             cleanup_performed = False
-                            if log_auto_clean:
-                                cleanup_success = log_monitor.cleanup_log(log_info)
-                                if cleanup_success:
-                                    logger.info(f"    Log cleanup successful for {log_path}")
-                                    cleanup_performed = True
-                                    size_after = log_monitor.get_log_size(log_path)
-                                    if size_after:
-                                        log_info = size_after
-                                else:
-                                    logger.warning(f"    Log cleanup failed for {log_path}")
+                            
+                            if cleanup_success:
+                                logger.info(f"    Log cleanup successful for {log_path}")
+                                cleanup_performed = True
+                                cleaned_logs.add(log_path)
+                                size_after = log_monitor.get_log_size(log_path)
+                                if size_after:
+                                    log_info = size_after
+                            else:
+                                logger.warning(f"    Log cleanup failed for {log_path}")
                             
                             if webhook:
                                 threshold_formatted = all_log_sizes.get('threshold_formatted', 'N/A')
@@ -1525,6 +1530,9 @@ def main(
                                 logger.warning(f"Log file {log_path}: {log_info.get('size_formatted', 'N/A')} exceeds threshold")
                             
                             last_log_alert_time[log_path] = current_time
+                    
+                    current_exceeded_paths = {log.get('path') for log in exceeded_logs}
+                    cleaned_logs = {path for path in cleaned_logs if path not in current_exceeded_paths}
                 except Exception as e:
                     logger.debug(f"Error checking log sizes: {e}")
             
