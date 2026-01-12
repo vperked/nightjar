@@ -391,12 +391,10 @@ class DiskMonitor:
         if not path or not isinstance(path, str):
             return None
         
-        # Security: Validate path to prevent traversal attacks
         is_valid, resolved_path, error = validate_path(path, allowed_base_paths=allowed_base_paths, allow_symlinks=False)
         if not is_valid:
             return None
         
-        # Use resolved path for operations
         path = resolved_path
         
         if not os.path.exists(path):
@@ -421,19 +419,15 @@ class DiskMonitor:
         start_time = time.time() if timeout else None
         
         try:
-            # Use topdown=True to allow depth limiting
             for dirpath, dirnames, filenames in os.walk(path, topdown=True):
-                # Check timeout
                 if timeout and (time.time() - start_time) > timeout:
                     logger.warning(f"Directory size calculation timed out after {timeout}s for {path}")
                     timed_out = True
                     break
                 
-                # Check depth limit
                 if max_depth is not None:
                     current_depth = dirpath[len(path):].count(os.sep)
                     if current_depth >= max_depth:
-                        # Clear dirnames to prevent descending further
                         dirnames.clear()
                 
                 dir_count += len(dirnames)
@@ -446,7 +440,6 @@ class DiskMonitor:
                     except (OSError, PermissionError):
                         continue
                     
-                    # Check timeout periodically (every 100 files)
                     if timeout and file_count % 100 == 0:
                         if (time.time() - start_time) > timeout:
                             logger.warning(f"Directory size calculation timed out after {timeout}s for {path}")
@@ -458,9 +451,8 @@ class DiskMonitor:
                     
         except (OSError, PermissionError) as e:
             logger.debug(f"Permission error calculating directory size for {path}: {e}")
-            # Return partial results if we have any
             if file_count > 0 or dir_count > 0:
-                pass  # Continue to return partial results
+                pass
             else:
                 return None
         

@@ -154,14 +154,11 @@ class NetworkMonitor:
             logger.warning("Invalid interval for bandwidth calculation")
             return {}
         
-        # Ensure interval is safe for division (prevent division by zero)
         safe_interval = max(interval, 0.001)
         
         if use_cache:
-            # Non-blocking approach using cached values
             return self._get_bandwidth_from_cache(interface, safe_interval)
         else:
-            # Blocking approach with time.sleep() - kept for compatibility
             return self._get_bandwidth_blocking(interface, safe_interval)
     
     def _get_bandwidth_from_cache(self, interface: Optional[str], interval: float) -> Dict:
@@ -184,7 +181,6 @@ class NetworkMonitor:
             if not current_io or interface not in current_io:
                 return {}
             
-            # Check if we have cached data for this interface
             if (self._last_io_per_nic and interface in self._last_io_per_nic 
                 and self._last_io_timestamp):
                 time_delta = current_time - self._last_io_timestamp
@@ -200,13 +196,11 @@ class NetworkMonitor:
                         'packets_recv_per_sec': (after.packets_recv - before.packets_recv) / time_delta,
                     }
                     
-                    # Update cache
                     self._last_io_per_nic = current_io
                     self._last_io_timestamp = current_time
                     
                     return result
             
-            # No cached data, initialize cache and return zeros
             self._last_io_per_nic = current_io
             self._last_io_timestamp = current_time
             return {
@@ -217,12 +211,10 @@ class NetworkMonitor:
                 'packets_recv_per_sec': 0.0,
             }
         else:
-            # System-wide
             current_io = psutil.net_io_counters()
             if current_io is None:
                 return {}
             
-            # Check if we have cached data
             if self._last_io_counters and self._last_io_timestamp:
                 time_delta = current_time - self._last_io_timestamp
                 if time_delta > 0:
@@ -234,13 +226,11 @@ class NetworkMonitor:
                         'packets_recv_per_sec': (current_io.packets_recv - self._last_io_counters.packets_recv) / time_delta,
                     }
                     
-                    # Update cache
                     self._last_io_counters = current_io
                     self._last_io_timestamp = current_time
                     
                     return result
             
-            # No cached data, initialize cache and return zeros
             self._last_io_counters = current_io
             self._last_io_timestamp = current_time
             return {

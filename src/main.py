@@ -29,7 +29,6 @@ logger = get_logger()
 EMBED_SEND_DELAY = 0.2
 MAX_TRACKED_TORRENTS = 1000
 
-# Default threshold constants
 DEFAULT_CPU_THRESHOLD = 80.0
 DEFAULT_MEMORY_THRESHOLD = 80.0
 DEFAULT_GPU_THRESHOLD = 80.0
@@ -51,7 +50,19 @@ _env_cache = {}
 
 
 def get_cached_env(key: str, default: str = None) -> Optional[str]:
-    """Get environment variable with caching to avoid repeated lookups."""
+    """
+    Get environment variable with caching to avoid repeated lookups.
+    
+    Environment variables are cached after first access to improve performance.
+    Values are validated for security before caching.
+    
+    Args:
+        key: Environment variable name
+        default: Default value if variable is not set (default: None)
+        
+    Returns:
+        Environment variable value or default if not set
+    """
     if key not in _env_cache:
         value = os.getenv(key, default)
         if value:
@@ -217,7 +228,19 @@ def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core:
 
 
 def get_env_float(key: str, default: float) -> float:
-    """Safely get float from environment variable, handling empty strings and None."""
+    """
+    Safely get float value from environment variable.
+    
+    Handles empty strings, None values, and invalid conversions gracefully.
+    Returns default value on any error.
+    
+    Args:
+        key: Environment variable name
+        default: Default value to return if variable is not set or invalid
+        
+    Returns:
+        Float value from environment variable or default
+    """
     value = get_cached_env(key, str(default))
     if not value or value.strip() == '':
         return default
@@ -228,7 +251,19 @@ def get_env_float(key: str, default: float) -> float:
 
 
 def get_env_int(key: str, default: int) -> int:
-    """Safely get int from environment variable, handling empty strings and None."""
+    """
+    Safely get integer value from environment variable.
+    
+    Handles empty strings, None values, and invalid conversions gracefully.
+    Returns default value on any error.
+    
+    Args:
+        key: Environment variable name
+        default: Default value to return if variable is not set or invalid
+        
+    Returns:
+        Integer value from environment variable or default
+    """
     value = get_cached_env(key, str(default))
     if not value or value.strip() == '':
         return default
@@ -239,12 +274,34 @@ def get_env_int(key: str, default: int) -> int:
 
 
 def clamp_threshold(value: float, min_val: float, max_val: float) -> float:
-    """Clamp a threshold value between min and max values."""
+    """
+    Clamp a threshold value between minimum and maximum bounds.
+    
+    Args:
+        value: Value to clamp
+        min_val: Minimum allowed value
+        max_val: Maximum allowed value
+        
+    Returns:
+        Clamped value within [min_val, max_val] range
+    """
     return max(min_val, min(max_val, value))
 
 
 def get_env_bool(key: str, default: bool = False) -> bool:
-    """Safely get boolean from environment variable, handling empty strings and None."""
+    """
+    Safely get boolean value from environment variable.
+    
+    Accepts various string representations: 'true', '1', 'yes', 'on' for True,
+    and 'false', '0', 'no', 'off', '' for False. Case-insensitive.
+    
+    Args:
+        key: Environment variable name
+        default: Default value to return if variable is not set or invalid (default: False)
+        
+    Returns:
+        Boolean value from environment variable or default
+    """
     value = get_cached_env(key, str(default).lower())
     if not value or value.strip() == '':
         return default
@@ -259,7 +316,15 @@ def get_env_bool(key: str, default: bool = False) -> bool:
 
 
 def run_self_test() -> bool:
-    """Run a lightweight self-test for core monitors without starting the loop."""
+    """
+    Run a lightweight self-test for core monitors without starting the monitoring loop.
+    
+    Tests initialization and basic functionality of all monitor modules.
+    If Discord webhook is configured, sends sample embeds to verify webhook functionality.
+    
+    Returns:
+        True if all tests pass, False otherwise
+    """
     logger.info("Running self-test...")
     results = []
     
@@ -768,6 +833,8 @@ def main(
                 logger.warning(f"Error sending qBittorrent status to Discord: {e}")
     
     logger.info("Starting continuous monitoring (Press Ctrl+C to stop)")
+
+    monitoring_start_time = time.time()
     
     last_cpu_alert_time = 0
     last_memory_alert_time = 0
@@ -804,7 +871,6 @@ def main(
     
     try:
         while True:
-            # Initialize process lists at start of loop for clarity
             top_cpu_processes = None
             top_memory_processes = None
             
@@ -1323,7 +1389,7 @@ def main(
                                     logger.warning(f"Process {name} (PID: {pid}): Memory {memory_usage:.1f}% (threshold: {process_memory_threshold:.1f}%)")
                                 
                                 last_process_alert_time[proc_key] = current_time
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError) as e:
                     logger.debug(f"Error accessing process: {e}")
                 except Exception as e:
                     logger.debug(f"Unexpected error checking processes: {e}")
@@ -1551,25 +1617,42 @@ def main(
     except KeyboardInterrupt:
         shutdown_start = time.time()
         logger.info("Monitoring stopped by user")
+        
+        uptime_seconds = shutdown_start - monitoring_start_time
+        
+        logger.info("Shutting down...")
+        
+        try:
+            if freeze_monitor_enabled and freeze_monitor:
+                try:
+                    freeze_monitor.stop_watchdog()
+                except Exception as e:
+                    logger.debug(f"Error stopping freeze monitor: {e}")
+        except KeyboardInterrupt:
+            logger.warning("Shutdown interrupted, exiting immediately")
+            raise
+        
+        try:
+            stop_server(timeout=3.0)  
+        except KeyboardInterrupt:
+            logger.warning("Server shutdown interrupted, exiting immediately")
+            raise
+        except Exception as e:
+            logger.warning(f"Error stopping web server: {e}")
+        
+        shutdown_seconds = time.time() - shutdown_start
+        logger.info(f"Shutdown complete ({shutdown_seconds:.2f}s)")
+        
         if webhook:
             try:
                 logger.info("Sending shutdown notification...")
-                webhook.send_message("Server monitoring stopped by user")
-                logger.info("Shutdown notification sent")
-            except (KeyboardInterrupt, Exception):
-                logger.warning("Shutdown notification skipped")
-        logger.info("Shutting down...")
-        if freeze_monitor_enabled and freeze_monitor:
-            try:
-                freeze_monitor.stop_watchdog()
-            except Exception as e:
-                logger.debug(f"Error stopping freeze monitor: {e}")
-        try:
-            stop_server()
-        except Exception as e:
-            logger.warning(f"Error stopping web server: {e}")
-        shutdown_time = time.time() - shutdown_start
-        logger.info(f"Shutdown complete ({shutdown_time:.2f}s)")
+                success = webhook.send_shutdown_notification(uptime_seconds=uptime_seconds, shutdown_seconds=shutdown_seconds)
+                if success:
+                    logger.info("Shutdown notification sent")
+                else:
+                    logger.warning("Shutdown notification failed")
+            except (KeyboardInterrupt, Exception) as e:
+                logger.warning(f"Shutdown notification skipped: {e}")
     except Exception as e:
         logger.error(f"Unexpected error in monitoring loop: {e}")
         logger.info("Shutting down due to error...")

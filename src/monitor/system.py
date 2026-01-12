@@ -243,12 +243,10 @@ class SystemMonitor:
         """
         processes_data = []
         
-        # Fetch all relevant attributes in one pass for efficiency
         attrs = ['pid', 'name', 'cpu_percent', 'memory_percent']
         
         for proc in psutil.process_iter(attrs=attrs):
             try:
-                # Normalize CPU percent by CPU count
                 cpu_percent_raw = proc.info.get('cpu_percent', 0.0)
                 cpu_count = self.cpu_monitor.cpu_count if self.cpu_monitor.cpu_count > 0 else 1
                 cpu_percent_normalized = min(cpu_percent_raw / cpu_count, 100.0)
@@ -259,11 +257,9 @@ class SystemMonitor:
                     'cpu_percent': cpu_percent_normalized,
                     'memory_percent': proc.info.get('memory_percent', 0.0),
                 })
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, TypeError):
-                # TypeError can occur if proc.info is None or incomplete
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, TypeError):    
                 continue
         
-        # Sort by the requested metric
         if sort_by == 'cpu':
             processes_data.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
         elif sort_by == 'memory':

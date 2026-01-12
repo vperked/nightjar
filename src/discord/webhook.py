@@ -5,7 +5,7 @@ from typing import Dict, Optional, List, Any
 from datetime import datetime, timezone
 from collections import deque
 from dotenv import load_dotenv
-from util.util import format_bytes, format_bytes_per_second
+from util.util import format_bytes, format_bytes_per_second, format_duration
 from logger import get_logger
 
 load_dotenv()
@@ -126,6 +126,57 @@ class DiscordWebhook:
             embed['timestamp'] = datetime.now(timezone.utc).isoformat()
         
         return {'embeds': [embed]}
+    
+    def send_shutdown_notification(self, uptime_seconds: float, shutdown_seconds: float) -> bool:
+        """
+        Send a shutdown notification embed with uptime and shutdown duration.
+        
+        Args:
+            uptime_seconds: How long the server monitor ran in seconds
+            shutdown_seconds: How long the shutdown process took in seconds
+            
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        uptime_formatted = format_duration(uptime_seconds)
+        shutdown_formatted = format_duration(shutdown_seconds)
+        
+        color = 0x3498DB 
+        
+        fields = [
+            {
+                'name': 'Monitoring Duration',
+                'value': uptime_formatted,
+                'inline': True
+            },
+            {
+                'name': 'Shutdown Time',
+                'value': shutdown_formatted,
+                'inline': True
+            }
+        ]
+        
+        if shutdown_seconds < 1.0:
+            status = "Fast shutdown"
+        elif shutdown_seconds < 3.0:
+            status = "Normal shutdown"
+        else:
+            status = "Slow shutdown"
+        
+        fields.append({
+            'name': 'Status',
+            'value': status,
+            'inline': True
+        })
+        
+        return self.send_embed(
+            title='Server Monitor Stopped',
+            description='Server monitoring has been stopped by user.',
+            color=color,
+            fields=fields,
+            footer='Server Monitor',
+            timestamp=True
+        )
     
     def send_message(self, content: str, username: Optional[str] = None, 
                     avatar_url: Optional[str] = None) -> bool:

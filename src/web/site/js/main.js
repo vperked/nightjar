@@ -1,4 +1,4 @@
-// Theme management
+
 let isDarkMode = true;
 
 function initTheme() {
@@ -6,7 +6,6 @@ function initTheme() {
     if (savedTheme) {
         isDarkMode = savedTheme === 'dark';
     } else {
-        // Check system preference
         isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
     }
     applyTheme();
@@ -33,7 +32,6 @@ function applyTheme() {
     }
 }
 
-// Toast notifications
 function showToast(message, type = 'info', duration = 3000) {
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
@@ -43,7 +41,6 @@ function showToast(message, type = 'info', duration = 3000) {
     
     document.body.appendChild(toast);
     
-    // Trigger animation
     setTimeout(() => toast.classList.add('show'), 10);
     
     setTimeout(() => {
@@ -52,24 +49,21 @@ function showToast(message, type = 'info', duration = 3000) {
     }, duration);
 }
 
-// Progress bar color with thresholds - preserves original gradients
 function updateBarColor(element, percent, type = 'default') {
     const baseClasses = 'progress-fill';
     let gradientClass = '';
     let warningClass = '';
     
-    // Define base gradients for each type
     const gradients = {
-        'cpu': 'bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500',
-        'memory': 'bg-gradient-to-r from-cyan-500 via-blue-500 to-indigo-500',
-        'disk': 'bg-gradient-to-r from-emerald-500 via-green-500 to-teal-500',
-        'gpu': 'bg-gradient-to-r from-orange-500 via-red-500 to-pink-500',
-        'default': 'bg-gradient-to-r from-gray-500 via-gray-600 to-gray-700'
+        'cpu': 'bg-gradient-to-r from-red-500 via-red-600 to-red-700',
+        'memory': 'bg-gradient-to-r from-red-500 via-red-600 to-red-700',
+        'disk': 'bg-gradient-to-r from-red-500 via-red-600 to-red-700',
+        'gpu': 'bg-gradient-to-r from-red-500 via-red-600 to-red-700',
+        'default': 'bg-gradient-to-r from-red-500 via-red-600 to-red-700'
     };
     
     gradientClass = gradients[type] || gradients['default'];
     
-    // Add warning/critical styling based on thresholds
     if (percent >= 90) {
         warningClass = 'progress-critical';
         element.style.boxShadow = '0 0 20px rgba(239, 68, 68, 0.6), 0 0 40px rgba(239, 68, 68, 0.3)';
@@ -83,12 +77,10 @@ function updateBarColor(element, percent, type = 'default') {
     element.className = `${baseClasses} ${gradientClass} ${warningClass}`;
 }
 
-// Add threshold indicator to card
 function updateThresholdIndicator(cardId, percent, thresholds = { warning: 80, critical: 90 }) {
     const card = document.getElementById(cardId);
     if (!card) return;
     
-    // Remove existing indicators
     card.classList.remove('threshold-warning', 'threshold-critical');
     
     if (percent >= thresholds.critical) {
@@ -137,7 +129,6 @@ async function fetchStats(showLoading = false) {
     const refreshBtn = document.getElementById('refreshBtn');
     const refreshIcon = document.getElementById('refreshIcon');
 
-    // Show loading state
     if (showLoading || !content.classList.contains('hidden')) {
         if (refreshIcon) {
             refreshIcon.classList.add('spinning');
@@ -145,7 +136,6 @@ async function fetchStats(showLoading = false) {
         isRefreshing = true;
     }
     
-    // Only show full loading if we don't have content yet
     const hasContent = !content.classList.contains('hidden');
     if (!hasContent) {
         loading.classList.remove('hidden');
@@ -159,12 +149,10 @@ async function fetchStats(showLoading = false) {
         }
         const data = await response.json();
 
-        // System info
         document.getElementById('hostname').textContent = data.system?.hostname || 'N/A';
         document.getElementById('platform').textContent = `${data.system?.platform || 'N/A'} ${data.system?.platform_release || ''}`.trim();
         document.getElementById('uptime').textContent = data.uptime?.formatted || 'N/A';
 
-        // CPU
         const cpuPercent = data.cpu?.cpu_percent || 0;
         document.getElementById('cpuPercent').textContent = cpuPercent.toFixed(1) + '%';
         document.getElementById('cpuBar').style.width = cpuPercent + '%';
@@ -172,7 +160,6 @@ async function fetchStats(showLoading = false) {
         updateThresholdIndicator('cpuCard', cpuPercent);
         document.getElementById('cpuCores').textContent = `${data.cpu?.cpu_count_logical || 0} logical, ${data.cpu?.cpu_count_physical || 0} physical`;
 
-        // Memory
         const memoryPercent = data.memory?.memory_percent || 0;
         const memoryInfo = data.memory?.virtual_memory || {};
         document.getElementById('memoryPercent').textContent = memoryPercent.toFixed(1) + '%';
@@ -182,7 +169,6 @@ async function fetchStats(showLoading = false) {
         document.getElementById('memoryUsed').textContent = formatBytes(memoryInfo.used || 0);
         document.getElementById('memoryTotal').textContent = formatBytes(memoryInfo.total || 0);
 
-        // Disk
         const diskInfo = data.disk?.total || {};
         const diskPercent = diskInfo.percent || 0;
         document.getElementById('diskPercent').textContent = diskPercent.toFixed(1) + '%';
@@ -192,7 +178,6 @@ async function fetchStats(showLoading = false) {
         document.getElementById('diskUsed').textContent = formatBytes(diskInfo.used || 0);
         document.getElementById('diskTotal').textContent = formatBytes(diskInfo.total || 0);
 
-        // GPU
         if (data.gpu && data.gpu.utilization) {
             const gpuPercent = data.gpu.utilization.gpu || 0;
             document.getElementById('gpuCard').classList.remove('hidden');
@@ -207,7 +192,6 @@ async function fetchStats(showLoading = false) {
             document.getElementById('gpuCard').classList.add('hidden');
         }
 
-        // Temperature
         if (data.temperature && data.temperature > 0) {
             document.getElementById('tempCard').classList.remove('hidden');
             document.getElementById('cpuTemp').textContent = data.temperature.toFixed(1) + '°C';
@@ -215,21 +199,16 @@ async function fetchStats(showLoading = false) {
             document.getElementById('tempCard').classList.add('hidden');
         }
 
-        // Network
         const networkInfo = data.network || {};
         document.getElementById('networkUpload').textContent = formatBytesPerSecond(networkInfo.bytes_sent_per_sec || 0);
         document.getElementById('networkDownload').textContent = formatBytesPerSecond(networkInfo.bytes_recv_per_sec || 0);
         
-        // Network details
         updateNetworkDetails(networkInfo);
 
-        // Processes
         document.getElementById('processCount').textContent = data.processes?.total || 0;
         
-        // Top processes
         updateTopProcesses(data.top_processes_cpu || [], data.top_processes_memory || []);
 
-        // Update timestamp
         const now = new Date();
         const timeStr = now.toLocaleTimeString('en-US', { 
             hour: '2-digit', 
@@ -243,7 +222,6 @@ async function fetchStats(showLoading = false) {
         content.classList.remove('hidden');
         error.classList.add('hidden');
         
-        // Store data for charts
         updateCharts(data);
         
     } catch (err) {
@@ -263,7 +241,6 @@ async function fetchStats(showLoading = false) {
         
         showToast(errorMsg, 'error', 5000);
         
-        // Only show error if we don't have content, otherwise silently retry
         if (content.classList.contains('hidden')) {
             error.classList.remove('hidden');
             errorMessage.textContent = errorMsg + 'Retrying...';
@@ -272,7 +249,6 @@ async function fetchStats(showLoading = false) {
                 fetchStats();
             }, 2000);
         } else {
-            // If we have content, retry silently without showing error
             setTimeout(fetchStats, 2000);
         }
     } finally {
@@ -287,15 +263,12 @@ function updateNetworkDetails(networkInfo) {
     const detailsContainer = document.getElementById('networkDetails');
     if (!detailsContainer) return;
     
-    // Show interface name if available
     const interfaceName = networkInfo.interface_name || 'N/A';
     const interfaceEl = document.getElementById('networkInterface');
     if (interfaceEl) {
         interfaceEl.textContent = interfaceName;
     }
     
-    // Show latency if available (would need to be added to backend)
-    // For now, just show connection status
     const statusEl = document.getElementById('networkStatus');
     if (statusEl) {
         statusEl.textContent = networkInfo.bytes_sent_per_sec > 0 || networkInfo.bytes_recv_per_sec > 0 ? 'Active' : 'Idle';
@@ -359,7 +332,6 @@ function createProcessItem(proc, type, rank) {
     return item;
 }
 
-// Simple chart data storage (for future enhancement)
 const chartData = {
     cpu: [],
     memory: [],
@@ -370,19 +342,16 @@ const chartData = {
 function updateCharts(data) {
     const now = Date.now();
     
-    // Store data points
     chartData.cpu.push({ time: now, value: data.cpu?.cpu_percent || 0 });
     chartData.memory.push({ time: now, value: data.memory?.memory_percent || 0 });
     chartData.disk.push({ time: now, value: data.disk?.total?.percent || 0 });
     
-    // Keep only last N points
     Object.keys(chartData).forEach(key => {
         if (key !== 'maxPoints' && chartData[key].length > chartData.maxPoints) {
             chartData[key].shift();
         }
     });
     
-    // Update mini charts if they exist
     updateMiniChart('cpuChart', chartData.cpu);
     updateMiniChart('memoryChart', chartData.memory);
     updateMiniChart('diskChart', chartData.disk);
@@ -397,12 +366,11 @@ function updateMiniChart(canvasId, data) {
     const height = canvas.height;
     
     ctx.clearRect(0, 0, width, height);
-    
-    // Set chart color based on canvas ID
-    let chartColor = '#3b82f6';
-    if (canvasId === 'cpuChart') chartColor = '#a855f7'; // purple
-    else if (canvasId === 'memoryChart') chartColor = '#06b6d4'; // cyan
-    else if (canvasId === 'diskChart') chartColor = '#10b981'; // emerald
+
+    let chartColor = '#ef4444'; // red
+    if (canvasId === 'cpuChart') chartColor = '#ef4444'; // red
+    else if (canvasId === 'memoryChart') chartColor = '#ef4444'; // red
+    else if (canvasId === 'diskChart') chartColor = '#ef4444'; // red
     
     ctx.strokeStyle = chartColor;
     ctx.lineWidth = 2;
@@ -429,7 +397,6 @@ function manualRefresh() {
     fetchStats(true);
 }
 
-// Initialize on page load
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
         initTheme();

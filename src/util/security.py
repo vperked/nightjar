@@ -1,6 +1,7 @@
 """
 Security utilities for path validation and sanitization.
-Provides functions to prevent path traversal attacks and validate user inputs.
+Provides functions to prevent path traversal attacks and validate user inputs,
+environment variables, and subprocess paths.
 """
 
 import os
@@ -36,18 +37,14 @@ def validate_path(path: str, allowed_base_paths: Optional[List[str]] = None,
     if not path or not isinstance(path, str):
         return False, None, "Path must be a non-empty string"
     
-    # Check for path traversal sequences
     if '..' in path or path.startswith('/') and not path.startswith('//'):
-        # Allow absolute paths but check for traversal
         normalized = os.path.normpath(path)
         if '..' in normalized or normalized != os.path.normpath(path):
             return False, None, "Path contains traversal sequences (..)"
     
-    # Check for null bytes (potential injection)
     if '\x00' in path:
         return False, None, "Path contains null bytes"
     
-    # Check for suspicious patterns
     suspicious_patterns = [
         r'[;&|`$()]',  # Command injection characters
         r'<|>',  # Redirection characters
@@ -57,15 +54,12 @@ def validate_path(path: str, allowed_base_paths: Optional[List[str]] = None,
             return False, None, f"Path contains suspicious characters: {pattern}"
     
     try:
-        # Resolve the path to handle symlinks and get absolute path
         resolved = os.path.realpath(path)
         
-        # Check if symlink (if not allowed)
         if not allow_symlinks:
             if os.path.islink(path):
                 return False, None, "Symlinks are not allowed"
         
-        # If allowed_base_paths is specified, check if path is within allowed directories
         if allowed_base_paths:
             resolved_allowed = [os.path.realpath(base) for base in allowed_base_paths if os.path.exists(base)]
             is_allowed = any(
@@ -95,16 +89,13 @@ def sanitize_path(path: str, base_path: Optional[str] = None) -> Optional[str]:
     if not path:
         return None
     
-    # Remove null bytes
     path = path.replace('\x00', '')
     
-    # Normalize path
     try:
         normalized = os.path.normpath(path)
     except (ValueError, OSError):
         return None
     
-    # If base_path is provided, ensure path is within it
     if base_path:
         try:
             base_real = os.path.realpath(base_path)
@@ -138,11 +129,9 @@ def validate_environment_variable(key: str, value: str,
     if not value:
         return True, None
     
-    # Check length
     if len(value) > max_length:
         return False, f"Environment variable {key} exceeds maximum length ({max_length})"
     
-    # Check for suspicious patterns (blacklist)
     if blocked_patterns is None:
         blocked_patterns = [
             r'[;&|`$()<>]',  # Command injection characters
@@ -157,7 +146,6 @@ def validate_environment_variable(key: str, value: str,
         if re.search(pattern, value, re.IGNORECASE):
             return False, f"Environment variable {key} contains blocked pattern: {pattern}"
     
-    # If whitelist is provided, check against it
     if allowed_patterns:
         is_allowed = any(re.match(pattern, value) for pattern in allowed_patterns)
         if not is_allowed:
@@ -182,7 +170,6 @@ def safe_subprocess_path(path: str) -> Optional[str]:
         logger.warning(f"Unsafe path rejected for subprocess: {error}")
         return None
     
-    # Additional validation: ensure path doesn't contain shell metacharacters
     if re.search(r'[;&|`$()<>]', resolved_path):
         logger.warning(f"Path contains shell metacharacters: {resolved_path}")
         return None

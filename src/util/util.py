@@ -6,7 +6,6 @@ import psutil
 
 CPU_COUNT = psutil.cpu_count(logical=True)
 
-# Byte conversion constants
 BYTES_PER_KB = 1024
 BYTES_PER_MB = 1024 * 1024
 BYTES_PER_GB = 1024 * 1024 * 1024
@@ -116,3 +115,48 @@ def format_percentage(value: float, precision: int = 1) -> str:
     """
     return f"{value:.{precision}f}%"
 
+
+def format_duration(seconds: float) -> str:
+    """
+    Format duration in seconds to human-readable format.
+    
+    Args:
+        seconds: Duration in seconds
+        
+    Returns:
+        Formatted string (e.g., "2 hours, 15 minutes, 30 seconds")
+    """
+    if seconds < 60:
+        return f"{seconds:.1f} seconds"
+    
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    
+    if minutes < 60:
+        if secs < 1:
+            return f"{minutes} minute{'s' if minutes != 1 else ''}"
+        return f"{minutes} minute{'s' if minutes != 1 else ''}, {secs:.1f} second{'s' if secs != 1 else ''}"
+    
+    hours = minutes // 60
+    mins = minutes % 60
+    
+    if hours < 24:
+        parts = [f"{hours} hour{'s' if hours != 1 else ''}"]
+        if mins > 0:
+            parts.append(f"{mins} minute{'s' if mins != 1 else ''}")
+        if secs >= 1:
+            parts.append(f"{int(secs)} second{'s' if int(secs) != 1 else ''}")
+        return ", ".join(parts)
+    
+    days = hours // 24
+    hrs = hours % 24
+    
+    parts = [f"{days} day{'s' if days != 1 else ''}"]
+    if hrs > 0:
+        parts.append(f"{hrs} hour{'s' if hrs != 1 else ''}")
+    if mins > 0:
+        parts.append(f"{mins} minute{'s' if mins != 1 else ''}")
+    if secs >= 1 and len(parts) < 3:
+        parts.append(f"{int(secs)} second{'s' if int(secs) != 1 else ''}")
+    
+    return ", ".join(parts)

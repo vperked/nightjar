@@ -3,6 +3,9 @@ import time
 from typing import Dict, List, Optional, Callable
 from datetime import datetime
 from util.util import format_bytes, CPU_COUNT
+from logger import get_logger
+
+logger = get_logger('ProcessMonitor')
 
 
 class ProcessMonitor:
@@ -112,54 +115,52 @@ class ProcessMonitor:
         """
         processes = []
         
-        # Optimization: First pass - collect basic info for all processes (fast)
-        # Use memory_percent as a proxy since it's cheaper to get
         if sort_by == 'cpu':
-            # For CPU sorting, first get memory as a proxy (memory-heavy processes often use CPU)
-            for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
-                try:
-                    proc_info = proc.info.copy()
-                    if proc_info.get('memory_percent') is None:
-                        proc_info['memory_percent'] = proc.memory_percent()
-                    proc_info['cpu_percent'] = 0.0  # Will be filled in second pass
-                    processes.append(proc_info)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    continue
+            try:
+                for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
+                    try:
+                        proc_info = proc.info.copy()
+                        if proc_info.get('memory_percent') is None:
+                            proc_info['memory_percent'] = proc.memory_percent()
+                        proc_info['cpu_percent'] = 0.0
+                        processes.append(proc_info)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError):
+                        continue
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Permission error during process iteration: {e}")
+                pass
             
-            # Sort by memory to get candidates (memory usage often correlates with CPU)
             processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
-            # Only check CPU for top candidates (limit * 5 or max 50)
             candidates = processes[:min(limit * 5, 50, len(processes))]
             
-            # Second pass - get CPU for candidates only (expensive operation)
             for proc_info in candidates:
                 try:
                     proc = psutil.Process(proc_info['pid'])
                     cpu_percent = proc.cpu_percent(interval=None)  # Non-blocking
-                    # Normalize CPU percent by CPU count
                     cpu_count = psutil.cpu_count(logical=True) or 1
                     proc_info['cpu_percent'] = min(cpu_percent / cpu_count, 100.0)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError):
                     proc_info['cpu_percent'] = 0.0
                     continue
             
-            # Sort by CPU and return top limit
             processes.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
         else:
-            # For memory sorting, just get memory for all (already have it from first pass)
-            for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
-                try:
-                    proc_info = proc.info.copy()
-                    if proc_info.get('memory_percent') is None:
-                        proc_info['memory_percent'] = proc.memory_percent()
-                    proc_info['cpu_percent'] = 0.0
-                    processes.append(proc_info)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    continue
+            try:
+                for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
+                    try:
+                        proc_info = proc.info.copy()
+                        if proc_info.get('memory_percent') is None:
+                            proc_info['memory_percent'] = proc.memory_percent()
+                        proc_info['cpu_percent'] = 0.0
+                        processes.append(proc_info)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError):
+                        continue
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Permission error during process iteration: {e}")
+                pass
             
             processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
         
-        # Return top processes, but get full info only for the ones we return
         top_pids = [p['pid'] for p in processes[:limit]]
         result = []
         for pid in top_pids:
@@ -167,7 +168,6 @@ class ProcessMonitor:
             if proc_info:
                 result.append(proc_info)
         
-        # Re-sort result to ensure correct order
         if sort_by == 'cpu':
             result.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
         elif sort_by == 'memory':

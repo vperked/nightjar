@@ -13,7 +13,6 @@ from logger import get_logger
 
 logger = get_logger('Systemd')
 
-# Systemd is only available on Linux
 IS_LINUX = platform.system() == 'Linux'
 
 
@@ -284,7 +283,6 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
-# Security settings
 NoNewPrivileges=true
 PrivateTmp=true
 

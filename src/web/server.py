@@ -7,6 +7,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Dict, Optional
 from logger import get_logger
+from util.security import validate_path
 
 logger = get_logger('WebServer')
 
@@ -55,7 +56,18 @@ _cpu_cache = {
 
 
 def set_monitors(cpu, memory, system, gpu, disk, network, sensors):
-    """Set monitor instances to use for stats collection."""
+    """
+    Set monitor instances to use for stats collection in the web server.
+    
+    Args:
+        cpu: CPU monitor instance
+        memory: Memory monitor instance
+        system: System monitor instance
+        gpu: GPU monitor instance
+        disk: Disk monitor instance
+        network: Network monitor instance
+        sensors: Sensors monitor instance
+    """
     global cpu_monitor, memory_monitor, system_monitor, gpu_monitor
     global disk_monitor, network_monitor, sensors_monitor
     
@@ -72,11 +84,66 @@ class WebRequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler for serving the web UI and API."""
     
     def log_message(self, format_str, *args):
-        """Override to use our logger instead of default logging."""
+        """
+        Override to use our logger instead of default logging.
+        
+        Args:
+            format_str: Log message format string
+            *args: Arguments for format string
+        """
         logger.info(f"{self.address_string()} - {format_str % args}")
     
+    def _add_security_headers(self):
+        """
+        Add security headers to response.
+        
+        Includes Content-Security-Policy, X-Content-Type-Options,
+        X-Frame-Options, X-XSS-Protection, and Referrer-Policy.
+        """
+        try:
+            # More permissive CSP to allow all necessary resources
+            csp = ("default-src 'self'; "
+                   "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com; "
+                   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                   "font-src 'self' https://fonts.gstatic.com data:; "
+                   "img-src 'self' data: https:; "
+                   "connect-src 'self'; "
+                   "frame-ancestors 'none'")
+            self.send_header('Content-Security-Policy', csp)
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('X-Frame-Options', 'DENY')
+            self.send_header('X-XSS-Protection', '1; mode=block')
+            self.send_header('Referrer-Policy', 'no-referrer')
+        except Exception as e:
+            logger.error(f"Error adding security headers: {e}", exc_info=True)
+    
+    def _add_cors_headers(self, allowed_origin='*'):
+        """
+        Add CORS headers to response.
+        
+        Args:
+            allowed_origin: Allowed origin for CORS (default: '*' for same-origin only in practice)
+                            In production, this should be restricted to specific origins.
+        """
+        try:
+            self.send_header('Access-Control-Allow-Origin', allowed_origin)
+            self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        except Exception as e:
+            logger.error(f"Error adding CORS headers: {e}")
+    
     def do_GET(self):
-        """Handle GET requests."""
+        """
+        Handle GET requests.
+        
+        Routes requests to appropriate handlers:
+        - '/' or '/index.html' -> serve_html()
+        - '/api/stats' -> serve_stats()
+        - '/health' -> serve_health()
+        - '/favicon.ico' -> send_no_content()
+        - '/js/*' -> serve_static_file()
+        - Other -> 404 Not Found
+        """
         try:
             if self.path == '/' or self.path == '/index.html':
                 self.serve_html()
@@ -95,23 +162,54 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Unexpected error handling request: {e}")
     
+    def do_OPTIONS(self):
+        """
+        Handle OPTIONS requests for CORS preflight.
+        
+        Responds to CORS preflight requests with appropriate headers.
+        """
+        try:
+            self.send_response(200)
+            self._add_cors_headers(allowed_origin='*') 
+            self._add_security_headers()
+            self.end_headers()
+        except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
+            logger.debug(f"Connection error handling OPTIONS: {e}")
+        except Exception as e:
+            logger.error(f"Error handling OPTIONS request: {e}")
+    
     def send_no_content(self):
-        """Send a 204 No Content response for favicon requests."""
+        """
+        Send a 204 No Content response.
+        
+        Used for favicon requests and other requests that don't need content.
+        """
         try:
             self.send_response(204)
+            self._add_security_headers()
             self.end_headers()
         except (ConnectionAbortedError, BrokenPipeError, OSError):
             pass
     
     def send_error_safe(self, code, message=None):
-        """Send an error response, handling connection errors gracefully."""
+        """
+        Send an error response, handling connection errors gracefully.
+        
+        Args:
+            code: HTTP status code
+            message: Optional error message
+        """
         try:
             self.send_error(code, message)
         except (ConnectionAbortedError, BrokenPipeError, OSError):
             logger.debug(f"Connection aborted while sending error {code}")
     
     def serve_html(self):
-        """Serve the HTML file."""
+        """
+        Serve the main HTML dashboard page.
+        
+        Returns the index.html file from the site directory.
+        """
         try:
             html_path = Path(__file__).parent / 'site' / 'index.html'
             if not html_path.exists():
@@ -124,31 +222,51 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
             self.send_header('Content-length', str(len(content)))
+            self._add_security_headers()
             self.end_headers()
             self.wfile.write(content)
         except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
             logger.debug(f"Connection error serving HTML: {e}")
         except Exception as e:
-            logger.error(f"Error serving HTML: {e}")
-            self.send_error_safe(500, f"Internal Server Error: {str(e)}")
+            logger.error(f"Error serving HTML: {e}", exc_info=True)
+            try:
+                self.send_error_safe(500, f"Internal Server Error: {str(e)}")
+            except Exception:
+                pass  # Already failed, can't send error response
     
     def serve_static_file(self, path):
-        """Serve static files like JavaScript."""
+        """
+        Serve static files like JavaScript, CSS, and images.
+        
+        Args:
+            path: Request path (e.g., '/js/main.js')
+            
+        Security: Validates that the file is within the site directory to prevent
+        path traversal attacks using validate_path() from security module.
+        """
         try:
             site_dir = Path(__file__).parent / 'site'
             file_path = site_dir / path.lstrip('/')
             
-            try:
-                file_path.resolve().relative_to(site_dir.resolve())
-            except ValueError:
+            # Validate path using security module
+            is_valid, resolved_path, error = validate_path(
+                str(file_path),
+                allowed_base_paths=[str(site_dir)],
+                allow_symlinks=False
+            )
+            
+            if not is_valid or not resolved_path:
+                logger.warning(f"Path validation failed for {path}: {error}")
                 self.send_error_safe(403, "Forbidden")
                 return
             
-            if not file_path.exists() or not file_path.is_file():
+            resolved_path_obj = Path(resolved_path)
+            if not resolved_path_obj.exists() or not resolved_path_obj.is_file():
+                logger.warning(f"File not found: {resolved_path} (requested: {path})")
                 self.send_error_safe(404, "File not found")
                 return
             
-            with open(file_path, 'rb') as f:
+            with open(resolved_path, 'rb') as f:
                 content = f.read()
             
             content_type = 'application/javascript'
@@ -164,16 +282,25 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', content_type)
             self.send_header('Content-length', str(len(content)))
+            self._add_security_headers()
             self.end_headers()
             self.wfile.write(content)
         except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
             logger.debug(f"Connection error serving static file: {e}")
         except Exception as e:
-            logger.error(f"Error serving static file: {e}")
-            self.send_error_safe(500, f"Internal Server Error: {str(e)}")
+            logger.error(f"Error serving static file {path}: {e}", exc_info=True)
+            try:
+                self.send_error_safe(500, f"Internal Server Error: {str(e)}")
+            except Exception:
+                pass  
     
     def serve_stats(self):
-        """Serve system statistics as JSON."""
+        """
+        Serve system statistics as JSON.
+        
+        Collects data from all monitors and returns as JSON response.
+        Logs a warning if stats collection takes longer than 1 second.
+        """
         try:
             start_time = time.time()
             stats = self.get_system_stats()
@@ -186,26 +313,39 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Content-length', str(len(response)))
+            self._add_security_headers()
+            self._add_cors_headers(allowed_origin='*')  # Restrict in production if needed
             self.end_headers()
             self.wfile.write(response)
         except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
             logger.debug(f"Connection error serving stats: {e}")
         except Exception as e:
-            logger.error(f"Error serving stats: {e}")
+            logger.error(f"Error serving stats: {e}", exc_info=True)
             try:
                 error_response = json.dumps({'error': str(e)}).encode('utf-8')
                 self.send_response(500)
                 self.send_header('Content-type', 'application/json')
                 self.send_header('Content-length', str(len(error_response)))
+                self._add_security_headers()
+                self._add_cors_headers(allowed_origin='*')
                 self.end_headers()
                 self.wfile.write(error_response)
             except (ConnectionAbortedError, BrokenPipeError, OSError):
                 logger.debug("Connection aborted while sending error response")
     
     def serve_health(self):
-        """Serve health check endpoint with comprehensive system checks."""
+        """
+        Serve health check endpoint with comprehensive system checks.
+        
+        Performs health checks on CPU, memory, disk, system uptime, and temperature.
+        Returns appropriate HTTP status codes:
+        - 200 OK: All systems healthy
+        - 503 Service Unavailable: System degraded (high resource usage)
+        - 500 Internal Server Error: Critical failure
+        
+        Returns JSON with detailed status of each component.
+        """
         try:
             import time
             import psutil
@@ -317,14 +457,15 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             status_code = 200 if health_status == 'ok' else (503 if health_status == 'degraded' else 500)
             self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Content-length', str(len(response)))
+            self._add_security_headers()
+            self._add_cors_headers(allowed_origin='*')  
             self.end_headers()
             self.wfile.write(response)
         except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
             logger.debug(f"Connection error serving health: {e}")
         except Exception as e:
-            logger.error(f"Error serving health: {e}")
+            logger.error(f"Error serving health: {e}", exc_info=True)
             try:
                 error_response = json.dumps({
                     'status': 'error',
@@ -334,13 +475,23 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self.send_response(500)
                 self.send_header('Content-type', 'application/json')
                 self.send_header('Content-length', str(len(error_response)))
+                self._add_security_headers()
+                self._add_cors_headers(allowed_origin='*')
                 self.end_headers()
                 self.wfile.write(error_response)
             except (ConnectionAbortedError, BrokenPipeError, OSError):
                 logger.debug("Connection aborted while sending health error response")
     
     def get_system_stats(self) -> Dict:
-        """Collect current system statistics with caching for performance."""
+        """
+        Collect current system statistics with caching for performance.
+        
+        Gathers data from all available monitors (CPU, memory, disk, network, GPU, sensors).
+        Uses caching to avoid expensive operations on every request.
+        
+        Returns:
+            Dictionary containing system statistics from all monitors
+        """
         global cpu_monitor, memory_monitor, system_monitor, gpu_monitor
         global disk_monitor, network_monitor, sensors_monitor
         global _process_cache, _network_cache, _gpu_cache, _disk_cache, _cpu_cache
@@ -360,7 +511,6 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 time_since_cpu_update = current_time - _cpu_cache['last_update']
                 if time_since_cpu_update >= _cpu_cache['cache_interval']:
                     stats['cpu'] = cpu_monitor.get_cpu_info()
-                    # Use interval=0 for non-blocking call (uses cached values from psutil)
                     stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0)
                     _cpu_cache['data'] = stats['cpu']
                     _cpu_cache['last_update'] = current_time
@@ -418,12 +568,10 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             try:
                 time_since_network_update = current_time - _network_cache['last_update']
                 if time_since_network_update >= _network_cache['cache_interval']:
-                    # Get current I/O counters (non-blocking)
                     current_io = psutil.net_io_counters()
                     if current_io is None:
                         stats['network'] = _network_cache.get('data', {})
                     else:
-                        # Calculate rate from previous measurement if available
                         if _network_cache['last_io'] is not None and _network_cache['last_io_time'] > 0:
                             time_diff = current_time - _network_cache['last_io_time']
                             if time_diff > 0:
@@ -440,7 +588,6 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                             else:
                                 stats['network'] = _network_cache.get('data', {})
                         else:
-                            # First measurement - initialize cache but return empty rates
                             bandwidth = {
                                 'interface_name': 'system-wide',
                                 'bytes_sent_per_sec': 0,
@@ -451,7 +598,6 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                             _network_cache['data'] = bandwidth
                             stats['network'] = bandwidth
                         
-                        # Store current values for next calculation
                         _network_cache['last_io'] = current_io
                         _network_cache['last_io_time'] = current_time
                 else:
@@ -489,7 +635,15 @@ class WebRequestHandler(BaseHTTPRequestHandler):
 
 
 def get_local_ip_addresses():
-    """Get local network IP addresses."""
+    """
+    Get local network IP addresses.
+    
+    Retrieves all non-loopback, non-link-local IP addresses for the local machine.
+    Attempts to determine the primary IP by connecting to an external address.
+    
+    Returns:
+        List of IP address strings
+    """
     addresses = []
     try:
         hostname = socket.gethostname()
@@ -518,7 +672,15 @@ def get_local_ip_addresses():
 
 
 def _run_server(port, host):
-    """Internal function to run the server in a thread."""
+    """
+    Internal function to run the HTTP server in a thread.
+    
+    Args:
+        port: Port to listen on
+        host: Host address to bind to
+        
+    This function is called by the server thread and runs the server's main loop.
+    """
     global httpd
     
     server_address = (host, port)
@@ -560,17 +722,47 @@ def start_server(port=8080, host='0.0.0.0'):
     logger.info("Web server thread started")
 
 
-def stop_server():
-    """Stop the web server."""
+def stop_server(timeout: float = 5.0):
+    """
+    Stop the web server with timeout to prevent blocking.
+    
+    Args:
+        timeout: Maximum time to wait for server shutdown in seconds (default: 5.0)
+    """
+    import time
+    import threading
+    
     global httpd, server_thread
     
     if httpd:
         try:
-            httpd.shutdown()
-            logger.info("Web server stopped")
+            shutdown_complete = threading.Event()
+            shutdown_error = [None]
+            
+            def shutdown_thread():
+                try:
+                    httpd.shutdown()
+                    shutdown_complete.set()
+                except Exception as e:
+                    shutdown_error[0] = e
+                    shutdown_complete.set()
+            
+            shutdown_thread_obj = threading.Thread(target=shutdown_thread, daemon=True)
+            shutdown_thread_obj.start()
+            
+            if shutdown_complete.wait(timeout=timeout):
+                if shutdown_error[0]:
+                    logger.warning(f"Error stopping web server: {shutdown_error[0]}")
+                else:
+                    logger.info("Web server stopped")
+            else:
+                logger.warning(f"Web server shutdown timed out after {timeout}s, forcing exit")
+        except KeyboardInterrupt:
+            logger.warning("Web server shutdown interrupted by user")
         except Exception as e:
             logger.warning(f"Error stopping web server: {e}")
-        httpd = None
+        finally:
+            httpd = None
     
     server_thread = None
 
