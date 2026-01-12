@@ -54,8 +54,11 @@ def get_cached_env(key: str, default: str = None) -> Optional[str]:
     """Get environment variable with caching to avoid repeated lookups."""
     if key not in _env_cache:
         value = os.getenv(key, default)
-        if value and len(value) > 10000:
-            logger.warning(f"Environment variable {key} is unusually long ({len(value)} chars), possible injection attempt")
+        if value:
+            from util.security import validate_environment_variable
+            is_valid, error_msg = validate_environment_variable(key, value, max_length=10000)
+            if not is_valid:
+                logger.warning(f"Environment variable {key} validation failed: {error_msg}")
         _env_cache[key] = value
     return _env_cache[key]
 
@@ -801,6 +804,10 @@ def main(
     
     try:
         while True:
+            # Initialize process lists at start of loop for clarity
+            top_cpu_processes = None
+            top_memory_processes = None
+            
             if freeze_monitor_enabled and freeze_monitor:
                 freeze_monitor.update_heartbeat()
             
@@ -1259,8 +1266,6 @@ def main(
                     network_alert_sent = False
             
             process_check_counter += 1
-            top_cpu_processes = None
-            top_memory_processes = None
             
             if process_check_counter >= PROCESS_CHECK_INTERVAL:
                 process_check_counter = 0

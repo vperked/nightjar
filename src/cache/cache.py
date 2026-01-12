@@ -123,7 +123,15 @@ def clear_cache(verbose: bool = True) -> dict:
 
 
 def _format_bytes(bytes_value: int) -> str:
-    """Format bytes to human-readable format."""
+    """
+    Format bytes to human-readable format.
+    
+    Args:
+        bytes_value: Value in bytes
+        
+    Returns:
+        Formatted string (e.g., "1.50 KB")
+    """
     if bytes_value == 0:
         return "0 B"
     for unit in ['B', 'KB', 'MB', 'GB']:

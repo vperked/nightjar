@@ -232,54 +232,44 @@ class SystemMonitor:
     def get_top_processes(self, limit: int = 10, sort_by: str = 'cpu') -> List[Dict]:
         """
         Get top processes by CPU or memory usage.
-        Optimized to minimize blocking calls by only checking CPU for likely candidates.
+        Optimized to fetch all necessary attributes in one pass.
         
         Args:
             limit: Number of processes to return
             sort_by: 'cpu' or 'memory' to sort by
             
         Returns:
-            List of process dictionaries
+            List of process dictionaries sorted by the specified metric
         """
-        processes = []
-        if sort_by == 'cpu':
-            for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
-                try:
-                    proc_info = proc.info.copy()
-                    if proc_info.get('memory_percent') is None:
-                        proc_info['memory_percent'] = proc.memory_percent()
-                    proc_info['cpu_percent'] = 0.0
-                    processes.append(proc_info)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    continue
-            
-            processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
-            candidates = processes[:min(limit * 5, 50, len(processes))]
-            
-            for proc_info in candidates:
-                try:
-                    proc = psutil.Process(proc_info['pid'])
-                    cpu_percent = proc.cpu_percent(interval=None)
-                    proc_info['cpu_percent'] = min(cpu_percent / self.cpu_monitor.cpu_count, 100.0) if self.cpu_monitor.cpu_count > 0 else min(cpu_percent, 100.0)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    proc_info['cpu_percent'] = 0.0
-                    continue
-            
-            processes.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
-        else:
-            for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
-                try:
-                    proc_info = proc.info.copy()
-                    if proc_info.get('memory_percent') is None:
-                        proc_info['memory_percent'] = proc.memory_percent()
-                    proc_info['cpu_percent'] = 0.0
-                    processes.append(proc_info)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    continue
-            
-            processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
+        processes_data = []
         
-        return processes[:limit]
+        # Fetch all relevant attributes in one pass for efficiency
+        attrs = ['pid', 'name', 'cpu_percent', 'memory_percent']
+        
+        for proc in psutil.process_iter(attrs=attrs):
+            try:
+                # Normalize CPU percent by CPU count
+                cpu_percent_raw = proc.info.get('cpu_percent', 0.0)
+                cpu_count = self.cpu_monitor.cpu_count if self.cpu_monitor.cpu_count > 0 else 1
+                cpu_percent_normalized = min(cpu_percent_raw / cpu_count, 100.0)
+                
+                processes_data.append({
+                    'pid': proc.info['pid'],
+                    'name': proc.info['name'],
+                    'cpu_percent': cpu_percent_normalized,
+                    'memory_percent': proc.info.get('memory_percent', 0.0),
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, TypeError):
+                # TypeError can occur if proc.info is None or incomplete
+                continue
+        
+        # Sort by the requested metric
+        if sort_by == 'cpu':
+            processes_data.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
+        elif sort_by == 'memory':
+            processes_data.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
+        
+        return processes_data[:limit]
     
     def get_all_info(self, include_top_processes: bool = False) -> Dict:
         """

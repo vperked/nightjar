@@ -13,7 +13,9 @@ class NetworkMonitor:
     
     def __init__(self):
         """Initialize the network monitor."""
-        pass
+        self._last_io_counters = None
+        self._last_io_timestamp = None
+        self._last_io_per_nic = None
     
     def get_network_interfaces(self) -> List[Dict]:
         """
@@ -136,13 +138,14 @@ class NetworkMonitor:
         }
     
     def get_bandwidth_usage(self, interface: Optional[str] = None,
-                           interval: float = 1.0) -> Dict:
+                           interval: float = 1.0, use_cache: bool = True) -> Dict:
         """
         Get current bandwidth usage (bytes per second).
         
         Args:
             interface: Interface name (None for system-wide)
             interval: Time interval to measure over in seconds (must be > 0)
+            use_cache: If True, uses cached counters for non-blocking calculation (recommended)
             
         Returns:
             Dictionary containing bandwidth usage
@@ -151,6 +154,114 @@ class NetworkMonitor:
             logger.warning("Invalid interval for bandwidth calculation")
             return {}
         
+        # Ensure interval is safe for division (prevent division by zero)
+        safe_interval = max(interval, 0.001)
+        
+        if use_cache:
+            # Non-blocking approach using cached values
+            return self._get_bandwidth_from_cache(interface, safe_interval)
+        else:
+            # Blocking approach with time.sleep() - kept for compatibility
+            return self._get_bandwidth_blocking(interface, safe_interval)
+    
+    def _get_bandwidth_from_cache(self, interface: Optional[str], interval: float) -> Dict:
+        """
+        Calculate bandwidth from cached counters (non-blocking).
+        
+        Args:
+            interface: Interface name (None for system-wide)
+            interval: Time interval for rate calculation
+            
+        Returns:
+            Dictionary containing bandwidth usage
+        """
+        import time
+        
+        current_time = time.time()
+        
+        if interface:
+            current_io = psutil.net_io_counters(pernic=True)
+            if not current_io or interface not in current_io:
+                return {}
+            
+            # Check if we have cached data for this interface
+            if (self._last_io_per_nic and interface in self._last_io_per_nic 
+                and self._last_io_timestamp):
+                time_delta = current_time - self._last_io_timestamp
+                if time_delta > 0:
+                    before = self._last_io_per_nic[interface]
+                    after = current_io[interface]
+                    
+                    result = {
+                        'interface': interface,
+                        'bytes_sent_per_sec': (after.bytes_sent - before.bytes_sent) / time_delta,
+                        'bytes_recv_per_sec': (after.bytes_recv - before.bytes_recv) / time_delta,
+                        'packets_sent_per_sec': (after.packets_sent - before.packets_sent) / time_delta,
+                        'packets_recv_per_sec': (after.packets_recv - before.packets_recv) / time_delta,
+                    }
+                    
+                    # Update cache
+                    self._last_io_per_nic = current_io
+                    self._last_io_timestamp = current_time
+                    
+                    return result
+            
+            # No cached data, initialize cache and return zeros
+            self._last_io_per_nic = current_io
+            self._last_io_timestamp = current_time
+            return {
+                'interface': interface,
+                'bytes_sent_per_sec': 0.0,
+                'bytes_recv_per_sec': 0.0,
+                'packets_sent_per_sec': 0.0,
+                'packets_recv_per_sec': 0.0,
+            }
+        else:
+            # System-wide
+            current_io = psutil.net_io_counters()
+            if current_io is None:
+                return {}
+            
+            # Check if we have cached data
+            if self._last_io_counters and self._last_io_timestamp:
+                time_delta = current_time - self._last_io_timestamp
+                if time_delta > 0:
+                    result = {
+                        'interface': 'system-wide',
+                        'bytes_sent_per_sec': (current_io.bytes_sent - self._last_io_counters.bytes_sent) / time_delta,
+                        'bytes_recv_per_sec': (current_io.bytes_recv - self._last_io_counters.bytes_recv) / time_delta,
+                        'packets_sent_per_sec': (current_io.packets_sent - self._last_io_counters.packets_sent) / time_delta,
+                        'packets_recv_per_sec': (current_io.packets_recv - self._last_io_counters.packets_recv) / time_delta,
+                    }
+                    
+                    # Update cache
+                    self._last_io_counters = current_io
+                    self._last_io_timestamp = current_time
+                    
+                    return result
+            
+            # No cached data, initialize cache and return zeros
+            self._last_io_counters = current_io
+            self._last_io_timestamp = current_time
+            return {
+                'interface': 'system-wide',
+                'bytes_sent_per_sec': 0.0,
+                'bytes_recv_per_sec': 0.0,
+                'packets_sent_per_sec': 0.0,
+                'packets_recv_per_sec': 0.0,
+            }
+    
+    def _get_bandwidth_blocking(self, interface: Optional[str], interval: float) -> Dict:
+        """
+        Calculate bandwidth using blocking time.sleep() approach.
+        
+        Args:
+            interface: Interface name (None for system-wide)
+            interval: Time interval to sleep and measure over
+            
+        Returns:
+            Dictionary containing bandwidth usage
+        """
         if interface:
             io_before = psutil.net_io_counters(pernic=True)
             if not io_before or interface not in io_before:

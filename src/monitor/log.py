@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 from util.util import format_bytes
+from util.security import safe_subprocess_path
 from logger import LOG_FILE, LOG_MAX_BYTES, get_logger
 
 logger = get_logger()
@@ -248,22 +249,28 @@ class LogMonitor:
                 is_system_log = any(log_path_str.startswith(sys_path) for sys_path in self.system_log_paths)
                 
                 if is_system_log:
-                    try:
-                        result = subprocess.run(
-                            ['truncate', '-s', '0', log_path_str],
-                            capture_output=True,
-                            text=True,
-                            timeout=60,
-                            check=False
-                        )
-                        if result.returncode == 0:
-                            new_size = log_path.stat().st_size
-                            logger.info(f"System log cleared: {log_path} from {format_bytes(current_size)} to {format_bytes(new_size)}")
-                            return True
-                        else:
-                            logger.debug(f"truncate command failed, trying file operations: {result.stderr}")
-                    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-                        logger.debug(f"truncate command not available or failed: {e}, using file operations")
+                    # Security: Validate path before using in subprocess
+                    safe_path = safe_subprocess_path(log_path_str)
+                    if not safe_path:
+                        logger.warning(f"Unsafe path rejected for truncate command: {log_path_str}")
+                        # Fall through to file operations
+                    else:
+                        try:
+                            result = subprocess.run(
+                                ['truncate', '-s', '0', safe_path],
+                                capture_output=True,
+                                text=True,
+                                timeout=60,
+                                check=False
+                            )
+                            if result.returncode == 0:
+                                new_size = log_path.stat().st_size
+                                logger.info(f"System log cleared: {log_path} from {format_bytes(current_size)} to {format_bytes(new_size)}")
+                                return True
+                            else:
+                                logger.debug(f"truncate command failed, trying file operations: {result.stderr}")
+                        except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+                            logger.debug(f"truncate command not available or failed: {e}, using file operations")
             
             try:
                 with open(log_path, 'rb') as f:

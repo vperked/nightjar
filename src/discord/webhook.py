@@ -1,7 +1,7 @@
 import os
 import requests
 import time
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from datetime import datetime, timezone
 from collections import deque
 from dotenv import load_dotenv
@@ -99,8 +99,8 @@ class DiscordWebhook:
             logger.debug(f"Could not write to alert log file {self.alert_log_path}: {e}")
     
     def build_embed_payload(self, title: str, description: str = "", color: Optional[int] = None,
-                            fields: Optional[List[Dict[str, str]]] = None,
-                            footer: Optional[str] = None, timestamp: bool = True) -> Dict:
+                            fields: Optional[List[Dict[str, Any]]] = None,
+                            footer: Optional[str] = None, timestamp: bool = True) -> Dict[str, Any]:
         resolved_color = self.DEFAULT_EMBED_COLOR if color is None else color
         embed = {
             'title': title[:256],
@@ -1063,7 +1063,7 @@ class DiscordWebhook:
         if cleanup_performed:
             fields.append({
                 'name': 'Status',
-                'value': '✅ Auto-cleaned',
+                'value': 'Auto-cleaned',
                 'inline': True
             })
         

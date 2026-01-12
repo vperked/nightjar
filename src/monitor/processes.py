@@ -101,6 +101,7 @@ class ProcessMonitor:
     def get_top_processes(self, limit: int = 10, sort_by: str = 'cpu') -> List[Dict]:
         """
         Get top processes by CPU or memory usage.
+        Optimized to minimize expensive calls by filtering candidates first.
         
         Args:
             limit: Number of processes to return
@@ -111,20 +112,68 @@ class ProcessMonitor:
         """
         processes = []
         
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                proc_info = self.get_process_info(proc.info['pid'])
-                if proc_info:
-                    processes.append(proc_info)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        
+        # Optimization: First pass - collect basic info for all processes (fast)
+        # Use memory_percent as a proxy since it's cheaper to get
         if sort_by == 'cpu':
+            # For CPU sorting, first get memory as a proxy (memory-heavy processes often use CPU)
+            for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
+                try:
+                    proc_info = proc.info.copy()
+                    if proc_info.get('memory_percent') is None:
+                        proc_info['memory_percent'] = proc.memory_percent()
+                    proc_info['cpu_percent'] = 0.0  # Will be filled in second pass
+                    processes.append(proc_info)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+            
+            # Sort by memory to get candidates (memory usage often correlates with CPU)
+            processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
+            # Only check CPU for top candidates (limit * 5 or max 50)
+            candidates = processes[:min(limit * 5, 50, len(processes))]
+            
+            # Second pass - get CPU for candidates only (expensive operation)
+            for proc_info in candidates:
+                try:
+                    proc = psutil.Process(proc_info['pid'])
+                    cpu_percent = proc.cpu_percent(interval=None)  # Non-blocking
+                    # Normalize CPU percent by CPU count
+                    cpu_count = psutil.cpu_count(logical=True) or 1
+                    proc_info['cpu_percent'] = min(cpu_percent / cpu_count, 100.0)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    proc_info['cpu_percent'] = 0.0
+                    continue
+            
+            # Sort by CPU and return top limit
             processes.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
-        elif sort_by == 'memory':
+        else:
+            # For memory sorting, just get memory for all (already have it from first pass)
+            for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
+                try:
+                    proc_info = proc.info.copy()
+                    if proc_info.get('memory_percent') is None:
+                        proc_info['memory_percent'] = proc.memory_percent()
+                    proc_info['cpu_percent'] = 0.0
+                    processes.append(proc_info)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+            
             processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
         
-        return processes[:limit]
+        # Return top processes, but get full info only for the ones we return
+        top_pids = [p['pid'] for p in processes[:limit]]
+        result = []
+        for pid in top_pids:
+            proc_info = self.get_process_info(pid)
+            if proc_info:
+                result.append(proc_info)
+        
+        # Re-sort result to ensure correct order
+        if sort_by == 'cpu':
+            result.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
+        elif sort_by == 'memory':
+            result.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
+        
+        return result[:limit]
     
     def get_process_tree(self, pid: int) -> Dict:
         """

@@ -4,6 +4,7 @@ import os
 import platform
 from typing import Dict, List, Optional, Callable
 from util.util import format_bytes
+from util.security import validate_path, SecurityError
 
 
 class DiskMonitor:
@@ -13,7 +14,7 @@ class DiskMonitor:
         """Initialize the disk monitor."""
         pass
     
-    def get_disk_usage(self, path: str = '/') -> Dict:
+    def get_disk_usage(self, path: str = '/') -> Optional[Dict]:
         """
         Get disk usage for a specific path.
         
@@ -370,18 +371,33 @@ class DiskMonitor:
         
         return None
     
-    def get_directory_size(self, path: str) -> Optional[Dict]:
+    def get_directory_size(self, path: str, allowed_base_paths: Optional[List[str]] = None, 
+                          timeout: Optional[float] = None, max_depth: Optional[int] = None) -> Optional[Dict]:
         """
         Get the total size of a directory and all its contents recursively.
         
         Args:
             path: Directory path to check. Must be a non-empty string.
+            allowed_base_paths: Optional list of allowed base paths for security validation
+            timeout: Optional timeout in seconds. If exceeded, returns partial results.
+            max_depth: Optional maximum depth to traverse. None for unlimited.
             
         Returns:
-            Dictionary containing directory size information, or None if path doesn't exist
+            Dictionary containing directory size information, or None if path doesn't exist or is invalid.
+            If timeout is exceeded, returns partial results with 'timed_out': True flag.
         """
+        import time
+        
         if not path or not isinstance(path, str):
             return None
+        
+        # Security: Validate path to prevent traversal attacks
+        is_valid, resolved_path, error = validate_path(path, allowed_base_paths=allowed_base_paths, allow_symlinks=False)
+        if not is_valid:
+            return None
+        
+        # Use resolved path for operations
+        path = resolved_path
         
         if not os.path.exists(path):
             return None
@@ -401,9 +417,25 @@ class DiskMonitor:
         total_size = 0
         file_count = 0
         dir_count = 0
+        timed_out = False
+        start_time = time.time() if timeout else None
         
         try:
-            for dirpath, dirnames, filenames in os.walk(path):
+            # Use topdown=True to allow depth limiting
+            for dirpath, dirnames, filenames in os.walk(path, topdown=True):
+                # Check timeout
+                if timeout and (time.time() - start_time) > timeout:
+                    logger.warning(f"Directory size calculation timed out after {timeout}s for {path}")
+                    timed_out = True
+                    break
+                
+                # Check depth limit
+                if max_depth is not None:
+                    current_depth = dirpath[len(path):].count(os.sep)
+                    if current_depth >= max_depth:
+                        # Clear dirnames to prevent descending further
+                        dirnames.clear()
+                
                 dir_count += len(dirnames)
                 
                 for filename in filenames:
@@ -413,10 +445,26 @@ class DiskMonitor:
                         file_count += 1
                     except (OSError, PermissionError):
                         continue
+                    
+                    # Check timeout periodically (every 100 files)
+                    if timeout and file_count % 100 == 0:
+                        if (time.time() - start_time) > timeout:
+                            logger.warning(f"Directory size calculation timed out after {timeout}s for {path}")
+                            timed_out = True
+                            break
+                
+                if timed_out:
+                    break
+                    
         except (OSError, PermissionError) as e:
-            return None
+            logger.debug(f"Permission error calculating directory size for {path}: {e}")
+            # Return partial results if we have any
+            if file_count > 0 or dir_count > 0:
+                pass  # Continue to return partial results
+            else:
+                return None
         
-        return {
+        result = {
             'path': path,
             'size': total_size,
             'is_file': False,
@@ -424,6 +472,12 @@ class DiskMonitor:
             'file_count': file_count,
             'dir_count': dir_count,
         }
+        
+        if timed_out:
+            result['timed_out'] = True
+            result['partial'] = True
+        
+        return result
     
     def get_directory_size_human(self, path: str) -> Optional[Dict]:
         """
