@@ -2,7 +2,7 @@
 
 A comprehensive server monitoring system with Discord alerts, web dashboard, and system resource tracking.
 
-> **Latest Update:** January 2026 - Code review fixes and improvements applied
+> **Latest Update:** January 2026 - Kernel monitoring, automatic disk cleanup, and comprehensive code review fixes
 
 ## Directory Structure
 
@@ -17,13 +17,15 @@ src/
 ├── monitor/               # System monitoring modules
 │   ├── cpu.py            # CPU usage and frequency monitoring
 │   ├── memory.py         # Memory and swap monitoring
-│   ├── disk.py           # Disk usage and directory monitoring
+│   ├── disk.py           # Disk usage, directory monitoring, and automatic cleanup
 │   ├── network.py        # Network bandwidth and I/O monitoring
 │   ├── gpu.py            # NVIDIA GPU monitoring (nvidia-smi)
 │   ├── sensors.py        # Temperature and fan speed monitoring
 │   ├── system.py         # System info, processes, and uptime
 │   ├── processes.py      # Process resource usage tracking
 │   ├── freeze.py         # System freeze detection
+│   ├── kernel.py         # Kernel crash detection and system stability monitoring
+│   ├── log.py            # Log file monitoring and cleanup
 │   ├── qbittorrent.py    # qBittorrent Web API integration
 │   └── media.py          # Media directory monitoring
 ├── util/                  # Utility modules
@@ -95,6 +97,13 @@ The core monitoring application that:
 - Disk usage per partition
 - Directory size monitoring
 - Largest directories identification
+- **Automatic disk cleanup** - Proactive cleanup when usage exceeds thresholds
+  - Normal cleanup at 50% usage (configurable)
+  - Emergency cleanup at 95% usage (configurable)
+  - Temporary file cleanup (`/tmp`, `/var/tmp`)
+  - Log file cleanup (via log monitor integration)
+  - Cache directory cleanup (`/var/cache`)
+  - Prevents disk from reaching 100% usage
 
 #### `monitor/network.py` - Network Monitoring
 - Bandwidth usage (upload/download)
@@ -117,6 +126,23 @@ The core monitoring application that:
 - Hostname and platform info
 - Process count
 - Top processes by CPU/memory
+
+#### `monitor/kernel.py` - Kernel Crash & Stability Monitoring
+- **Proactive crash detection** - Early warning signs before crashes
+- Kernel panic and oops detection
+- System stability risk assessment
+- Hardware error detection (EDAC, MCE)
+- Memory pressure monitoring (OOM killer detection)
+- Disk I/O error detection
+- System lockup detection
+- Unexpected reboot detection
+- Boot time tracking
+- Risk scoring with recommendations
+
+#### `monitor/log.py` - Log File Monitoring
+- Log file size monitoring
+- Log cleanup integration with disk cleanup
+- Directory log analysis
 
 #### `monitor/processes.py` - Process Monitoring
 - Top processes by resource usage
@@ -145,13 +171,21 @@ The core monitoring application that:
 Sends rich embed alerts to Discord for:
 - CPU usage alerts
 - Memory usage alerts
-- Disk usage alerts
+- Disk usage alerts (via `DISK_WEBHOOK` if configured)
 - Network bandwidth alerts
 - Temperature alerts (with cause analysis)
 - Process resource alerts
 - Directory size alerts
-- qBittorrent notifications
+- qBittorrent notifications (via `QBITTORRENT_WEBHOOK` if configured)
 - System freeze alerts
+- Kernel crash and stability alerts (via `CRASH_WEBHOOK` if configured)
+- Disk cleanup notifications
+
+**Separate Webhooks:**
+- `WEBHOOK` - Main alerts (default)
+- `DISK_WEBHOOK` - Disk-related alerts (usage, cleanup, directory size)
+- `CRASH_WEBHOOK` - Kernel crash, stability, and reboot alerts
+- `QBITTORRENT_WEBHOOK` - qBittorrent-specific notifications
 
 **Features:**
 - Consistent embed styling (red color scheme)
@@ -228,6 +262,13 @@ Standardized error handling utilities:
 - Logging helpers
 - Error pattern standardization
 
+#### `util/security.py`
+Security utilities:
+- Path validation and traversal protection
+- Safe subprocess execution
+- Environment variable validation
+- Security checks for file operations
+
 #### `cache/cache.py`
 Cache management:
 - Startup cache clearing
@@ -239,7 +280,12 @@ Cache management:
 All configuration is done via environment variables (`.env` file):
 
 ### Required
-- `WEBHOOK` - Discord webhook URL for alerts
+- `WEBHOOK` - Discord webhook URL for main alerts
+
+### Optional Webhooks
+- `DISK_WEBHOOK` - Separate webhook for disk-related alerts (usage, cleanup, directory size)
+- `CRASH_WEBHOOK` - Separate webhook for kernel crash and stability alerts
+- `QBITTORRENT_WEBHOOK` - Separate webhook for qBittorrent notifications
 
 ### Optional Features
 - `QBITTORRENT_MONITOR` - Enable qBittorrent monitoring (true/false)
@@ -251,7 +297,9 @@ All configuration is done via environment variables (`.env` file):
 - `CPU_THRESHOLD` - CPU usage alert threshold (default: 80.0%)
 - `MEMORY_THRESHOLD` - Memory usage threshold (default: 80.0%)
 - `GPU_THRESHOLD` - GPU utilization threshold (default: 80.0%)
-- `DISK_THRESHOLD` - Disk usage threshold (default: 80.0%)
+- `DISK_THRESHOLD` - Disk usage alert threshold (default: 80.0%)
+- `DISK_CLEANUP_THRESHOLD` - Disk usage threshold to trigger cleanup (default: 50.0%)
+- `DISK_EMERGENCY_THRESHOLD` - Disk usage threshold for emergency cleanup (default: 95.0%, clamped 90-99%)
 - `TEMP_THRESHOLD` - Temperature threshold in Celsius (default: 80.0°C)
 - `NETWORK_BANDWIDTH_THRESHOLD` - Network bandwidth in MB/s (default: 1000.0)
 - `PROCESS_CPU_THRESHOLD` - Per-process CPU threshold (default: 50.0%)
@@ -261,6 +309,11 @@ All configuration is done via environment variables (`.env` file):
 - `CHECK_INTERVAL` - Monitoring loop interval in seconds (default: 5.0)
 - `ALERT_COOLDOWN` - Seconds between alerts for same metric (default: 300.0)
 - `TEMP_ALERT_DURATION` - Seconds temp must stay high before alert (default: 30.0)
+- `DISK_CLEANUP_COOLDOWN` - Seconds between disk cleanup attempts (default: 3600.0)
+- `DISK_EMERGENCY_COOLDOWN` - Seconds between emergency cleanup attempts (default: 1800.0)
+- `KERNEL_CHECK_INTERVAL` - Loop iterations between kernel crash checks (default: 30)
+- `KERNEL_STABILITY_CHECK_INTERVAL` - Loop iterations between stability checks (default: 10)
+- `KERNEL_CHECK_SINCE_MINUTES` - Minutes to look back in kernel logs (default: 60)
 
 ### qBittorrent Settings
 - `QBITTORRENT_HOST` - qBittorrent Web UI host (default: localhost)
@@ -279,6 +332,29 @@ All configuration is done via environment variables (`.env` file):
 
 ### Error Recovery
 - `ALERT_LOG_PATH` - Path for fallback alert logging when Discord fails (default: /var/log/server-monitor-alerts.log)
+
+### Disk Cleanup Settings
+- `DISK_CLEANUP_THRESHOLD` - Start cleanup when disk usage exceeds this % (default: 50.0%)
+- `DISK_EMERGENCY_THRESHOLD` - Emergency cleanup when disk usage exceeds this % (default: 95.0%)
+- `DISK_CLEANUP_COOLDOWN` - Seconds between normal cleanup attempts (default: 3600.0 = 1 hour)
+- `DISK_EMERGENCY_COOLDOWN` - Seconds between emergency cleanup attempts (default: 1800.0 = 30 min)
+
+**Cleanup Behavior:**
+- Normal cleanup: Removes files older than 7 days, then 3 days, then 1 day, then all temp files
+- Emergency cleanup: Aggressively removes all temporary files, cleans logs, and cache directories
+- Prevents disk from reaching 100% usage which can cause system crashes
+
+### Kernel Monitoring Settings
+- `KERNEL_CHECK_INTERVAL` - Check for crashes every N loop iterations (default: 30)
+- `KERNEL_STABILITY_CHECK_INTERVAL` - Check stability every N loop iterations (default: 10)
+- `KERNEL_CHECK_SINCE_MINUTES` - Look back N minutes in kernel logs (default: 60)
+
+**Monitoring Features:**
+- Detects kernel panics, oops, and crashes
+- Proactive early warning detection (hardware errors, memory pressure, I/O errors)
+- System stability risk scoring (low, medium, high, critical)
+- Unexpected reboot detection
+- Boot time tracking
 
 See `env.recommended` for complete configuration options.
 
@@ -313,6 +389,17 @@ The system automatically sends Discord alerts when:
 - Individual processes exceed CPU/memory thresholds
 - Media directory exceeds size threshold
 - System freeze detected (if enabled)
+- Kernel crash or panic detected
+- System stability risk detected (high/critical)
+- Unexpected system reboot detected
+- Early warning signs detected (hardware errors, memory pressure, etc.)
+
+### Automatic Disk Cleanup
+The system automatically cleans up disk space when:
+- Disk usage exceeds `DISK_CLEANUP_THRESHOLD` (default: 50%) - Normal cleanup
+- Disk usage exceeds `DISK_EMERGENCY_THRESHOLD` (default: 95%) - Emergency cleanup
+- Cleanup targets: `/tmp`, `/var/tmp`, log files, cache directories
+- Prevents disk from reaching 100% usage (which can cause system crashes)
 
 ### Alert Cooldown
 Alerts for the same metric are rate-limited by `ALERT_COOLDOWN` to prevent spam.
@@ -443,6 +530,18 @@ main(cpu_monitor=mock_cpu, memory_monitor=mock_memory)
 - Returns JSON with status and timestamp
 - Useful for external monitoring tools
 
+**Disk cleanup not working:**
+- Ensure the monitor has write permissions to `/tmp`, `/var/tmp`, and cache directories
+- Check logs for cleanup operation results
+- Verify `DISK_CLEANUP_THRESHOLD` and `DISK_EMERGENCY_THRESHOLD` are set correctly
+- Emergency cleanup triggers at 95% usage by default
+
+**Kernel monitoring not detecting issues:**
+- Verify system has access to `/var/log/kern.log`, `journalctl`, and `dmesg`
+- Check that the monitor has permission to read kernel logs
+- Some systems may not expose all kernel log sources
+- Stability checks run more frequently (every 10 iterations) than crash checks (every 30)
+
 ## 📚 Dependencies
 
 - `psutil` - System and process utilities
@@ -467,6 +566,25 @@ The codebase follows clean code principles:
 - Comprehensive cleanup in finally blocks
 
 ### Recent Improvements (2026)
+
+**New Features:**
+- **Kernel crash monitoring** - Proactive detection of kernel crashes, panics, and system instability
+- **Automatic disk cleanup** - Prevents disk from reaching 100% usage with proactive cleanup
+- **Separate webhook routing** - Dedicated webhooks for disk, crash, and qBittorrent alerts
+- **System stability risk assessment** - Risk scoring with early warning detection
+- **Unexpected reboot detection** - Tracks and alerts on unexpected system reboots
+
+**Code Quality & Bug Fixes:**
+- Fixed IndexError issues in kernel monitoring (added bounds checking)
+- Fixed potential division by zero errors
+- Fixed path slicing edge cases with safe `os.path.relpath()`
+- Fixed timeout validation edge cases
+- Simplified redundant datetime logic
+- Moved inline imports to module level for better performance
+- Comprehensive code review and bug fixes applied
+- All critical and medium priority issues resolved
+
+**Existing Improvements:**
 - Fixed duplicate qBittorrent monitoring code
 - Added null checks for optional monitors
 - Implemented cached environment variable access

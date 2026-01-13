@@ -118,9 +118,13 @@ function fetchWithTimeout(url, timeout = 15000) {
 
 let refreshInterval = null;
 let isRefreshing = false;
+let retryCount = 0;
+const MAX_RETRY_DELAY = 30000;
 
 async function fetchStats(showLoading = false) {
-    if (isRefreshing) return;
+    if (isRefreshing && !showLoading) {
+        return;
+    }
     
     const loading = document.getElementById('loading');
     const content = document.getElementById('content');
@@ -128,6 +132,12 @@ async function fetchStats(showLoading = false) {
     const errorMessage = document.getElementById('errorMessage');
     const refreshBtn = document.getElementById('refreshBtn');
     const refreshIcon = document.getElementById('refreshIcon');
+    
+    if (refreshBtn) {
+        refreshBtn.disabled = true;
+        refreshBtn.style.opacity = '0.6';
+        refreshBtn.style.cursor = 'not-allowed';
+    }
 
     if (showLoading || !content.classList.contains('hidden')) {
         if (refreshIcon) {
@@ -223,6 +233,8 @@ async function fetchStats(showLoading = false) {
         error.classList.add('hidden');
         
         updateCharts(data);
+    
+        retryCount = 0;
         
     } catch (err) {
         loading.classList.add('hidden');
@@ -240,21 +252,32 @@ async function fetchStats(showLoading = false) {
         }
         
         showToast(errorMsg, 'error', 5000);
+
+        retryCount++;
+        const baseDelay = 2000;
+        const retryDelay = Math.min(baseDelay * Math.pow(2, Math.min(retryCount - 1, 5)), MAX_RETRY_DELAY);
         
         if (content.classList.contains('hidden')) {
             error.classList.remove('hidden');
-            errorMessage.textContent = errorMsg + 'Retrying...';
+            errorMessage.textContent = `${errorMsg}Retrying in ${Math.round(retryDelay / 1000)}s...`;
             setTimeout(() => {
                 error.classList.add('hidden');
                 fetchStats();
-            }, 2000);
+            }, retryDelay);
         } else {
-            setTimeout(fetchStats, 2000);
+            setTimeout(() => {
+                fetchStats();
+            }, retryDelay);
         }
     } finally {
         isRefreshing = false;
         if (refreshIcon) {
             refreshIcon.classList.remove('spinning');
+        }
+        if (refreshBtn) {
+            refreshBtn.disabled = false;
+            refreshBtn.style.opacity = '1';
+            refreshBtn.style.cursor = 'pointer';
         }
     }
 }
@@ -394,17 +417,22 @@ function updateMiniChart(canvasId, data) {
 }
 
 function manualRefresh() {
+    isRefreshing = false;
+    retryCount = 0;
     fetchStats(true);
 }
 
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        initTheme();
-        fetchStats();
-        refreshInterval = setInterval(fetchStats, 5000);
-    });
-} else {
+function initializeApp() {
     initTheme();
     fetchStats();
     refreshInterval = setInterval(fetchStats, 5000);
+    
+    window.manualRefresh = manualRefresh;
+    window.toggleTheme = toggleTheme;
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeApp);
+} else {
+    initializeApp();
 }

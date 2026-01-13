@@ -9,13 +9,15 @@ from monitor.processes import ProcessMonitor
 from monitor.freeze import FreezeMonitor
 from monitor.qbittorrent import QBittorrentMonitor
 from monitor.log import LogMonitor
+from monitor.kernel import KernelMonitor
 from discord.webhook import DiscordWebhook
 from util.util import format_bytes, format_bytes_per_second, BYTES_PER_KB, BYTES_PER_MB, BYTES_PER_GB
-from util.systemd import install_systemd_service, is_systemd_available, is_root
+from util.systemd import install_systemd_service, is_systemd_available
 from cache.cache import clear_cache_on_startup, clear_cache_on_exit
 from logger import get_logger
 from web.server import set_monitors, start_server, stop_server
-from typing import Optional, Tuple, Dict, List, Any
+from typing import Optional, Tuple, Dict, List
+from datetime import datetime
 import os
 import sys
 import time
@@ -34,6 +36,8 @@ DEFAULT_MEMORY_THRESHOLD = 80.0
 DEFAULT_GPU_THRESHOLD = 80.0
 DEFAULT_DISK_THRESHOLD = 80.0
 DEFAULT_DISK_EARLY_WARNING_THRESHOLD = 75.0
+DEFAULT_DISK_CLEANUP_THRESHOLD = 50.0
+DEFAULT_DISK_EMERGENCY_THRESHOLD = 95.0
 DEFAULT_TEMP_THRESHOLD = 80.0
 DEFAULT_TEMP_ALERT_DURATION = 30.0
 DEFAULT_NETWORK_BANDWIDTH_THRESHOLD = 1000.0
@@ -45,6 +49,9 @@ DEFAULT_FREEZE_THRESHOLD = 30.0
 DEFAULT_FREEZE_HEARTBEAT_TIMEOUT = 60.0
 DEFAULT_MEDIA_DIRECTORY_THRESHOLD_GB = 500.0
 DEFAULT_MEDIA_CHECK_INTERVAL = 10
+DEFAULT_KERNEL_CHECK_INTERVAL = 30  # Check every 30 cycles
+DEFAULT_KERNEL_STABILITY_CHECK_INTERVAL = 10  # Check stability more frequently (every 10 cycles)
+DEFAULT_KERNEL_CHECK_SINCE_MINUTES = 60  # Check last 60 minutes
 
 _env_cache = {}
 
@@ -115,7 +122,7 @@ def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core:
         elif freq_percent >= 85:
             reasons.append(f"CPU running at high frequency ({freq_percent:.0f}% of max)")
     
-    if cpu_per_core:
+    if cpu_per_core and len(cpu_per_core) > 0:
         max_core = max(cpu_per_core)
         if max_core >= 90:
             high_cores = sum(1 for core in cpu_per_core if core >= 80)
@@ -559,7 +566,8 @@ def main(
     sensors_monitor: Optional[SensorsMonitor] = None,
     process_monitor: Optional[ProcessMonitor] = None,
     qbittorrent_monitor: Optional[QBittorrentMonitor] = None,
-    log_monitor: Optional[LogMonitor] = None
+    log_monitor: Optional[LogMonitor] = None,
+    kernel_monitor: Optional[KernelMonitor] = None
 ):
     """
     Main function for comprehensive server monitoring with Discord alerts.
@@ -632,6 +640,9 @@ def main(
         logger.info("qBittorrent monitoring disabled (set QBITTORRENT_MONITOR=true to enable)")
     if log_monitor is None:
         log_monitor = LogMonitor()
+    if kernel_monitor is None:
+        kernel_monitor = KernelMonitor()
+        logger.info("Kernel monitoring enabled")
     logger.info("Monitors initialized")
     
     self_test_on_start = get_env_bool('SELF_TEST_ON_START', True)
@@ -669,11 +680,39 @@ def main(
         else:
             logger.debug("qBittorrent webhook not configured (set QBITTORRENT_WEBHOOK to enable)")
     
+    disk_webhook = None
+    disk_webhook_url = get_cached_env('DISK_WEBHOOK')
+    if disk_webhook_url:
+        try:
+            disk_webhook = DiscordWebhook(webhook_url=disk_webhook_url)
+            logger.info("Disk Discord webhook connected")
+        except ValueError:
+            logger.warning("Disk webhook URL invalid")
+        except Exception as e:
+            logger.warning(f"Failed to connect to disk webhook: {e}")
+    else:
+        logger.debug("Disk webhook not configured (set DISK_WEBHOOK to enable)")
+    
+    crash_webhook = None
+    crash_webhook_url = get_cached_env('CRASH_WEBHOOK')
+    if crash_webhook_url:
+        try:
+            crash_webhook = DiscordWebhook(webhook_url=crash_webhook_url)
+            logger.info("Crash Discord webhook connected")
+        except ValueError:
+            logger.warning("Crash webhook URL invalid")
+        except Exception as e:
+            logger.warning(f"Failed to connect to crash webhook: {e}")
+    else:
+        logger.debug("Crash webhook not configured (set CRASH_WEBHOOK to enable)")
+    
     cpu_threshold = get_env_float('CPU_THRESHOLD', DEFAULT_CPU_THRESHOLD)
     memory_threshold = get_env_float('MEMORY_THRESHOLD', DEFAULT_MEMORY_THRESHOLD)
     gpu_threshold = get_env_float('GPU_THRESHOLD', DEFAULT_GPU_THRESHOLD)
     disk_threshold = get_env_float('DISK_THRESHOLD', DEFAULT_DISK_THRESHOLD)
     disk_early_warning_threshold = get_env_float('DISK_EARLY_WARNING_THRESHOLD', DEFAULT_DISK_EARLY_WARNING_THRESHOLD)
+    disk_cleanup_threshold = get_env_float('DISK_CLEANUP_THRESHOLD', DEFAULT_DISK_CLEANUP_THRESHOLD)
+    disk_emergency_threshold = get_env_float('DISK_EMERGENCY_THRESHOLD', DEFAULT_DISK_EMERGENCY_THRESHOLD)
     monitor_individual_partitions = get_env_bool('MONITOR_INDIVIDUAL_PARTITIONS', True)
     temp_threshold = get_env_float('TEMP_THRESHOLD', DEFAULT_TEMP_THRESHOLD)
     temp_alert_duration = get_env_float('TEMP_ALERT_DURATION', DEFAULT_TEMP_ALERT_DURATION)
@@ -700,9 +739,17 @@ def main(
     gpu_threshold = clamp_threshold(gpu_threshold, 0.0, 100.0)
     disk_threshold = clamp_threshold(disk_threshold, 0.0, 100.0)
     disk_early_warning_threshold = clamp_threshold(disk_early_warning_threshold, 0.0, 100.0)
+    disk_cleanup_threshold = clamp_threshold(disk_cleanup_threshold, 0.0, 100.0)
+    disk_emergency_threshold = clamp_threshold(disk_emergency_threshold, 90.0, 99.0)  # Must be between 90-99%
     if disk_early_warning_threshold >= disk_threshold:
         disk_early_warning_threshold = max(0.0, disk_threshold - 5.0)
         logger.warning(f"Early warning threshold adjusted to {disk_early_warning_threshold:.1f}% (must be less than main threshold)")
+    if disk_cleanup_threshold >= disk_threshold:
+        disk_cleanup_threshold = max(0.0, disk_threshold - 10.0)
+        logger.warning(f"Cleanup threshold adjusted to {disk_cleanup_threshold:.1f}% (must be less than main threshold)")
+    if disk_emergency_threshold <= disk_threshold:
+        disk_emergency_threshold = min(99.0, disk_threshold + 10.0)
+        logger.warning(f"Emergency threshold adjusted to {disk_emergency_threshold:.1f}% (must be greater than main threshold)")
     temp_threshold = max(0.0, temp_threshold)
     temp_alert_duration = max(0.0, temp_alert_duration)
     process_cpu_threshold = clamp_threshold(process_cpu_threshold, 0.0, 100.0)
@@ -732,7 +779,7 @@ def main(
     logger.info(f"Uptime: {system_summary['uptime']}")
     logger.info(f"CPU: {cpu_monitor.cpu_count} logical, {cpu_monitor.cpu_count_physical} physical | Threshold: {cpu_threshold:.1f}%")
     logger.info(f"Memory: {memory_info['total']} | Threshold: {memory_threshold:.1f}%")
-    logger.info(f"Disk: {total_disk['percent']:.1f}% used | Threshold: {disk_threshold:.1f}% | Early Warning: {disk_early_warning_threshold:.1f}%")
+    logger.info(f"Disk: {total_disk['percent']:.1f}% used | Threshold: {disk_threshold:.1f}% | Early Warning: {disk_early_warning_threshold:.1f}% | Cleanup: {disk_cleanup_threshold:.1f}% | Emergency: {disk_emergency_threshold:.1f}%")
     if monitor_individual_partitions:
         logger.info(f"Individual partition monitoring: Enabled")
     
@@ -766,6 +813,15 @@ def main(
     log_check_interval = get_env_int('LOG_CHECK_INTERVAL', 20)
     log_monitor.set_threshold(log_threshold_mb)
     logger.info(f"Log Monitoring: Threshold: {log_threshold_mb:.1f} MB | Check interval: {log_check_interval} cycles | Auto-clean: Enabled")
+    
+    kernel_check_interval = get_env_int('KERNEL_CHECK_INTERVAL', DEFAULT_KERNEL_CHECK_INTERVAL)
+    kernel_stability_check_interval = get_env_int('KERNEL_STABILITY_CHECK_INTERVAL', DEFAULT_KERNEL_STABILITY_CHECK_INTERVAL)
+    kernel_check_since_minutes = get_env_int('KERNEL_CHECK_SINCE_MINUTES', DEFAULT_KERNEL_CHECK_SINCE_MINUTES)
+    kernel_monitor_enabled = get_env_bool('KERNEL_MONITOR_ENABLED', True)
+    if kernel_monitor_enabled:
+        logger.info(f"Kernel Monitoring: Crash check interval: {kernel_check_interval} cycles | Stability check: {kernel_stability_check_interval} cycles | Lookback: {kernel_check_since_minutes} minutes")
+    else:
+        logger.info("Kernel Monitoring: Disabled (set KERNEL_MONITOR_ENABLED=true to enable)")
     
     qbittorrent_connected = False
     if qbittorrent_monitor:
@@ -840,8 +896,12 @@ def main(
     last_memory_alert_time = 0
     last_gpu_alert_time = 0
     last_disk_alert_time = 0
+    last_disk_cleanup_time = 0
+    last_partition_cleanup_times = {}
     last_partition_alert_times = {}
     partition_alert_sent = {}
+    disk_cleanup_cooldown = 3600.0  # 1 hour cooldown between cleanups
+    disk_emergency_cooldown = 300.0  # 5 minutes cooldown for emergency cleanups
     last_temp_alert_time = 0
     last_freeze_alert_time = 0
     temp_high_start_time = None
@@ -862,6 +922,12 @@ def main(
     log_check_counter = 0
     last_log_alert_time = {}
     cleaned_logs = set()
+    kernel_check_counter = 0
+    kernel_stability_check_counter = 0
+    last_kernel_alert_time = 0
+    last_kernel_stability_alert_time = 0
+    kernel_alert_sent = False
+    kernel_stability_alert_sent = False
     qbittorrent_check_counter = 0
     NETWORK_CHECK_INTERVAL = 2
     PROCESS_CHECK_INTERVAL = 3
@@ -871,6 +937,7 @@ def main(
     
     try:
         while True:
+            current_time = time.time()
             top_cpu_processes = None
             top_memory_processes = None
             
@@ -891,6 +958,133 @@ def main(
             
             total_disk = disk_monitor.get_total_disk_usage()
             disk_percent = total_disk.get('percent', 0.0)
+            
+            if disk_percent >= disk_emergency_threshold:
+                time_since_last_cleanup = current_time - last_disk_cleanup_time
+                
+                if time_since_last_cleanup >= disk_emergency_cooldown:
+                    logger.critical(f"[EMERGENCY] Disk usage at {disk_percent:.1f}% (emergency threshold: {disk_emergency_threshold:.1f}%) - CRITICAL! Starting emergency cleanup...")
+                    
+                    try:
+                        cleanup_stats = disk_monitor.emergency_cleanup_disk_space(mountpoint='/', log_monitor=log_monitor)
+                        
+                        if cleanup_stats['total_size_cleared'] > 0:
+                            logger.critical(f"[EMERGENCY] Emergency cleanup cleared {format_bytes(cleanup_stats['total_size_cleared'])} "
+                                          f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs, {cleanup_stats.get('logs_cleaned', 0)} logs)")
+                            
+                            if cleanup_stats.get('final_usage'):
+                                logger.critical(f"[EMERGENCY] Disk usage after emergency cleanup: {cleanup_stats['final_usage']:.1f}%")
+                                
+                                if cleanup_stats['final_usage'] >= disk_emergency_threshold:
+                                    logger.critical(f"[EMERGENCY] Disk still critically full after cleanup! Manual intervention required!")
+                            
+                            if disk_webhook:
+                                fields = [
+                                    {'name': 'EMERGENCY CLEANUP', 'value': 'Disk critically full - aggressive cleanup performed', 'inline': False},
+                                    {'name': 'Usage Before', 'value': f"{cleanup_stats.get('initial_usage', disk_percent):.1f}%", 'inline': True},
+                                    {'name': 'Usage After', 'value': f"{cleanup_stats.get('final_usage', disk_percent):.1f}%", 'inline': True},
+                                    {'name': 'Space Cleared', 'value': format_bytes(cleanup_stats['total_size_cleared']), 'inline': True},
+                                    {'name': 'Files Removed', 'value': str(cleanup_stats['files_removed']), 'inline': True},
+                                    {'name': 'Logs Cleaned', 'value': str(cleanup_stats.get('logs_cleaned', 0)), 'inline': True},
+                                ]
+                                
+                                if cleanup_stats.get('final_usage', disk_percent) >= disk_emergency_threshold:
+                                    fields.append({
+                                        'name': 'CRITICAL',
+                                        'value': 'Disk still critically full after cleanup! Manual intervention required!',
+                                        'inline': False
+                                    })
+                                
+                                if cleanup_stats['errors']:
+                                    error_count = len(cleanup_stats['errors'])
+                                    fields.append({
+                                        'name': 'Errors',
+                                        'value': f"{error_count} error(s) occurred during emergency cleanup",
+                                        'inline': False
+                                    })
+                                
+                                success = disk_webhook.send_embed(
+                                    title='EMERGENCY: Disk Critically Full',
+                                    description=f'Emergency cleanup performed to prevent disk from reaching 100%',
+                                    fields=fields,
+                                    footer='Server Monitor - Emergency',
+                                    timestamp=True
+                                )
+                                if success:
+                                    logger.info("    Discord emergency notification sent")
+                        else:
+                            logger.critical(f"[EMERGENCY] No space could be freed! Disk may crash if it reaches 100%!")
+                            if disk_webhook:
+                                disk_webhook.send_embed(
+                                    title='CRITICAL: Disk Cleanup Failed',
+                                    description=f'Disk at {disk_percent:.1f}% and emergency cleanup could not free space! Manual intervention required immediately!',
+                                    fields=[
+                                        {'name': 'Current Usage', 'value': f"{disk_percent:.1f}%", 'inline': False},
+                                        {'name': 'Emergency Threshold', 'value': f"{disk_emergency_threshold:.1f}%", 'inline': True},
+                                        {'name': 'Status', 'value': 'CRITICAL - Manual intervention required', 'inline': False},
+                                    ],
+                                    footer='Server Monitor - Critical Alert',
+                                    timestamp=True
+                                )
+                        
+                        last_disk_cleanup_time = current_time
+                    except Exception as e:
+                        logger.critical(f"[EMERGENCY] Error during emergency disk cleanup: {e}")
+                        last_disk_cleanup_time = current_time
+
+            elif disk_percent >= disk_cleanup_threshold:
+                time_since_last_cleanup = current_time - last_disk_cleanup_time
+                
+                if time_since_last_cleanup >= disk_cleanup_cooldown:
+                    logger.warning(f"[CLEANUP] Disk usage at {disk_percent:.1f}% (cleanup threshold: {disk_cleanup_threshold:.1f}%), starting automatic cleanup...")
+                    
+                    try:
+                        target_free_percent = 20.0
+                        cleanup_stats = disk_monitor.cleanup_disk_space(mountpoint='/', target_free_percent=target_free_percent)
+                        
+                        if cleanup_stats['total_size_cleared'] > 0:
+                            logger.info(f"[CLEANUP] Cleaned {format_bytes(cleanup_stats['total_size_cleared'])} "
+                                      f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs)")
+                            
+                            if cleanup_stats.get('final_usage'):
+                                logger.info(f"[CLEANUP] Disk usage after cleanup: {cleanup_stats['final_usage']:.1f}%")
+                            
+                            if disk_webhook:
+                                fields = [
+                                    {'name': 'Usage Before', 'value': f"{cleanup_stats.get('initial_usage', disk_percent):.1f}%", 'inline': True},
+                                    {'name': 'Usage After', 'value': f"{cleanup_stats.get('final_usage', disk_percent):.1f}%", 'inline': True},
+                                    {'name': 'Space Cleared', 'value': format_bytes(cleanup_stats['total_size_cleared']), 'inline': True},
+                                    {'name': 'Files Removed', 'value': str(cleanup_stats['files_removed']), 'inline': True},
+                                    {'name': 'Directories Removed', 'value': str(cleanup_stats['dirs_removed']), 'inline': True},
+                                ]
+                                
+                                if cleanup_stats['errors']:
+                                    error_count = len(cleanup_stats['errors'])
+                                    fields.append({
+                                        'name': 'Errors',
+                                        'value': f"{error_count} error(s) occurred during cleanup",
+                                        'inline': False
+                                    })
+                                
+                                success = disk_webhook.send_embed(
+                                    title='Disk Cleanup Performed',
+                                    description=f'Automatic disk cleanup completed to prevent disk from filling up',
+                                    fields=fields,
+                                    footer='Server Monitor',
+                                    timestamp=True
+                                )
+                                if success:
+                                    logger.info("    Discord cleanup notification sent")
+                        else:
+                            logger.info("[CLEANUP] No files were cleaned (disk may need manual intervention)")
+                        
+                        last_disk_cleanup_time = current_time
+                    except Exception as e:
+                        logger.error(f"[CLEANUP] Error during automatic disk cleanup: {e}")
+                        last_disk_cleanup_time = current_time
+                else:
+                    remaining_cooldown = disk_cleanup_cooldown - time_since_last_cleanup
+                    logger.debug(f"Disk cleanup cooldown: {remaining_cooldown:.0f}s remaining")
             
             cpu_temp = None
             if sensors_monitor.is_available():
@@ -930,7 +1124,6 @@ def main(
                     network_io=network_io_data
                 )
             
-            current_time = time.time()
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
             
             metrics_str = f"[{timestamp}] CPU: {cpu_percent:.1f}% | Memory: {memory_percent:.1f}% | Disk: {disk_percent:.1f}%"
@@ -1037,7 +1230,7 @@ def main(
                 time_since_last_alert = current_time - last_disk_alert_time
                 
                 if not disk_alert_sent or time_since_last_alert >= alert_cooldown:
-                    if webhook:
+                    if disk_webhook:
                         logger.warning(f"[ALERT] Disk: {disk_percent:.1f}% (threshold: {disk_threshold:.1f}%)")
                         
                         fields = [
@@ -1101,7 +1294,7 @@ def main(
                                 'inline': False
                             })
                         
-                        success = webhook.send_embed(
+                        success = disk_webhook.send_embed(
                             title='Disk Usage Alert',
                             description=f'Disk usage has exceeded the threshold of {disk_threshold:.1f}%',
                             fields=fields,
@@ -1132,15 +1325,120 @@ def main(
                     for partition in all_partitions:
                         partition_key = partition.get('mountpoint', partition.get('device', 'unknown'))
                         percent = partition['percent']
+                        mountpoint = partition.get('mountpoint', '/')
+                        
+                        if percent >= disk_emergency_threshold:
+                            last_cleanup_time = last_partition_cleanup_times.get(partition_key, 0)
+                            time_since_last_cleanup = current_time - last_cleanup_time
+                            
+                            if time_since_last_cleanup >= disk_emergency_cooldown:
+                                logger.critical(f"[EMERGENCY] Partition {partition_key}: {percent:.1f}% (emergency threshold: {disk_emergency_threshold:.1f}%) - CRITICAL! Starting emergency cleanup...")
+                                
+                                try:
+                                    cleanup_stats = disk_monitor.emergency_cleanup_disk_space(mountpoint=mountpoint, log_monitor=log_monitor)
+                                    
+                                    if cleanup_stats['total_size_cleared'] > 0:
+                                        logger.critical(f"[EMERGENCY] Partition {partition_key}: Emergency cleanup cleared {format_bytes(cleanup_stats['total_size_cleared'])} "
+                                                      f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs, {cleanup_stats.get('logs_cleaned', 0)} logs)")
+                                        
+                                        if cleanup_stats.get('final_usage'):
+                                            logger.critical(f"[EMERGENCY] Partition {partition_key} usage after emergency cleanup: {cleanup_stats['final_usage']:.1f}%")
+                                        
+                                        if disk_webhook:
+                                            fields = [
+                                                {'name': 'EMERGENCY CLEANUP', 'value': f'Partition {partition_key} critically full', 'inline': False},
+                                                {'name': 'Usage Before', 'value': f"{cleanup_stats.get('initial_usage', percent):.1f}%", 'inline': True},
+                                                {'name': 'Usage After', 'value': f"{cleanup_stats.get('final_usage', percent):.1f}%", 'inline': True},
+                                                {'name': 'Space Cleared', 'value': format_bytes(cleanup_stats['total_size_cleared']), 'inline': True},
+                                                {'name': 'Files Removed', 'value': str(cleanup_stats['files_removed']), 'inline': True},
+                                                {'name': 'Logs Cleaned', 'value': str(cleanup_stats.get('logs_cleaned', 0)), 'inline': True},
+                                            ]
+                                            
+                                            if cleanup_stats.get('final_usage', percent) >= disk_emergency_threshold:
+                                                fields.append({
+                                                    'name': 'CRITICAL',
+                                                    'value': 'Partition still critically full after cleanup! Manual intervention required!',
+                                                    'inline': False
+                                                })
+                                            
+                                            success = disk_webhook.send_embed(
+                                                title='EMERGENCY: Partition Critically Full',
+                                                description=f'Emergency cleanup performed for partition {partition_key}',
+                                                fields=fields,
+                                                footer='Server Monitor - Emergency',
+                                                timestamp=True
+                                            )
+                                            if success:
+                                                logger.info(f"    Discord emergency notification sent for {partition_key}")
+                                    else:
+                                        logger.critical(f"[EMERGENCY] Partition {partition_key}: No space could be freed!")
+                                    
+                                    last_partition_cleanup_times[partition_key] = current_time
+                                except Exception as e:
+                                    logger.critical(f"[EMERGENCY] Error during emergency cleanup for partition {partition_key}: {e}")
+                                    last_partition_cleanup_times[partition_key] = current_time
+                        
+                        elif percent >= disk_cleanup_threshold:
+                            last_cleanup_time = last_partition_cleanup_times.get(partition_key, 0)
+                            time_since_last_cleanup = current_time - last_cleanup_time
+                            
+                            if time_since_last_cleanup >= disk_cleanup_cooldown:
+                                logger.warning(f"[CLEANUP] Partition {partition_key}: {percent:.1f}% (cleanup threshold: {disk_cleanup_threshold:.1f}%), starting automatic cleanup...")
+                                
+                                try:
+                                    target_free_percent = 20.0
+                                    cleanup_stats = disk_monitor.cleanup_disk_space(mountpoint=mountpoint, target_free_percent=target_free_percent)
+                                    
+                                    if cleanup_stats['total_size_cleared'] > 0:
+                                        logger.info(f"[CLEANUP] Partition {partition_key}: Cleaned {format_bytes(cleanup_stats['total_size_cleared'])} "
+                                                  f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs)")
+                                        
+                                        if cleanup_stats.get('final_usage'):
+                                            logger.info(f"[CLEANUP] Partition {partition_key} usage after cleanup: {cleanup_stats['final_usage']:.1f}%")
+                                        
+                                        if disk_webhook:
+                                            fields = [
+                                                {'name': 'Partition', 'value': partition_key, 'inline': False},
+                                                {'name': 'Usage Before', 'value': f"{cleanup_stats.get('initial_usage', percent):.1f}%", 'inline': True},
+                                                {'name': 'Usage After', 'value': f"{cleanup_stats.get('final_usage', percent):.1f}%", 'inline': True},
+                                                {'name': 'Space Cleared', 'value': format_bytes(cleanup_stats['total_size_cleared']), 'inline': True},
+                                                {'name': 'Files Removed', 'value': str(cleanup_stats['files_removed']), 'inline': True},
+                                                {'name': 'Directories Removed', 'value': str(cleanup_stats['dirs_removed']), 'inline': True},
+                                            ]
+                                            
+                                            if cleanup_stats['errors']:
+                                                error_count = len(cleanup_stats['errors'])
+                                                fields.append({
+                                                    'name': 'Errors',
+                                                    'value': f"{error_count} error(s) occurred during cleanup",
+                                                    'inline': False
+                                                })
+                                            
+                                            success = disk_webhook.send_embed(
+                                                title='Partition Cleanup Performed',
+                                                description=f'Automatic cleanup completed for partition {partition_key}',
+                                                fields=fields,
+                                                footer='Server Monitor',
+                                                timestamp=True
+                                            )
+                                            if success:
+                                                logger.info(f"    Discord partition cleanup notification sent for {partition_key}")
+                                    else:
+                                        logger.info(f"[CLEANUP] Partition {partition_key}: No files were cleaned")
+                                    
+                                    last_partition_cleanup_times[partition_key] = current_time
+                                except Exception as e:
+                                    logger.error(f"[CLEANUP] Error during automatic cleanup for partition {partition_key}: {e}")
+                                    last_partition_cleanup_times[partition_key] = current_time
                         
                         last_alert_time = last_partition_alert_times.get(partition_key, 0)
                         time_since_last_alert = current_time - last_alert_time
                         
                         if percent >= disk_threshold:
                             if not partition_alert_sent.get(partition_key, False) or time_since_last_alert >= alert_cooldown:
-                                if webhook:
+                                if disk_webhook:
                                     logger.warning(f"[ALERT] Partition {partition_key}: {percent:.1f}% (threshold: {disk_threshold:.1f}%)")
-                                    success = webhook.send_partition_alert(
+                                    success = disk_webhook.send_partition_alert(
                                         partition=partition,
                                         threshold=disk_threshold,
                                         is_early_warning=False
@@ -1159,9 +1457,9 @@ def main(
                                 logger.debug(f"Partition {partition_key} alert cooldown: {remaining_cooldown:.0f}s")
                         elif percent >= disk_early_warning_threshold:
                             if not partition_alert_sent.get(partition_key, False) or time_since_last_alert >= alert_cooldown:
-                                if webhook:
+                                if disk_webhook:
                                     logger.warning(f"[WARNING] Partition {partition_key}: {percent:.1f}% (early warning: {disk_early_warning_threshold:.1f}%)")
-                                    success = webhook.send_partition_alert(
+                                    success = disk_webhook.send_partition_alert(
                                         partition=partition,
                                         threshold=disk_early_warning_threshold,
                                         is_early_warning=True
@@ -1187,9 +1485,9 @@ def main(
                                 time_since_last_alert = current_time - last_alert_time
                                 
                                 if not partition_alert_sent.get(nvme_key, False) or time_since_last_alert >= alert_cooldown:
-                                    if webhook:
+                                    if disk_webhook:
                                         logger.warning(f"[WARNING] NVMe {nvme_key}: {nvme_percent:.1f}% (early warning: {disk_early_warning_threshold:.1f}%)")
-                                        success = webhook.send_partition_alert(
+                                        success = disk_webhook.send_partition_alert(
                                             partition=nvme_partition,
                                             threshold=disk_early_warning_threshold,
                                             is_early_warning=True
@@ -1456,11 +1754,11 @@ def main(
                                     subdir_human['size_bytes'] = subdir['size']
                                     subdirs_human.append(subdir_human)
                             
-                            if webhook:
+                            if disk_webhook:
                                 from util.util import format_bytes
                                 size_formatted = format_bytes(media_size_info['size'])
                                 logger.warning(f"[ALERT] Directory {media_directory}: {size_formatted} (threshold: {format_bytes(media_directory_threshold_bytes)})")
-                                success = webhook.send_directory_size_alert(
+                                success = disk_webhook.send_directory_size_alert(
                                     directory_path=media_directory,
                                     size_bytes=media_size_info['size'],
                                     threshold_bytes=media_directory_threshold_bytes,
@@ -1611,6 +1909,230 @@ def main(
                     cleaned_logs = {path for path in cleaned_logs if path not in current_exceeded_paths}
                 except Exception as e:
                     logger.debug(f"Error checking log sizes: {e}")
+            
+            kernel_stability_check_counter += 1
+            if kernel_monitor_enabled and kernel_stability_check_counter >= kernel_stability_check_interval:
+                kernel_stability_check_counter = 0
+                try:
+                    stability = kernel_monitor.check_system_stability()
+                    if stability.get('risk_level') in ['high', 'critical']:
+                        time_since_last_alert = current_time - last_kernel_stability_alert_time
+                        
+                        if not kernel_stability_alert_sent or time_since_last_alert >= alert_cooldown:
+                            risk_level = stability.get('risk_level', 'unknown')
+                            risk_score = stability.get('risk_score', 0)
+                            indicators = stability.get('indicators', [])
+                            
+                            logger.warning(f"[KERNEL] System stability risk: {risk_level.upper()} (score: {risk_score})")
+                            
+                            if crash_webhook:
+                                fields = [
+                                    {'name': 'Risk Level', 'value': risk_level.upper(), 'inline': True},
+                                    {'name': 'Risk Score', 'value': str(risk_score), 'inline': True},
+                                    {'name': 'Status', 'value': 'System showing signs of instability - crash risk elevated', 'inline': False},
+                                ]
+                                
+                                if indicators:
+                                    fields.append({
+                                        'name': 'Warning Indicators',
+                                        'value': '\n'.join(indicators[:8]),
+                                        'inline': False
+                                    })
+                                
+                                recommendations = stability.get('recommendations', [])
+                                if recommendations:
+                                    fields.append({
+                                        'name': 'Recommended Actions',
+                                        'value': '\n'.join(recommendations[:5]),
+                                        'inline': False
+                                    })
+                                
+                                success = crash_webhook.send_embed(
+                                    title=f'Kernel Alert: System Stability Risk ({risk_level.upper()})',
+                                    description='System showing signs of instability that may lead to kernel crash',
+                                    fields=fields,
+                                    footer='Server Monitor - Kernel Stability',
+                                    timestamp=True
+                                )
+                                if success:
+                                    logger.info("    Discord kernel stability alert sent")
+                                else:
+                                    logger.warning("    Discord kernel stability alert failed")
+                            
+                            last_kernel_stability_alert_time = current_time
+                            kernel_stability_alert_sent = True
+                    else:
+                        if kernel_stability_alert_sent:
+                            kernel_stability_alert_sent = False
+                except Exception as e:
+                    logger.debug(f"Error checking kernel stability: {e}")
+            
+            kernel_check_counter += 1
+            if kernel_monitor_enabled and kernel_check_counter >= kernel_check_interval:
+                kernel_check_counter = 0
+                try:
+                    crash_results = kernel_monitor.check_kernel_crashes(since_minutes=kernel_check_since_minutes)
+                    
+                    if crash_results.get('unexpected_reboot'):
+                        reboot_info = crash_results['unexpected_reboot']
+                        time_since_last_alert = current_time - last_kernel_alert_time
+                        
+                        if not kernel_alert_sent or time_since_last_alert >= alert_cooldown:
+                            logger.critical(f"[KERNEL] Unexpected system reboot detected! Previous boot: {reboot_info.get('previous_boot_time')}, Current boot: {reboot_info.get('current_boot_time')}")
+                            
+                            if crash_webhook:
+                                prev_boot = reboot_info.get('previous_boot_time')
+                                curr_boot = reboot_info.get('current_boot_time')
+                                fields = [
+                                    {'name': 'Event Type', 'value': 'Unexpected System Reboot', 'inline': False},
+                                    {'name': 'Previous Boot Time', 'value': datetime.fromtimestamp(prev_boot).strftime('%Y-%m-%d %H:%M:%S') if prev_boot else 'Unknown', 'inline': True},
+                                    {'name': 'Current Boot Time', 'value': datetime.fromtimestamp(curr_boot).strftime('%Y-%m-%d %H:%M:%S') if curr_boot else 'Unknown', 'inline': True},
+                                    {'name': 'Status', 'value': 'System may have crashed or was unexpectedly rebooted', 'inline': False},
+                                ]
+                                
+                                success = crash_webhook.send_embed(
+                                    title='Kernel Alert: Unexpected System Reboot',
+                                    description='System reboot detected - possible kernel crash or unexpected shutdown',
+                                    fields=fields,
+                                    footer='Server Monitor - Kernel',
+                                    timestamp=True
+                                )
+                                if success:
+                                    logger.info("    Discord kernel reboot alert sent")
+                                else:
+                                    logger.warning("    Discord kernel reboot alert failed")
+                            
+                            last_kernel_alert_time = current_time
+                            kernel_alert_sent = True
+                    
+                    early_warnings = crash_results.get('early_warnings', [])
+                    hardware_errors = crash_results.get('hardware_errors', [])
+                    
+                    critical_warnings = [w for w in early_warnings if w.get('severity') == 'critical']
+                    if critical_warnings or hardware_errors:
+                        time_since_last_alert = current_time - last_kernel_alert_time
+                        
+                        if not kernel_alert_sent or time_since_last_alert >= alert_cooldown:
+                            logger.warning(f"[KERNEL] Early warning signs detected: {len(critical_warnings)} critical warnings, {len(hardware_errors)} hardware errors")
+                            
+                            if crash_webhook:
+                                fields = [
+                                    {'name': 'Warning Type', 'value': 'Early Warning - System may be heading towards crash', 'inline': False},
+                                    {'name': 'Critical Warnings', 'value': str(len(critical_warnings)), 'inline': True},
+                                    {'name': 'Hardware Errors', 'value': str(len(hardware_errors)), 'inline': True},
+                                ]
+                                
+                                if hardware_errors:
+                                    hw_details = []
+                                    for hw_error in hardware_errors[:5]:
+                                        error_type = hw_error.get('error_type', 'unknown')
+                                        if 'count' in hw_error:
+                                            hw_details.append(f"{error_type}: {hw_error['count']} errors")
+                                        elif 'message' in hw_error:
+                                            hw_details.append(f"{hw_error.get('type', 'error')}: {hw_error['message'][:100]}")
+                                    
+                                    if hw_details:
+                                        fields.append({
+                                            'name': 'Hardware Errors',
+                                            'value': '\n'.join(hw_details),
+                                            'inline': False
+                                        })
+                                
+                                if critical_warnings:
+                                    warning_details = []
+                                    for warning in critical_warnings[:5]:
+                                        keyword = warning.get('keyword', 'unknown')
+                                        message = warning.get('message', '')[:150]
+                                        warning_details.append(f"**{keyword}**: {message}")
+                                    
+                                    if warning_details:
+                                        fields.append({
+                                            'name': 'Critical Warnings',
+                                            'value': '\n'.join(warning_details),
+                                            'inline': False
+                                        })
+                                
+                                fields.append({
+                                    'name': 'Action Required',
+                                    'value': 'System showing signs of instability. Monitor closely and investigate hardware/system issues.',
+                                    'inline': False
+                                })
+                                
+                                success = crash_webhook.send_embed(
+                                    title='Kernel Alert: Early Warning Signs Detected',
+                                    description='System showing early warning signs that may indicate impending kernel crash',
+                                    fields=fields,
+                                    footer='Server Monitor - Kernel Warning',
+                                    timestamp=True
+                                )
+                                if success:
+                                    logger.info("    Discord kernel early warning alert sent")
+                                else:
+                                    logger.warning("    Discord kernel early warning alert failed")
+                            
+                            last_kernel_alert_time = current_time
+                            kernel_alert_sent = True
+                    
+                    crashes = crash_results.get('crashes_found', [])
+                    if crashes:
+                        time_since_last_alert = current_time - last_kernel_alert_time
+                        
+                        if not kernel_alert_sent or time_since_last_alert >= alert_cooldown:
+                            logger.critical(f"[KERNEL] {len(crashes)} kernel crash/panic detected!")
+                            
+                            if crash_webhook:
+                                crash_summary = {}
+                                for crash in crashes:
+                                    crash_type = crash.get('keyword', 'unknown')
+                                    if crash_type not in crash_summary:
+                                        crash_summary[crash_type] = []
+                                    crash_summary[crash_type].append(crash)
+                                
+                                fields = [
+                                    {'name': 'Total Crashes', 'value': str(len(crashes)), 'inline': True},
+                                    {'name': 'Check Period', 'value': f'{kernel_check_since_minutes} minutes', 'inline': True},
+                                ]
+                                
+                                crash_details = []
+                                for i, (crash_type, crash_list) in enumerate(list(crash_summary.items())[:5]):
+                                    latest_crash = crash_list[0]
+                                    message = latest_crash.get('message', '')[:200]
+                                    source = latest_crash.get('source', 'unknown')
+                                    crash_details.append(f"**{crash_type}** ({len(crash_list)} occurrence(s)) - Source: {source}\n`{message}`")
+                                
+                                if crash_details:
+                                    fields.append({
+                                        'name': 'Crash Details',
+                                        'value': '\n\n'.join(crash_details),
+                                        'inline': False
+                                    })
+                                
+                                if len(crash_summary) > 5:
+                                    fields.append({
+                                        'name': 'Note',
+                                        'value': f'Showing first 5 of {len(crash_summary)} crash types. Check logs for full details.',
+                                        'inline': False
+                                    })
+                                
+                                success = crash_webhook.send_embed(
+                                    title='Kernel Alert: Crash/Panic Detected',
+                                    description=f'Kernel crashes, panics, or oops detected in system logs',
+                                    fields=fields,
+                                    footer='Server Monitor - Kernel',
+                                    timestamp=True
+                                )
+                                if success:
+                                    logger.info("    Discord kernel crash alert sent")
+                                else:
+                                    logger.warning("    Discord kernel crash alert failed")
+                            
+                            last_kernel_alert_time = current_time
+                            kernel_alert_sent = True
+                    else:
+                        if kernel_alert_sent:
+                            kernel_alert_sent = False
+                except Exception as e:
+                    logger.debug(f"Error checking kernel crashes: {e}")
             
             time.sleep(check_interval)
             

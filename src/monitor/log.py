@@ -249,11 +249,9 @@ class LogMonitor:
                 is_system_log = any(log_path_str.startswith(sys_path) for sys_path in self.system_log_paths)
                 
                 if is_system_log:
-                    # Security: Validate path before using in subprocess
                     safe_path = safe_subprocess_path(log_path_str)
                     if not safe_path:
                         logger.warning(f"Unsafe path rejected for truncate command: {log_path_str}")
-                        # Fall through to file operations
                     else:
                         try:
                             result = subprocess.run(

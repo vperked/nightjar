@@ -25,14 +25,14 @@ _process_cache = {
     'top_cpu': [],
     'top_memory': [],
     'last_update': 0.0,
-    'cache_interval': 5.0  # Increased from 2.0 to reduce load
+    'cache_interval': 5.0  
 }
 
 _network_cache = {
     'data': {},
     'last_update': 0.0,
-    'cache_interval': 2.0,  # Increased from 1.0 to reduce frequent updates
-    'last_io': None,  # Store previous I/O counters for rate calculation
+    'cache_interval': 2.0, 
+    'last_io': None,  
     'last_io_time': 0.0
 }
 
@@ -51,7 +51,7 @@ _disk_cache = {
 _cpu_cache = {
     'data': {},
     'last_update': 0.0,
-    'cache_interval': 1.0  # Cache CPU stats for 1 second
+    'cache_interval': 1.0  
 }
 
 
@@ -101,7 +101,6 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         X-Frame-Options, X-XSS-Protection, and Referrer-Policy.
         """
         try:
-            # More permissive CSP to allow all necessary resources
             csp = ("default-src 'self'; "
                    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com; "
                    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
@@ -122,8 +121,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         Add CORS headers to response.
         
         Args:
-            allowed_origin: Allowed origin for CORS (default: '*' for same-origin only in practice)
-                            In production, this should be restricted to specific origins.
+            allowed_origin: Allowed origin for CORS (default: '*' for same-origin only)
         """
         try:
             self.send_header('Access-Control-Allow-Origin', allowed_origin)
@@ -131,6 +129,16 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         except Exception as e:
             logger.error(f"Error adding CORS headers: {e}")
+    
+    def _add_connection_headers(self):
+        """
+        Add connection keep-alive headers to maintain persistent connections.
+        """
+        try:
+            self.send_header('Connection', 'keep-alive')
+            self.send_header('Keep-Alive', 'timeout=60, max=1000')
+        except Exception as e:
+            logger.debug(f"Error adding connection headers: {e}")
     
     def do_GET(self):
         """
@@ -309,30 +317,42 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             if elapsed > 1.0:
                 logger.warning(f"Stats collection took {elapsed:.2f}s (slow)")
             
+            # Ensure stats is always a valid dict
+            if not isinstance(stats, dict):
+                logger.error("get_system_stats returned invalid type, using empty dict")
+                stats = {}
+            
             response = json.dumps(stats, indent=2).encode('utf-8')
             
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.send_header('Content-length', str(len(response)))
+            self._add_connection_headers()
             self._add_security_headers()
             self._add_cors_headers(allowed_origin='*')  # Restrict in production if needed
             self.end_headers()
             self.wfile.write(response)
+            self.wfile.flush()  # Ensure response is sent immediately
         except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
             logger.debug(f"Connection error serving stats: {e}")
         except Exception as e:
             logger.error(f"Error serving stats: {e}", exc_info=True)
             try:
-                error_response = json.dumps({'error': str(e)}).encode('utf-8')
+                # Try to send error response, but use minimal valid JSON if possible
+                error_response = json.dumps({'error': str(e), 'timestamp': time.time()}).encode('utf-8')
                 self.send_response(500)
                 self.send_header('Content-type', 'application/json')
                 self.send_header('Content-length', str(len(error_response)))
+                self._add_connection_headers()
                 self._add_security_headers()
                 self._add_cors_headers(allowed_origin='*')
                 self.end_headers()
                 self.wfile.write(error_response)
+                self.wfile.flush()
             except (ConnectionAbortedError, BrokenPipeError, OSError):
                 logger.debug("Connection aborted while sending error response")
+            except Exception:
+                logger.error("Failed to send error response", exc_info=True)
     
     def serve_health(self):
         """
@@ -491,6 +511,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         
         Returns:
             Dictionary containing system statistics from all monitors
+            Always returns a valid dict, even if some monitors fail.
         """
         global cpu_monitor, memory_monitor, system_monitor, gpu_monitor
         global disk_monitor, network_monitor, sensors_monitor
@@ -499,137 +520,153 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         stats = {}
         current_time = time.time()
         
-        if system_monitor:
-            try:
-                stats['system'] = system_monitor.get_system_info()
-                stats['uptime'] = system_monitor.get_uptime()
-            except Exception as e:
-                logger.warning(f"Error getting system info: {e}")
-        
-        if cpu_monitor:
-            try:
-                time_since_cpu_update = current_time - _cpu_cache['last_update']
-                if time_since_cpu_update >= _cpu_cache['cache_interval']:
-                    stats['cpu'] = cpu_monitor.get_cpu_info()
-                    stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0)
-                    _cpu_cache['data'] = stats['cpu']
-                    _cpu_cache['last_update'] = current_time
-                else:
-                    stats['cpu'] = _cpu_cache['data']
-            except Exception as e:
-                logger.warning(f"Error getting CPU info: {e}")
-                stats['cpu'] = _cpu_cache.get('data', {})
-        
-        if memory_monitor:
-            try:
-                stats['memory'] = memory_monitor.get_memory_stats()
-            except Exception as e:
-                logger.warning(f"Error getting memory info: {e}")
-        
-        if disk_monitor:
-            try:
-                time_since_disk_update = current_time - _disk_cache['last_update']
-                if time_since_disk_update >= _disk_cache['cache_interval']:
-                    disk_data = disk_monitor.get_total_disk_usage()
-                    _disk_cache['data'] = {'total': disk_data}
-                    _disk_cache['last_update'] = current_time
-                    stats['disk'] = _disk_cache['data']
-                else:
-                    stats['disk'] = _disk_cache['data']
-            except Exception as e:
-                logger.warning(f"Error getting disk info: {e}")
-                stats['disk'] = _disk_cache.get('data', {})
-        
-        if gpu_monitor:
-            try:
-                if gpu_monitor.nvidia_smi_available and gpu_monitor.get_gpu_count() > 0:
-                    time_since_gpu_update = current_time - _gpu_cache['last_update']
-                    if time_since_gpu_update >= _gpu_cache['cache_interval']:
-                        gpu_data = gpu_monitor.get_gpu_comprehensive(0)
-                        _gpu_cache['data'] = gpu_data
-                        _gpu_cache['last_update'] = current_time
-                        stats['gpu'] = _gpu_cache['data']
+        try:
+            if system_monitor:
+                try:
+                    stats['system'] = system_monitor.get_system_info()
+                    stats['uptime'] = system_monitor.get_uptime()
+                except Exception as e:
+                    logger.warning(f"Error getting system info: {e}")
+            
+            if cpu_monitor:
+                try:
+                    time_since_cpu_update = current_time - _cpu_cache['last_update']
+                    if time_since_cpu_update >= _cpu_cache['cache_interval']:
+                        stats['cpu'] = cpu_monitor.get_cpu_info()
+                        stats['cpu']['cpu_percent'] = cpu_monitor.get_cpu_percent(interval=0)
+                        _cpu_cache['data'] = stats['cpu']
+                        _cpu_cache['last_update'] = current_time
                     else:
-                        stats['gpu'] = _gpu_cache['data']
-            except Exception as e:
-                logger.warning(f"Error getting GPU info: {e}")
-                stats['gpu'] = _gpu_cache.get('data', {})
-        
-        if sensors_monitor:
-            try:
-                if sensors_monitor.is_available():
-                    temp = sensors_monitor.get_cpu_temperature()
-                    if temp is not None:
-                        stats['temperature'] = temp
-            except Exception as e:
-                logger.warning(f"Error getting temperature: {e}")
-        
-        if network_monitor:
-            try:
-                time_since_network_update = current_time - _network_cache['last_update']
-                if time_since_network_update >= _network_cache['cache_interval']:
-                    current_io = psutil.net_io_counters()
-                    if current_io is None:
-                        stats['network'] = _network_cache.get('data', {})
+                        stats['cpu'] = _cpu_cache['data']
+                except Exception as e:
+                    logger.warning(f"Error getting CPU info: {e}")
+                    stats['cpu'] = _cpu_cache.get('data', {})
+            
+            if memory_monitor:
+                try:
+                    stats['memory'] = memory_monitor.get_memory_stats()
+                except Exception as e:
+                    logger.warning(f"Error getting memory info: {e}")
+            
+            if disk_monitor:
+                try:
+                    time_since_disk_update = current_time - _disk_cache['last_update']
+                    if time_since_disk_update >= _disk_cache['cache_interval']:
+                        disk_data = disk_monitor.get_total_disk_usage()
+                        _disk_cache['data'] = {'total': disk_data}
+                        _disk_cache['last_update'] = current_time
+                        stats['disk'] = _disk_cache['data']
                     else:
-                        if _network_cache['last_io'] is not None and _network_cache['last_io_time'] > 0:
-                            time_diff = current_time - _network_cache['last_io_time']
-                            if time_diff > 0:
+                        stats['disk'] = _disk_cache['data']
+                except Exception as e:
+                    logger.warning(f"Error getting disk info: {e}")
+                    stats['disk'] = _disk_cache.get('data', {})
+            
+            if gpu_monitor:
+                try:
+                    if gpu_monitor.nvidia_smi_available and gpu_monitor.get_gpu_count() > 0:
+                        time_since_gpu_update = current_time - _gpu_cache['last_update']
+                        if time_since_gpu_update >= _gpu_cache['cache_interval']:
+                            gpu_data = gpu_monitor.get_gpu_comprehensive(0)
+                            _gpu_cache['data'] = gpu_data
+                            _gpu_cache['last_update'] = current_time
+                            stats['gpu'] = _gpu_cache['data']
+                        else:
+                            stats['gpu'] = _gpu_cache['data']
+                except Exception as e:
+                    logger.warning(f"Error getting GPU info: {e}")
+                    stats['gpu'] = _gpu_cache.get('data', {})
+            
+            if sensors_monitor:
+                try:
+                    if sensors_monitor.is_available():
+                        temp = sensors_monitor.get_cpu_temperature()
+                        if temp is not None:
+                            stats['temperature'] = temp
+                except Exception as e:
+                    logger.warning(f"Error getting temperature: {e}")
+            
+            if network_monitor:
+                try:
+                    time_since_network_update = current_time - _network_cache['last_update']
+                    if time_since_network_update >= _network_cache['cache_interval']:
+                        current_io = psutil.net_io_counters()
+                        if current_io is None:
+                            stats['network'] = _network_cache.get('data', {})
+                        else:
+                            if _network_cache['last_io'] is not None and _network_cache['last_io_time'] > 0:
+                                time_diff = current_time - _network_cache['last_io_time']
+                                if time_diff > 0:
+                                    bandwidth = {
+                                        'interface_name': 'system-wide',
+                                        'bytes_sent_per_sec': (current_io.bytes_sent - _network_cache['last_io'].bytes_sent) / time_diff,
+                                        'bytes_recv_per_sec': (current_io.bytes_recv - _network_cache['last_io'].bytes_recv) / time_diff,
+                                        'packets_sent_per_sec': (current_io.packets_sent - _network_cache['last_io'].packets_sent) / time_diff,
+                                        'packets_recv_per_sec': (current_io.packets_recv - _network_cache['last_io'].packets_recv) / time_diff,
+                                    }
+                                    _network_cache['data'] = bandwidth
+                                    _network_cache['last_update'] = current_time
+                                    stats['network'] = bandwidth
+                                else:
+                                    stats['network'] = _network_cache.get('data', {})
+                            else:
                                 bandwidth = {
                                     'interface_name': 'system-wide',
-                                    'bytes_sent_per_sec': (current_io.bytes_sent - _network_cache['last_io'].bytes_sent) / time_diff,
-                                    'bytes_recv_per_sec': (current_io.bytes_recv - _network_cache['last_io'].bytes_recv) / time_diff,
-                                    'packets_sent_per_sec': (current_io.packets_sent - _network_cache['last_io'].packets_sent) / time_diff,
-                                    'packets_recv_per_sec': (current_io.packets_recv - _network_cache['last_io'].packets_recv) / time_diff,
+                                    'bytes_sent_per_sec': 0,
+                                    'bytes_recv_per_sec': 0,
+                                    'packets_sent_per_sec': 0,
+                                    'packets_recv_per_sec': 0,
                                 }
                                 _network_cache['data'] = bandwidth
-                                _network_cache['last_update'] = current_time
                                 stats['network'] = bandwidth
-                            else:
-                                stats['network'] = _network_cache.get('data', {})
-                        else:
-                            bandwidth = {
-                                'interface_name': 'system-wide',
-                                'bytes_sent_per_sec': 0,
-                                'bytes_recv_per_sec': 0,
-                                'packets_sent_per_sec': 0,
-                                'packets_recv_per_sec': 0,
-                            }
-                            _network_cache['data'] = bandwidth
-                            stats['network'] = bandwidth
-                        
-                        _network_cache['last_io'] = current_io
-                        _network_cache['last_io_time'] = current_time
-                else:
-                    stats['network'] = _network_cache['data']
-            except Exception as e:
-                logger.warning(f"Error getting network info: {e}")
-                stats['network'] = _network_cache.get('data', {})
-        
-        if system_monitor:
-            try:
-                stats['processes'] = system_monitor.get_process_count()
-                
-                time_since_process_update = current_time - _process_cache['last_update']
-                if time_since_process_update >= _process_cache['cache_interval']:
-                    try:
-                        _process_cache['top_cpu'] = system_monitor.get_top_processes(limit=5, sort_by='cpu')
-                        _process_cache['top_memory'] = system_monitor.get_top_processes(limit=5, sort_by='memory')
-                        _process_cache['last_update'] = current_time
-                    except Exception as e:
-                        logger.debug(f"Error updating process cache: {e}")
-                
-                stats['top_processes_cpu'] = _process_cache['top_cpu']
-                stats['top_processes_memory'] = _process_cache['top_memory']
-            except Exception as e:
-                logger.warning(f"Error getting process info: {e}")
+                            
+                            _network_cache['last_io'] = current_io
+                            _network_cache['last_io_time'] = current_time
+                    else:
+                        stats['network'] = _network_cache['data']
+                except Exception as e:
+                    logger.warning(f"Error getting network info: {e}")
+                    stats['network'] = _network_cache.get('data', {})
+            
+            if system_monitor:
+                try:
+                    stats['processes'] = system_monitor.get_process_count()
+                    
+                    time_since_process_update = current_time - _process_cache['last_update']
+                    if time_since_process_update >= _process_cache['cache_interval']:
+                        try:
+                            _process_cache['top_cpu'] = system_monitor.get_top_processes(limit=5, sort_by='cpu')
+                            _process_cache['top_memory'] = system_monitor.get_top_processes(limit=5, sort_by='memory')
+                            _process_cache['last_update'] = current_time
+                        except Exception as e:
+                            logger.debug(f"Error updating process cache: {e}")
+                    
+                    stats['top_processes_cpu'] = _process_cache['top_cpu']
+                    stats['top_processes_memory'] = _process_cache['top_memory']
+                except Exception as e:
+                    logger.warning(f"Error getting process info: {e}")
+                    stats['processes'] = {'total': 0}
+                    stats['top_processes_cpu'] = _process_cache.get('top_cpu', [])
+                    stats['top_processes_memory'] = _process_cache.get('top_memory', [])
+            else:
                 stats['processes'] = {'total': 0}
-                stats['top_processes_cpu'] = _process_cache.get('top_cpu', [])
-                stats['top_processes_memory'] = _process_cache.get('top_memory', [])
-        else:
-            stats['processes'] = {'total': 0}
-            stats['top_processes_cpu'] = []
-            stats['top_processes_memory'] = []
+                stats['top_processes_cpu'] = []
+                stats['top_processes_memory'] = []
+        
+        except Exception as e:
+            logger.error(f"Critical error in get_system_stats: {e}", exc_info=True)
+            if not stats:
+                stats = {
+                    'system': {},
+                    'uptime': {},
+                    'cpu': {},
+                    'memory': {},
+                    'disk': {},
+                    'network': {},
+                    'processes': {'total': 0},
+                    'top_processes_cpu': [],
+                    'top_processes_memory': []
+                }
         
         return stats
 
