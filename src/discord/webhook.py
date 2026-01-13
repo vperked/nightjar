@@ -1127,6 +1127,72 @@ class DiscordWebhook:
             timestamp=True
         )
     
+    def send_batched_log_cleanup_alert(self, cleaned_logs: List[Dict], threshold_formatted: str) -> bool:
+        """
+        Send a batched alert for multiple log files that were cleaned.
+        
+        Args:
+            cleaned_logs: List of dictionaries containing cleaned log file information
+            threshold_formatted: Formatted threshold string
+            
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        if not cleaned_logs:
+            return False
+        
+        color = 0xdc3545
+        log_count = len(cleaned_logs)
+        
+        if log_count == 1:
+            description = f'Log file exceeded threshold and was auto-cleaned'
+        else:
+            description = f'{log_count} log files exceeded threshold and were auto-cleaned'
+        
+        fields = []
+        
+        fields.append({
+            'name': 'Logs Cleaned',
+            'value': str(log_count),
+            'inline': True
+        })
+        
+        fields.append({
+            'name': 'Threshold',
+            'value': threshold_formatted,
+            'inline': True
+        })
+        
+        fields.append({
+            'name': 'Status',
+            'value': 'Auto-cleaned',
+            'inline': True
+        })
+        
+        log_list = []
+        for log_info in cleaned_logs[:20]:
+            log_path = log_info.get('path', 'Unknown')
+            size_formatted = log_info.get('size_formatted', 'N/A')
+            log_list.append(f"• `{log_path}` - {size_formatted}")
+        
+        if log_count > 20:
+            log_list.append(f"\n*... and {log_count - 20} more log file(s)*")
+        
+        fields.append({
+            'name': 'Cleaned Log Files',
+            'value': '\n'.join(log_list) if log_list else 'None',
+            'inline': False
+        })
+        
+        return self.send_embed(
+            title='Log Size Alert - Batch Cleanup',
+            description=description,
+            color=color,
+            fields=fields,
+            footer='Server Monitor',
+            timestamp=True
+        )
+    
     def send_freeze_alert(self, freeze_status: Dict, system_info: Optional[Dict] = None) -> bool:
         """
         Send a system freeze detection alert to Discord.

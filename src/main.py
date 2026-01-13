@@ -1859,6 +1859,9 @@ def main(
                     all_log_sizes = log_monitor.get_all_log_sizes()
                     exceeded_logs = all_log_sizes.get('exceeded_logs', [])
                     
+                    cleaned_logs_batch = []
+                    threshold_formatted = all_log_sizes.get('threshold_formatted', 'N/A')
+                    
                     for log_info in exceeded_logs:
                         log_path = log_info.get('path', 'Unknown')
                         
@@ -1871,11 +1874,9 @@ def main(
                         if time_since_last_alert >= alert_cooldown:
                             original_size = log_info.get('size_bytes', 0)
                             cleanup_success = log_monitor.cleanup_log(log_info)
-                            cleanup_performed = False
                             
                             if cleanup_success:
                                 logger.info(f"    Log cleanup successful for {log_path}")
-                                cleanup_performed = True
                                 cleaned_logs.add(log_path)
                                 
                                 size_after = log_monitor.get_log_size(log_path)
@@ -1884,26 +1885,25 @@ def main(
                                     logger.info(f"    Log size after cleanup: {log_info.get('size_formatted', 'N/A')}")
                                 else:
                                     logger.warning(f"    Could not get log size after cleanup for {log_path}")
+                                
+                                cleaned_logs_batch.append(log_info)
                             else:
                                 logger.error(f"    Log cleanup failed for {log_path} - check permissions (may need root/sudo)")
                             
-                            if webhook:
-                                threshold_formatted = all_log_sizes.get('threshold_formatted', 'N/A')
-                                logger.warning(f"[ALERT] Log file {log_path}: {log_info.get('size_formatted', 'N/A')} (threshold: {threshold_formatted})")
-                                success = webhook.send_log_size_alert(
-                                    log_info=log_info,
-                                    threshold_bytes=all_log_sizes.get('threshold_bytes', 0),
-                                    threshold_formatted=threshold_formatted,
-                                    cleanup_performed=cleanup_performed
-                                )
-                                if success:
-                                    logger.info(f"    Discord log alert sent for {log_path}")
-                                else:
-                                    logger.warning(f"    Discord log alert failed for {log_path}")
-                            else:
-                                logger.warning(f"Log file {log_path}: {log_info.get('size_formatted', 'N/A')} exceeds threshold")
-                            
                             last_log_alert_time[log_path] = current_time
+                    
+                    if cleaned_logs_batch and webhook:
+                        logger.warning(f"[ALERT] {len(cleaned_logs_batch)} log file(s) exceeded threshold and were auto-cleaned")
+                        success = webhook.send_batched_log_cleanup_alert(
+                            cleaned_logs=cleaned_logs_batch,
+                            threshold_formatted=threshold_formatted
+                        )
+                        if success:
+                            logger.info(f"    Discord batched log cleanup alert sent for {len(cleaned_logs_batch)} log(s)")
+                        else:
+                            logger.warning(f"    Discord batched log cleanup alert failed")
+                    elif cleaned_logs_batch:
+                        logger.warning(f"{len(cleaned_logs_batch)} log file(s) exceeded threshold and were auto-cleaned (no webhook configured)")
                     
                     current_exceeded_paths = {log.get('path') for log in exceeded_logs}
                     cleaned_logs = {path for path in cleaned_logs if path not in current_exceeded_paths}

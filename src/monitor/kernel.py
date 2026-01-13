@@ -340,8 +340,12 @@ class KernelMonitor:
                             write_errors = int(parts[13])
                             
                             if read_errors > 0 or write_errors > 0:
-                                risk_score += 15
                                 device = parts[2]
+                                
+                                if device.startswith('loop') or device.startswith('ram') or device.startswith('zram'):
+                                    continue
+                                
+                                risk_score += 15
                                 indicators.append(f'Warning: I/O errors on {device} (R:{read_errors}, W:{write_errors})')
                                 stability['recommendations'].append(f'Check disk health on {device}')
                         except (ValueError, IndexError):
@@ -578,6 +582,7 @@ class KernelMonitor:
     def _check_unexpected_reboot(self) -> Optional[Dict]:
         """
         Check for unexpected reboots by monitoring boot time changes.
+        Requires at least 10 seconds difference to avoid false positives from timing issues.
         
         Returns:
             Dictionary with reboot information if detected, None otherwise
@@ -595,7 +600,8 @@ class KernelMonitor:
                 self.last_boot_time = current_boot_time
                 return None
             
-            if current_boot_time != self.last_boot_time:
+            boot_time_diff = abs(current_boot_time - self.last_boot_time)
+            if boot_time_diff >= 10.0:
                 reboot_info = {
                     'type': 'unexpected_reboot',
                     'previous_boot_time': self.last_boot_time,
