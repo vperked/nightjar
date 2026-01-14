@@ -342,7 +342,26 @@ class KernelMonitor:
                             if read_errors > 0 or write_errors > 0:
                                 device = parts[2]
                                 
-                                if device.startswith('loop') or device.startswith('ram') or device.startswith('zram'):
+                                # Filter out virtual devices and partitions to avoid duplicate alerts
+                                # - loop, ram, zram: virtual block devices
+                                # - dm-*: device mapper (LVM, etc.) - errors already reported on physical devices
+                                is_virtual = (device.startswith('loop') or 
+                                             device.startswith('ram') or 
+                                             device.startswith('zram') or
+                                             device.startswith('dm-'))
+                                is_partition = False
+                                if 'p' in device:
+                                    p_index = device.rfind('p')
+                                    if p_index > 0 and p_index < len(device) - 1 and device[p_index+1:].isdigit():
+                                        is_partition = True
+                                elif len(device) >= 4:
+                                    device_lower = device.lower()
+                                    if (device_lower.startswith(('sd', 'hd', 'vd')) and 
+                                        device[-1].isdigit() and 
+                                        any(c.isalpha() for c in device[2:-1])):
+                                        is_partition = True
+                                
+                                if is_virtual or is_partition:
                                     continue
                                 
                                 risk_score += 15
