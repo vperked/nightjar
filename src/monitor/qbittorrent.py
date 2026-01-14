@@ -21,10 +21,14 @@ class QBittorrentMonitor:
             username: qBittorrent Web UI username (default: from QBITTORRENT_USERNAME env or 'admin')
             password: qBittorrent Web UI password (default: from QBITTORRENT_PASSWORD env)
         """
-        self.host = host or os.getenv('QBITTORRENT_HOST', 'localhost')
-        self.port = port or int(os.getenv('QBITTORRENT_PORT', '8080'))
-        self.username = username or os.getenv('QBITTORRENT_USERNAME', 'admin')
-        self.password = password or os.getenv('QBITTORRENT_PASSWORD', '')
+        self.host = host or os.getenv('QBITTORRENT_HOST', 'localhost') or 'localhost'
+        port_env = os.getenv('QBITTORRENT_PORT', '8080')
+        try:
+            self.port = port or (int(port_env) if port_env and port_env.strip() else 8080)
+        except (ValueError, TypeError):
+            self.port = 8080
+        self.username = username or os.getenv('QBITTORRENT_USERNAME', 'admin') or 'admin'
+        self.password = password or os.getenv('QBITTORRENT_PASSWORD', '') or ''
         
         self.client = None
         self._connected = False
