@@ -26,6 +26,7 @@ class KernelMonitor:
         self.last_check_time = time.time()
         self.detected_crashes = set()
         self.last_reported_errors = {}  # Track last reported error counts per device
+        self.last_alert_time = {}  # Track last alert time per device (to prevent spam)
         
         if self.is_linux:
             try:
@@ -275,12 +276,11 @@ class KernelMonitor:
             stability['error'] = 'Stability monitoring only available on Linux'
             return stability
         
-        # Check if system has rebooted - reset error tracking if so
         try:
             current_boot_time = self._get_boot_time()
             if current_boot_time and self.last_boot_time and abs(current_boot_time - self.last_boot_time) >= 10.0:
-                # System rebooted, reset error tracking
                 self.last_reported_errors = {}
+                self.last_alert_time = {}
                 self.last_boot_time = current_boot_time
         except Exception:
             pass
@@ -353,9 +353,6 @@ class KernelMonitor:
                             if read_errors > 0 or write_errors > 0:
                                 device = parts[2]
                                 
-                                # Filter out virtual devices and partitions to avoid duplicate alerts
-                                # - loop, ram, zram: virtual block devices
-                                # - dm-*: device mapper (LVM, etc.) - errors already reported on physical devices
                                 is_virtual = (device.startswith('loop') or 
                                              device.startswith('ram') or 
                                              device.startswith('zram') or
@@ -377,10 +374,13 @@ class KernelMonitor:
                                 
                                 total_errors = read_errors + write_errors
                                 should_alert = False
+                                current_time = time.time()
+                                device_cooldown = 24 * 60 * 60 
                                 
                                 if device not in self.last_reported_errors:
                                     should_alert = True
                                     self.last_reported_errors[device] = {'read': read_errors, 'write': write_errors, 'total': total_errors}
+                                    self.last_alert_time[device] = current_time
                                 else:
                                     last_errors = self.last_reported_errors[device]
                                     last_total = last_errors['total']
@@ -389,14 +389,26 @@ class KernelMonitor:
                                     if total_increase < 0:
                                         should_alert = True
                                         self.last_reported_errors[device] = {'read': read_errors, 'write': write_errors, 'total': total_errors}
-                                    else:
-                                        absolute_threshold = 100
-                                        relative_threshold = max(1, int(last_total * 0.10))
-                                        error_threshold = max(absolute_threshold, relative_threshold)
-                                        
-                                        if total_increase >= error_threshold:
+                                        self.last_alert_time[device] = current_time
+                                    elif total_increase > 0:
+                                        dramatic_increase_threshold = int(last_total * 0.50)
+                                        if total_increase >= dramatic_increase_threshold:
                                             should_alert = True
                                             self.last_reported_errors[device] = {'read': read_errors, 'write': write_errors, 'total': total_errors}
+                                            self.last_alert_time[device] = current_time
+                                        else:
+                                            absolute_threshold = 100
+                                            relative_threshold = max(1, int(last_total * 0.10))
+                                            error_threshold = max(absolute_threshold, relative_threshold)
+                                            
+                                            time_since_last_alert = current_time - self.last_alert_time.get(device, 0)
+                                            
+                                            if total_increase >= error_threshold and time_since_last_alert >= device_cooldown:
+                                                should_alert = True
+                                                self.last_reported_errors[device] = {'read': read_errors, 'write': write_errors, 'total': total_errors}
+                                                self.last_alert_time[device] = current_time
+                                            else:
+                                                self.last_reported_errors[device] = {'read': read_errors, 'write': write_errors, 'total': total_errors}
                                 
                                 if should_alert:
                                     risk_score += 15
