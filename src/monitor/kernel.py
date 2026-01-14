@@ -22,12 +22,13 @@ DEFAULT_PERSISTENCE_FILE = os.path.join(os.path.expanduser('~'), '.servermonitor
 class KernelMonitor:
     """Monitor kernel for crashes, panics, and oops."""
     
-    def __init__(self, persistence_file: Optional[str] = None):
+    def __init__(self, persistence_file: Optional[str] = None, ignored_devices: Optional[List[str]] = None):
         """
         Initialize the kernel monitor.
         
         Args:
             persistence_file: Path to file for persisting tracking data (default: ~/.servermonitor_kernel_tracking.json)
+            ignored_devices: List of device names to ignore for I/O error alerts (default: from KERNEL_IGNORE_DEVICES env)
         """
         self.is_linux = platform.system() == 'Linux'
         self.last_boot_time = None
@@ -36,6 +37,19 @@ class KernelMonitor:
         self.last_reported_errors = {}  # Track last reported error counts per device
         self.last_alert_time = {}  # Track last alert time per device (to prevent spam)
         self.persistence_file = persistence_file or DEFAULT_PERSISTENCE_FILE
+        
+        # Load ignored devices from environment or parameter
+        if ignored_devices is None:
+            ignore_env = os.getenv('KERNEL_IGNORE_DEVICES', '')
+            if ignore_env:
+                self.ignored_devices = [d.strip() for d in ignore_env.split(',') if d.strip()]
+            else:
+                self.ignored_devices = []
+        else:
+            self.ignored_devices = ignored_devices
+        
+        if self.ignored_devices:
+            logger.info(f"Kernel monitor: Ignoring I/O errors on devices: {', '.join(self.ignored_devices)}")
         
         if self.is_linux:
             try:
@@ -438,6 +452,10 @@ class KernelMonitor:
                                         is_partition = True
                                 
                                 if is_virtual or is_partition:
+                                    continue
+                                
+                                # Check if device is in ignore list
+                                if device in self.ignored_devices:
                                     continue
                                 
                                 total_errors = read_errors + write_errors
