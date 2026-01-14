@@ -24,7 +24,8 @@ class KernelMonitor:
         self.is_linux = platform.system() == 'Linux'
         self.last_boot_time = None
         self.last_check_time = time.time()
-        self.detected_crashes = set()  
+        self.detected_crashes = set()
+        self.last_reported_errors = {}  # Track last reported error counts per device
         
         if self.is_linux:
             try:
@@ -274,6 +275,16 @@ class KernelMonitor:
             stability['error'] = 'Stability monitoring only available on Linux'
             return stability
         
+        # Check if system has rebooted - reset error tracking if so
+        try:
+            current_boot_time = self._get_boot_time()
+            if current_boot_time and self.last_boot_time and abs(current_boot_time - self.last_boot_time) >= 10.0:
+                # System rebooted, reset error tracking
+                self.last_reported_errors = {}
+                self.last_boot_time = current_boot_time
+        except Exception:
+            pass
+        
         risk_score = 0
         indicators = []
         
@@ -364,9 +375,33 @@ class KernelMonitor:
                                 if is_virtual or is_partition:
                                     continue
                                 
-                                risk_score += 15
-                                indicators.append(f'Warning: I/O errors on {device} (R:{read_errors}, W:{write_errors})')
-                                stability['recommendations'].append(f'Check disk health on {device}')
+                                total_errors = read_errors + write_errors
+                                should_alert = False
+                                
+                                if device not in self.last_reported_errors:
+                                    should_alert = True
+                                    self.last_reported_errors[device] = {'read': read_errors, 'write': write_errors, 'total': total_errors}
+                                else:
+                                    last_errors = self.last_reported_errors[device]
+                                    last_total = last_errors['total']
+                                    total_increase = total_errors - last_total
+                                    
+                                    if total_increase < 0:
+                                        should_alert = True
+                                        self.last_reported_errors[device] = {'read': read_errors, 'write': write_errors, 'total': total_errors}
+                                    else:
+                                        absolute_threshold = 100
+                                        relative_threshold = max(1, int(last_total * 0.10))
+                                        error_threshold = max(absolute_threshold, relative_threshold)
+                                        
+                                        if total_increase >= error_threshold:
+                                            should_alert = True
+                                            self.last_reported_errors[device] = {'read': read_errors, 'write': write_errors, 'total': total_errors}
+                                
+                                if should_alert:
+                                    risk_score += 15
+                                    indicators.append(f'Warning: I/O errors on {device} (R:{read_errors}, W:{write_errors})')
+                                    stability['recommendations'].append(f'Check disk health on {device}')
                         except (ValueError, IndexError):
                             continue
         except Exception:
