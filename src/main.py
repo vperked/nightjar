@@ -21,7 +21,10 @@ from datetime import datetime
 import os
 import sys
 import time
+import platform
 import psutil
+import hashlib
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -332,6 +335,7 @@ def run_self_test() -> bool:
     Returns:
         True if all tests pass, False otherwise
     """
+    start_time = time.time()
     logger.info("Running self-test...")
     results = []
     
@@ -543,16 +547,136 @@ def run_self_test() -> bool:
                     failures += 1
                     logger.warning(f"Embed send error for {title}: {e}")
             add_result("Discord embeds", failures == 0, f"sent {sent}/{total}, failed {failures}")
+            
+            # Test duplicate detection hash logic
+            try:
+                test_fields = [
+                    {'name': 'Risk Level', 'value': 'HIGH', 'inline': True},
+                    {'name': 'Risk Score', 'value': '30', 'inline': True},
+                    {'name': 'Status', 'value': 'System showing signs of instability - crash risk elevated', 'inline': False},
+                    {'name': 'Warning Indicators', 'value': 'Warning: I/O errors on nvme0n1 (R:132569, W:774362)', 'inline': False},
+                    {'name': 'Recommended Actions', 'value': 'Check disk health on nvme0n1', 'inline': False}
+                ]
+                
+                # Test 1: Same content should produce same hash
+                normalized_fields_1 = sorted(
+                    [{'name': f.get('name', ''), 'value': f.get('value', ''), 'inline': f.get('inline', False)} 
+                     for f in test_fields],
+                    key=lambda x: (x['name'], x['value'])
+                )
+                alert_content_1 = {
+                    'title': 'Kernel Alert: System Stability Risk (HIGH)',
+                    'description': 'System showing signs of instability that may lead to kernel crash',
+                    'fields': normalized_fields_1
+                }
+                hash_1 = hashlib.md5(json.dumps(alert_content_1, sort_keys=True).encode()).hexdigest()
+                
+                # Create same content again (different field order shouldn't matter)
+                test_fields_reordered = [
+                    {'name': 'Status', 'value': 'System showing signs of instability - crash risk elevated', 'inline': False},
+                    {'name': 'Risk Level', 'value': 'HIGH', 'inline': True},
+                    {'name': 'Risk Score', 'value': '30', 'inline': True},
+                    {'name': 'Warning Indicators', 'value': 'Warning: I/O errors on nvme0n1 (R:132569, W:774362)', 'inline': False},
+                    {'name': 'Recommended Actions', 'value': 'Check disk health on nvme0n1', 'inline': False}
+                ]
+                normalized_fields_2 = sorted(
+                    [{'name': f.get('name', ''), 'value': f.get('value', ''), 'inline': f.get('inline', False)} 
+                     for f in test_fields_reordered],
+                    key=lambda x: (x['name'], x['value'])
+                )
+                alert_content_2 = {
+                    'title': 'Kernel Alert: System Stability Risk (HIGH)',
+                    'description': 'System showing signs of instability that may lead to kernel crash',
+                    'fields': normalized_fields_2
+                }
+                hash_2 = hashlib.md5(json.dumps(alert_content_2, sort_keys=True).encode()).hexdigest()
+                
+                # Test 2: Different content should produce different hash
+                different_fields = test_fields.copy()
+                different_fields[1] = {'name': 'Risk Score', 'value': '45', 'inline': True}  # Changed score
+                normalized_fields_diff = sorted(
+                    [{'name': f.get('name', ''), 'value': f.get('value', ''), 'inline': f.get('inline', False)} 
+                     for f in different_fields],
+                    key=lambda x: (x['name'], x['value'])
+                )
+                different_content = {
+                    'title': 'Kernel Alert: System Stability Risk (HIGH)',
+                    'description': 'System showing signs of instability that may lead to kernel crash',
+                    'fields': normalized_fields_diff
+                }
+                hash_3 = hashlib.md5(json.dumps(different_content, sort_keys=True).encode()).hexdigest()
+                
+                # Verify: same content = same hash, different content = different hash
+                same_content_same_hash = (hash_1 == hash_2)
+                different_content_different_hash = (hash_1 != hash_3)
+                test_passed = same_content_same_hash and different_content_different_hash
+                
+                add_result("Duplicate detection", test_passed, 
+                          f"same content: {same_content_same_hash}, different content: {different_content_different_hash}")
+            except Exception as e:
+                add_result("Duplicate detection", False, str(e))
         except Exception as e:
             add_result("Discord embeds", False, str(e))
     else:
         add_result("Discord embeds", True, "Skipped (WEBHOOK not set)")
+        add_result("Duplicate detection", True, "Skipped (WEBHOOK not set)")
+    
+    # Additional tests
+    try:
+        process_monitor = ProcessMonitor()
+        top_cpu = process_monitor.get_top_processes(limit=5, sort_by='cpu')
+        top_memory = process_monitor.get_top_processes(limit=5, sort_by='memory')
+        process_count = process_monitor.get_process_count()
+        add_result("Process monitor", True, f"{process_count.get('total', 0)} total, {len(top_cpu)} top CPU, {len(top_memory)} top memory")
+    except Exception as e:
+        add_result("Process monitor", False, str(e))
+    
+    try:
+        kernel_monitor = KernelMonitor()
+        kernel_status = kernel_monitor.get_kernel_status()
+        if platform.system() == 'Linux':
+            stability = kernel_monitor.check_system_stability()
+            add_result("Kernel monitor", True, f"risk level: {stability.get('risk_level', 'unknown')}")
+        else:
+            add_result("Kernel monitor", True, "skipped (not Linux)")
+    except Exception as e:
+        add_result("Kernel monitor", False, str(e))
+    
+    try:
+        disk_io = disk_monitor.get_disk_io_counters(perdisk=False)
+        disk_io_per_disk = disk_monitor.get_disk_io_counters(perdisk=True)
+        add_result("Disk I/O counters", True, f"system-wide and {len(disk_io_per_disk)} per-disk")
+    except Exception as e:
+        add_result("Disk I/O counters", False, str(e))
+    
+    try:
+        partitions = disk_monitor.get_all_partitions()
+        add_result("Disk partitions", True, f"found {len(partitions)} partitions")
+    except Exception as e:
+        add_result("Disk partitions", False, str(e))
+    
+    try:
+        system_info = system_monitor.get_system_info()
+        uptime = system_monitor.get_uptime()
+        add_result("System info", True, f"uptime: {uptime.get('formatted', 'unknown')}")
+    except Exception as e:
+        add_result("System info", False, str(e))
+    
+    try:
+        network_interfaces = network_monitor.get_network_interfaces()
+        add_result("Network interfaces", True, f"found {len(network_interfaces)} interfaces")
+    except Exception as e:
+        add_result("Network interfaces", False, str(e))
+    
+    # Calculate and display elapsed time
+    elapsed_time = time.time() - start_time
+    elapsed_str = f"{elapsed_time:.2f}s" if elapsed_time < 60 else f"{elapsed_time/60:.1f}m"
     
     success = all(results) if results else True
     if success:
-        logger.info("Self-test completed successfully.")
+        logger.info(f"Self-test completed successfully in {elapsed_str}.")
     else:
-        logger.warning("Self-test completed with failures. See logs above.")
+        logger.warning(f"Self-test completed with failures in {elapsed_str}. See logs above.")
     return success
 
 
@@ -645,15 +769,6 @@ def main(
         logger.info("Kernel monitoring enabled")
     logger.info("Monitors initialized")
     
-    self_test_on_start = get_env_bool('SELF_TEST_ON_START', True)
-    if self_test_on_start:
-        logger.info("Running startup self-test (set SELF_TEST_ON_START=false to skip)...")
-        try:
-            run_self_test()
-        except Exception as e:
-            logger.warning(f"Startup self-test failed: {e}")
-    else:
-        logger.info("Startup self-test skipped")
     
     webhook = None
     logger.info("Connecting to Discord webhook...")
@@ -928,6 +1043,7 @@ def main(
     last_kernel_stability_alert_time = 0
     kernel_alert_sent = False
     kernel_stability_alert_sent = False
+    last_kernel_stability_alert_hash = None  # Track last sent alert content to prevent duplicates
     qbittorrent_check_counter = 0
     NETWORK_CHECK_INTERVAL = 2
     PROCESS_CHECK_INTERVAL = 3
@@ -1947,23 +2063,40 @@ def main(
                                         'inline': False
                                     })
                                 
-                                success = crash_webhook.send_embed(
-                                    title=f'Kernel Alert: System Stability Risk ({risk_level.upper()})',
-                                    description='System showing signs of instability that may lead to kernel crash',
-                                    fields=fields,
-                                    footer='Server Monitor - Kernel Stability',
-                                    timestamp=True
+                                normalized_fields = sorted(
+                                    [{'name': f.get('name', ''), 'value': f.get('value', ''), 'inline': f.get('inline', False)} 
+                                     for f in fields],
+                                    key=lambda x: (x['name'], x['value'])
                                 )
-                                if success:
-                                    logger.info("    Discord kernel stability alert sent")
+                                alert_content = {
+                                    'title': f'Kernel Alert: System Stability Risk ({risk_level.upper()})',
+                                    'description': 'System showing signs of instability that may lead to kernel crash',
+                                    'fields': normalized_fields
+                                }
+                                alert_hash = hashlib.md5(json.dumps(alert_content, sort_keys=True).encode()).hexdigest()
+                                
+                                if alert_hash != last_kernel_stability_alert_hash:
+                                    success = crash_webhook.send_embed(
+                                        title=alert_content['title'],
+                                        description=alert_content['description'],
+                                        fields=fields,
+                                        footer='Server Monitor - Kernel Stability',
+                                        timestamp=True
+                                    )
+                                    if success:
+                                        logger.info("    Discord kernel stability alert sent")
+                                        last_kernel_stability_alert_hash = alert_hash
+                                    else:
+                                        logger.warning("    Discord kernel stability alert failed")
                                 else:
-                                    logger.warning("    Discord kernel stability alert failed")
+                                    logger.debug("    Skipping duplicate kernel stability alert (same content)")
                             
                             last_kernel_stability_alert_time = current_time
                             kernel_stability_alert_sent = True
                     else:
                         if kernel_stability_alert_sent:
                             kernel_stability_alert_sent = False
+                            last_kernel_stability_alert_hash = None
                 except Exception as e:
                     logger.debug(f"Error checking kernel stability: {e}")
             

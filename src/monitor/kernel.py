@@ -15,22 +15,33 @@ from util.security import safe_subprocess_path
 
 logger = get_logger()
 
+# Default path for persistence file
+DEFAULT_PERSISTENCE_FILE = os.path.join(os.path.expanduser('~'), '.servermonitor_kernel_tracking.json')
+
 
 class KernelMonitor:
     """Monitor kernel for crashes, panics, and oops."""
     
-    def __init__(self):
-        """Initialize the kernel monitor."""
+    def __init__(self, persistence_file: Optional[str] = None):
+        """
+        Initialize the kernel monitor.
+        
+        Args:
+            persistence_file: Path to file for persisting tracking data (default: ~/.servermonitor_kernel_tracking.json)
+        """
         self.is_linux = platform.system() == 'Linux'
         self.last_boot_time = None
         self.last_check_time = time.time()
         self.detected_crashes = set()
         self.last_reported_errors = {}  # Track last reported error counts per device
         self.last_alert_time = {}  # Track last alert time per device (to prevent spam)
+        self.persistence_file = persistence_file or DEFAULT_PERSISTENCE_FILE
         
         if self.is_linux:
             try:
                 self.last_boot_time = self._get_boot_time()
+                # Load persisted tracking data
+                self._load_tracking_data()
             except Exception as e:
                 logger.debug(f"Could not get initial boot time: {e}")
     
@@ -55,6 +66,62 @@ class KernelMonitor:
             except Exception:
                 pass
             return None
+    
+    def _load_tracking_data(self):
+        """Load persisted tracking data from file."""
+        if not os.path.exists(self.persistence_file):
+            logger.debug(f"Persistence file not found: {self.persistence_file}, starting fresh")
+            return
+        
+        try:
+            with open(self.persistence_file, 'r') as f:
+                data = json.load(f)
+                
+            saved_boot_time = data.get('boot_time')
+            if saved_boot_time and self.last_boot_time:
+                if abs(saved_boot_time - self.last_boot_time) >= 10.0:
+                    logger.debug("System rebooted since last run, resetting tracking data")
+                    self.last_reported_errors = {}
+                    self.last_alert_time = {}
+                    self._save_tracking_data()
+                    return
+            
+            self.last_reported_errors = data.get('last_reported_errors', {})
+            self.last_alert_time = data.get('last_alert_time', {})
+            
+            self.last_alert_time = {k: float(v) for k, v in self.last_alert_time.items()}
+            
+            logger.debug(f"Loaded tracking data for {len(self.last_reported_errors)} devices")
+        except (json.JSONDecodeError, IOError, ValueError) as e:
+            logger.warning(f"Error loading tracking data from {self.persistence_file}: {e}, starting fresh")
+            self.last_reported_errors = {}
+            self.last_alert_time = {}
+    
+    def _save_tracking_data(self):
+        """Save tracking data to file for persistence across restarts."""
+        try:
+            data = {
+                'boot_time': self.last_boot_time,
+                'last_reported_errors': self.last_reported_errors,
+                'last_alert_time': self.last_alert_time,
+                'saved_at': time.time()
+            }
+            
+            # Create directory if it doesn't exist
+            persistence_dir = os.path.dirname(self.persistence_file)
+            if persistence_dir and not os.path.exists(persistence_dir):
+                os.makedirs(persistence_dir, mode=0o700, exist_ok=True)
+            
+            # Write to temporary file first, then rename (atomic operation)
+            temp_file = self.persistence_file + '.tmp'
+            with open(temp_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            
+            # Atomic rename
+            os.replace(temp_file, self.persistence_file)
+            logger.debug(f"Saved tracking data to {self.persistence_file}")
+        except (IOError, OSError) as e:
+            logger.warning(f"Error saving tracking data to {self.persistence_file}: {e}")
     
     def _check_early_warning_signs(self, since_minutes: int = 60) -> List[Dict]:
         """
@@ -282,6 +349,7 @@ class KernelMonitor:
                 self.last_reported_errors = {}
                 self.last_alert_time = {}
                 self.last_boot_time = current_boot_time
+                self._save_tracking_data()
         except Exception:
             pass
         
@@ -418,6 +486,11 @@ class KernelMonitor:
                             continue
         except Exception:
             pass
+
+        try:
+            self._save_tracking_data()
+        except Exception as e:
+            logger.debug(f"Error saving tracking data: {e}")
         
         if risk_score >= 50:
             stability['risk_level'] = 'critical'
