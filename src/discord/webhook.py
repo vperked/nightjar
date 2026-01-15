@@ -1172,8 +1172,13 @@ class DiscordWebhook:
         log_list = []
         for log_info in cleaned_logs[:20]:
             log_path = log_info.get('path', 'Unknown')
-            size_formatted = log_info.get('size_formatted', 'N/A')
-            log_list.append(f"• `{log_path}` - {size_formatted}")
+            original_size = log_info.get('original_size_formatted')
+            if original_size:
+                size_formatted = log_info.get('size_formatted', 'N/A')
+                log_list.append(f"• `{log_path}` - {original_size} → {size_formatted}")
+            else:
+                size_formatted = log_info.get('size_formatted', 'N/A')
+                log_list.append(f"• `{log_path}` - {size_formatted}")
         
         if log_count > 20:
             log_list.append(f"\n*... and {log_count - 20} more log file(s)*")
