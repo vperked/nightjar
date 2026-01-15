@@ -548,7 +548,6 @@ def run_self_test() -> bool:
                     logger.warning(f"Embed send error for {title}: {e}")
             add_result("Discord embeds", failures == 0, f"sent {sent}/{total}, failed {failures}")
             
-            # Test duplicate detection hash logic
             try:
                 test_fields = [
                     {'name': 'Risk Level', 'value': 'HIGH', 'inline': True},
@@ -558,7 +557,6 @@ def run_self_test() -> bool:
                     {'name': 'Recommended Actions', 'value': 'Check disk health on nvme0n1', 'inline': False}
                 ]
                 
-                # Test 1: Same content should produce same hash
                 normalized_fields_1 = sorted(
                     [{'name': f.get('name', ''), 'value': f.get('value', ''), 'inline': f.get('inline', False)} 
                      for f in test_fields],
@@ -571,7 +569,6 @@ def run_self_test() -> bool:
                 }
                 hash_1 = hashlib.md5(json.dumps(alert_content_1, sort_keys=True).encode()).hexdigest()
                 
-                # Create same content again (different field order shouldn't matter)
                 test_fields_reordered = [
                     {'name': 'Status', 'value': 'System showing signs of instability - crash risk elevated', 'inline': False},
                     {'name': 'Risk Level', 'value': 'HIGH', 'inline': True},
@@ -591,9 +588,8 @@ def run_self_test() -> bool:
                 }
                 hash_2 = hashlib.md5(json.dumps(alert_content_2, sort_keys=True).encode()).hexdigest()
                 
-                # Test 2: Different content should produce different hash
                 different_fields = test_fields.copy()
-                different_fields[1] = {'name': 'Risk Score', 'value': '45', 'inline': True}  # Changed score
+                different_fields[1] = {'name': 'Risk Score', 'value': '45', 'inline': True}
                 normalized_fields_diff = sorted(
                     [{'name': f.get('name', ''), 'value': f.get('value', ''), 'inline': f.get('inline', False)} 
                      for f in different_fields],
@@ -606,7 +602,6 @@ def run_self_test() -> bool:
                 }
                 hash_3 = hashlib.md5(json.dumps(different_content, sort_keys=True).encode()).hexdigest()
                 
-                # Verify: same content = same hash, different content = different hash
                 same_content_same_hash = (hash_1 == hash_2)
                 different_content_different_hash = (hash_1 != hash_3)
                 test_passed = same_content_same_hash and different_content_different_hash
@@ -621,7 +616,6 @@ def run_self_test() -> bool:
         add_result("Discord embeds", True, "Skipped (WEBHOOK not set)")
         add_result("Duplicate detection", True, "Skipped (WEBHOOK not set)")
     
-    # Additional tests
     try:
         process_monitor = ProcessMonitor()
         top_cpu = process_monitor.get_top_processes(limit=5, sort_by='cpu')
@@ -1871,7 +1865,6 @@ def main(
                                     subdirs_human.append(subdir_human)
                             
                             if disk_webhook:
-                                from util.util import format_bytes
                                 size_formatted = format_bytes(media_size_info['size'])
                                 logger.warning(f"[ALERT] Directory {media_directory}: {size_formatted} (threshold: {format_bytes(media_directory_threshold_bytes)})")
                                 success = disk_webhook.send_directory_size_alert(
@@ -1885,7 +1878,6 @@ def main(
                                 else:
                                     logger.warning("    Discord directory alert failed")
                             else:
-                                from util.util import format_bytes
                                 size_formatted = format_bytes(media_size_info['size'])
                                 logger.warning(f"Directory {media_directory}: {size_formatted} (threshold: {format_bytes(media_directory_threshold_bytes)})")
                             
@@ -2158,11 +2150,20 @@ def main(
                                 if hardware_errors:
                                     hw_details = []
                                     for hw_error in hardware_errors[:5]:
-                                        error_type = hw_error.get('error_type', 'unknown')
-                                        if 'count' in hw_error:
-                                            hw_details.append(f"{error_type}: {hw_error['count']} errors")
+                                        if 'count_increase' in hw_error:
+                                            source = hw_error.get('source', 'unknown')
+                                            count_increase = hw_error['count_increase']
+                                            total_count = hw_error.get('count', 0)
+                                            error_type = hw_error.get('error_type', 'unknown')
+                                            hw_details.append(f"{source}: {count_increase} new {error_type} errors (total: {total_count})")
+                                        elif 'count' in hw_error:
+                                            source = hw_error.get('source', 'unknown')
+                                            error_type = hw_error.get('error_type', 'unknown')
+                                            count = hw_error['count']
+                                            hw_details.append(f"{source}: {count} {error_type} errors")
                                         elif 'message' in hw_error:
-                                            hw_details.append(f"{hw_error.get('type', 'error')}: {hw_error['message'][:100]}")
+                                            source = hw_error.get('source', 'unknown')
+                                            hw_details.append(f"{source}: {hw_error['message'][:100]}")
                                     
                                     if hw_details:
                                         fields.append({

@@ -36,9 +36,9 @@ class KernelMonitor:
         self.detected_crashes = set()
         self.last_reported_errors = {}  # Track last reported error counts per device
         self.last_alert_time = {}  # Track last alert time per device (to prevent spam)
+        self.last_edac_counts = {}  # Track previous EDAC error counts to detect increases
         self.persistence_file = persistence_file or DEFAULT_PERSISTENCE_FILE
         
-        # Load ignored devices from environment or parameter
         if ignored_devices is None:
             ignore_env = os.getenv('KERNEL_IGNORE_DEVICES', '')
             if ignore_env:
@@ -54,7 +54,6 @@ class KernelMonitor:
         if self.is_linux:
             try:
                 self.last_boot_time = self._get_boot_time()
-                # Load persisted tracking data
                 self._load_tracking_data()
             except Exception as e:
                 logger.debug(f"Could not get initial boot time: {e}")
@@ -102,6 +101,7 @@ class KernelMonitor:
             
             self.last_reported_errors = data.get('last_reported_errors', {})
             self.last_alert_time = data.get('last_alert_time', {})
+            self.last_edac_counts = data.get('last_edac_counts', {})
             
             self.last_alert_time = {k: float(v) for k, v in self.last_alert_time.items()}
             
@@ -118,20 +118,18 @@ class KernelMonitor:
                 'boot_time': self.last_boot_time,
                 'last_reported_errors': self.last_reported_errors,
                 'last_alert_time': self.last_alert_time,
+                'last_edac_counts': self.last_edac_counts,
                 'saved_at': time.time()
             }
             
-            # Create directory if it doesn't exist
             persistence_dir = os.path.dirname(self.persistence_file)
             if persistence_dir and not os.path.exists(persistence_dir):
                 os.makedirs(persistence_dir, mode=0o700, exist_ok=True)
             
-            # Write to temporary file first, then rename (atomic operation)
             temp_file = self.persistence_file + '.tmp'
             with open(temp_file, 'w') as f:
                 json.dump(data, f, indent=2)
             
-            # Atomic rename
             os.replace(temp_file, self.persistence_file)
             logger.debug(f"Saved tracking data to {self.persistence_file}")
         except (IOError, OSError) as e:
@@ -242,24 +240,65 @@ class KernelMonitor:
                 '/sys/devices/system/edac'
             ]
             
+            current_time = time.time()
+            edac_cooldown = 24 * 60 * 60  # 24 hours between alerts for same EDAC source
+            
             for edac_path in edac_paths:
                 if os.path.exists(edac_path):
                     for root, dirs, files in os.walk(edac_path):
+                        path_parts = root.split('/')
+                        mc_name = 'unknown'
+                        for part in path_parts:
+                            if part.startswith('mc') or part.startswith('edac'):
+                                mc_name = part
+                                break
+                        
                         for file in files:
                             if 'ce_count' in file or 'ue_count' in file:
                                 filepath = os.path.join(root, file)
                                 try:
                                     with open(filepath, 'r') as f:
                                         count = int(f.read().strip())
-                                        if count > 0:
-                                            error_type = 'correctable' if 'ce_count' in file else 'uncorrectable'
+                                        
+                                        edac_key = f"{mc_name}_{file}"
+                                        
+                                        last_count = self.last_edac_counts.get(edac_key, 0)
+                                        count_increase = count - last_count
+                                        
+                                        self.last_edac_counts[edac_key] = count
+                                        
+                                        error_type = 'correctable' if 'ce_count' in file else 'uncorrectable'
+                                        
+                                        should_alert = False
+                                        if count_increase > 0:
+                                            if error_type == 'uncorrectable':
+                                                should_alert = True
+                                            else:
+                                                if count_increase >= 1000 or (last_count > 0 and count_increase >= last_count * 0.10):
+                                                    should_alert = True
+                                        
+                                        if should_alert:
+                                            last_alert = self.last_alert_time.get(edac_key, 0)
+                                            if current_time - last_alert < edac_cooldown:
+                                                should_alert = False
+                                        
+                                        if should_alert:
+                                            source_name = f"EDAC-{mc_name}"
+                                            if 'mc' in mc_name:
+                                                source_name = f"Memory Controller {mc_name}"
+                                            
                                             errors.append({
                                                 'type': 'hardware_error',
                                                 'error_type': error_type,
-                                                'source': 'EDAC',
+                                                'source': source_name,
                                                 'count': count,
-                                                'location': filepath
+                                                'count_increase': count_increase,
+                                                'location': filepath,
+                                                'message': f"{error_type.capitalize()} memory error detected: {count_increase} new errors (total: {count})"
                                             })
+                                            
+                                            self.last_alert_time[edac_key] = current_time
+                                            
                                 except (ValueError, OSError, PermissionError):
                                     continue
         except Exception as e:
@@ -362,6 +401,7 @@ class KernelMonitor:
             if current_boot_time and self.last_boot_time and abs(current_boot_time - self.last_boot_time) >= 10.0:
                 self.last_reported_errors = {}
                 self.last_alert_time = {}
+                self.last_edac_counts = {}  # Reset EDAC counts on reboot
                 self.last_boot_time = current_boot_time
                 self._save_tracking_data()
         except Exception:
@@ -454,7 +494,6 @@ class KernelMonitor:
                                 if is_virtual or is_partition:
                                     continue
                                 
-                                # Check if device is in ignore list
                                 if device in self.ignored_devices:
                                     continue
                                 

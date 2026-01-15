@@ -256,7 +256,6 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             site_dir = Path(__file__).parent / 'site'
             file_path = site_dir / path.lstrip('/')
             
-            # Validate path using security module
             is_valid, resolved_path, error = validate_path(
                 str(file_path),
                 allowed_base_paths=[str(site_dir)],
@@ -317,7 +316,6 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             if elapsed > 1.0:
                 logger.warning(f"Stats collection took {elapsed:.2f}s (slow)")
             
-            # Ensure stats is always a valid dict
             if not isinstance(stats, dict):
                 logger.error("get_system_stats returned invalid type, using empty dict")
                 stats = {}
@@ -338,7 +336,6 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Error serving stats: {e}", exc_info=True)
             try:
-                # Try to send error response, but use minimal valid JSON if possible
                 error_response = json.dumps({'error': str(e), 'timestamp': time.time()}).encode('utf-8')
                 self.send_response(500)
                 self.send_header('Content-type', 'application/json')
