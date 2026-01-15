@@ -15,6 +15,7 @@ BYTES_PER_TB = 1024 * 1024 * 1024 * 1024
 def format_bytes(bytes_value: int, precision: int = 2) -> str:
     """
     Convert bytes to human-readable format.
+    Uses decimal conversion (1000 MB = 1 GB) for values >= 1000 MB for cleaner display.
     
     Args:
         bytes_value: Value in bytes
@@ -26,11 +27,26 @@ def format_bytes(bytes_value: int, precision: int = 2) -> str:
     if bytes_value == 0:
         return "0 B"
     
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+    mb_value = bytes_value / BYTES_PER_MB
+    
+    if mb_value >= 1000:
+        gb_value = mb_value / 1000.0
+        if gb_value >= 1000:
+            tb_value = gb_value / 1000.0
+            if tb_value >= 1000:
+                pb_value = tb_value / 1000.0
+                if pb_value >= 1000:
+                    eb_value = pb_value / 1000.0
+                    return f"{eb_value:.{precision}f} EB"
+                return f"{pb_value:.{precision}f} PB"
+            return f"{tb_value:.{precision}f} TB"
+        return f"{gb_value:.{precision}f} GB"
+    
+    for unit in ['B', 'KB', 'MB']:
         if bytes_value < BYTES_PER_KB:
             return f"{bytes_value:.{precision}f} {unit}"
         bytes_value /= BYTES_PER_KB
-    return f"{bytes_value:.{precision}f} EB"
+    return f"{bytes_value:.{precision}f} MB"
 
 
 def format_bytes_per_second(bytes_per_sec: float, precision: int = 2) -> str:

@@ -1976,25 +1976,32 @@ def main(
                         if log_path in cleaned_logs:
                             continue
                         
+                        current_log_info = log_monitor.get_log_size(log_path)
+                        if not current_log_info:
+                            continue
+                        
+                        if not log_monitor.check_log_threshold(current_log_info):
+                            continue
+                        
                         last_alert_time = last_log_alert_time.get(log_path, 0)
                         time_since_last_alert = current_time - last_alert_time
                         
                         if time_since_last_alert >= alert_cooldown:
-                            original_size = log_info.get('size_bytes', 0)
-                            cleanup_success = log_monitor.cleanup_log(log_info)
+                            original_size = current_log_info.get('size_bytes', 0)
+                            cleanup_success = log_monitor.cleanup_log(current_log_info)
                             
                             if cleanup_success:
-                                logger.info(f"    Log cleanup successful for {log_path}")
+                                logger.info(f"    Log cleanup successful for {log_path} (was {format_bytes(original_size)})")
                                 cleaned_logs.add(log_path)
                                 
                                 size_after = log_monitor.get_log_size(log_path)
                                 if size_after:
-                                    log_info = size_after
-                                    logger.info(f"    Log size after cleanup: {log_info.get('size_formatted', 'N/A')}")
+                                    cleaned_log_info = size_after
+                                    logger.info(f"    Log size after cleanup: {cleaned_log_info.get('size_formatted', 'N/A')}")
+                                    cleaned_logs_batch.append(cleaned_log_info)
                                 else:
                                     logger.warning(f"    Could not get log size after cleanup for {log_path}")
-                                
-                                cleaned_logs_batch.append(log_info)
+                                    cleaned_logs_batch.append(current_log_info)
                             else:
                                 logger.error(f"    Log cleanup failed for {log_path} - check permissions (may need root/sudo)")
                             
