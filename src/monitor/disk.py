@@ -732,10 +732,26 @@ class DiskMonitor:
         logger.info(f"[CLEANUP] Starting disk cleanup: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free (target: {target_free_percent:.1f}% free)")
         
         if log_monitor:
-            logger.info("[CLEANUP] Step 1: Cleaning log files...")
+            logger.info("[CLEANUP] Step 1: Cleaning log files (all logs in /var/log)...")
             try:
+                all_log_files = log_monitor.get_all_log_files_in_directory('/var/log')
+                
                 all_log_sizes = log_monitor.get_all_log_sizes()
-                exceeded_logs = all_log_sizes.get('exceeded_logs', [])
+                monitored_logs = []
+                if all_log_sizes.get('application_log'):
+                    monitored_logs.append(all_log_sizes['application_log'])
+                monitored_logs.extend(all_log_sizes.get('system_logs', []))
+                if all_log_sizes.get('journal_log'):
+                    monitored_logs.append(all_log_sizes['journal_log'])
+                
+                all_logs_dict = {}
+                for log_info in all_log_files + monitored_logs:
+                    log_path = log_info.get('path', '')
+                    if log_path:
+                        if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
+                            all_logs_dict[log_path] = log_info
+                
+                exceeded_logs = [log for log in all_logs_dict.values() if log_monitor.check_log_threshold(log)]
                 
                 exceeded_logs.sort(key=lambda x: x.get('size_bytes', 0), reverse=True)
                 
@@ -846,21 +862,26 @@ class DiskMonitor:
         stats['errors'].extend(cleanup_stats['errors'])
         
         if log_monitor:
-            logger.info("[EMERGENCY] Step 2: Cleaning log files (aggressive - all logs)...")
+            logger.info("[EMERGENCY] Step 2: Cleaning log files (aggressive - ALL logs in /var/log)...")
             try:
+                all_log_files = log_monitor.get_all_log_files_in_directory('/var/log')
+                
                 all_log_sizes = log_monitor.get_all_log_sizes()
-                all_logs = []
+                monitored_logs = []
+                if all_log_sizes.get('application_log'):
+                    monitored_logs.append(all_log_sizes['application_log'])
+                monitored_logs.extend(all_log_sizes.get('system_logs', []))
+                if all_log_sizes.get('journal_log'):
+                    monitored_logs.append(all_log_sizes['journal_log'])
                 
-                app_log = all_log_sizes.get('application_log')
-                if app_log:
-                    all_logs.append(app_log)
+                all_logs_dict = {}
+                for log_info in all_log_files + monitored_logs:
+                    log_path = log_info.get('path', '')
+                    if log_path:
+                        if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
+                            all_logs_dict[log_path] = log_info
                 
-                system_logs = all_log_sizes.get('system_logs', [])
-                all_logs.extend(system_logs)
-                
-                journal_log = all_log_sizes.get('journal_log')
-                if journal_log:
-                    all_logs.append(journal_log)
+                all_logs = list(all_logs_dict.values())
                 
                 all_logs.sort(key=lambda x: x.get('size_bytes', 0), reverse=True)
                 

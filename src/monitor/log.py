@@ -144,6 +144,51 @@ class LogMonitor:
         size_bytes = log_info.get('size_bytes', 0)
         return size_bytes > self.threshold_bytes
     
+    def get_all_log_files_in_directory(self, log_dir: str = '/var/log') -> List[Dict]:
+        """
+        Get all log files in a directory (e.g., /var/log).
+        Discovers all .log files and other common log file patterns.
+        
+        Args:
+            log_dir: Directory to search for log files (default: /var/log)
+            
+        Returns:
+            List of dictionaries containing log file information
+        """
+        if not self.is_linux or not os.path.exists(log_dir):
+            return []
+        
+        log_files = []
+        log_extensions = ['.log', '.log.1', '.log.2', '.log.3', '.log.4', '.log.5', '.log.gz', '.log.bz2']
+        log_keywords = ['log', 'syslog', 'messages', 'kern', 'auth', 'daemon', 'mail', 'mail.log', 'apache', 'nginx', 'mysql', 'postgresql']
+        
+        try:
+            for root, dirs, files in os.walk(log_dir):
+                if 'journal' in root:
+                    continue
+                
+                dirs_to_skip = ['journal', 'private', 'apt', 'dist-upgrade']
+                dirs[:] = [d for d in dirs if d not in dirs_to_skip]
+                
+                for filename in files:
+                    filepath = os.path.join(root, filename)
+                    filename_lower = filename.lower()
+                    
+                    is_log_file = (
+                        any(filename_lower.endswith(ext) for ext in log_extensions) or
+                        any(keyword in filename_lower for keyword in log_keywords) or
+                        '.log' in filename_lower
+                    )
+                    
+                    if is_log_file and not any(filename_lower.endswith(ext) for ext in ['.lock', '.pid', '.tmp', '.swp']):
+                        log_info = self.get_log_size(filepath)
+                        if log_info:
+                            log_files.append(log_info)
+        except (OSError, PermissionError) as e:
+            logger.debug(f"Error scanning {log_dir} for log files: {e}")
+        
+        return log_files
+    
     def get_all_log_sizes(self) -> Dict:
         """
         Get size information for all monitored logs.
@@ -204,7 +249,6 @@ class LogMonitor:
         log_path = log_info.get('path', '')
         size_bytes = log_info.get('size_bytes', 0)
         
-        # Skip if below threshold and not forcing
         if not force and size_bytes <= self.threshold_bytes:
             return True
         
@@ -243,9 +287,7 @@ class LogMonitor:
             
             current_size = log_path.stat().st_size
             
-            # If forcing cleanup and log is small, clear it completely
             if force and current_size <= self.threshold_bytes:
-                # For small logs in emergency, clear them completely
                 if current_size > 0:
                     try:
                         if self.is_linux:
@@ -266,7 +308,6 @@ class LogMonitor:
                                         logger.info(f"Emergency: Cleared small log {log_path} ({format_bytes(current_size)})")
                                         return True
                         
-                        # Fallback: truncate to empty
                         with open(log_path, 'wb') as f:
                             f.truncate(0)
                         logger.info(f"Emergency: Cleared small log {log_path} ({format_bytes(current_size)})")
@@ -276,7 +317,6 @@ class LogMonitor:
                         return False
                 return True
             
-            # Normal cleanup: only if exceeds threshold
             if not force and current_size <= self.threshold_bytes:
                 return True
             
@@ -345,7 +385,6 @@ class LogMonitor:
         
         try:
             if force:
-                # In emergency, aggressively clean journal logs to 100MB
                 vacuum_size = '100M'
             else:
                 threshold_mb = self.threshold_bytes / (1024 * 1024)
