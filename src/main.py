@@ -662,7 +662,6 @@ def run_self_test() -> bool:
     except Exception as e:
         add_result("Network interfaces", False, str(e))
     
-    # Calculate and display elapsed time
     elapsed_time = time.time() - start_time
     elapsed_str = f"{elapsed_time:.2f}s" if elapsed_time < 60 else f"{elapsed_time/60:.1f}m"
     
@@ -1150,11 +1149,11 @@ def main(
                     
                     try:
                         target_free_percent = 20.0
-                        cleanup_stats = disk_monitor.cleanup_disk_space(mountpoint='/', target_free_percent=target_free_percent)
+                        cleanup_stats = disk_monitor.cleanup_disk_space(mountpoint='/', target_free_percent=target_free_percent, log_monitor=log_monitor)
                         
                         if cleanup_stats['total_size_cleared'] > 0:
                             logger.info(f"[CLEANUP] Cleaned {format_bytes(cleanup_stats['total_size_cleared'])} "
-                                      f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs)")
+                                      f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs, {cleanup_stats.get('logs_cleaned', 0)} logs)")
                             
                             if cleanup_stats.get('final_usage'):
                                 logger.info(f"[CLEANUP] Disk usage after cleanup: {cleanup_stats['final_usage']:.1f}%")
@@ -1497,11 +1496,11 @@ def main(
                                 
                                 try:
                                     target_free_percent = 20.0
-                                    cleanup_stats = disk_monitor.cleanup_disk_space(mountpoint=mountpoint, target_free_percent=target_free_percent)
+                                    cleanup_stats = disk_monitor.cleanup_disk_space(mountpoint=mountpoint, target_free_percent=target_free_percent, log_monitor=log_monitor)
                                     
                                     if cleanup_stats['total_size_cleared'] > 0:
                                         logger.info(f"[CLEANUP] Partition {partition_key}: Cleaned {format_bytes(cleanup_stats['total_size_cleared'])} "
-                                                  f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs)")
+                                                  f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs, {cleanup_stats.get('logs_cleaned', 0)} logs)")
                                         
                                         if cleanup_stats.get('final_usage'):
                                             logger.info(f"[CLEANUP] Partition {partition_key} usage after cleanup: {cleanup_stats['final_usage']:.1f}%")

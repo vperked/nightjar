@@ -4,6 +4,7 @@ import os
 import platform
 import shutil
 import glob
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
 from util.util import format_bytes
@@ -692,14 +693,15 @@ class DiskMonitor:
         
         return stats
     
-    def cleanup_disk_space(self, mountpoint: str = '/', target_free_percent: float = 20.0) -> Dict:
+    def cleanup_disk_space(self, mountpoint: str = '/', target_free_percent: float = 20.0, log_monitor=None) -> Dict:
         """
         Clean up disk space to reach target free percentage.
-        Performs aggressive cleanup of temporary files and caches.
+        Performs aggressive cleanup of temporary files, caches, and logs.
         
         Args:
             mountpoint: Mount point to clean (default: '/')
             target_free_percent: Target free space percentage (default: 20.0)
+            log_monitor: Optional LogMonitor instance to clean logs
             
         Returns:
             Dictionary with cleanup statistics
@@ -710,7 +712,8 @@ class DiskMonitor:
             'total_size_cleared': 0,
             'errors': [],
             'initial_usage': None,
-            'final_usage': None
+            'final_usage': None,
+            'logs_cleaned': 0
         }
         
         initial_usage = self.get_disk_usage(mountpoint)
@@ -728,6 +731,54 @@ class DiskMonitor:
         
         logger.info(f"[CLEANUP] Starting disk cleanup: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free (target: {target_free_percent:.1f}% free)")
         
+        if log_monitor:
+            logger.info("[CLEANUP] Step 1: Cleaning log files...")
+            try:
+                all_log_sizes = log_monitor.get_all_log_sizes()
+                exceeded_logs = all_log_sizes.get('exceeded_logs', [])
+                
+                exceeded_logs.sort(key=lambda x: x.get('size_bytes', 0), reverse=True)
+                
+                for log_info in exceeded_logs:
+                    try:
+                        log_path = log_info.get('path', '')
+                        if not log_path:
+                            continue
+                        
+                        current_log_info = log_monitor.get_log_size(log_path)
+                        if not current_log_info:
+                            continue
+                        
+                        original_size = current_log_info.get('size_bytes', 0)
+                        if original_size == 0:
+                            continue
+                        
+                        if log_monitor.cleanup_log(current_log_info):
+                            stats['logs_cleaned'] += 1
+                            size_after = log_monitor.get_log_size(log_path)
+                            size_after_bytes = size_after.get('size_bytes', 0) if size_after else 0
+                            stats['total_size_cleared'] += max(0, original_size - size_after_bytes)
+                            logger.info(f"    Cleaned log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
+                    except Exception as e:
+                        stats['errors'].append(f"Error cleaning log {log_info.get('path', 'unknown')}: {e}")
+                
+                current_usage = self.get_disk_usage(mountpoint)
+                if current_usage:
+                    current_free_percent = 100.0 - current_usage['percent']
+                    if current_free_percent >= target_free_percent:
+                        logger.info(f"[CLEANUP] Target free space reached after log cleanup: {current_free_percent:.1f}% free")
+                        self._restart_log_services()
+                        final_usage = self.get_disk_usage(mountpoint)
+                        if final_usage:
+                            stats['final_usage'] = final_usage['percent']
+                        return stats
+                
+                if stats['logs_cleaned'] > 0:
+                    self._restart_log_services()
+            except Exception as e:
+                stats['errors'].append(f"Error getting log sizes: {e}")
+        
+        logger.info("[CLEANUP] Step 2: Cleaning temporary files...")
         for max_age_days in [7, 3, 1, 0]:
             cleanup_stats = self.cleanup_temporary_files(mountpoint, max_age_days=max_age_days)
             stats['files_removed'] += cleanup_stats['files_removed']
@@ -742,13 +793,16 @@ class DiskMonitor:
                     logger.info(f"[CLEANUP] Target free space reached: {current_free_percent:.1f}% free")
                     break
         
+        if stats['logs_cleaned'] > 0:
+            self._restart_log_services()
+        
         final_usage = self.get_disk_usage(mountpoint)
         if final_usage:
             stats['final_usage'] = final_usage['percent']
             final_free_percent = 100.0 - final_usage['percent']
             logger.info(f"[CLEANUP] Disk cleanup complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
                        f"Cleared {format_bytes(stats['total_size_cleared'])} "
-                       f"({stats['files_removed']} files, {stats['dirs_removed']} dirs)")
+                       f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)")
         
         return stats
     
@@ -792,21 +846,51 @@ class DiskMonitor:
         stats['errors'].extend(cleanup_stats['errors'])
         
         if log_monitor:
-            logger.info("[EMERGENCY] Step 2: Cleaning log files...")
+            logger.info("[EMERGENCY] Step 2: Cleaning log files (aggressive - all logs)...")
             try:
                 all_log_sizes = log_monitor.get_all_log_sizes()
-                exceeded_logs = all_log_sizes.get('exceeded_logs', [])
+                all_logs = []
                 
-                for log_info in exceeded_logs:
+                app_log = all_log_sizes.get('application_log')
+                if app_log:
+                    all_logs.append(app_log)
+                
+                system_logs = all_log_sizes.get('system_logs', [])
+                all_logs.extend(system_logs)
+                
+                journal_log = all_log_sizes.get('journal_log')
+                if journal_log:
+                    all_logs.append(journal_log)
+                
+                all_logs.sort(key=lambda x: x.get('size_bytes', 0), reverse=True)
+                
+                for log_info in all_logs:
                     try:
-                        original_size = log_info.get('size_bytes', 0)
-                        if log_monitor.cleanup_log(log_info):
+                        log_path = log_info.get('path', '')
+                        if not log_path:
+                            continue
+                        
+                        current_log_info = log_monitor.get_log_size(log_path)
+                        if not current_log_info:
+                            continue
+                        
+                        original_size = current_log_info.get('size_bytes', 0)
+                        if original_size == 0:
+                            continue
+                        
+                        if log_monitor.cleanup_log(current_log_info, force=True):
                             stats['logs_cleaned'] += 1
-                            stats['total_size_cleared'] += max(0, original_size - log_info.get('size_bytes', 0))
+                            size_after = log_monitor.get_log_size(log_path)
+                            size_after_bytes = size_after.get('size_bytes', 0) if size_after else 0
+                            stats['total_size_cleared'] += max(0, original_size - size_after_bytes)
+                            logger.info(f"    Cleaned log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
                     except Exception as e:
                         stats['errors'].append(f"Error cleaning log {log_info.get('path', 'unknown')}: {e}")
             except Exception as e:
                 stats['errors'].append(f"Error getting log sizes: {e}")
+            
+            if stats['logs_cleaned'] > 0:
+                self._restart_log_services()
         
         logger.info("[EMERGENCY] Step 3: Cleaning additional cache directories...")
         cache_dirs = ['/var/cache', '/tmp', '/var/tmp']
@@ -850,6 +934,9 @@ class DiskMonitor:
             except Exception as e:
                 stats['errors'].append(f"Error cleaning cache directory {cache_dir}: {e}")
         
+        if stats['logs_cleaned'] > 0:
+            self._restart_log_services()
+        
         final_usage = self.get_disk_usage(mountpoint)
         if final_usage:
             stats['final_usage'] = final_usage['percent']
@@ -859,4 +946,33 @@ class DiskMonitor:
                           f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)")
         
         return stats
+    
+    def _restart_log_services(self):
+        """
+        Restart log services (rsyslog and systemd-journald) after log cleanup.
+        This ensures services properly manage log files after cleanup.
+        """
+        if not platform.system() == 'Linux':
+            return
+        
+        services_to_restart = ['rsyslog', 'systemd-journald']
+        
+        for service in services_to_restart:
+            try:
+                logger.info(f"    Restarting {service}...")
+                result = subprocess.run(
+                    ['systemctl', 'restart', service],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False
+                )
+                if result.returncode == 0:
+                    logger.info(f"    {service} restarted successfully")
+                else:
+                    logger.warning(f"    Failed to restart {service}: {result.stderr}")
+            except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+                logger.debug(f"    Could not restart {service}: {e}")
+            except Exception as e:
+                logger.debug(f"    Error restarting {service}: {e}")
 

@@ -185,7 +185,7 @@ class LogMonitor:
         """
         self.threshold_bytes = threshold_mb * 1024 * 1024
     
-    def cleanup_log(self, log_info: Dict) -> bool:
+    def cleanup_log(self, log_info: Dict, force: bool = False) -> bool:
         """
         Clean up a log file that exceeds the threshold.
         For regular files, truncates to threshold size keeping the most recent data.
@@ -193,6 +193,7 @@ class LogMonitor:
         
         Args:
             log_info: Dictionary containing log file information
+            force: If True, clean log even if it doesn't exceed threshold (for emergency cleanup)
             
         Returns:
             True if cleanup was successful, False otherwise
@@ -203,15 +204,16 @@ class LogMonitor:
         log_path = log_info.get('path', '')
         size_bytes = log_info.get('size_bytes', 0)
         
-        if size_bytes <= self.threshold_bytes:
+        # Skip if below threshold and not forcing
+        if not force and size_bytes <= self.threshold_bytes:
             return True
         
         try:
             if log_path == self.journal_log_path or (self.journal_log_path and log_path.startswith(self.journal_log_path)):
-                return self._cleanup_journal_log()
+                return self._cleanup_journal_log(force=force)
             else:
                 path = Path(log_path)
-                return self._cleanup_regular_log(path)
+                return self._cleanup_regular_log(path, force=force)
         except PermissionError as e:
             logger.error(f"Permission denied cleaning log {log_path}: {e}. Try running with sudo/root permissions.")
             return False
@@ -222,13 +224,14 @@ class LogMonitor:
             logger.warning(f"Unexpected error cleaning up log {log_path}: {e}")
             return False
     
-    def _cleanup_regular_log(self, log_path: Path) -> bool:
+    def _cleanup_regular_log(self, log_path: Path, force: bool = False) -> bool:
         """
         Truncate a regular log file to threshold size, keeping the most recent data.
         Tries multiple methods: truncate command, then file operations.
         
         Args:
             log_path: Path to the log file
+            force: If True, clean log even if below threshold (for emergency cleanup)
             
         Returns:
             True if successful, False otherwise
@@ -239,7 +242,42 @@ class LogMonitor:
                 return False
             
             current_size = log_path.stat().st_size
-            if current_size <= self.threshold_bytes:
+            
+            # If forcing cleanup and log is small, clear it completely
+            if force and current_size <= self.threshold_bytes:
+                # For small logs in emergency, clear them completely
+                if current_size > 0:
+                    try:
+                        if self.is_linux:
+                            log_path_str = str(log_path)
+                            is_system_log = any(log_path_str.startswith(sys_path) for sys_path in self.system_log_paths)
+                            
+                            if is_system_log:
+                                safe_path = safe_subprocess_path(log_path_str)
+                                if safe_path:
+                                    result = subprocess.run(
+                                        ['truncate', '-s', '0', safe_path],
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=60,
+                                        check=False
+                                    )
+                                    if result.returncode == 0:
+                                        logger.info(f"Emergency: Cleared small log {log_path} ({format_bytes(current_size)})")
+                                        return True
+                        
+                        # Fallback: truncate to empty
+                        with open(log_path, 'wb') as f:
+                            f.truncate(0)
+                        logger.info(f"Emergency: Cleared small log {log_path} ({format_bytes(current_size)})")
+                        return True
+                    except (OSError, PermissionError, subprocess.SubprocessError) as e:
+                        logger.debug(f"Could not clear small log {log_path}: {e}")
+                        return False
+                return True
+            
+            # Normal cleanup: only if exceeds threshold
+            if not force and current_size <= self.threshold_bytes:
                 return True
             
             excess_bytes = current_size - self.threshold_bytes
@@ -292,9 +330,12 @@ class LogMonitor:
             logger.error(f"Unexpected error cleaning log {log_path}: {e}")
             return False
     
-    def _cleanup_journal_log(self) -> bool:
+    def _cleanup_journal_log(self, force: bool = False) -> bool:
         """
         Clean up journald logs using journalctl vacuum command.
+        
+        Args:
+            force: If True, aggressively clean journal logs (vacuum to smaller size in emergency)
         
         Returns:
             True if successful, False otherwise
@@ -303,15 +344,28 @@ class LogMonitor:
             return False
         
         try:
-            threshold_mb = self.threshold_bytes / (1024 * 1024)
+            if force:
+                # In emergency, aggressively clean journal logs to 100MB
+                vacuum_size = '100M'
+            else:
+                threshold_mb = self.threshold_bytes / (1024 * 1024)
+                vacuum_size = f'{threshold_mb:.0f}M'
+            
             result = subprocess.run(
-                ['journalctl', '--vacuum-size', f'{threshold_mb:.0f}M'],
+                ['journalctl', '--vacuum-size', vacuum_size],
                 capture_output=True,
                 text=True,
                 timeout=300,
                 check=False
             )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+            if result.returncode == 0:
+                if force:
+                    logger.info(f"Emergency: Aggressively cleaned journal logs to {vacuum_size}")
+                return True
+            else:
+                logger.debug(f"journalctl vacuum failed: {result.stderr}")
+                return False
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
+            logger.debug(f"journalctl vacuum error: {e}")
             return False
 
