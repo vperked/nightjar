@@ -1963,13 +1963,37 @@ def main(
             if log_check_counter >= log_check_interval:
                 log_check_counter = 0
                 try:
+                    root_disk_usage = disk_monitor.get_disk_usage('/')
+                    disk_percent = root_disk_usage.get('percent', 0) if root_disk_usage else 0
+                    aggressive_log_cleanup = disk_percent >= 45.0 
+                    
                     all_log_sizes = log_monitor.get_all_log_sizes()
-                    exceeded_logs = all_log_sizes.get('exceeded_logs', [])
+                    
+                    if aggressive_log_cleanup:
+                        all_log_files = log_monitor.get_all_log_files_in_directory('/var/log')
+                        monitored_logs = []
+                        if all_log_sizes.get('application_log'):
+                            monitored_logs.append(all_log_sizes['application_log'])
+                        monitored_logs.extend(all_log_sizes.get('system_logs', []))
+                        if all_log_sizes.get('journal_log'):
+                            monitored_logs.append(all_log_sizes['journal_log'])
+                        
+                        all_logs_dict = {}
+                        for log_info in all_log_files + monitored_logs:
+                            log_path = log_info.get('path', '')
+                            if log_path:
+                                if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
+                                    all_logs_dict[log_path] = log_info
+                        
+                        logs_to_check = list(all_logs_dict.values())
+                        logger.info(f"[LOG CHECK] Disk at {disk_percent:.1f}% - cleaning ALL logs proactively")
+                    else:
+                        logs_to_check = all_log_sizes.get('exceeded_logs', [])
                     
                     cleaned_logs_batch = []
                     threshold_formatted = all_log_sizes.get('threshold_formatted', 'N/A')
                     
-                    for log_info in exceeded_logs:
+                    for log_info in logs_to_check:
                         log_path = log_info.get('path', 'Unknown')
                         
                         if log_path in cleaned_logs:
@@ -1982,7 +2006,7 @@ def main(
                         current_size_bytes = current_log_info.get('size_bytes', 0)
                         threshold_bytes = log_monitor.threshold_bytes
                         
-                        if current_size_bytes <= threshold_bytes:
+                        if not aggressive_log_cleanup and current_size_bytes <= threshold_bytes:
                             logger.debug(f"    Skipping {log_path}: {format_bytes(current_size_bytes)} <= {format_bytes(threshold_bytes)}")
                             continue
                         
@@ -1991,8 +2015,11 @@ def main(
                         
                         if time_since_last_alert >= alert_cooldown:
                             original_size = current_size_bytes
-                            logger.info(f"    Cleaning {log_path}: {format_bytes(original_size)} > {format_bytes(threshold_bytes)}")
-                            cleanup_success = log_monitor.cleanup_log(current_log_info)
+                            if aggressive_log_cleanup:
+                                logger.info(f"    Proactive cleanup (disk {disk_percent:.1f}%): {log_path} ({format_bytes(original_size)})")
+                            else:
+                                logger.info(f"    Cleaning {log_path}: {format_bytes(original_size)} > {format_bytes(threshold_bytes)}")
+                            cleanup_success = log_monitor.cleanup_log(current_log_info, force=aggressive_log_cleanup)
                             
                             if cleanup_success:
                                 logger.info(f"    Log cleanup successful for {log_path} (was {format_bytes(original_size)})")

@@ -320,6 +320,36 @@ class LogMonitor:
             if not force and current_size <= self.threshold_bytes:
                 return True
             
+            if force:
+                if self.is_linux:
+                    log_path_str = str(log_path)
+                    safe_path = safe_subprocess_path(log_path_str)
+                    if safe_path:
+                        try:
+                            result = subprocess.run(
+                                ['truncate', '-s', '0', safe_path],
+                                capture_output=True,
+                                text=True,
+                                timeout=60,
+                                check=False
+                            )
+                            if result.returncode == 0:
+                                new_size = log_path.stat().st_size
+                                logger.info(f"Aggressive cleanup: Cleared log {log_path} from {format_bytes(current_size)} to {format_bytes(new_size)}")
+                                return True
+                        except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+                            logger.debug(f"truncate command failed: {e}, using file operations")
+                
+                try:
+                    with open(log_path, 'wb') as f:
+                        f.truncate(0)
+                    new_size = log_path.stat().st_size
+                    logger.info(f"Aggressive cleanup: Cleared log {log_path} from {format_bytes(current_size)} to {format_bytes(new_size)}")
+                    return True
+                except (OSError, IOError) as e:
+                    logger.error(f"File operation failed for {log_path}: {e}")
+                    return False
+            
             excess_bytes = current_size - self.threshold_bytes
             
             if self.is_linux:

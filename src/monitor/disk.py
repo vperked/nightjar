@@ -732,7 +732,15 @@ class DiskMonitor:
         logger.info(f"[CLEANUP] Starting disk cleanup: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free (target: {target_free_percent:.1f}% free)")
         
         if log_monitor:
-            logger.info("[CLEANUP] Step 1: Cleaning log files (all logs in /var/log)...")
+            # When disk is getting full, clean ALL logs, not just those exceeding threshold
+            # This prevents logs from filling the disk even if individual logs are small
+            aggressive_cleanup = initial_usage['percent'] >= 50.0
+            
+            if aggressive_cleanup:
+                logger.info("[CLEANUP] Step 1: Aggressive log cleanup (disk >= 50%, cleaning ALL logs in /var/log)...")
+            else:
+                logger.info("[CLEANUP] Step 1: Cleaning log files (all logs in /var/log exceeding threshold)...")
+            
             try:
                 all_log_files = log_monitor.get_all_log_files_in_directory('/var/log')
                 
@@ -751,11 +759,15 @@ class DiskMonitor:
                         if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
                             all_logs_dict[log_path] = log_info
                 
-                exceeded_logs = [log for log in all_logs_dict.values() if log_monitor.check_log_threshold(log)]
+                # When aggressive, clean ALL logs. Otherwise, only those exceeding threshold
+                if aggressive_cleanup:
+                    logs_to_clean = list(all_logs_dict.values())
+                else:
+                    logs_to_clean = [log for log in all_logs_dict.values() if log_monitor.check_log_threshold(log)]
                 
-                exceeded_logs.sort(key=lambda x: x.get('size_bytes', 0), reverse=True)
+                logs_to_clean.sort(key=lambda x: x.get('size_bytes', 0), reverse=True)
                 
-                for log_info in exceeded_logs:
+                for log_info in logs_to_clean:
                     try:
                         log_path = log_info.get('path', '')
                         if not log_path:
@@ -769,7 +781,8 @@ class DiskMonitor:
                         if original_size == 0:
                             continue
                         
-                        if log_monitor.cleanup_log(current_log_info):
+                        # Use force=True when doing aggressive cleanup to clean even small logs
+                        if log_monitor.cleanup_log(current_log_info, force=aggressive_cleanup):
                             stats['logs_cleaned'] += 1
                             size_after = log_monitor.get_log_size(log_path)
                             size_after_bytes = size_after.get('size_bytes', 0) if size_after else 0
