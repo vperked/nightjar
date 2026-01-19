@@ -52,9 +52,9 @@ DEFAULT_FREEZE_THRESHOLD = 30.0
 DEFAULT_FREEZE_HEARTBEAT_TIMEOUT = 60.0
 DEFAULT_MEDIA_DIRECTORY_THRESHOLD_GB = 500.0
 DEFAULT_MEDIA_CHECK_INTERVAL = 10
-DEFAULT_KERNEL_CHECK_INTERVAL = 30  # Check every 30 cycles
-DEFAULT_KERNEL_STABILITY_CHECK_INTERVAL = 10  # Check stability more frequently (every 10 cycles)
-DEFAULT_KERNEL_CHECK_SINCE_MINUTES = 60  # Check last 60 minutes
+DEFAULT_KERNEL_CHECK_INTERVAL = 30
+DEFAULT_KERNEL_STABILITY_CHECK_INTERVAL = 10
+DEFAULT_KERNEL_CHECK_SINCE_MINUTES = 60
 
 _env_cache = {}
 
@@ -237,16 +237,18 @@ def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core:
     return " | ".join(reasons[:4])
 
 
-def get_env_float(key: str, default: float) -> float:
+def get_env_float(key: str, default: float, min_val: Optional[float] = None, max_val: Optional[float] = None) -> float:
     """
-    Safely get float value from environment variable.
+    Safely get float value from environment variable with optional range validation.
     
     Handles empty strings, None values, and invalid conversions gracefully.
-    Returns default value on any error.
+    Returns default value on any error. Validates range if min_val/max_val provided.
     
     Args:
         key: Environment variable name
         default: Default value to return if variable is not set or invalid
+        min_val: Optional minimum allowed value
+        max_val: Optional maximum allowed value
         
     Returns:
         Float value from environment variable or default
@@ -255,21 +257,32 @@ def get_env_float(key: str, default: float) -> float:
     if not value or value.strip() == '':
         return default
     try:
-        return float(value)
+        float_value = float(value)
+        
+        if min_val is not None and float_value < min_val:
+            logger.warning(f"{key}={float_value} is below minimum {min_val}, using default {default}")
+            return default
+        if max_val is not None and float_value > max_val:
+            logger.warning(f"{key}={float_value} is above maximum {max_val}, using default {default}")
+            return default
+        
+        return float_value
     except (ValueError, TypeError):
         return default
 
 
-def get_env_int(key: str, default: int) -> int:
+def get_env_int(key: str, default: int, min_val: Optional[int] = None, max_val: Optional[int] = None) -> int:
     """
-    Safely get integer value from environment variable.
+    Safely get integer value from environment variable with optional range validation.
     
     Handles empty strings, None values, and invalid conversions gracefully.
-    Returns default value on any error.
+    Returns default value on any error. Validates range if min_val/max_val provided.
     
     Args:
         key: Environment variable name
         default: Default value to return if variable is not set or invalid
+        min_val: Optional minimum allowed value
+        max_val: Optional maximum allowed value
         
     Returns:
         Integer value from environment variable or default
@@ -278,7 +291,16 @@ def get_env_int(key: str, default: int) -> int:
     if not value or value.strip() == '':
         return default
     try:
-        return int(value)
+        int_value = int(value)
+        
+        if min_val is not None and int_value < min_val:
+            logger.warning(f"{key}={int_value} is below minimum {min_val}, using default {default}")
+            return default
+        if max_val is not None and int_value > max_val:
+            logger.warning(f"{key}={int_value} is above maximum {max_val}, using default {default}")
+            return default
+        
+        return int_value
     except (ValueError, TypeError):
         return default
 
@@ -848,7 +870,7 @@ def main(
     disk_threshold = clamp_threshold(disk_threshold, 0.0, 100.0)
     disk_early_warning_threshold = clamp_threshold(disk_early_warning_threshold, 0.0, 100.0)
     disk_cleanup_threshold = clamp_threshold(disk_cleanup_threshold, 0.0, 100.0)
-    disk_emergency_threshold = clamp_threshold(disk_emergency_threshold, 90.0, 99.0)  # Must be between 90-99%
+    disk_emergency_threshold = clamp_threshold(disk_emergency_threshold, 90.0, 99.0)
     if disk_early_warning_threshold >= disk_threshold:
         disk_early_warning_threshold = max(0.0, disk_threshold - 5.0)
         logger.warning(f"Early warning threshold adjusted to {disk_early_warning_threshold:.1f}% (must be less than main threshold)")
@@ -1008,8 +1030,8 @@ def main(
     last_partition_cleanup_times = {}
     last_partition_alert_times = {}
     partition_alert_sent = {}
-    disk_cleanup_cooldown = 3600.0  # 1 hour cooldown between cleanups
-    disk_emergency_cooldown = 300.0  # 5 minutes cooldown for emergency cleanups
+    disk_cleanup_cooldown = 3600.0
+    disk_emergency_cooldown = 300.0
     last_temp_alert_time = 0
     last_freeze_alert_time = 0
     temp_high_start_time = None
@@ -1036,7 +1058,7 @@ def main(
     last_kernel_stability_alert_time = 0
     kernel_alert_sent = False
     kernel_stability_alert_sent = False
-    last_kernel_stability_alert_hash = None  # Track last sent alert content to prevent duplicates
+    last_kernel_stability_alert_hash = None
     qbittorrent_check_counter = 0
     NETWORK_CHECK_INTERVAL = 2
     PROCESS_CHECK_INTERVAL = 3

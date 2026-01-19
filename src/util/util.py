@@ -11,6 +11,11 @@ BYTES_PER_MB = 1024 * 1024
 BYTES_PER_GB = 1024 * 1024 * 1024
 BYTES_PER_TB = 1024 * 1024 * 1024 * 1024
 
+assert BYTES_PER_KB > 0, "BYTES_PER_KB must be positive"
+assert BYTES_PER_MB > 0, "BYTES_PER_MB must be positive"
+assert BYTES_PER_GB > 0, "BYTES_PER_GB must be positive"
+assert BYTES_PER_TB > 0, "BYTES_PER_TB must be positive"
+
 
 def format_bytes(bytes_value: int, precision: int = 2) -> str:
     """

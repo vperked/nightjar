@@ -15,7 +15,6 @@ from util.security import safe_subprocess_path
 
 logger = get_logger()
 
-# Default path for persistence file
 DEFAULT_PERSISTENCE_FILE = os.path.join(os.path.expanduser('~'), '.servermonitor_kernel_tracking.json')
 
 
@@ -34,9 +33,9 @@ class KernelMonitor:
         self.last_boot_time = None
         self.last_check_time = time.time()
         self.detected_crashes = set()
-        self.last_reported_errors = {}  # Track last reported error counts per device
-        self.last_alert_time = {}  # Track last alert time per device (to prevent spam)
-        self.last_edac_counts = {}  # Track previous EDAC error counts to detect increases
+        self.last_reported_errors = {}
+        self.last_alert_time = {}
+        self.last_edac_counts = {}
         self.persistence_file = persistence_file or DEFAULT_PERSISTENCE_FILE
         
         if ignored_devices is None:
@@ -177,7 +176,7 @@ class KernelMonitor:
                     cmd = [
                         'journalctl',
                         '--since', since_str,
-                        '--priority', '0..4',  # emerg, alert, crit, err, warning
+                        '--priority', '0..4',
                         '--grep', keyword,
                         '--no-pager',
                         '--format', 'json'
@@ -241,7 +240,7 @@ class KernelMonitor:
             ]
             
             current_time = time.time()
-            edac_cooldown = 24 * 60 * 60  # 24 hours between alerts for same EDAC source
+            edac_cooldown = 24 * 60 * 60
             
             for edac_path in edac_paths:
                 if os.path.exists(edac_path):
@@ -401,7 +400,7 @@ class KernelMonitor:
             if current_boot_time and self.last_boot_time and abs(current_boot_time - self.last_boot_time) >= 10.0:
                 self.last_reported_errors = {}
                 self.last_alert_time = {}
-                self.last_edac_counts = {}  # Reset EDAC counts on reboot
+                self.last_edac_counts = {}
                 self.last_boot_time = current_boot_time
                 self._save_tracking_data()
         except Exception:

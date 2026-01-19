@@ -128,7 +128,10 @@ class ProcessMonitor:
                         continue
             except (PermissionError, OSError) as e:
                 logger.debug(f"Permission error during process iteration: {e}")
-                pass
+                return []
+            except Exception as e:
+                logger.error(f"Failed to iterate processes: {e}", exc_info=True)
+                return []
             
             processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
             candidates = processes[:min(limit * 5, 50, len(processes))]
@@ -136,7 +139,7 @@ class ProcessMonitor:
             for proc_info in candidates:
                 try:
                     proc = psutil.Process(proc_info['pid'])
-                    cpu_percent = proc.cpu_percent(interval=None)  # Non-blocking
+                    cpu_percent = proc.cpu_percent(interval=None)
                     cpu_count = psutil.cpu_count(logical=True) or 1
                     proc_info['cpu_percent'] = min(cpu_percent / cpu_count, 100.0)
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError):
@@ -157,7 +160,10 @@ class ProcessMonitor:
                         continue
             except (PermissionError, OSError) as e:
                 logger.debug(f"Permission error during process iteration: {e}")
-                pass
+                return []
+            except Exception as e:
+                logger.error(f"Failed to iterate processes: {e}", exc_info=True)
+                return []
             
             processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
         
