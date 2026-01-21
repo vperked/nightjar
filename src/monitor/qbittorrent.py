@@ -2,6 +2,7 @@ import os
 import qbittorrentapi
 from typing import Dict, List, Optional
 from util.util import format_bytes, format_bytes_per_second
+from util.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from logger import get_logger
 
 logger = get_logger('QBittorrentMonitor')
@@ -27,13 +28,27 @@ class QBittorrentMonitor:
             self.port = port or (int(port_env) if port_env and port_env.strip() else 8080)
         except (ValueError, TypeError):
             self.port = 8080
-        self.username = username or os.getenv('QBITTORRENT_USERNAME', 'admin') or 'admin'
-        self.password = password or os.getenv('QBITTORRENT_PASSWORD', '') or ''
+        
+        self.username = username or os.getenv('QBITTORRENT_USERNAME')
+        self.password = password or os.getenv('QBITTORRENT_PASSWORD')
+        
+        if not self.username:
+            raise ValueError(
+                "qBittorrent username not provided. Set QBITTORRENT_USERNAME environment variable "
+                "or pass username parameter."
+            )
+        
+        if not self.password:
+            raise ValueError(
+                "qBittorrent password not provided. Set QBITTORRENT_PASSWORD environment variable "
+                "or pass password parameter. Empty passwords are not allowed for security."
+            )
         
         self.client = None
         self._connected = False
         self._last_error = None
         self._connection_logged = False
+        self.circuit_breaker = CircuitBreaker(failure_threshold=5, timeout=60.0, success_threshold=2)
         
         logger.debug(f"qBittorrent monitor initialized: {self.host}:{self.port} (user: {self.username})")
         if not self.password:
@@ -74,28 +89,34 @@ class QBittorrentMonitor:
     def _ensure_connected(self) -> bool:
         """
         Ensure connection to qBittorrent Web UI is established.
+        Uses circuit breaker to prevent cascading failures.
         
         Returns:
             True if connected, False otherwise
         """
-        if self._connected and self.client:
-            try:
-                self.client.app_version()
-                return True
-            except (qbittorrentapi.exceptions.APIConnectionError, 
-                    qbittorrentapi.exceptions.LoginRequired):
-                logger.debug("qBittorrent session expired, reconnecting...")
-                self._connected = False
-                self.client = None
-                self._connection_logged = False
-        
-        logger.debug(f"Attempting to connect to qBittorrent at {self.host}:{self.port}...")
-        client = self._get_client()
-        if not client:
-            logger.warning(f"Failed to create qBittorrent client: {self._last_error}")
+        if self.circuit_breaker.is_open():
+            logger.debug("qBittorrent circuit breaker is OPEN, skipping connection attempt")
             return False
         
-        try:
+        def _connect_internal() -> bool:
+            """Internal connection logic wrapped by circuit breaker."""
+            if self._connected and self.client:
+                try:
+                    self.client.app_version()
+                    return True
+                except (qbittorrentapi.exceptions.APIConnectionError, 
+                        qbittorrentapi.exceptions.LoginRequired):
+                    logger.debug("qBittorrent session expired, reconnecting...")
+                    self._connected = False
+                    self.client = None
+                    self._connection_logged = False
+            
+            logger.debug(f"Attempting to connect to qBittorrent at {self.host}:{self.port}...")
+            client = self._get_client()
+            if not client:
+                logger.warning(f"Failed to create qBittorrent client: {self._last_error}")
+                return False
+            
             logger.debug(f"Logging in to qBittorrent as {self.username}...")
             client.auth_log_in()
             version = client.app_version()
@@ -107,26 +128,25 @@ class QBittorrentMonitor:
             self._connected = True
             self._last_error = None
             return True
-        except qbittorrentapi.exceptions.LoginFailed as e:
-            error_msg = str(e)
-            logger.warning(f"qBittorrent login failed: {error_msg}")
-            logger.debug(f"Login failed details - Host: {self.host}:{self.port}, User: {self.username}")
-            self._last_error = f"Login failed: {error_msg}"
-            self._connected = False
+        
+        try:
+            return self.circuit_breaker.call(_connect_internal)
+        except CircuitBreakerOpenError:
+            logger.debug("qBittorrent circuit breaker is OPEN, service unavailable")
             return False
-        except qbittorrentapi.exceptions.APIConnectionError as e:
+        except (qbittorrentapi.exceptions.LoginFailed, 
+                qbittorrentapi.exceptions.APIConnectionError,
+                ConnectionError, OSError) as e:
             error_msg = str(e)
             error_type = type(e).__name__
-            logger.warning(f"qBittorrent connection error: {error_type}: {error_msg}")
-            logger.debug(f"Connection error details - Host: {self.host}:{self.port}, Error: {repr(e)}")
-            self._last_error = f"Connection error: {error_type}: {error_msg}"
+            logger.debug(f"qBittorrent connection error ({error_type}): {error_msg}")
+            self._last_error = f"{error_type}: {error_msg}"
             self._connected = False
             return False
         except Exception as e:
             error_msg = str(e)
             error_type = type(e).__name__
-            logger.warning(f"qBittorrent error ({error_type}): {error_msg}")
-            logger.debug(f"Error details - Host: {self.host}:{self.port}, Error: {repr(e)}")
+            logger.warning(f"qBittorrent unexpected error ({error_type}): {error_msg}")
             self._last_error = f"{error_type}: {error_msg}"
             self._connected = False
             return False
@@ -154,7 +174,17 @@ class QBittorrentMonitor:
             return []
         
         try:
-            torrents = self.client.torrents_info()
+            def _get_torrents():
+                return self.client.torrents_info()
+            
+            try:
+                torrents = self.circuit_breaker.call(_get_torrents)
+            except CircuitBreakerOpenError:
+                logger.debug("qBittorrent circuit breaker is OPEN, returning empty list")
+                return []
+            except Exception as e:
+                logger.debug(f"Error getting torrents: {e}")
+                return []
             result = []
             
             for torrent in torrents:

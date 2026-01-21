@@ -379,12 +379,29 @@ class LogMonitor:
                             logger.debug(f"truncate command not available or failed: {e}, using file operations")
             
             try:
-                with open(log_path, 'rb') as f:
-                    f.seek(excess_bytes)
-                    tail_data = f.read()
+                chunk_size = 1024 * 1024
+                temp_file_path = str(log_path) + '.tmp'
                 
-                with open(log_path, 'wb') as f:
-                    f.write(tail_data)
+                try:
+                    with open(log_path, 'rb') as f_in:
+                        f_in.seek(excess_bytes)
+                        with open(temp_file_path, 'wb') as f_out:
+                            while True:
+                                chunk = f_in.read(chunk_size)
+                                if not chunk:
+                                    break
+                                f_out.write(chunk)
+                    
+                    import shutil
+                    shutil.move(temp_file_path, log_path)
+                except (OSError, IOError) as e:
+                    try:
+                        import os
+                        if os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
+                    except Exception:
+                        pass
+                    raise
                 
                 new_size = log_path.stat().st_size
                 logger.info(f"Log truncated using file operations: {log_path} from {format_bytes(current_size)} to {format_bytes(new_size)}")

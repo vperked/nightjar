@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from collections import deque
 from dotenv import load_dotenv
 from util.util import format_bytes, format_bytes_per_second, format_duration
+from util.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from logger import get_logger
 
 load_dotenv()
@@ -26,7 +27,7 @@ class RateLimiter:
         """
         self.max_calls = max_calls
         self.period = period
-        self.calls = deque()
+        self.calls = deque(maxlen=max_calls * 2)
     
     def wait_if_needed(self):
         """Wait if rate limit would be exceeded."""
@@ -60,6 +61,8 @@ class DiscordWebhook:
             )
         self.rate_limiter = RateLimiter(max_calls=30, period=60.0)
         self.alert_log_path = os.getenv('ALERT_LOG_PATH', '/var/log/server-monitor-alerts.log')
+        self.session = requests.Session()
+        self.circuit_breaker = CircuitBreaker(failure_threshold=5, timeout=60.0, success_threshold=2)
     
     def _handle_webhook_error(self, error: Exception) -> bool:
         """
@@ -200,13 +203,25 @@ class DiscordWebhook:
         if avatar_url:
             payload['avatar_url'] = avatar_url
         
-        try:
+        if self.circuit_breaker.is_open():
+            logger.debug("Discord circuit breaker is OPEN, using fallback logging")
+            self._log_fallback(str(payload)[:2000])
+            return False
+        
+        def _send_post():
             self.rate_limiter.wait_if_needed()
-            response = requests.post(self.webhook_url, json=payload, timeout=10)
+            response = self.session.post(self.webhook_url, json=payload, timeout=10)
             response.raise_for_status()
             return True
+        
+        try:
+            return self.circuit_breaker.call(_send_post)
         except KeyboardInterrupt:
             raise
+        except CircuitBreakerOpenError:
+            logger.debug("Discord circuit breaker is OPEN, using fallback logging")
+            self._log_fallback(str(payload)[:2000])
+            return False
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, 
                 requests.exceptions.HTTPError, requests.exceptions.RequestException) as e:
             self._log_fallback(str(payload)[:2000])
@@ -243,7 +258,7 @@ class DiscordWebhook:
         
         try:
             self.rate_limiter.wait_if_needed()
-            response = requests.post(self.webhook_url, json=payload, timeout=10)
+            response = self.session.post(self.webhook_url, json=payload, timeout=10)
             response.raise_for_status()
             return True
         except KeyboardInterrupt:

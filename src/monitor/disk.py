@@ -385,7 +385,8 @@ class DiskMonitor:
         
         Args:
             path: Directory path to check. Must be a non-empty string.
-            allowed_base_paths: Optional list of allowed base paths for security validation
+            allowed_base_paths: Optional list of allowed base paths for security validation.
+                              If None, defaults to safe predefined paths: ['/home', '/var', '/tmp', '/usr/local'].
             timeout: Optional timeout in seconds. If exceeded, returns partial results.
             max_depth: Optional maximum depth to traverse. None for unlimited.
             
@@ -394,10 +395,20 @@ class DiskMonitor:
             If timeout is exceeded, returns partial results with 'timed_out': True flag.
         """
         if not path or not isinstance(path, str):
+            logger.warning(f"[SECURITY] Path validation failed: path must be a non-empty string")
             return None
+        
+        if allowed_base_paths is None:
+            allowed_base_paths = ['/home', '/var', '/tmp', '/usr/local']
+            logger.debug(f"[SECURITY] Using default safe base paths: {allowed_base_paths}")
         
         is_valid, resolved_path, error = validate_path(path, allowed_base_paths=allowed_base_paths, allow_symlinks=False)
         if not is_valid:
+            logger.warning(f"[SECURITY] Path validation failed for '{path}': {error}")
+            return None
+        
+        if resolved_path and ('..' in resolved_path or resolved_path != os.path.normpath(resolved_path)):
+            logger.warning(f"[SECURITY] Path traversal detected in resolved path: {resolved_path}")
             return None
         
         path = resolved_path
@@ -646,6 +657,7 @@ class DiskMonitor:
                         except (OSError, PermissionError) as e:
                             continue
                         except Exception as e:
+                            logger.warning(f"Unexpected error removing {filepath}: {e}", exc_info=True)
                             stats['errors'].append(f"Error removing {filepath}: {e}")
                     
                     for dirname in dirs:
@@ -659,6 +671,7 @@ class DiskMonitor:
                         except (OSError, PermissionError):
                             continue
                         except Exception as e:
+                            logger.warning(f"Unexpected error removing directory {dirpath}: {e}", exc_info=True)
                             stats['errors'].append(f"Error removing directory {dirpath}: {e}")
                 
                 temp_patterns = [
@@ -682,13 +695,16 @@ class DiskMonitor:
                             except (OSError, PermissionError):
                                 continue
                             except Exception as e:
+                                logger.warning(f"Unexpected error removing {filepath}: {e}", exc_info=True)
                                 stats['errors'].append(f"Error removing {filepath}: {e}")
                     except Exception as e:
+                        logger.warning(f"Unexpected error with pattern {pattern}: {e}", exc_info=True)
                         stats['errors'].append(f"Error with pattern {pattern}: {e}")
                         
             except PermissionError as e:
                 stats['errors'].append(f"Permission denied cleaning {temp_dir}: {e}")
             except Exception as e:
+                logger.error(f"Unexpected error cleaning {temp_dir}: {e}", exc_info=True)
                 stats['errors'].append(f"Error cleaning {temp_dir}: {e}")
         
         return stats
@@ -757,7 +773,6 @@ class DiskMonitor:
                         if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
                             all_logs_dict[log_path] = log_info
                 
-                # When aggressive, clean ALL logs. Otherwise, only those exceeding threshold
                 if aggressive_cleanup:
                     logs_to_clean = list(all_logs_dict.values())
                 else:
@@ -779,7 +794,6 @@ class DiskMonitor:
                         if original_size == 0:
                             continue
                         
-                        # Use force=True when doing aggressive cleanup to clean even small logs
                         if log_monitor.cleanup_log(current_log_info, force=aggressive_cleanup):
                             stats['logs_cleaned'] += 1
                             size_after = log_monitor.get_log_size(log_path)
@@ -787,6 +801,7 @@ class DiskMonitor:
                             stats['total_size_cleared'] += max(0, original_size - size_after_bytes)
                             logger.info(f"    Cleaned log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
                     except Exception as e:
+                        logger.error(f"Unexpected error cleaning log {log_info.get('path', 'unknown')}: {e}", exc_info=True)
                         stats['errors'].append(f"Error cleaning log {log_info.get('path', 'unknown')}: {e}")
                 
                 current_usage = self.get_disk_usage(mountpoint)
@@ -805,10 +820,16 @@ class DiskMonitor:
                     self._restart_log_services()
                     self._setup_nginx_logs()
             except Exception as e:
+                logger.error(f"Unexpected error getting log sizes: {e}", exc_info=True)
                 stats['errors'].append(f"Error getting log sizes: {e}")
         
         logger.info("[CLEANUP] Step 2: Cleaning temporary files...")
-        for max_age_days in [7, 3, 1, 0]:
+        max_attempts = 4
+        for attempt, max_age_days in enumerate([7, 3, 1, 0]):
+            if attempt >= max_attempts:
+                logger.warning("[CLEANUP] Max cleanup attempts reached, stopping to prevent infinite loop")
+                break
+            
             cleanup_stats = self.cleanup_temporary_files(mountpoint, max_age_days=max_age_days)
             stats['files_removed'] += cleanup_stats['files_removed']
             stats['dirs_removed'] += cleanup_stats['dirs_removed']
@@ -1004,8 +1025,10 @@ class DiskMonitor:
                             stats['total_size_cleared'] += max(0, original_size - size_after_bytes)
                             logger.info(f"    Cleaned log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
                     except Exception as e:
+                        logger.error(f"Unexpected error cleaning log {log_info.get('path', 'unknown')}: {e}", exc_info=True)
                         stats['errors'].append(f"Error cleaning log {log_info.get('path', 'unknown')}: {e}")
             except Exception as e:
+                logger.error(f"Unexpected error getting log sizes: {e}", exc_info=True)
                 stats['errors'].append(f"Error getting log sizes: {e}")
             
             if stats['logs_cleaned'] > 0:
@@ -1024,7 +1047,7 @@ class DiskMonitor:
                     continue
                 
                 current_time = time.time()
-                max_age_seconds = 24 * 60 * 60  # 1 day
+                max_age_seconds = 24 * 60 * 60
                 
                 for root, dirs, files in os.walk(resolved_path, topdown=False):
                     for filename in files:
@@ -1041,6 +1064,7 @@ class DiskMonitor:
                         except (OSError, PermissionError):
                             continue
                         except Exception as e:
+                            logger.warning(f"Unexpected error removing {filepath}: {e}", exc_info=True)
                             stats['errors'].append(f"Error removing {filepath}: {e}")
                     
                     for dirname in dirs:
@@ -1052,6 +1076,7 @@ class DiskMonitor:
                         except (OSError, PermissionError):
                             continue
             except Exception as e:
+                logger.error(f"Unexpected error cleaning cache directory {cache_dir}: {e}", exc_info=True)
                 stats['errors'].append(f"Error cleaning cache directory {cache_dir}: {e}")
         
         if stats['logs_cleaned'] > 0:

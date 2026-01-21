@@ -46,8 +46,8 @@ def validate_path(path: str, allowed_base_paths: Optional[List[str]] = None,
         return False, None, "Path contains null bytes"
     
     suspicious_patterns = [
-        r'[;&|`$()]',  # Command injection characters
-        r'<|>',  # Redirection characters
+        r'[;&|`$()]',
+        r'<|>',
     ]
     for pattern in suspicious_patterns:
         if re.search(pattern, path):
@@ -134,12 +134,12 @@ def validate_environment_variable(key: str, value: str,
     
     if blocked_patterns is None:
         blocked_patterns = [
-            r'[;&|`$()<>]',  # Command injection characters
-            r'<script',  # XSS attempts
-            r'javascript:',  # JavaScript injection
-            r'eval\s*\(',  # Code execution attempts
-            r'exec\s*\(',  # Code execution attempts
-            r'__import__',  # Python import injection
+            r'[;&|`$()<>]',
+            r'<script',
+            r'javascript:',
+            r'eval\s*\(',
+            r'exec\s*\(',
+            r'__import__',
         ]
     
     for pattern in blocked_patterns:
