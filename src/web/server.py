@@ -778,7 +778,32 @@ def _run_server(port, host):
     global httpd
 
     server_address = (host, port)
-    httpd = HTTPServer(server_address, WebRequestHandler)
+    
+    try:
+        httpd = HTTPServer(server_address, WebRequestHandler)
+    except (OSError, socket.error) as e:
+        error_str = str(e).lower()
+        is_port_in_use = (
+            port == 8080 and (
+                "address already in use" in error_str or
+                "address already in use" in str(e) or
+                getattr(e, 'errno', None) in (98, 10048) or
+                "already in use" in error_str
+            )
+        )
+        
+        if is_port_in_use:
+            logger.warning(f"Port {port} is already in use, trying port 8081 instead")
+            port = 8081
+            server_address = (host, port)
+            try:
+                httpd = HTTPServer(server_address, WebRequestHandler)
+                logger.info(f"Successfully bound to port {port}")
+            except (OSError, socket.error) as e2:
+                logger.error(f"Failed to bind to port {port}: {e2}")
+                raise
+        else:
+            raise
 
     logger.info(f"Web server starting on http://{host}:{port}")
     logger.info(f"Access the web UI locally at http://localhost:{port}")
