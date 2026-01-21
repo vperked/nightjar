@@ -13,6 +13,8 @@ from logger import get_logger
 
 logger = get_logger()
 
+PERMISSION_CHECK_TIMEOUT = 5
+
 
 class DiskMonitor:
     """Monitor disk usage and I/O statistics."""
@@ -809,16 +811,16 @@ class DiskMonitor:
                     current_free_percent = 100.0 - current_usage['percent']
                     if current_free_percent >= target_free_percent:
                         logger.info(f"[CLEANUP] Target free space reached after log cleanup: {current_free_percent:.1f}% free")
-                        self._restart_log_services()
-                        self._setup_nginx_logs()
+                        self.restart_log_services()
+                        self.setup_nginx_logs()
                         final_usage = self.get_disk_usage(mountpoint)
                         if final_usage:
                             stats['final_usage'] = final_usage['percent']
                         return stats
                 
                 if stats['logs_cleaned'] > 0:
-                    self._restart_log_services()
-                    self._setup_nginx_logs()
+                    self.restart_log_services()
+                    self.setup_nginx_logs()
             except Exception as e:
                 logger.error(f"Unexpected error getting log sizes: {e}", exc_info=True)
                 stats['errors'].append(f"Error getting log sizes: {e}")
@@ -843,8 +845,7 @@ class DiskMonitor:
                     logger.info(f"[CLEANUP] Target free space reached: {current_free_percent:.1f}% free")
                     break
         
-        # Step 3: Clean package caches and other common space consumers
-        if initial_usage['percent'] >= 50.0:  # Only when disk is getting full
+        if initial_usage['percent'] >= 50.0:
             logger.info("[CLEANUP] Step 3: Cleaning package caches and other space consumers...")
             cache_cleanup_stats = self._cleanup_package_caches()
             stats['files_removed'] += cache_cleanup_stats.get('files_removed', 0)
@@ -859,7 +860,7 @@ class DiskMonitor:
                     logger.info(f"[CLEANUP] Target free space reached after cache cleanup: {current_free_percent:.1f}% free")
         
         if stats['logs_cleaned'] > 0:
-            self._restart_log_services()
+            self.restart_log_services()
         
         final_usage = self.get_disk_usage(mountpoint)
         if final_usage:
@@ -889,8 +890,8 @@ class DiskMonitor:
             return stats
         
         cache_dirs_to_clean = [
-            '/var/cache/apt/archives',  # APT package cache
-            '/var/cache/apt/pkgcache.bin',  # APT cache files
+            '/var/cache/apt/archives',
+            '/var/cache/apt/pkgcache.bin',
             '/var/cache/apt/srcpkgcache.bin',
         ]
         
@@ -905,7 +906,6 @@ class DiskMonitor:
                 
                 cache_dir = resolved_path
                 
-                # Clean .deb files from apt cache
                 if 'apt/archives' in cache_dir:
                     try:
                         for filename in os.listdir(cache_dir):
@@ -922,7 +922,6 @@ class DiskMonitor:
                     except (OSError, PermissionError) as e:
                         stats['errors'].append(f"Error cleaning {cache_dir}: {e}")
                 
-                # Clean cache binary files
                 elif cache_dir.endswith('.bin'):
                     try:
                         if os.path.isfile(cache_dir):
@@ -1032,8 +1031,8 @@ class DiskMonitor:
                 stats['errors'].append(f"Error getting log sizes: {e}")
             
             if stats['logs_cleaned'] > 0:
-                self._restart_log_services()
-                self._setup_nginx_logs()
+                self.restart_log_services()
+                self.setup_nginx_logs()
         
         logger.info("[EMERGENCY] Step 3: Cleaning additional cache directories...")
         cache_dirs = ['/var/cache', '/tmp', '/var/tmp']
@@ -1080,7 +1079,7 @@ class DiskMonitor:
                 stats['errors'].append(f"Error cleaning cache directory {cache_dir}: {e}")
         
         if stats['logs_cleaned'] > 0:
-            self._restart_log_services()
+            self.restart_log_services()
         
         final_usage = self.get_disk_usage(mountpoint)
         if final_usage:
@@ -1092,7 +1091,83 @@ class DiskMonitor:
         
         return stats
     
-    def _restart_log_services(self):
+    def cleanup_logs_and_restart_services(self, log_monitor=None) -> Dict:
+        """
+        Public method to clean all logs in /var/log and restart services.
+        Consolidates log cleanup logic from main loop.
+        
+        Args:
+            log_monitor: Optional LogMonitor instance to clean logs
+            
+        Returns:
+            Dictionary with cleanup statistics
+        """
+        stats = {
+            'logs_cleaned': 0,
+            'total_size_cleared': 0,
+            'errors': []
+        }
+        
+        if not log_monitor:
+            stats['errors'].append("No log monitor provided")
+            return stats
+        
+        try:
+            all_log_files = log_monitor.get_all_log_files_in_directory('/var/log')
+            
+            all_log_sizes = log_monitor.get_all_log_sizes()
+            monitored_logs = []
+            if all_log_sizes.get('journal_log'):
+                monitored_logs.append(all_log_sizes['journal_log'])
+            
+            all_logs_dict = {}
+            for log_info in all_log_files + monitored_logs:
+                log_path = log_info.get('path', '')
+                if log_path:
+                    if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
+                        all_logs_dict[log_path] = log_info
+            
+            logs_to_clean = sorted(all_logs_dict.values(), key=lambda x: x.get('size_bytes', 0), reverse=True)
+            
+            for log_info in logs_to_clean:
+                try:
+                    log_path = log_info.get('path', '')
+                    if not log_path:
+                        continue
+                    
+                    current_log_info = log_monitor.get_log_size(log_path)
+                    if not current_log_info:
+                        continue
+                    
+                    original_size = current_log_info.get('size_bytes', 0)
+                    if original_size == 0:
+                        continue
+                    
+                    if log_monitor.cleanup_log(current_log_info, force=True):
+                        stats['logs_cleaned'] += 1
+                        size_after = log_monitor.get_log_size(log_path)
+                        size_after_bytes = size_after.get('size_bytes', 0) if size_after else 0
+                        stats['total_size_cleared'] += max(0, original_size - size_after_bytes)
+                        logger.info(f"    Cleared log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
+                except (OSError, PermissionError) as e:
+                    stats['errors'].append(f"Permission error cleaning log {log_info.get('path', 'unknown')}: {e}")
+                except Exception as e:
+                    stats['errors'].append(f"Error cleaning log {log_info.get('path', 'unknown')}: {e}")
+            
+            if stats['logs_cleaned'] > 0:
+                self.restart_log_services()
+                self.setup_nginx_logs()
+        
+        except (OSError, PermissionError) as e:
+            stats['errors'].append(f"Permission error during log cleanup: {e}")
+            logger.error(f"Permission error during log cleanup: {e}")
+        except Exception as e:
+            stats['errors'].append(f"Error during log cleanup: {e}")
+            logger.error(f"Error during log cleanup: {e}")
+        
+        return stats
+    
+    def restart_log_services(self):
         """
         Restart log services (rsyslog and systemd-journald) after log cleanup.
         This ensures services properly manage log files after cleanup.
@@ -1121,72 +1196,94 @@ class DiskMonitor:
             except Exception as e:
                 logger.debug(f"    Error restarting {service}: {e}")
     
-    def _setup_nginx_logs(self):
+    def setup_nginx_logs(self, max_retries: int = 3):
         """
         Setup nginx log directory and files with proper ownership and permissions.
-        Creates /var/log/nginx directory if it doesn't exist, sets ownership to www-data:adm,
-        creates error.log and access.log files, and restarts nginx.
+        Creates nginx log directory if it doesn't exist, sets ownership,
+        creates log files, and restarts nginx.
+        
+        Args:
+            max_retries: Maximum number of retry attempts for nginx restart
         """
         if not platform.system() == 'Linux':
             return
         
-        nginx_log_dir = '/var/log/nginx'
+        nginx_log_dir = os.getenv('NGINX_LOG_DIR', '/var/log/nginx')
+        nginx_user_group = os.getenv('NGINX_USER_GROUP', 'www-data:adm')
+        nginx_service_name = os.getenv('NGINX_SERVICE_NAME', 'nginx')
         
         try:
-            # Create directory with proper permissions
-            os.makedirs(nginx_log_dir, mode=0o755, exist_ok=True)
+            if not os.path.exists(nginx_log_dir):
+                os.makedirs(nginx_log_dir, mode=0o755, exist_ok=True)
+                logger.info(f"    Created nginx log directory: {nginx_log_dir}")
             
-            # Set ownership to www-data:adm
             try:
                 result = subprocess.run(
-                    ['chown', 'www-data:adm', nginx_log_dir],
+                    ['id', nginx_user_group.split(':')[0]],
                     capture_output=True,
                     text=True,
-                    timeout=10,
+                    timeout=5,
                     check=False
                 )
-                if result.returncode != 0:
-                    logger.debug(f"    Could not set ownership on {nginx_log_dir}: {result.stderr}")
-            except Exception as e:
-                logger.debug(f"    Error setting ownership on {nginx_log_dir}: {e}")
+                if result.returncode == 0:
+                    result = subprocess.run(
+                        ['chown', nginx_user_group, nginx_log_dir],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False
+                    )
+                    if result.returncode != 0:
+                        logger.warning(f"    Could not set ownership on {nginx_log_dir}: {result.stderr}")
+                else:
+                    logger.warning(f"    User {nginx_user_group} does not exist, skipping ownership change")
+            except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+                logger.warning(f"    Error setting ownership on {nginx_log_dir}: {e}")
             
-            # Create log files if they don't exist
             for log_file in ['error.log', 'access.log']:
                 log_path = os.path.join(nginx_log_dir, log_file)
                 if not os.path.exists(log_path):
                     try:
                         Path(log_path).touch()
-                        # Set ownership on log file
                         subprocess.run(
-                            ['chown', 'www-data:adm', log_path],
+                            ['chown', nginx_user_group, log_path],
                             capture_output=True,
                             text=True,
                             timeout=10,
                             check=False
                         )
                         logger.debug(f"    Created nginx log file: {log_path}")
+                    except (OSError, PermissionError) as e:
+                        logger.warning(f"    Permission error creating nginx log file {log_path}: {e}")
                     except Exception as e:
-                        logger.debug(f"    Error creating nginx log file {log_path}: {e}")
+                        logger.warning(f"    Error creating nginx log file {log_path}: {e}")
             
             logger.info(f"    Nginx log directory setup: {nginx_log_dir}")
             
-            # Restart nginx
-            try:
-                result = subprocess.run(
-                    ['systemctl', 'restart', 'nginx'],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False
-                )
-                if result.returncode == 0:
-                    logger.info("    Nginx restarted successfully")
-                else:
-                    logger.warning(f"    Failed to restart nginx: {result.stderr}")
-            except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-                logger.debug(f"    Could not restart nginx: {e}")
-            except Exception as e:
-                logger.debug(f"    Error restarting nginx: {e}")
+            for attempt in range(max_retries):
+                try:
+                    result = subprocess.run(
+                        ['systemctl', 'restart', nginx_service_name],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=False
+                    )
+                    if result.returncode == 0:
+                        logger.info(f"    {nginx_service_name} restarted successfully")
+                        break
+                    else:
+                        logger.warning(f"    Failed to restart {nginx_service_name}: {result.stderr}")
+                        if attempt < max_retries - 1:
+                            time.sleep(2 ** attempt)
+                except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+                    logger.warning(f"    Could not restart {nginx_service_name}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                except Exception as e:
+                    logger.error(f"    Error restarting {nginx_service_name}: {e}")
+        except (OSError, PermissionError) as e:
+            logger.error(f"    Permission error setting up nginx logs: {e}")
         except Exception as e:
-            logger.debug(f"    Error setting up nginx logs: {e}")
+            logger.error(f"    Error setting up nginx logs: {e}")
 
