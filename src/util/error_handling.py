@@ -18,12 +18,12 @@ def log_and_continue(
 ) -> Callable:
     """
     Decorator to catch exceptions, log them, and return a default value.
-    
+
     Args:
         error_message: Message to log when exception occurs
         log_level: Logging level ('error', 'warning', 'debug')
         return_value: Value to return on exception
-    
+
     Returns:
         Decorator function
     """

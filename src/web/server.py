@@ -64,7 +64,7 @@ _cpu_cache_lock = threading.Lock()
 def set_monitors(cpu, memory, system, gpu, disk, network, sensors):
     """
     Set monitor instances to use for stats collection in the web server.
-    
+
     Args:
         cpu: CPU monitor instance
         memory: Memory monitor instance
@@ -76,7 +76,7 @@ def set_monitors(cpu, memory, system, gpu, disk, network, sensors):
     """
     global cpu_monitor, memory_monitor, system_monitor, gpu_monitor
     global disk_monitor, network_monitor, sensors_monitor
-    
+
     cpu_monitor = cpu
     memory_monitor = memory
     system_monitor = system
@@ -88,21 +88,21 @@ def set_monitors(cpu, memory, system, gpu, disk, network, sensors):
 
 class WebRequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler for serving the web UI and API."""
-    
+
     def log_message(self, format_str, *args):
         """
         Override to use our logger instead of default logging.
-        
+
         Args:
             format_str: Log message format string
             *args: Arguments for format string
         """
         logger.info(f"{self.address_string()} - {format_str % args}")
-    
+
     def _add_security_headers(self):
         """
         Add security headers to response.
-        
+
         Includes Content-Security-Policy, X-Content-Type-Options,
         X-Frame-Options, X-XSS-Protection, and Referrer-Policy.
         """
@@ -121,11 +121,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             self.send_header('Referrer-Policy', 'no-referrer')
         except Exception as e:
             logger.error(f"Error adding security headers: {e}", exc_info=True)
-    
+
     def _add_cors_headers(self, allowed_origin='*'):
         """
         Add CORS headers to response.
-        
+
         Args:
             allowed_origin: Allowed origin for CORS (default: '*' for same-origin only)
         """
@@ -135,7 +135,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         except Exception as e:
             logger.error(f"Error adding CORS headers: {e}")
-    
+
     def _add_connection_headers(self):
         """
         Add connection keep-alive headers to maintain persistent connections.
@@ -145,22 +145,22 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             self.send_header('Keep-Alive', 'timeout=60, max=1000')
         except Exception as e:
             logger.debug(f"Error adding connection headers: {e}")
-    
+
     def validate_query_params(self):
         """
         Validate query parameters from request.
-        
+
         Returns:
             Tuple of (is_valid, error_message)
             - is_valid: True if parameters are valid
             - error_message: Error message if invalid, None otherwise
         """
         from urllib.parse import urlparse, parse_qs
-        
+
         try:
             parsed = urlparse(self.path)
             query_params = parse_qs(parsed.query)
-            
+
             for key, values in query_params.items():
                 if not key or len(key) > 100:
                     return False, f"Invalid parameter name: {key}"
@@ -169,16 +169,16 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                         return False, f"Parameter value too long: {key}"
                     if value and ('..' in value or '\x00' in value):
                         return False, f"Suspicious characters in parameter: {key}"
-            
+
             return True, None
         except Exception as e:
             logger.warning(f"Error validating query parameters: {e}")
             return False, f"Error parsing query parameters: {e}"
-    
+
     def do_GET(self):
         """
         Handle GET requests.
-        
+
         Routes requests to appropriate handlers:
         - '/' or '/index.html' -> serve_html()
         - '/api/stats' -> serve_stats()
@@ -186,7 +186,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         - '/favicon.ico' -> send_no_content()
         - '/js/*' -> serve_static_file()
         - Other -> 404 Not Found
-        
+
         Validates query parameters before processing requests.
         """
         try:
@@ -195,7 +195,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 logger.warning(f"Invalid query parameters: {error_msg}")
                 self.send_error_safe(400, f"Bad Request: {error_msg}")
                 return
-            
+
             if self.path == '/' or self.path == '/index.html':
                 self.serve_html()
             elif self.path == '/api/stats':
@@ -212,27 +212,27 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             logger.debug(f"Connection error (client may have disconnected): {e}")
         except Exception as e:
             logger.error(f"Unexpected error handling request: {e}", exc_info=True)
-    
+
     def do_OPTIONS(self):
         """
         Handle OPTIONS requests for CORS preflight.
-        
+
         Responds to CORS preflight requests with appropriate headers.
         """
         try:
             self.send_response(200)
-            self._add_cors_headers(allowed_origin='*') 
+            self._add_cors_headers(allowed_origin='*')
             self._add_security_headers()
             self.end_headers()
         except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
             logger.debug(f"Connection error handling OPTIONS: {e}")
         except Exception as e:
             logger.error(f"Error handling OPTIONS request: {e}")
-    
+
     def send_no_content(self):
         """
         Send a 204 No Content response.
-        
+
         Used for favicon requests and other requests that don't need content.
         """
         try:
@@ -241,11 +241,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
         except (ConnectionAbortedError, BrokenPipeError, OSError):
             pass
-    
+
     def send_error_safe(self, code, message=None):
         """
         Send an error response, handling connection errors gracefully.
-        
+
         Args:
             code: HTTP status code
             message: Optional error message
@@ -254,11 +254,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             self.send_error(code, message)
         except (ConnectionAbortedError, BrokenPipeError, OSError):
             logger.debug(f"Connection aborted while sending error {code}")
-    
+
     def serve_html(self):
         """
         Serve the main HTML dashboard page.
-        
+
         Returns the index.html file from the site directory.
         """
         try:
@@ -266,10 +266,10 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             if not html_path.exists():
                 self.send_error_safe(404, "HTML file not found")
                 return
-            
+
             with open(html_path, 'rb') as f:
                 content = f.read()
-            
+
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
             self.send_header('Content-length', str(len(content)))
@@ -284,41 +284,41 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self.send_error_safe(500, f"Internal Server Error: {str(e)}")
             except Exception:
                 pass
-    
+
     def serve_static_file(self, path):
         """
         Serve static files like JavaScript, CSS, and images.
-        
+
         Args:
             path: Request path (e.g., '/js/main.js')
-            
+
         Security: Validates that the file is within the site directory to prevent
         path traversal attacks using validate_path() from security module.
         """
         try:
             site_dir = Path(__file__).parent / 'site'
             file_path = site_dir / path.lstrip('/')
-            
+
             is_valid, resolved_path, error = validate_path(
                 str(file_path),
                 allowed_base_paths=[str(site_dir)],
                 allow_symlinks=False
             )
-            
+
             if not is_valid or not resolved_path:
                 logger.warning(f"Path validation failed for {path}: {error}")
                 self.send_error_safe(403, "Forbidden")
                 return
-            
+
             resolved_path_obj = Path(resolved_path)
             if not resolved_path_obj.exists() or not resolved_path_obj.is_file():
                 logger.warning(f"File not found: {resolved_path} (requested: {path})")
                 self.send_error_safe(404, "File not found")
                 return
-            
+
             with open(resolved_path, 'rb') as f:
                 content = f.read()
-            
+
             content_type = 'application/javascript'
             if path.endswith('.css'):
                 content_type = 'text/css'
@@ -328,7 +328,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 content_type = 'image/jpeg'
             elif path.endswith('.svg'):
                 content_type = 'image/svg+xml'
-            
+
             self.send_response(200)
             self.send_header('Content-type', content_type)
             self.send_header('Content-length', str(len(content)))
@@ -343,11 +343,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self.send_error_safe(500, f"Internal Server Error: {str(e)}")
             except Exception:
                 pass
-    
+
     def serve_stats(self):
         """
         Serve system statistics as JSON.
-        
+
         Collects data from all monitors and returns as JSON response.
         Logs a warning if stats collection takes longer than 1 second.
         """
@@ -355,19 +355,19 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             start_time = time.time()
             stats = self.get_system_stats()
             elapsed = time.time() - start_time
-            
+
             if elapsed > 1.0:
                 logger.warning(f"Stats collection took {elapsed:.2f}s (slow)")
-            
+
             if not isinstance(stats, dict):
                 logger.error("get_system_stats returned invalid type, using empty dict")
                 stats = {}
-            
+
             import os
             debug_mode = os.getenv('DEBUG', 'false').lower() == 'true'
             indent = 2 if debug_mode else None
             response = json.dumps(stats, indent=indent).encode('utf-8')
-            
+
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.send_header('Content-length', str(len(response)))
@@ -399,28 +399,28 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 logger.debug("Connection aborted while sending error response")
             except Exception:
                 logger.error("Failed to send error response", exc_info=True)
-    
+
     def serve_health(self):
         """
         Serve health check endpoint with comprehensive system checks.
-        
+
         Performs health checks on CPU, memory, disk, system uptime, and temperature.
         Returns appropriate HTTP status codes:
         - 200 OK: All systems healthy
         - 503 Service Unavailable: System degraded (high resource usage)
         - 500 Internal Server Error: Critical failure
-        
+
         Returns JSON with detailed status of each component.
         """
         try:
             import time
             import psutil
             from datetime import datetime
-            
+
             health_status = 'ok'
             checks = {}
             issues = []
-            
+
             if cpu_monitor:
                 try:
                     cpu_percent = cpu_monitor.get_cpu_percent(interval=0.1)
@@ -435,7 +435,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     checks['cpu'] = {'status': 'error', 'error': str(e)}
                     issues.append('CPU monitor failed')
                     health_status = 'error'
-            
+
             if memory_monitor:
                 try:
                     memory_percent = memory_monitor.get_memory_percent()
@@ -455,7 +455,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     checks['memory'] = {'status': 'error', 'error': str(e)}
                     issues.append('Memory monitor failed')
                     health_status = 'error'
-            
+
             if disk_monitor:
                 try:
                     disk_usage = disk_monitor.get_total_disk_usage()
@@ -476,7 +476,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     checks['disk'] = {'status': 'error', 'error': str(e)}
                     issues.append('Disk monitor failed')
                     health_status = 'error'
-            
+
             try:
                 boot_time = psutil.boot_time()
                 uptime_seconds = time.time() - boot_time
@@ -491,7 +491,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 issues.append('System info check failed')
                 if health_status == 'ok':
                     health_status = 'degraded'
-            
+
             if sensors_monitor:
                 try:
                     if sensors_monitor.is_available():
@@ -507,19 +507,19 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                         checks['temperature'] = {'status': 'unavailable'}
                 except Exception as e:
                     checks['temperature'] = {'status': 'error', 'error': str(e)}
-            
+
             health_data = {
                 'status': health_status,
                 'timestamp': time.time(),
                 'timestamp_iso': datetime.now().isoformat(),
                 'checks': checks
             }
-            
+
             if issues:
                 health_data['issues'] = issues
-            
+
             response = json.dumps(health_data, indent=2).encode('utf-8')
-            
+
             status_code = 200 if health_status == 'ok' else (503 if health_status == 'degraded' else 500)
             self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
@@ -547,14 +547,14 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(error_response)
             except (ConnectionAbortedError, BrokenPipeError, OSError):
                 logger.debug("Connection aborted while sending health error response")
-    
+
     def get_system_stats(self) -> Dict:
         """
         Collect current system statistics with caching for performance.
-        
+
         Gathers data from all available monitors (CPU, memory, disk, network, GPU, sensors).
         Uses caching to avoid expensive operations on every request.
-        
+
         Returns:
             Dictionary containing system statistics from all monitors
             Always returns a valid dict, even if some monitors fail.
@@ -563,10 +563,10 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         global disk_monitor, network_monitor, sensors_monitor
         global _process_cache, _network_cache, _gpu_cache, _disk_cache, _cpu_cache
         global _process_cache_lock, _network_cache_lock, _gpu_cache_lock, _disk_cache_lock, _cpu_cache_lock
-        
+
         stats = {}
         current_time = time.time()
-        
+
         try:
             if system_monitor:
                 try:
@@ -574,7 +574,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     stats['uptime'] = system_monitor.get_uptime()
                 except Exception as e:
                     logger.warning(f"Error getting system info: {e}")
-            
+
             if cpu_monitor:
                 try:
                     with _cpu_cache_lock:
@@ -590,13 +590,13 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     logger.warning(f"Error getting CPU info: {e}")
                     with _cpu_cache_lock:
                         stats['cpu'] = _cpu_cache.get('data', {})
-            
+
             if memory_monitor:
                 try:
                     stats['memory'] = memory_monitor.get_memory_stats()
                 except Exception as e:
                     logger.warning(f"Error getting memory info: {e}")
-            
+
             if disk_monitor:
                 try:
                     with _disk_cache_lock:
@@ -612,7 +612,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     logger.warning(f"Error getting disk info: {e}")
                     with _disk_cache_lock:
                         stats['disk'] = _disk_cache.get('data', {})
-            
+
             if gpu_monitor:
                 try:
                     if gpu_monitor.nvidia_smi_available and gpu_monitor.get_gpu_count() > 0:
@@ -629,7 +629,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     logger.warning(f"Error getting GPU info: {e}")
                     with _gpu_cache_lock:
                         stats['gpu'] = _gpu_cache.get('data', {})
-            
+
             if sensors_monitor:
                 try:
                     if sensors_monitor.is_available():
@@ -638,7 +638,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                             stats['temperature'] = temp
                 except Exception as e:
                     logger.warning(f"Error getting temperature: {e}")
-            
+
             if network_monitor:
                 try:
                     with _network_cache_lock:
@@ -673,7 +673,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                                     }
                                     _network_cache['data'] = bandwidth
                                     stats['network'] = bandwidth
-                                
+
                                 _network_cache['last_io'] = current_io
                                 _network_cache['last_io_time'] = current_time
                         else:
@@ -682,11 +682,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     logger.warning(f"Error getting network info: {e}")
                     with _network_cache_lock:
                         stats['network'] = _network_cache.get('data', {})
-            
+
             if system_monitor:
                 try:
                     stats['processes'] = system_monitor.get_process_count()
-                    
+
                     with _process_cache_lock:
                         time_since_process_update = current_time - _process_cache['last_update']
                         if time_since_process_update >= _process_cache['cache_interval']:
@@ -696,7 +696,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                                 _process_cache['last_update'] = current_time
                             except Exception as e:
                                 logger.debug(f"Error updating process cache: {e}")
-                        
+
                         stats['top_processes_cpu'] = _process_cache['top_cpu']
                         stats['top_processes_memory'] = _process_cache['top_memory']
                 except Exception as e:
@@ -709,7 +709,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 stats['processes'] = {'total': 0}
                 stats['top_processes_cpu'] = []
                 stats['top_processes_memory'] = []
-        
+
         except Exception as e:
             logger.error(f"Critical error in get_system_stats: {e}", exc_info=True)
             if not stats:
@@ -724,31 +724,31 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     'top_processes_cpu': [],
                     'top_processes_memory': []
                 }
-        
+
         return stats
 
 
 def get_local_ip_addresses():
     """
     Get local network IP addresses.
-    
+
     Retrieves all non-loopback, non-link-local IP addresses for the local machine.
     Attempts to determine the primary IP by connecting to an external address.
-    
+
     Returns:
         List of IP address strings
     """
     addresses = []
     try:
         hostname = socket.gethostname()
-        
+
         addrs = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_DGRAM)
-        
+
         for addr_info in addrs:
             ip = addr_info[4][0]
             if ip != '127.0.0.1' and not ip.startswith('169.254.'):
                 addresses.append(ip)
-        
+
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(('8.8.8.8', 80))
@@ -758,31 +758,31 @@ def get_local_ip_addresses():
                 addresses.insert(0, primary_ip)
         except Exception:
             pass
-            
+
     except Exception as e:
         logger.debug(f"Error getting local IP addresses: {e}")
-    
+
     return addresses
 
 
 def _run_server(port, host):
     """
     Internal function to run the HTTP server in a thread.
-    
+
     Args:
         port: Port to listen on
         host: Host address to bind to
-        
+
     This function is called by the server thread and runs the server's main loop.
     """
     global httpd
-    
+
     server_address = (host, port)
     httpd = HTTPServer(server_address, WebRequestHandler)
-    
+
     logger.info(f"Web server starting on http://{host}:{port}")
     logger.info(f"Access the web UI locally at http://localhost:{port}")
-    
+
     network_ips = get_local_ip_addresses()
     if network_ips:
         logger.info("Network access available at:")
@@ -790,7 +790,7 @@ def _run_server(port, host):
             logger.info(f"  http://{ip}:{port}")
     else:
         logger.info("Network IP addresses could not be determined")
-    
+
     try:
         httpd.serve_forever()
     except Exception as e:
@@ -800,17 +800,17 @@ def _run_server(port, host):
 def start_server(port=8080, host='0.0.0.0'):
     """
     Start the web server in a background thread.
-    
+
     Args:
         port: Port to listen on (default: 8080)
         host: Host to bind to (default: 0.0.0.0)
     """
     global server_thread
-    
+
     if server_thread and server_thread.is_alive():
         logger.warning("Web server is already running")
         return
-    
+
     server_thread = threading.Thread(target=_run_server, args=(port, host), daemon=True)
     server_thread.start()
     logger.info("Web server thread started")
@@ -819,20 +819,20 @@ def start_server(port=8080, host='0.0.0.0'):
 def stop_server(timeout: float = 5.0):
     """
     Stop the web server with timeout to prevent blocking.
-    
+
     Args:
         timeout: Maximum time to wait for server shutdown in seconds (default: 5.0)
     """
     import time
     import threading
-    
+
     global httpd, server_thread
-    
+
     if httpd:
         try:
             shutdown_complete = threading.Event()
             shutdown_error = [None]
-            
+
             def shutdown_thread():
                 try:
                     httpd.shutdown()
@@ -840,10 +840,10 @@ def stop_server(timeout: float = 5.0):
                 except Exception as e:
                     shutdown_error[0] = e
                     shutdown_complete.set()
-            
+
             shutdown_thread_obj = threading.Thread(target=shutdown_thread, daemon=True)
             shutdown_thread_obj.start()
-            
+
             if shutdown_complete.wait(timeout=timeout):
                 if shutdown_error[0]:
                     logger.warning(f"Error stopping web server: {shutdown_error[0]}")
@@ -857,6 +857,6 @@ def stop_server(timeout: float = 5.0):
             logger.warning(f"Error stopping web server: {e}")
         finally:
             httpd = None
-    
+
     server_thread = None
 

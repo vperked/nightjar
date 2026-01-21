@@ -14,59 +14,59 @@ logger = get_logger('Cache')
 def find_cache_directories(root_dir: str = None) -> List[str]:
     """
     Find all __pycache__ directories in the project.
-    
+
     Args:
         root_dir: Root directory to search (default: project root)
-        
+
     Returns:
         List of paths to __pycache__ directories
     """
     if root_dir is None:
         root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    
+
     cache_dirs = []
     for root, dirs, files in os.walk(root_dir):
         if any(ignore in root for ignore in ['venv', '.venv', 'env', '.env', 'node_modules', '.git']):
             continue
-        
+
         if '__pycache__' in dirs:
             cache_dirs.append(os.path.join(root, '__pycache__'))
-    
+
     return cache_dirs
 
 
 def find_pyc_files(root_dir: str = None) -> List[str]:
     """
     Find all .pyc files in the project.
-    
+
     Args:
         root_dir: Root directory to search (default: project root)
-        
+
     Returns:
         List of paths to .pyc files
     """
     if root_dir is None:
         root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    
+
     pyc_files = []
     for root, dirs, files in os.walk(root_dir):
         if any(ignore in root for ignore in ['venv', '.venv', 'env', '.env', 'node_modules', '.git']):
             continue
-        
+
         for file in files:
             if file.endswith('.pyc'):
                 pyc_files.append(os.path.join(root, file))
-    
+
     return pyc_files
 
 
 def clear_cache(verbose: bool = True) -> dict:
     """
     Clear all Python cache files and directories.
-    
+
     Args:
         verbose: Whether to print information about cleared cache
-        
+
     Returns:
         Dictionary with statistics about cleared cache
     """
@@ -76,11 +76,11 @@ def clear_cache(verbose: bool = True) -> dict:
         'total_size_cleared': 0,
         'errors': []
     }
-    
+
     root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     cache_dirs = find_cache_directories(root_dir)
     pyc_files = find_pyc_files(root_dir)
-    
+
     for cache_dir in cache_dirs:
         try:
             total_size = 0
@@ -91,11 +91,11 @@ def clear_cache(verbose: bool = True) -> dict:
                         total_size += os.path.getsize(filepath)
                     except (OSError, FileNotFoundError):
                         pass
-            
+
             shutil.rmtree(cache_dir)
             stats['cache_dirs_removed'] += 1
             stats['total_size_cleared'] += total_size
-            
+
             if verbose:
                 logger.debug(f"Removed cache directory: {cache_dir} ({_format_bytes(total_size)})")
         except Exception as e:
@@ -103,14 +103,14 @@ def clear_cache(verbose: bool = True) -> dict:
             stats['errors'].append(error_msg)
             if verbose:
                 logger.warning(error_msg)
-    
+
     for pyc_file in pyc_files:
         try:
             file_size = os.path.getsize(pyc_file)
             os.remove(pyc_file)
             stats['pyc_files_removed'] += 1
             stats['total_size_cleared'] += file_size
-            
+
             if verbose:
                 logger.debug(f"Removed .pyc file: {pyc_file} ({_format_bytes(file_size)})")
         except Exception as e:
@@ -118,17 +118,17 @@ def clear_cache(verbose: bool = True) -> dict:
             stats['errors'].append(error_msg)
             if verbose:
                 logger.warning(error_msg)
-    
+
     return stats
 
 
 def _format_bytes(bytes_value: int) -> str:
     """
     Format bytes to human-readable format.
-    
+
     Args:
         bytes_value: Value in bytes
-        
+
     Returns:
         Formatted string (e.g., "1.50 KB")
     """
@@ -144,48 +144,48 @@ def _format_bytes(bytes_value: int) -> str:
 def clear_cache_on_startup(verbose: bool = True) -> dict:
     """
     Clear cache on startup. This should be called at the beginning of main().
-    
+
     Args:
         verbose: Whether to print information about cleared cache
-        
+
     Returns:
         Dictionary with statistics about cleared cache
     """
     if verbose:
         logger.info("Clearing cache...")
-    
+
     stats = clear_cache(verbose=False)
-    
+
     if verbose:
         if stats['cache_dirs_removed'] > 0 or stats['pyc_files_removed'] > 0:
             logger.info(f"Cache cleared ({stats['cache_dirs_removed']} dirs, {stats['pyc_files_removed']} files)")
         else:
             logger.info("No cache found")
-    
+
     return stats
 
 
 def clear_cache_on_exit(verbose: bool = True) -> dict:
     """
     Clear cache on exit. This should be called during shutdown.
-    
+
     Args:
         verbose: Whether to print information about cleared cache
-        
+
     Returns:
         Dictionary with statistics about cleared cache
     """
     if verbose:
         logger.info("Clearing cache...")
-    
+
     stats = clear_cache(verbose=False)
-    
+
     if verbose:
         if stats['cache_dirs_removed'] > 0 or stats['pyc_files_removed'] > 0:
             logger.info(f"Cache cleared ({stats['cache_dirs_removed']} dirs, {stats['pyc_files_removed']} files)")
         else:
             logger.info("No cache found")
-    
+
     return stats
 
 

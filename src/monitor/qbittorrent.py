@@ -10,12 +10,12 @@ logger = get_logger('QBittorrentMonitor')
 
 class QBittorrentMonitor:
     """Monitor qBittorrent torrents using the Web API."""
-    
+
     def __init__(self, host: Optional[str] = None, port: Optional[int] = None,
                  username: Optional[str] = None, password: Optional[str] = None):
         """
         Initialize the qBittorrent monitor.
-        
+
         Args:
             host: qBittorrent Web UI host (default: from QBITTORRENT_HOST env or 'localhost')
             port: qBittorrent Web UI port (default: from QBITTORRENT_PORT env or 8080)
@@ -28,36 +28,36 @@ class QBittorrentMonitor:
             self.port = port or (int(port_env) if port_env and port_env.strip() else 8080)
         except (ValueError, TypeError):
             self.port = 8080
-        
+
         self.username = username or os.getenv('QBITTORRENT_USERNAME')
         self.password = password or os.getenv('QBITTORRENT_PASSWORD')
-        
+
         if not self.username:
             raise ValueError(
                 "qBittorrent username not provided. Set QBITTORRENT_USERNAME environment variable "
                 "or pass username parameter."
             )
-        
+
         if not self.password:
             raise ValueError(
                 "qBittorrent password not provided. Set QBITTORRENT_PASSWORD environment variable "
                 "or pass password parameter. Empty passwords are not allowed for security."
             )
-        
+
         self.client = None
         self._connected = False
         self._last_error = None
         self._connection_logged = False
         self.circuit_breaker = CircuitBreaker(failure_threshold=5, timeout=60.0, success_threshold=2)
-        
+
         logger.debug(f"qBittorrent monitor initialized: {self.host}:{self.port} (user: {self.username})")
         if not self.password:
             logger.warning("qBittorrent password not configured. Set QBITTORRENT_PASSWORD environment variable.")
-    
+
     def _get_client(self) -> Optional[qbittorrentapi.Client]:
         """
         Get or create qBittorrent client connection.
-        
+
         Returns:
             qBittorrent client instance, or None if connection fails
         """
@@ -69,7 +69,7 @@ class QBittorrentMonitor:
                     username=self.username,
                     password=self.password
                 )
-            except (qbittorrentapi.exceptions.APIConnectionError, 
+            except (qbittorrentapi.exceptions.APIConnectionError,
                     qbittorrentapi.exceptions.LoginFailed,
                     ConnectionError, OSError) as e:
                 error_msg = str(e)
@@ -83,40 +83,40 @@ class QBittorrentMonitor:
                 logger.warning(f"Unexpected error creating qBittorrent client ({error_type}): {error_msg}")
                 self._last_error = f"{error_type}: {error_msg}"
                 return None
-        
+
         return self.client
-    
+
     def _ensure_connected(self) -> bool:
         """
         Ensure connection to qBittorrent Web UI is established.
         Uses circuit breaker to prevent cascading failures.
-        
+
         Returns:
             True if connected, False otherwise
         """
         if self.circuit_breaker.is_open():
             logger.debug("qBittorrent circuit breaker is OPEN, skipping connection attempt")
             return False
-        
+
         def _connect_internal() -> bool:
             """Internal connection logic wrapped by circuit breaker."""
             if self._connected and self.client:
                 try:
                     self.client.app_version()
                     return True
-                except (qbittorrentapi.exceptions.APIConnectionError, 
+                except (qbittorrentapi.exceptions.APIConnectionError,
                         qbittorrentapi.exceptions.LoginRequired):
                     logger.debug("qBittorrent session expired, reconnecting...")
                     self._connected = False
                     self.client = None
                     self._connection_logged = False
-            
+
             logger.debug(f"Attempting to connect to qBittorrent at {self.host}:{self.port}...")
             client = self._get_client()
             if not client:
                 logger.warning(f"Failed to create qBittorrent client: {self._last_error}")
                 return False
-            
+
             logger.debug(f"Logging in to qBittorrent as {self.username}...")
             client.auth_log_in()
             version = client.app_version()
@@ -128,13 +128,13 @@ class QBittorrentMonitor:
             self._connected = True
             self._last_error = None
             return True
-        
+
         try:
             return self.circuit_breaker.call(_connect_internal)
         except CircuitBreakerOpenError:
             logger.debug("qBittorrent circuit breaker is OPEN, service unavailable")
             return False
-        except (qbittorrentapi.exceptions.LoginFailed, 
+        except (qbittorrentapi.exceptions.LoginFailed,
                 qbittorrentapi.exceptions.APIConnectionError,
                 ConnectionError, OSError) as e:
             error_msg = str(e)
@@ -150,11 +150,11 @@ class QBittorrentMonitor:
             self._last_error = f"{error_type}: {error_msg}"
             self._connected = False
             return False
-    
+
     def is_available(self) -> bool:
         """
         Check if qBittorrent Web UI is available and accessible.
-        
+
         Returns:
             True if available, False otherwise
         """
@@ -162,21 +162,21 @@ class QBittorrentMonitor:
             logger.debug("qBittorrent not available: password not configured")
             return False
         return self._ensure_connected()
-    
+
     def get_all_torrents(self) -> List[Dict]:
         """
         Get all torrents from qBittorrent.
-        
+
         Returns:
             List of dictionaries containing torrent information
         """
         if not self._ensure_connected():
             return []
-        
+
         try:
             def _get_torrents():
                 return self.client.torrents_info()
-            
+
             try:
                 torrents = self.circuit_breaker.call(_get_torrents)
             except CircuitBreakerOpenError:
@@ -186,7 +186,7 @@ class QBittorrentMonitor:
                 logger.debug(f"Error getting torrents: {e}")
                 return []
             result = []
-            
+
             for torrent in torrents:
                 torrent_dict = {
                     'hash': torrent.hash,
@@ -210,7 +210,7 @@ class QBittorrentMonitor:
                     'uploaded': torrent.uploaded,
                 }
                 result.append(torrent_dict)
-            
+
             return result
         except (qbittorrentapi.exceptions.APIConnectionError,
                 qbittorrentapi.exceptions.LoginFailed,
@@ -226,59 +226,59 @@ class QBittorrentMonitor:
             logger.warning(f"Unexpected error getting torrents: {e}")
             self._last_error = str(e)
             return []
-    
+
     def get_downloading_torrents(self) -> List[Dict]:
         """
         Get all currently downloading torrents.
-        
+
         Returns:
             List of dictionaries containing downloading torrent information
         """
         all_torrents = self.get_all_torrents()
         downloading = []
-        
+
         for torrent in all_torrents:
             state = torrent.get('state', '').lower()
             if state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']:
                 downloading.append(torrent)
-        
+
         return downloading
-    
+
     def get_seeding_torrents(self) -> List[Dict]:
         """
         Get all currently seeding torrents.
-        
+
         Returns:
             List of dictionaries containing seeding torrent information
         """
         all_torrents = self.get_all_torrents()
         seeding = []
-        
+
         for torrent in all_torrents:
             state = torrent.get('state', '').lower()
             if state in ['uploading', 'stalledup', 'queuedup', 'checkingup', 'pausedup']:
                 seeding.append(torrent)
-        
+
         return seeding
-    
+
     def get_torrent_summary(self) -> Dict:
         """
         Get a summary of all torrents.
-        
+
         Returns:
             Dictionary containing summary statistics
         """
         all_torrents = self.get_all_torrents()
-        
+
         downloading = self.get_downloading_torrents()
         seeding = self.get_seeding_torrents()
-        
+
         total_download_speed = sum(t.get('dlspeed', 0) for t in downloading)
         total_upload_speed = sum(t.get('upspeed', 0) for t in seeding)
-        
+
         total_downloaded = sum(t.get('downloaded', 0) for t in all_torrents)
         total_uploaded = sum(t.get('uploaded', 0) for t in all_torrents)
-        
+
         return {
             'total': len(all_torrents),
             'downloading': len(downloading),
@@ -290,16 +290,16 @@ class QBittorrentMonitor:
             'available': self._connected,
             'last_error': self._last_error,
         }
-    
+
     def get_torrent_summary_human(self) -> Dict:
         """
         Get torrent summary in human-readable format.
-        
+
         Returns:
             Dictionary with formatted values
         """
         summary = self.get_torrent_summary()
-        
+
         return {
             'total': summary['total'],
             'downloading': summary['downloading'],
@@ -311,17 +311,17 @@ class QBittorrentMonitor:
             'available': summary['available'],
             'last_error': summary['last_error'],
         }
-    
+
     def get_downloading_torrents_human(self) -> List[Dict]:
         """
         Get downloading torrents with human-readable values.
-        
+
         Returns:
             List of dictionaries with formatted values
         """
         downloading = self.get_downloading_torrents()
         result = []
-        
+
         for torrent in downloading:
             result.append({
                 'name': torrent['name'],
@@ -334,19 +334,19 @@ class QBittorrentMonitor:
                 'peers': torrent['peers'],
                 'save_path': torrent['save_path'],
             })
-        
+
         return result
-    
+
     def get_seeding_torrents_human(self) -> List[Dict]:
         """
         Get seeding torrents with human-readable values.
-        
+
         Returns:
             List of dictionaries with formatted values
         """
         seeding = self.get_seeding_torrents()
         result = []
-        
+
         for torrent in seeding:
             result.append({
                 'name': torrent['name'],
@@ -359,6 +359,6 @@ class QBittorrentMonitor:
                 'peers': torrent['peers'],
                 'save_path': torrent['save_path'],
             })
-        
+
         return result
 
