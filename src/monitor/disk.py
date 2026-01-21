@@ -732,12 +732,10 @@ class DiskMonitor:
         logger.info(f"[CLEANUP] Starting disk cleanup: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free (target: {target_free_percent:.1f}% free)")
         
         if log_monitor:
-            # When disk is getting full, clean ALL logs, not just those exceeding threshold
-            # This prevents logs from filling the disk even if individual logs are small
-            aggressive_cleanup = initial_usage['percent'] >= 50.0
+            aggressive_cleanup = initial_usage['percent'] >= 40.0
             
             if aggressive_cleanup:
-                logger.info("[CLEANUP] Step 1: Aggressive log cleanup (disk >= 50%, cleaning ALL logs in /var/log)...")
+                logger.info("[CLEANUP] Step 1: Aggressive log cleanup (disk >= 40%, cleaning ALL logs in /var/log)...")
             else:
                 logger.info("[CLEANUP] Step 1: Cleaning log files (all logs in /var/log exceeding threshold)...")
             
@@ -797,6 +795,7 @@ class DiskMonitor:
                     if current_free_percent >= target_free_percent:
                         logger.info(f"[CLEANUP] Target free space reached after log cleanup: {current_free_percent:.1f}% free")
                         self._restart_log_services()
+                        self._setup_nginx_logs()
                         final_usage = self.get_disk_usage(mountpoint)
                         if final_usage:
                             stats['final_usage'] = final_usage['percent']
@@ -804,6 +803,7 @@ class DiskMonitor:
                 
                 if stats['logs_cleaned'] > 0:
                     self._restart_log_services()
+                    self._setup_nginx_logs()
             except Exception as e:
                 stats['errors'].append(f"Error getting log sizes: {e}")
         
@@ -822,6 +822,21 @@ class DiskMonitor:
                     logger.info(f"[CLEANUP] Target free space reached: {current_free_percent:.1f}% free")
                     break
         
+        # Step 3: Clean package caches and other common space consumers
+        if initial_usage['percent'] >= 50.0:  # Only when disk is getting full
+            logger.info("[CLEANUP] Step 3: Cleaning package caches and other space consumers...")
+            cache_cleanup_stats = self._cleanup_package_caches()
+            stats['files_removed'] += cache_cleanup_stats.get('files_removed', 0)
+            stats['dirs_removed'] += cache_cleanup_stats.get('dirs_removed', 0)
+            stats['total_size_cleared'] += cache_cleanup_stats.get('total_size_cleared', 0)
+            stats['errors'].extend(cache_cleanup_stats.get('errors', []))
+            
+            current_usage = self.get_disk_usage(mountpoint)
+            if current_usage:
+                current_free_percent = 100.0 - current_usage['percent']
+                if current_free_percent >= target_free_percent:
+                    logger.info(f"[CLEANUP] Target free space reached after cache cleanup: {current_free_percent:.1f}% free")
+        
         if stats['logs_cleaned'] > 0:
             self._restart_log_services()
         
@@ -832,6 +847,76 @@ class DiskMonitor:
             logger.info(f"[CLEANUP] Disk cleanup complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
                        f"Cleared {format_bytes(stats['total_size_cleared'])} "
                        f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)")
+        
+        return stats
+    
+    def _cleanup_package_caches(self) -> Dict:
+        """
+        Clean package caches and other common space-consuming directories.
+        
+        Returns:
+            Dictionary with cleanup statistics
+        """
+        stats = {
+            'files_removed': 0,
+            'dirs_removed': 0,
+            'total_size_cleared': 0,
+            'errors': []
+        }
+        
+        if not platform.system() == 'Linux':
+            return stats
+        
+        cache_dirs_to_clean = [
+            '/var/cache/apt/archives',  # APT package cache
+            '/var/cache/apt/pkgcache.bin',  # APT cache files
+            '/var/cache/apt/srcpkgcache.bin',
+        ]
+        
+        for cache_dir in cache_dirs_to_clean:
+            if not os.path.exists(cache_dir):
+                continue
+            
+            try:
+                is_valid, resolved_path, error = validate_path(cache_dir, allow_symlinks=False)
+                if not is_valid:
+                    continue
+                
+                cache_dir = resolved_path
+                
+                # Clean .deb files from apt cache
+                if 'apt/archives' in cache_dir:
+                    try:
+                        for filename in os.listdir(cache_dir):
+                            filepath = os.path.join(cache_dir, filename)
+                            if os.path.isfile(filepath) and filename.endswith('.deb'):
+                                try:
+                                    file_size = os.path.getsize(filepath)
+                                    os.remove(filepath)
+                                    stats['files_removed'] += 1
+                                    stats['total_size_cleared'] += file_size
+                                    logger.debug(f"Removed package cache file: {filepath} ({format_bytes(file_size)})")
+                                except (OSError, PermissionError):
+                                    continue
+                    except (OSError, PermissionError) as e:
+                        stats['errors'].append(f"Error cleaning {cache_dir}: {e}")
+                
+                # Clean cache binary files
+                elif cache_dir.endswith('.bin'):
+                    try:
+                        if os.path.isfile(cache_dir):
+                            file_size = os.path.getsize(cache_dir)
+                            os.remove(cache_dir)
+                            stats['files_removed'] += 1
+                            stats['total_size_cleared'] += file_size
+                            logger.debug(f"Removed cache binary: {cache_dir} ({format_bytes(file_size)})")
+                    except (OSError, PermissionError) as e:
+                        stats['errors'].append(f"Error removing {cache_dir}: {e}")
+            except Exception as e:
+                stats['errors'].append(f"Error processing {cache_dir}: {e}")
+        
+        if stats['total_size_cleared'] > 0:
+            logger.info(f"[CLEANUP] Cleaned package caches: {format_bytes(stats['total_size_cleared'])} ({stats['files_removed']} files)")
         
         return stats
     
@@ -925,6 +1010,7 @@ class DiskMonitor:
             
             if stats['logs_cleaned'] > 0:
                 self._restart_log_services()
+                self._setup_nginx_logs()
         
         logger.info("[EMERGENCY] Step 3: Cleaning additional cache directories...")
         cache_dirs = ['/var/cache', '/tmp', '/var/tmp']
@@ -1009,4 +1095,73 @@ class DiskMonitor:
                 logger.debug(f"    Could not restart {service}: {e}")
             except Exception as e:
                 logger.debug(f"    Error restarting {service}: {e}")
+    
+    def _setup_nginx_logs(self):
+        """
+        Setup nginx log directory and files with proper ownership and permissions.
+        Creates /var/log/nginx directory if it doesn't exist, sets ownership to www-data:adm,
+        creates error.log and access.log files, and restarts nginx.
+        """
+        if not platform.system() == 'Linux':
+            return
+        
+        nginx_log_dir = '/var/log/nginx'
+        
+        try:
+            # Create directory with proper permissions
+            os.makedirs(nginx_log_dir, mode=0o755, exist_ok=True)
+            
+            # Set ownership to www-data:adm
+            try:
+                result = subprocess.run(
+                    ['chown', 'www-data:adm', nginx_log_dir],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False
+                )
+                if result.returncode != 0:
+                    logger.debug(f"    Could not set ownership on {nginx_log_dir}: {result.stderr}")
+            except Exception as e:
+                logger.debug(f"    Error setting ownership on {nginx_log_dir}: {e}")
+            
+            # Create log files if they don't exist
+            for log_file in ['error.log', 'access.log']:
+                log_path = os.path.join(nginx_log_dir, log_file)
+                if not os.path.exists(log_path):
+                    try:
+                        Path(log_path).touch()
+                        # Set ownership on log file
+                        subprocess.run(
+                            ['chown', 'www-data:adm', log_path],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            check=False
+                        )
+                        logger.debug(f"    Created nginx log file: {log_path}")
+                    except Exception as e:
+                        logger.debug(f"    Error creating nginx log file {log_path}: {e}")
+            
+            logger.info(f"    Nginx log directory setup: {nginx_log_dir}")
+            
+            # Restart nginx
+            try:
+                result = subprocess.run(
+                    ['systemctl', 'restart', 'nginx'],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False
+                )
+                if result.returncode == 0:
+                    logger.info("    Nginx restarted successfully")
+                else:
+                    logger.warning(f"    Failed to restart nginx: {result.stderr}")
+            except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+                logger.debug(f"    Could not restart nginx: {e}")
+            except Exception as e:
+                logger.debug(f"    Error restarting nginx: {e}")
+        except Exception as e:
+            logger.debug(f"    Error setting up nginx logs: {e}")
 

@@ -18,10 +18,12 @@ from logger import get_logger
 from web.server import set_monitors, start_server, stop_server
 from typing import Optional, Tuple, Dict, List
 from datetime import datetime
+from pathlib import Path
 import os
 import sys
 import time
 import platform
+import subprocess
 import psutil
 import hashlib
 import json
@@ -39,7 +41,7 @@ DEFAULT_MEMORY_THRESHOLD = 80.0
 DEFAULT_GPU_THRESHOLD = 80.0
 DEFAULT_DISK_THRESHOLD = 80.0
 DEFAULT_DISK_EARLY_WARNING_THRESHOLD = 75.0
-DEFAULT_DISK_CLEANUP_THRESHOLD = 50.0
+DEFAULT_DISK_CLEANUP_THRESHOLD = 40.0  # Lower threshold for more proactive cleanup
 DEFAULT_DISK_EMERGENCY_THRESHOLD = 95.0
 DEFAULT_TEMP_THRESHOLD = 80.0
 DEFAULT_TEMP_ALERT_DURATION = 30.0
@@ -1068,6 +1070,118 @@ def main(
             total_disk = disk_monitor.get_total_disk_usage()
             disk_percent = total_disk.get('percent', 0.0)
             
+            # Simple approach: when disk >= 50%, clear all logs in /var/log/
+            if disk_percent >= 50.0:
+                time_since_last_cleanup = current_time - last_disk_cleanup_time
+                
+                # Run cleanup every 30 minutes when disk is >= 50%
+                if time_since_last_cleanup >= 1800.0:  # 30 minutes
+                    logger.warning(f"[CLEANUP] Disk at {disk_percent:.1f}% - clearing all logs in /var/log/...")
+                    try:
+                        if log_monitor:
+                            # Get ALL log files in /var/log
+                            all_log_files = log_monitor.get_all_log_files_in_directory('/var/log')
+                            
+                            # Also include journal logs
+                            all_log_sizes = log_monitor.get_all_log_sizes()
+                            monitored_logs = []
+                            if all_log_sizes.get('journal_log'):
+                                monitored_logs.append(all_log_sizes['journal_log'])
+                            
+                            # Combine and deduplicate
+                            all_logs_dict = {}
+                            for log_info in all_log_files + monitored_logs:
+                                log_path = log_info.get('path', '')
+                                if log_path:
+                                    if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
+                                        all_logs_dict[log_path] = log_info
+                            
+                            logs_cleaned = 0
+                            total_cleared = 0
+                            
+                            # Sort by size (largest first)
+                            logs_to_clean = sorted(all_logs_dict.values(), key=lambda x: x.get('size_bytes', 0), reverse=True)
+                            
+                            for log_info in logs_to_clean:
+                                try:
+                                    log_path = log_info.get('path', '')
+                                    if not log_path:
+                                        continue
+                                    
+                                    current_log_info = log_monitor.get_log_size(log_path)
+                                    if not current_log_info:
+                                        continue
+                                    
+                                    original_size = current_log_info.get('size_bytes', 0)
+                                    if original_size == 0:
+                                        continue
+                                    
+                                    # Force cleanup - clear completely
+                                    if log_monitor.cleanup_log(current_log_info, force=True):
+                                        logs_cleaned += 1
+                                        size_after = log_monitor.get_log_size(log_path)
+                                        size_after_bytes = size_after.get('size_bytes', 0) if size_after else 0
+                                        total_cleared += max(0, original_size - size_after_bytes)
+                                        logger.info(f"    Cleared log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
+                                except Exception as e:
+                                    logger.debug(f"Error cleaning log {log_info.get('path', 'unknown')}: {e}")
+                            
+                            if logs_cleaned > 0:
+                                logger.warning(f"[CLEANUP] Cleared {logs_cleaned} log file(s) in /var/log/, freed {format_bytes(total_cleared)}")
+                                
+                                # Restart log services and setup nginx logs
+                                if platform.system() == 'Linux':
+                                    try:
+                                        # Restart standard log services
+                                        for service in ['rsyslog', 'systemd-journald']:
+                                            subprocess.run(['systemctl', 'restart', service], 
+                                                         capture_output=True, timeout=30, check=False)
+                                        
+                                        # Setup nginx log directory and files if they were cleaned
+                                        nginx_log_dir = '/var/log/nginx'
+                                        nginx_logs_cleaned = any('/var/log/nginx' in log_info.get('path', '') for log_info in logs_to_clean)
+                                        
+                                        if nginx_logs_cleaned or not os.path.exists(nginx_log_dir):
+                                            try:
+                                                # Create directory with proper ownership and permissions
+                                                os.makedirs(nginx_log_dir, mode=0o755, exist_ok=True)
+                                                
+                                                # Set ownership to www-data:adm
+                                                subprocess.run(['chown', 'www-data:adm', nginx_log_dir], 
+                                                             capture_output=True, timeout=10, check=False)
+                                                
+                                                # Create log files if they don't exist
+                                                for log_file in ['error.log', 'access.log']:
+                                                    log_path = os.path.join(nginx_log_dir, log_file)
+                                                    if not os.path.exists(log_path):
+                                                        Path(log_path).touch()
+                                                        subprocess.run(['chown', 'www-data:adm', log_path], 
+                                                                     capture_output=True, timeout=10, check=False)
+                                                
+                                                logger.info(f"[CLEANUP] Created/verified nginx log directory: {nginx_log_dir}")
+                                                
+                                                # Restart nginx
+                                                result = subprocess.run(['systemctl', 'restart', 'nginx'], 
+                                                                       capture_output=True, text=True, timeout=30, check=False)
+                                                if result.returncode == 0:
+                                                    logger.info("[CLEANUP] Nginx restarted successfully")
+                                                else:
+                                                    logger.warning(f"[CLEANUP] Nginx restart failed: {result.stderr}")
+                                            except Exception as e:
+                                                logger.debug(f"[CLEANUP] Error setting up nginx logs: {e}")
+                                    except Exception as e:
+                                        logger.debug(f"[CLEANUP] Error restarting services: {e}")
+                                
+                                # Check disk usage after cleanup
+                                final_disk = disk_monitor.get_disk_usage('/')
+                                if final_disk:
+                                    logger.info(f"[CLEANUP] Disk usage after log cleanup: {final_disk['percent']:.1f}%")
+                        
+                        last_disk_cleanup_time = current_time
+                    except Exception as e:
+                        logger.error(f"[CLEANUP] Error clearing /var/log/: {e}")
+                        last_disk_cleanup_time = current_time
+            
             if disk_percent >= disk_emergency_threshold:
                 time_since_last_cleanup = current_time - last_disk_cleanup_time
                 
@@ -1144,7 +1258,16 @@ def main(
             elif disk_percent >= disk_cleanup_threshold:
                 time_since_last_cleanup = current_time - last_disk_cleanup_time
                 
-                if time_since_last_cleanup >= disk_cleanup_cooldown:
+                # Reduce cooldown when disk is very high (run cleanup more frequently)
+                effective_cooldown = disk_cleanup_cooldown
+                if disk_percent >= 80.0:
+                    effective_cooldown = 300.0  # 5 minutes when disk >= 80%
+                elif disk_percent >= 70.0:
+                    effective_cooldown = 900.0  # 15 minutes when disk >= 70%
+                elif disk_percent >= 60.0:
+                    effective_cooldown = 1800.0  # 30 minutes when disk >= 60%
+                
+                if time_since_last_cleanup >= effective_cooldown:
                     logger.warning(f"[CLEANUP] Disk usage at {disk_percent:.1f}% (cleanup threshold: {disk_cleanup_threshold:.1f}%), starting automatic cleanup...")
                     
                     try:
@@ -1960,12 +2083,17 @@ def main(
                         except Exception as e:
                             logger.warning(f"Unexpected error checking qBittorrent: {e}")
             log_check_counter += 1
-            if log_check_counter >= log_check_interval:
+            # Check logs more frequently when disk is getting full
+            root_disk_usage = disk_monitor.get_disk_usage('/')
+            disk_percent = root_disk_usage.get('percent', 0) if root_disk_usage else 0
+            
+            # When disk is high, check logs more frequently (every 5 cycles instead of 20)
+            effective_log_interval = log_check_interval if disk_percent < 40.0 else 5
+            
+            if log_check_counter >= effective_log_interval:
                 log_check_counter = 0
                 try:
-                    root_disk_usage = disk_monitor.get_disk_usage('/')
-                    disk_percent = root_disk_usage.get('percent', 0) if root_disk_usage else 0
-                    aggressive_log_cleanup = disk_percent >= 45.0 
+                    aggressive_log_cleanup = disk_percent >= 35.0  # Lower threshold for proactive cleanup 
                     
                     all_log_sizes = log_monitor.get_all_log_sizes()
                     
