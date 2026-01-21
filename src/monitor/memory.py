@@ -7,10 +7,6 @@ from util.util import format_bytes
 class MemoryMonitor:
     """Monitor memory usage and statistics."""
 
-    def __init__(self):
-        """Initialize the memory monitor."""
-        pass
-
     def get_memory_percent(self) -> float:
         """
         Get current memory usage percentage.

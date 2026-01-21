@@ -36,8 +36,9 @@ def get_python_executable() -> str:
         Path to Python executable (absolute path)
     """
     python_exec = sys.executable
-    if not os.path.isabs(python_exec):
-        python_exec = os.path.abspath(python_exec)
+    python_exec_path = Path(python_exec)
+    if not python_exec_path.is_absolute():
+        python_exec = str(python_exec_path.resolve())
     return python_exec
 
 
@@ -76,7 +77,7 @@ def check_directory_access(directory: str, username: str) -> bool:
     Returns:
         True if accessible, False otherwise
     """
-    if not os.path.exists(directory):
+    if not Path(directory).exists():
         return False
 
     if username == 'root':
@@ -141,7 +142,7 @@ def fix_directory_permissions(directory: str, username: str) -> bool:
         parent_paths.reverse()
 
         for p in parent_paths:
-            if not os.path.exists(p):
+            if not p.exists():
                 continue
 
             try:
@@ -191,20 +192,20 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
             home_dir = user_info.pw_dir
         except (ImportError, KeyError):
             home_dir = os.path.expanduser(f'~{service_user}')
-            if not os.path.exists(home_dir):
+            if not Path(home_dir).exists():
                 home_dir = os.environ.get('HOME', f'/home/{service_user}')
     else:
         home_dir = '/root'
 
     env_file = None
     env_file_candidates = [
-        os.path.join(home_dir, '.env'),
+        str(Path(home_dir) / '.env'),
         str(project_root / '.env'),
         str(project_root / 'src' / '.env'),
     ]
 
     for candidate in env_file_candidates:
-        if os.path.exists(candidate):
+        if Path(candidate).exists():
             env_file = candidate
             logger.info(f"Found .env file at: {env_file}")
             break
@@ -217,11 +218,11 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
     python_path = str(python_exec).replace('\\', '/')
     main_script_path = str(main_script.resolve()).replace('\\', '/')
 
-    if not os.path.exists(python_path):
+    if not Path(python_path).exists():
         logger.error(f"Python executable not found: {python_path}")
         raise FileNotFoundError(f"Python executable not found: {python_path}")
 
-    if not os.path.exists(main_script_path):
+    if not Path(main_script_path).exists():
         logger.error(f"Main script not found: {main_script_path}")
         raise FileNotFoundError(f"Main script not found: {main_script_path}")
 
@@ -230,7 +231,7 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
 
     if service_user == 'root':
         working_dir_path = project_root_path
-        if not os.path.exists(working_dir_path):
+        if not Path(working_dir_path).exists():
             logger.warning(f"Project root not accessible, using script directory: {script_dir}")
             working_dir_path = script_dir
     else:
@@ -255,7 +256,7 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
     logger.info(f"Working directory: {working_dir_path} (service user: {service_user})")
 
     venv_bin = str(project_root / 'venv' / 'bin').replace('\\', '/')
-    if os.path.exists(venv_bin):
+    if Path(venv_bin).exists():
         minimal_path = f"{venv_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     else:
         minimal_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -271,7 +272,7 @@ Group={service_user}
 WorkingDirectory={working_dir_path}
 Environment="PATH={minimal_path}\""""
 
-    if env_file and os.path.exists(env_file):
+    if env_file and Path(env_file).exists():
         service_content += f"\nEnvironmentFile={env_file}"
     elif env_file:
         logger.warning(f"EnvironmentFile specified ({env_file}) but file does not exist. Skipping EnvironmentFile line.")
@@ -327,7 +328,7 @@ def install_systemd_service(service_name: str = 'server-monitor',
             logger.error("Please ensure you're running from the correct directory.")
             return False
 
-        if not os.path.exists(python_exec):
+        if not Path(python_exec).exists():
             logger.error(f"Python executable not found at: {python_exec}")
             return False
 
@@ -342,7 +343,7 @@ def install_systemd_service(service_name: str = 'server-monitor',
 
         if service_user == 'root':
             working_dir_path = str(project_root.resolve()).replace('\\', '/')
-            if not os.path.exists(working_dir_path):
+            if not Path(working_dir_path).exists():
                 working_dir_path = script_dir
         else:
             working_dir_path = script_dir

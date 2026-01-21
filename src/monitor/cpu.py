@@ -115,9 +115,12 @@ class CpuMonitor:
         """
         return psutil.getloadavg()
 
-    def get_cpu_info(self) -> Dict:
+    def get_cpu_info(self, interval: float = 0.0) -> Dict:
         """
         Get comprehensive CPU information.
+
+        Args:
+            interval: Time interval in seconds to measure CPU usage (default: 0.0 for non-blocking)
 
         Returns:
             Dictionary containing all CPU information
@@ -125,8 +128,8 @@ class CpuMonitor:
         return {
             'cpu_count_logical': self.cpu_count,
             'cpu_count_physical': self.cpu_count_physical,
-            'cpu_percent': self.get_cpu_percent(),
-            'cpu_percent_per_core': self.get_cpu_percent_per_core(),
+            'cpu_percent': self.get_cpu_percent(interval=interval),
+            'cpu_percent_per_core': self.get_cpu_percent_per_core(interval=interval),
             'cpu_stats': self.get_cpu_stats(),
             'cpu_freq': self.get_cpu_freq(),
             'cpu_freq_per_core': self.get_cpu_freq_per_core(),

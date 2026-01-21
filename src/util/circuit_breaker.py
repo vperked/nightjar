@@ -94,6 +94,7 @@ class CircuitBreaker:
             return result
 
         except Exception as e:
+            logger.warning(f"Circuit breaker caught exception: {type(e).__name__}: {e}")
             self.failure_count += 1
             self.last_failure_time = time.time()
 

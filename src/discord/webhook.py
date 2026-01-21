@@ -1,6 +1,7 @@
 import os
 import requests
 import time
+from pathlib import Path
 from typing import Dict, Optional, List, Any
 from datetime import datetime, timezone
 from collections import deque
@@ -27,7 +28,7 @@ class RateLimiter:
         """
         self.max_calls = max_calls
         self.period = period
-        self.calls = deque(maxlen=max_calls * 2)
+        self.calls = deque(maxlen=max_calls)
 
     def wait_if_needed(self):
         """Wait if rate limit would be exceeded."""
@@ -955,7 +956,7 @@ class DiscordWebhook:
             top_subdirs = subdirectories[:5]
             subdir_list = []
             for subdir in top_subdirs:
-                subdir_name = os.path.basename(subdir.get('path', 'Unknown'))
+                subdir_name = Path(subdir.get('path', 'Unknown')).name
                 subdir_size = subdir.get('size_bytes', subdir.get('size', 0))
                 if isinstance(subdir_size, str):
                     subdir_size = subdir.get('size_bytes', 0)
@@ -968,7 +969,7 @@ class DiscordWebhook:
                     'inline': False
                 })
 
-        description = f'Directory "{os.path.basename(directory_path)}" has exceeded the size threshold of {threshold_formatted}'
+        description = f'Directory "{Path(directory_path).name}" has exceeded the size threshold of {threshold_formatted}'
 
         return self.send_embed(
             title='Directory Size Alert',

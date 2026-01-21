@@ -50,6 +50,8 @@ def format_bytes(bytes_value: int, precision: int = 2) -> str:
     for unit in ['B', 'KB', 'MB']:
         if bytes_value < BYTES_PER_KB:
             return f"{bytes_value:.{precision}f} {unit}"
+        if BYTES_PER_KB == 0:
+            return f"{bytes_value:.{precision}f} B"
         bytes_value /= BYTES_PER_KB
     return f"{bytes_value:.{precision}f} MB"
 

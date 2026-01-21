@@ -1,11 +1,14 @@
 import psutil
 import time
+import threading
 from typing import Dict, List, Optional, Callable
 from datetime import datetime
 from util.util import format_bytes, format_bytes_per_second
 from logger import get_logger
 
 logger = get_logger()
+
+_shutdown_event = threading.Event()
 
 
 class NetworkMonitor:
@@ -257,7 +260,8 @@ class NetworkMonitor:
             if not io_before or interface not in io_before:
                 return {}
 
-            time.sleep(interval)
+            if _shutdown_event.wait(timeout=interval):
+                return {}
 
             io_after = psutil.net_io_counters(pernic=True)
             if not io_after or interface not in io_after:
@@ -278,7 +282,8 @@ class NetworkMonitor:
             if io_before is None:
                 return {}
 
-            time.sleep(interval)
+            if _shutdown_event.wait(timeout=interval):
+                return {}
 
             io_after = psutil.net_io_counters()
             if io_after is None:
@@ -350,7 +355,8 @@ class NetworkMonitor:
                 if callback:
                     callback(measurement)
 
-            time.sleep(interval)
+            if _shutdown_event.wait(timeout=interval):
+                return {}
 
         return measurements
 

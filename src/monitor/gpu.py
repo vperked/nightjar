@@ -1,6 +1,9 @@
 import subprocess
 from typing import Dict, List, Optional
 from util.util import format_megabytes
+from logger import get_logger
+
+logger = get_logger('GpuMonitor')
 
 
 class GpuMonitor:
@@ -52,7 +55,8 @@ class GpuMonitor:
             if result.returncode == 0:
                 return result.stdout.strip()
             return None
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError) as e:
+            logger.warning(f"GPU query failed: {e}")
             return None
 
     def get_gpu_count(self) -> int:

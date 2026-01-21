@@ -35,6 +35,68 @@ load_dotenv()
 
 logger = get_logger()
 
+
+def validate_config() -> None:
+    """
+    Validate configuration at startup.
+    
+    Checks required environment variables and validates their values.
+    Raises ValueError if critical configuration is missing or invalid.
+    """
+    errors = []
+    warnings = []
+    
+    webhook_url = os.getenv('WEBHOOK')
+    if not webhook_url:
+        warnings.append("WEBHOOK environment variable not set - Discord notifications will be disabled")
+    elif not webhook_url.startswith('https://discord.com/api/webhooks/'):
+        warnings.append(f"WEBHOOK URL does not match expected Discord webhook format: {webhook_url[:50]}...")
+    
+    numeric_vars = {
+        'CPU_THRESHOLD': (0.0, 100.0),
+        'MEMORY_THRESHOLD': (0.0, 100.0),
+        'GPU_THRESHOLD': (0.0, 100.0),
+        'DISK_THRESHOLD': (0.0, 100.0),
+        'TEMP_THRESHOLD': (0.0, 150.0),
+        'CHECK_INTERVAL': (1.0, 3600.0),
+    }
+    
+    for var_name, (min_val, max_val) in numeric_vars.items():
+        value = os.getenv(var_name)
+        if value:
+            try:
+                float_val = float(value)
+                if not (min_val <= float_val <= max_val):
+                    errors.append(f"{var_name}={float_val} is outside valid range [{min_val}, {max_val}]")
+            except ValueError:
+                errors.append(f"{var_name}={value} is not a valid number")
+    
+    boolean_vars = ['QBITTORRENT_MONITOR', 'MEDIA_MONITOR_ENABLED', 'INSTALL_SYSTEMD']
+    for var_name in boolean_vars:
+        value = os.getenv(var_name)
+        if value and value.lower() not in ('true', 'false', '1', '0', 'yes', 'no', 'on', 'off', ''):
+            warnings.append(f"{var_name}={value} is not a valid boolean value (use true/false)")
+    
+    path_vars = ['MEDIA_DIRECTORY', 'LOG_FILE', 'ALERT_LOG_PATH']
+    for var_name in path_vars:
+        value = os.getenv(var_name)
+        if value:
+            if not isinstance(value, str) or len(value) > 1000:
+                errors.append(f"{var_name} path is invalid or too long")
+            elif '..' in value or '\x00' in value:
+                errors.append(f"{var_name} contains invalid characters")
+    
+    for warning in warnings:
+        logger.warning(f"Configuration warning: {warning}")
+    
+    if errors:
+        error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    if not warnings:
+        logger.info("Configuration validation passed")
+
 EMBED_SEND_DELAY = 0.2
 MAX_TRACKED_TORRENTS = 1000
 
@@ -257,13 +319,13 @@ def get_env_float(key: str, default: float, min_val: Optional[float] = None, max
     Returns default value on any error. Validates range if min_val/max_val provided.
 
     Args:
-        key: Environment variable name
-        default: Default value to return if variable is not set or invalid
-        min_val: Optional minimum allowed value
-        max_val: Optional maximum allowed value
+        key (str): Environment variable name
+        default (float): Default value to return if variable is not set or invalid
+        min_val (Optional[float]): Optional minimum allowed value
+        max_val (Optional[float]): Optional maximum allowed value
 
     Returns:
-        Float value from environment variable or default
+        float: Float value from environment variable or default
     """
     value = get_cached_env(key, str(default))
     if not value or value.strip() == '':
@@ -291,13 +353,13 @@ def get_env_int(key: str, default: int, min_val: Optional[int] = None, max_val: 
     Returns default value on any error. Validates range if min_val/max_val provided.
 
     Args:
-        key: Environment variable name
-        default: Default value to return if variable is not set or invalid
-        min_val: Optional minimum allowed value
-        max_val: Optional maximum allowed value
+        key (str): Environment variable name
+        default (int): Default value to return if variable is not set or invalid
+        min_val (Optional[int]): Optional minimum allowed value
+        max_val (Optional[int]): Optional maximum allowed value
 
     Returns:
-        Integer value from environment variable or default
+        int: Integer value from environment variable or default
     """
     value = get_cached_env(key, str(default))
     if not value or value.strip() == '':
@@ -438,7 +500,7 @@ def run_self_test() -> bool:
     media_directory = get_cached_env('MEDIA_DIRECTORY', '/home/media')
     if media_monitor_enabled:
         try:
-            if os.path.exists(media_directory):
+            if Path(media_directory).exists():
                 disk_monitor.get_directory_size(media_directory)
                 add_result("Media directory monitor", True)
             else:
@@ -765,6 +827,13 @@ def main(
     clear_cache_on_startup(verbose=True)
 
     logger.info("Starting Server Monitor...")
+    
+    try:
+        validate_config()
+    except ValueError as e:
+        logger.error(f"Configuration validation failed: {e}")
+        sys.exit(1)
+    
     logger.info("Initializing monitors...")
     qbittorrent_monitor_enabled = get_env_bool('QBITTORRENT_MONITOR', False)
 
@@ -945,7 +1014,7 @@ def main(
     else:
         logger.info("Freeze Detection: disabled")
     if media_monitor_enabled:
-        if os.path.exists(media_directory):
+        if Path(media_directory).exists():
             logger.info(f"Directory Monitoring: {media_directory} | Threshold: {media_directory_threshold_gb:.1f} GB")
         else:
             logger.warning(f"Directory Monitoring enabled but path not found: {media_directory}. Skipping directory monitoring.")
@@ -1186,9 +1255,10 @@ def main(
                     logger.critical(f"[WATCHDOG] CRITICAL: Monitoring loop appears to have stopped! "
                                   f"No heartbeat for {time_since_heartbeat:.1f}s (timeout: {monitoring_watchdog_timeout:.1f}s)")
 
-                    if webhook:
+                    target_webhook = crash_webhook if crash_webhook else webhook
+                    if target_webhook:
                         try:
-                            success = webhook.send_embed(
+                            success = target_webhook.send_embed(
                                 title='CRITICAL: Monitoring Loop Stopped',
                                 description=f'Monitoring loop has stopped responding. No heartbeat detected for {time_since_heartbeat:.1f} seconds.',
                                 fields=[
@@ -1200,7 +1270,8 @@ def main(
                                 timestamp=True
                             )
                             if success:
-                                logger.info("    Discord watchdog alert sent")
+                                webhook_name = "Crash webhook" if crash_webhook else "Discord"
+                                logger.info(f"    Discord watchdog alert sent to {webhook_name}")
                         except Exception as e:
                             logger.error(f"Error sending watchdog alert: {e}")
 
@@ -1636,7 +1707,7 @@ def main(
                             if largest_dirs:
                                 dir_list = []
                                 for i, dir_info in enumerate(largest_dirs, 1):
-                                    dir_name = os.path.basename(dir_info['path'])
+                                    dir_name = Path(dir_info['path']).name
                                     dir_size = dir_info['size']
                                     dir_list.append(f"{i}. `{dir_name}`: {dir_size}")
 
@@ -2090,7 +2161,7 @@ def main(
                             logger.warning(f"Unexpected error checking freeze status: {e}")
 
                 media_check_counter += 1
-                if media_monitor_enabled and media_check_counter >= media_check_interval and os.path.exists(media_directory):
+                if media_monitor_enabled and media_check_counter >= media_check_interval and Path(media_directory).exists():
                     media_check_counter = 0
                     try:
                         media_size_info = disk_monitor.get_directory_size(media_directory)

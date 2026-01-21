@@ -38,8 +38,9 @@ def validate_path(path: str, allowed_base_paths: Optional[List[str]] = None,
         return False, None, "Path must be a non-empty string"
 
     if '..' in path or path.startswith('/') and not path.startswith('//'):
-        normalized = os.path.normpath(path)
-        if '..' in normalized or normalized != os.path.normpath(path):
+        normalized = str(Path(path))
+        normalized_check = Path(path)
+        if '..' in normalized or normalized != str(normalized_check):
             return False, None, "Path contains traversal sequences (..)"
 
     if '\x00' in path:
@@ -98,8 +99,8 @@ def sanitize_path(path: str, base_path: Optional[str] = None) -> Optional[str]:
 
     if base_path:
         try:
-            base_real = os.path.realpath(base_path)
-            path_real = os.path.realpath(normalized)
+            base_real = str(Path(base_path).resolve())
+            path_real = str(Path(normalized).resolve())
 
             if not path_real.startswith(base_real + os.sep) and path_real != base_real:
                 return None

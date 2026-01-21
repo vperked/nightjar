@@ -409,18 +409,19 @@ class DiskMonitor:
             logger.warning(f"[SECURITY] Path validation failed for '{path}': {error}")
             return None
 
-        if resolved_path and ('..' in resolved_path or resolved_path != os.path.normpath(resolved_path)):
-            logger.warning(f"[SECURITY] Path traversal detected in resolved path: {resolved_path}")
+        if not resolved_path:
+            logger.warning(f"[SECURITY] Path validation returned no resolved path for '{path}'")
             return None
 
         path = resolved_path
+        path_obj = Path(path)
 
-        if not os.path.exists(path):
+        if not path_obj.exists():
             return None
 
-        if not os.path.isdir(path):
+        if not path_obj.is_dir():
             try:
-                size = os.path.getsize(path)
+                size = path_obj.stat().st_size
                 return {
                     'path': path,
                     'size': size,
@@ -445,9 +446,9 @@ class DiskMonitor:
 
                 if max_depth is not None:
                     try:
-                        rel_path = os.path.relpath(dirpath, path)
-                        current_depth = rel_path.count(os.sep)
-                    except ValueError:
+                        rel_path = Path(dirpath).relative_to(path)
+                        current_depth = len(rel_path.parts) - 1
+                    except (ValueError, TypeError):
                         current_depth = 0
                     if current_depth >= max_depth:
                         dirnames.clear()
@@ -455,9 +456,9 @@ class DiskMonitor:
                 dir_count += len(dirnames)
 
                 for filename in filenames:
-                    filepath = os.path.join(dirpath, filename)
+                    filepath = Path(dirpath) / filename
                     try:
-                        total_size += os.path.getsize(filepath)
+                        total_size += filepath.stat().st_size
                         file_count += 1
                     except (OSError, PermissionError):
                         continue
@@ -527,14 +528,15 @@ class DiskMonitor:
         Returns:
             List of dictionaries containing subdirectory size information
         """
-        if not os.path.exists(parent_path) or not os.path.isdir(parent_path):
+        parent_path_obj = Path(parent_path)
+        if not parent_path_obj.exists() or not parent_path_obj.is_dir():
             return []
 
         subdirs = []
         try:
             for item in os.listdir(parent_path):
-                item_path = os.path.join(parent_path, item)
-                if os.path.isdir(item_path):
+                item_path = parent_path_obj / item
+                if item_path.is_dir():
                     size_info = self.get_directory_size(item_path)
                     if size_info:
                         subdirs.append(size_info)
@@ -568,7 +570,8 @@ class DiskMonitor:
         Returns:
             List of dictionaries containing directory size information, sorted by size (largest first)
         """
-        if not os.path.exists(path) or not os.path.isdir(path):
+        path_obj = Path(path)
+        if not path_obj.exists() or not path_obj.is_dir():
             return []
 
         subdirs = self.get_subdirectories_sizes(path)
@@ -616,13 +619,18 @@ class DiskMonitor:
         current_time = time.time()
         max_age_seconds = max_age_days * 24 * 60 * 60
 
-        temp_dirs_to_check = []
-        if platform.system() == 'Linux':
+        temp_dirs_env = os.getenv('TEMP_DIRS', None)
+        if temp_dirs_env:
+            temp_dirs_to_check = temp_dirs_env.split(':')
+        elif platform.system() == 'Linux':
             temp_dirs_to_check = ['/tmp', '/var/tmp']
+        else:
+            temp_dirs_to_check = []
 
         temp_dirs = []
         for temp_dir in temp_dirs_to_check:
-            if not os.path.exists(temp_dir) or not os.path.isdir(temp_dir):
+            temp_dir_obj = Path(temp_dir)
+            if not temp_dir_obj.exists() or not temp_dir_obj.is_dir():
                 continue
             try:
                 is_valid, resolved_path, error = validate_path(temp_dir, allow_symlinks=False)
@@ -632,7 +640,8 @@ class DiskMonitor:
                 pass
 
         for temp_dir in temp_dirs:
-            if not os.path.exists(temp_dir) or not os.path.isdir(temp_dir):
+            temp_dir_obj = Path(temp_dir)
+            if not temp_dir_obj.exists() or not temp_dir_obj.is_dir():
                 continue
 
             try:
@@ -645,62 +654,63 @@ class DiskMonitor:
 
                 for root, dirs, files in os.walk(temp_dir, topdown=False):
                     for filename in files:
-                        filepath = os.path.join(root, filename)
+                        filepath = Path(root) / filename
                         try:
-                            file_stat = os.stat(filepath)
+                            file_stat = filepath.stat()
                             file_age = current_time - file_stat.st_mtime
 
                             if file_age > max_age_seconds:
-                                file_size = os.path.getsize(filepath)
-                                os.remove(filepath)
+                                file_size = file_stat.st_size
+                                filepath.unlink()
                                 stats['files_removed'] += 1
                                 stats['total_size_cleared'] += file_size
                                 logger.debug(f"Removed old temp file: {filepath} ({format_bytes(file_size)})")
                         except (OSError, PermissionError) as e:
                             continue
                         except Exception as e:
-                            logger.warning(f"Unexpected error removing {filepath}: {e}", exc_info=True)
+                            logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
                             stats['errors'].append(f"Error removing {filepath}: {e}")
 
                     for dirname in dirs:
-                        dirpath = os.path.join(root, dirname)
+                        dirpath = Path(root) / dirname
                         try:
-                            if dirpath != temp_dir:
-                                if not os.listdir(dirpath):
-                                    os.rmdir(dirpath)
+                            if str(dirpath) != temp_dir:
+                                if not any(dirpath.iterdir()):
+                                    dirpath.rmdir()
                                     stats['dirs_removed'] += 1
                                     logger.debug(f"Removed empty temp directory: {dirpath}")
                         except (OSError, PermissionError):
                             continue
                         except Exception as e:
-                            logger.warning(f"Unexpected error removing directory {dirpath}: {e}", exc_info=True)
+                            logger.error(f"Unexpected error removing directory {dirpath}: {e}", exc_info=True)
                             stats['errors'].append(f"Error removing directory {dirpath}: {e}")
 
                 temp_patterns = [
-                    os.path.join(temp_dir, 'tmp*'),
-                    os.path.join(temp_dir, '*.tmp'),
-                    os.path.join(temp_dir, '*.log'),
+                    str(Path(temp_dir) / 'tmp*'),
+                    str(Path(temp_dir) / '*.tmp'),
+                    str(Path(temp_dir) / '*.log'),
                 ]
 
                 for pattern in temp_patterns:
                     try:
                         for filepath in glob.glob(pattern):
+                            filepath_obj = Path(filepath)
                             try:
-                                file_stat = os.stat(filepath)
+                                file_stat = filepath_obj.stat()
                                 file_age = current_time - file_stat.st_mtime
 
                                 if file_age > max_age_seconds:
-                                    file_size = os.path.getsize(filepath)
-                                    os.remove(filepath)
+                                    file_size = file_stat.st_size
+                                    filepath_obj.unlink()
                                     stats['files_removed'] += 1
                                     stats['total_size_cleared'] += file_size
                             except (OSError, PermissionError):
                                 continue
                             except Exception as e:
-                                logger.warning(f"Unexpected error removing {filepath}: {e}", exc_info=True)
+                                logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
                                 stats['errors'].append(f"Error removing {filepath}: {e}")
                     except Exception as e:
-                        logger.warning(f"Unexpected error with pattern {pattern}: {e}", exc_info=True)
+                        logger.error(f"Unexpected error processing pattern {pattern}: {e}", exc_info=True)
                         stats['errors'].append(f"Error with pattern {pattern}: {e}")
 
             except PermissionError as e:
@@ -708,6 +718,85 @@ class DiskMonitor:
             except Exception as e:
                 logger.error(f"Unexpected error cleaning {temp_dir}: {e}", exc_info=True)
                 stats['errors'].append(f"Error cleaning {temp_dir}: {e}")
+
+        return stats
+
+    def _perform_log_cleanup(self, log_monitor, aggressive: bool = False, mountpoint: str = '/') -> Dict:
+        """
+        Perform log cleanup with optional aggressive mode.
+
+        Args:
+            log_monitor: LogMonitor instance to clean logs
+            aggressive: If True, clean all logs regardless of threshold
+            mountpoint: Mount point to check disk usage
+
+        Returns:
+            Dictionary with cleanup statistics
+        """
+        stats = {
+            'logs_cleaned': 0,
+            'total_size_cleared': 0,
+            'errors': []
+        }
+
+        if not log_monitor:
+            return stats
+
+        try:
+            all_log_files = log_monitor.get_all_log_files_in_directory('/var/log')
+            all_log_sizes = log_monitor.get_all_log_sizes()
+            monitored_logs = []
+            if all_log_sizes.get('application_log'):
+                monitored_logs.append(all_log_sizes['application_log'])
+            monitored_logs.extend(all_log_sizes.get('system_logs', []))
+            if all_log_sizes.get('journal_log'):
+                monitored_logs.append(all_log_sizes['journal_log'])
+
+            all_logs_dict = {}
+            for log_info in all_log_files + monitored_logs:
+                log_path = log_info.get('path', '')
+                if log_path:
+                    if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
+                        all_logs_dict[log_path] = log_info
+
+            if aggressive:
+                logs_to_clean = list(all_logs_dict.values())
+            else:
+                logs_to_clean = [log for log in all_logs_dict.values() if log_monitor.check_log_threshold(log)]
+
+            logs_to_clean.sort(key=lambda x: x.get('size_bytes', 0), reverse=True)
+
+            for log_info in logs_to_clean:
+                try:
+                    log_path = log_info.get('path', '')
+                    if not log_path:
+                        continue
+
+                    current_log_info = log_monitor.get_log_size(log_path)
+                    if not current_log_info:
+                        continue
+
+                    original_size = current_log_info.get('size_bytes', 0)
+                    if original_size == 0:
+                        continue
+
+                    if log_monitor.cleanup_log(current_log_info, force=aggressive):
+                        stats['logs_cleaned'] += 1
+                        size_after = log_monitor.get_log_size(log_path)
+                        size_after_bytes = size_after.get('size_bytes', 0) if size_after else 0
+                        stats['total_size_cleared'] += max(0, original_size - size_after_bytes)
+                        logger.info(f"    Cleaned log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
+                except Exception as e:
+                    logger.error(f"Unexpected error cleaning log {log_info.get('path', 'unknown')}: {e}", exc_info=True)
+                    stats['errors'].append(f"Error cleaning log {log_info.get('path', 'unknown')}: {e}")
+
+            if stats['logs_cleaned'] > 0:
+                self.restart_log_services()
+                self.setup_nginx_logs()
+
+        except Exception as e:
+            logger.error(f"Unexpected error getting log sizes: {e}", exc_info=True)
+            stats['errors'].append(f"Error getting log sizes: {e}")
 
         return stats
 
@@ -757,73 +846,20 @@ class DiskMonitor:
             else:
                 logger.info("[CLEANUP] Step 1: Cleaning log files (all logs in /var/log exceeding threshold)...")
 
-            try:
-                all_log_files = log_monitor.get_all_log_files_in_directory('/var/log')
+            log_cleanup_stats = self._perform_log_cleanup(log_monitor, aggressive=aggressive_cleanup, mountpoint=mountpoint)
+            stats['logs_cleaned'] = log_cleanup_stats['logs_cleaned']
+            stats['total_size_cleared'] += log_cleanup_stats['total_size_cleared']
+            stats['errors'].extend(log_cleanup_stats['errors'])
 
-                all_log_sizes = log_monitor.get_all_log_sizes()
-                monitored_logs = []
-                if all_log_sizes.get('application_log'):
-                    monitored_logs.append(all_log_sizes['application_log'])
-                monitored_logs.extend(all_log_sizes.get('system_logs', []))
-                if all_log_sizes.get('journal_log'):
-                    monitored_logs.append(all_log_sizes['journal_log'])
-
-                all_logs_dict = {}
-                for log_info in all_log_files + monitored_logs:
-                    log_path = log_info.get('path', '')
-                    if log_path:
-                        if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
-                            all_logs_dict[log_path] = log_info
-
-                if aggressive_cleanup:
-                    logs_to_clean = list(all_logs_dict.values())
-                else:
-                    logs_to_clean = [log for log in all_logs_dict.values() if log_monitor.check_log_threshold(log)]
-
-                logs_to_clean.sort(key=lambda x: x.get('size_bytes', 0), reverse=True)
-
-                for log_info in logs_to_clean:
-                    try:
-                        log_path = log_info.get('path', '')
-                        if not log_path:
-                            continue
-
-                        current_log_info = log_monitor.get_log_size(log_path)
-                        if not current_log_info:
-                            continue
-
-                        original_size = current_log_info.get('size_bytes', 0)
-                        if original_size == 0:
-                            continue
-
-                        if log_monitor.cleanup_log(current_log_info, force=aggressive_cleanup):
-                            stats['logs_cleaned'] += 1
-                            size_after = log_monitor.get_log_size(log_path)
-                            size_after_bytes = size_after.get('size_bytes', 0) if size_after else 0
-                            stats['total_size_cleared'] += max(0, original_size - size_after_bytes)
-                            logger.info(f"    Cleaned log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
-                    except Exception as e:
-                        logger.error(f"Unexpected error cleaning log {log_info.get('path', 'unknown')}: {e}", exc_info=True)
-                        stats['errors'].append(f"Error cleaning log {log_info.get('path', 'unknown')}: {e}")
-
-                current_usage = self.get_disk_usage(mountpoint)
-                if current_usage:
-                    current_free_percent = 100.0 - current_usage['percent']
-                    if current_free_percent >= target_free_percent:
-                        logger.info(f"[CLEANUP] Target free space reached after log cleanup: {current_free_percent:.1f}% free")
-                        self.restart_log_services()
-                        self.setup_nginx_logs()
-                        final_usage = self.get_disk_usage(mountpoint)
-                        if final_usage:
-                            stats['final_usage'] = final_usage['percent']
-                        return stats
-
-                if stats['logs_cleaned'] > 0:
-                    self.restart_log_services()
-                    self.setup_nginx_logs()
-            except Exception as e:
-                logger.error(f"Unexpected error getting log sizes: {e}", exc_info=True)
-                stats['errors'].append(f"Error getting log sizes: {e}")
+            current_usage = self.get_disk_usage(mountpoint)
+            if current_usage:
+                current_free_percent = 100.0 - current_usage['percent']
+                if current_free_percent >= target_free_percent:
+                    logger.info(f"[CLEANUP] Target free space reached after log cleanup: {current_free_percent:.1f}% free")
+                    final_usage = self.get_disk_usage(mountpoint)
+                    if final_usage:
+                        stats['final_usage'] = final_usage['percent']
+                    return stats
 
         logger.info("[CLEANUP] Step 2: Cleaning temporary files...")
         max_attempts = 4
@@ -889,14 +925,19 @@ class DiskMonitor:
         if not platform.system() == 'Linux':
             return stats
 
-        cache_dirs_to_clean = [
-            '/var/cache/apt/archives',
-            '/var/cache/apt/pkgcache.bin',
-            '/var/cache/apt/srcpkgcache.bin',
-        ]
+        cache_dirs_env = os.getenv('CACHE_DIRS', None)
+        if cache_dirs_env:
+            cache_dirs_to_clean = cache_dirs_env.split(':')
+        else:
+            cache_dirs_to_clean = [
+                '/var/cache/apt/archives',
+                '/var/cache/apt/pkgcache.bin',
+                '/var/cache/apt/srcpkgcache.bin',
+            ]
 
         for cache_dir in cache_dirs_to_clean:
-            if not os.path.exists(cache_dir):
+            cache_dir_obj = Path(cache_dir)
+            if not cache_dir_obj.exists():
                 continue
 
             try:
@@ -905,15 +946,16 @@ class DiskMonitor:
                     continue
 
                 cache_dir = resolved_path
+                cache_dir_obj = Path(cache_dir)
 
                 if 'apt/archives' in cache_dir:
                     try:
                         for filename in os.listdir(cache_dir):
-                            filepath = os.path.join(cache_dir, filename)
-                            if os.path.isfile(filepath) and filename.endswith('.deb'):
+                            filepath = cache_dir_obj / filename
+                            if filepath.is_file() and filename.endswith('.deb'):
                                 try:
-                                    file_size = os.path.getsize(filepath)
-                                    os.remove(filepath)
+                                    file_size = filepath.stat().st_size
+                                    filepath.unlink()
                                     stats['files_removed'] += 1
                                     stats['total_size_cleared'] += file_size
                                     logger.debug(f"Removed package cache file: {filepath} ({format_bytes(file_size)})")
@@ -924,9 +966,9 @@ class DiskMonitor:
 
                 elif cache_dir.endswith('.bin'):
                     try:
-                        if os.path.isfile(cache_dir):
-                            file_size = os.path.getsize(cache_dir)
-                            os.remove(cache_dir)
+                        if cache_dir_obj.is_file():
+                            file_size = cache_dir_obj.stat().st_size
+                            cache_dir_obj.unlink()
                             stats['files_removed'] += 1
                             stats['total_size_cleared'] += file_size
                             logger.debug(f"Removed cache binary: {cache_dir} ({format_bytes(file_size)})")
@@ -981,63 +1023,22 @@ class DiskMonitor:
 
         if log_monitor:
             logger.info("[EMERGENCY] Step 2: Cleaning log files (aggressive - ALL logs in /var/log)...")
-            try:
-                all_log_files = log_monitor.get_all_log_files_in_directory('/var/log')
-
-                all_log_sizes = log_monitor.get_all_log_sizes()
-                monitored_logs = []
-                if all_log_sizes.get('application_log'):
-                    monitored_logs.append(all_log_sizes['application_log'])
-                monitored_logs.extend(all_log_sizes.get('system_logs', []))
-                if all_log_sizes.get('journal_log'):
-                    monitored_logs.append(all_log_sizes['journal_log'])
-
-                all_logs_dict = {}
-                for log_info in all_log_files + monitored_logs:
-                    log_path = log_info.get('path', '')
-                    if log_path:
-                        if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
-                            all_logs_dict[log_path] = log_info
-
-                all_logs = list(all_logs_dict.values())
-
-                all_logs.sort(key=lambda x: x.get('size_bytes', 0), reverse=True)
-
-                for log_info in all_logs:
-                    try:
-                        log_path = log_info.get('path', '')
-                        if not log_path:
-                            continue
-
-                        current_log_info = log_monitor.get_log_size(log_path)
-                        if not current_log_info:
-                            continue
-
-                        original_size = current_log_info.get('size_bytes', 0)
-                        if original_size == 0:
-                            continue
-
-                        if log_monitor.cleanup_log(current_log_info, force=True):
-                            stats['logs_cleaned'] += 1
-                            size_after = log_monitor.get_log_size(log_path)
-                            size_after_bytes = size_after.get('size_bytes', 0) if size_after else 0
-                            stats['total_size_cleared'] += max(0, original_size - size_after_bytes)
-                            logger.info(f"    Cleaned log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
-                    except Exception as e:
-                        logger.error(f"Unexpected error cleaning log {log_info.get('path', 'unknown')}: {e}", exc_info=True)
-                        stats['errors'].append(f"Error cleaning log {log_info.get('path', 'unknown')}: {e}")
-            except Exception as e:
-                logger.error(f"Unexpected error getting log sizes: {e}", exc_info=True)
-                stats['errors'].append(f"Error getting log sizes: {e}")
-
-            if stats['logs_cleaned'] > 0:
-                self.restart_log_services()
-                self.setup_nginx_logs()
+            log_cleanup_stats = self._perform_log_cleanup(log_monitor, aggressive=True, mountpoint=mountpoint)
+            stats['logs_cleaned'] = log_cleanup_stats['logs_cleaned']
+            stats['total_size_cleared'] += log_cleanup_stats['total_size_cleared']
+            stats['errors'].extend(log_cleanup_stats['errors'])
 
         logger.info("[EMERGENCY] Step 3: Cleaning additional cache directories...")
-        cache_dirs = ['/var/cache', '/tmp', '/var/tmp']
+        emergency_cache_dirs_env = os.getenv('EMERGENCY_CACHE_DIRS', None)
+        if emergency_cache_dirs_env:
+            cache_dirs = emergency_cache_dirs_env.split(':')
+        elif platform.system() == 'Linux':
+            cache_dirs = ['/var/cache', '/tmp', '/var/tmp']
+        else:
+            cache_dirs = []
         for cache_dir in cache_dirs:
-            if not os.path.exists(cache_dir) or not os.path.isdir(cache_dir):
+            cache_dir_obj = Path(cache_dir)
+            if not cache_dir_obj.exists() or not cache_dir_obj.is_dir():
                 continue
 
             try:
@@ -1047,30 +1048,31 @@ class DiskMonitor:
 
                 current_time = time.time()
                 max_age_seconds = 24 * 60 * 60
+                resolved_path_obj = Path(resolved_path)
 
                 for root, dirs, files in os.walk(resolved_path, topdown=False):
                     for filename in files:
-                        filepath = os.path.join(root, filename)
+                        filepath = Path(root) / filename
                         try:
-                            file_stat = os.stat(filepath)
+                            file_stat = filepath.stat()
                             file_age = current_time - file_stat.st_mtime
 
                             if file_age > max_age_seconds:
-                                file_size = os.path.getsize(filepath)
-                                os.remove(filepath)
+                                file_size = file_stat.st_size
+                                filepath.unlink()
                                 stats['files_removed'] += 1
                                 stats['total_size_cleared'] += file_size
                         except (OSError, PermissionError):
                             continue
                         except Exception as e:
-                            logger.warning(f"Unexpected error removing {filepath}: {e}", exc_info=True)
+                            logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
                             stats['errors'].append(f"Error removing {filepath}: {e}")
 
                     for dirname in dirs:
-                        dirpath = os.path.join(root, dirname)
+                        dirpath = Path(root) / dirname
                         try:
-                            if dirpath != resolved_path and not os.listdir(dirpath):
-                                os.rmdir(dirpath)
+                            if str(dirpath) != resolved_path and not any(dirpath.iterdir()):
+                                dirpath.rmdir()
                                 stats['dirs_removed'] += 1
                         except (OSError, PermissionError):
                             continue
@@ -1211,10 +1213,16 @@ class DiskMonitor:
         nginx_log_dir = os.getenv('NGINX_LOG_DIR', '/var/log/nginx')
         nginx_user_group = os.getenv('NGINX_USER_GROUP', 'www-data:adm')
         nginx_service_name = os.getenv('NGINX_SERVICE_NAME', 'nginx')
+        
+        import re
+        if not re.match(r'^[a-z_][a-z0-9_-]*[$]?:[a-z_][a-z0-9_-]*[$]?$', nginx_user_group):
+            logger.error(f"Invalid NGINX_USER_GROUP format: {nginx_user_group}. Expected format: 'user:group'")
+            return
 
         try:
-            if not os.path.exists(nginx_log_dir):
-                os.makedirs(nginx_log_dir, mode=0o755, exist_ok=True)
+            nginx_log_dir_obj = Path(nginx_log_dir)
+            if not nginx_log_dir_obj.exists():
+                nginx_log_dir_obj.mkdir(mode=0o755, parents=True, exist_ok=True)
                 logger.info(f"    Created nginx log directory: {nginx_log_dir}")
 
             try:
@@ -1241,8 +1249,8 @@ class DiskMonitor:
                 logger.warning(f"    Error setting ownership on {nginx_log_dir}: {e}")
 
             for log_file in ['error.log', 'access.log']:
-                log_path = os.path.join(nginx_log_dir, log_file)
-                if not os.path.exists(log_path):
+                log_path = Path(nginx_log_dir) / log_file
+                if not log_path.exists():
                     try:
                         Path(log_path).touch()
                         subprocess.run(
