@@ -1154,43 +1154,9 @@ def main(
                                 # Restart log services and setup nginx logs
                                 if platform.system() == 'Linux':
                                     try:
-                                        # Restart standard log services
-                                        for service in ['rsyslog', 'systemd-journald']:
-                                            subprocess.run(['systemctl', 'restart', service], 
-                                                         capture_output=True, timeout=30, check=False)
+                                        disk_monitor._restart_log_services()
                                         
-                                        # Setup nginx log directory and files if they were cleaned
-                                        nginx_log_dir = '/var/log/nginx'
-                                        nginx_logs_cleaned = any('/var/log/nginx' in log_info.get('path', '') for log_info in logs_to_clean)
-                                        
-                                        if nginx_logs_cleaned or not os.path.exists(nginx_log_dir):
-                                            try:
-                                                # Create directory with proper ownership and permissions
-                                                os.makedirs(nginx_log_dir, mode=0o755, exist_ok=True)
-                                                
-                                                # Set ownership to www-data:adm
-                                                subprocess.run(['chown', 'www-data:adm', nginx_log_dir], 
-                                                             capture_output=True, timeout=10, check=False)
-                                                
-                                                # Create log files if they don't exist
-                                                for log_file in ['error.log', 'access.log']:
-                                                    log_path = os.path.join(nginx_log_dir, log_file)
-                                                    if not os.path.exists(log_path):
-                                                        Path(log_path).touch()
-                                                        subprocess.run(['chown', 'www-data:adm', log_path], 
-                                                                     capture_output=True, timeout=10, check=False)
-                                                
-                                                logger.info(f"[CLEANUP] Created/verified nginx log directory: {nginx_log_dir}")
-                                                
-                                                # Restart nginx
-                                                result = subprocess.run(['systemctl', 'restart', 'nginx'], 
-                                                                       capture_output=True, text=True, timeout=30, check=False)
-                                                if result.returncode == 0:
-                                                    logger.info("[CLEANUP] Nginx restarted successfully")
-                                                else:
-                                                    logger.warning(f"[CLEANUP] Nginx restart failed: {result.stderr}")
-                                            except Exception as e:
-                                                logger.debug(f"[CLEANUP] Error setting up nginx logs: {e}")
+                                        disk_monitor._setup_nginx_logs()
                                     except Exception as e:
                                         logger.debug(f"[CLEANUP] Error restarting services: {e}")
                                 
