@@ -20,6 +20,7 @@ network_monitor = None
 sensors_monitor = None
 httpd = None
 server_thread = None
+crash_webhook = None
 
 _process_cache = {
     'top_cpu': [],
@@ -84,6 +85,17 @@ def set_monitors(cpu, memory, system, gpu, disk, network, sensors):
     disk_monitor = disk
     network_monitor = network
     sensors_monitor = sensors
+
+
+def set_crash_webhook(webhook):
+    """
+    Set crash webhook for sending error notifications.
+
+    Args:
+        webhook: DiscordWebhook instance for crash/error notifications
+    """
+    global crash_webhook
+    crash_webhook = webhook
 
 
 class WebRequestHandler(BaseHTTPRequestHandler):
@@ -801,6 +813,22 @@ def _run_server(port, host):
                 logger.info(f"Successfully bound to port {port}")
             except (OSError, socket.error) as e2:
                 logger.error(f"Failed to bind to port {port}: {e2}")
+                if crash_webhook:
+                    try:
+                        crash_webhook.send_embed(
+                            title='Web Server Port Binding Error',
+                            description=f'Failed to bind web server to port {port}',
+                            fields=[
+                                {'name': 'Error Type', 'value': type(e2).__name__, 'inline': True},
+                                {'name': 'Error Message', 'value': str(e2)[:500], 'inline': False},
+                                {'name': 'Port', 'value': str(port), 'inline': True},
+                            ],
+                            color=0xFF6B6B,
+                            footer='Server Monitor - Web Server Error',
+                            timestamp=True
+                        )
+                    except Exception as webhook_error:
+                        logger.warning(f"Failed to send port binding error to crash webhook: {webhook_error}")
                 raise
         else:
             raise
@@ -820,6 +848,27 @@ def _run_server(port, host):
         httpd.serve_forever()
     except Exception as e:
         logger.error(f"Web server error: {e}")
+        if crash_webhook:
+            try:
+                import traceback
+                traceback_text = traceback.format_exc()
+                if len(traceback_text) > 1000:
+                    traceback_text = traceback_text[:1000] + "... (truncated)"
+                
+                crash_webhook.send_embed(
+                    title='Web Server Error',
+                    description=f'An error occurred in the web server',
+                    fields=[
+                        {'name': 'Error Type', 'value': type(e).__name__, 'inline': True},
+                        {'name': 'Error Message', 'value': str(e)[:500], 'inline': False},
+                        {'name': 'Traceback', 'value': f"```\n{traceback_text}\n```", 'inline': False},
+                    ],
+                    color=0xFF6B6B,
+                    footer='Server Monitor - Web Server Error',
+                    timestamp=True
+                )
+            except Exception as webhook_error:
+                logger.warning(f"Failed to send web server error to crash webhook: {webhook_error}")
 
 
 def start_server(port=8080, host='0.0.0.0'):

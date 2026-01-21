@@ -15,7 +15,7 @@ from util.util import format_bytes, format_bytes_per_second, BYTES_PER_KB, BYTES
 from util.systemd import install_systemd_service, is_systemd_available
 from cache.cache import clear_cache_on_startup, clear_cache_on_exit
 from logger import get_logger
-from web.server import set_monitors, start_server, stop_server
+from web.server import set_monitors, start_server, stop_server, set_crash_webhook
 from typing import Optional, Tuple, Dict, List
 from datetime import datetime
 from pathlib import Path
@@ -841,6 +841,7 @@ def main(
         try:
             crash_webhook = DiscordWebhook(webhook_url=crash_webhook_url)
             logger.info("Crash Discord webhook connected")
+            set_crash_webhook(crash_webhook)
         except ValueError:
             logger.warning("Crash webhook URL invalid")
         except Exception as e:
@@ -1073,7 +1074,9 @@ def main(
         current_time = time.time()
         time_since_last_webhook = current_time - last_error_webhook_time
 
-        if webhook and time_since_last_webhook >= ERROR_WEBHOOK_COOLDOWN:
+        target_webhook = crash_webhook if crash_webhook else webhook
+
+        if target_webhook and time_since_last_webhook >= ERROR_WEBHOOK_COOLDOWN:
             try:
 
                 traceback_text = traceback.format_exc() if include_traceback else ""
@@ -1091,8 +1094,8 @@ def main(
                 if traceback_text:
                     fields.append({'name': 'Traceback', 'value': f"```\n{traceback_text}\n```", 'inline': False})
 
-                success = webhook.send_embed(
-                    title='⚠️ Monitoring Error Detected',
+                success = target_webhook.send_embed(
+                    title='Monitoring Error Detected',
                     description=f'An error occurred in the monitoring system',
                     fields=fields,
                     color=0xFF6B6B,
@@ -1102,7 +1105,8 @@ def main(
 
                 if success:
                     last_error_webhook_time = current_time
-                    logger.info("    Error notification sent to Discord")
+                    webhook_name = "Crash webhook" if crash_webhook else "Discord"
+                    logger.info(f"    Error notification sent to {webhook_name}")
             except Exception as e:
                 logger.warning(f"Failed to send error notification to webhook: {e}")
 
