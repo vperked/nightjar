@@ -188,7 +188,7 @@ Sends rich embed alerts to Discord for:
 - `QBITTORRENT_WEBHOOK` - qBittorrent-specific notifications
 
 **Features:**
-- Consistent embed styling (red color scheme)
+- Consistent embed styling (black color scheme)
 - Detailed field information
 - Timestamps and footers
 - Error handling and retry logic
@@ -197,7 +197,7 @@ Sends rich embed alerts to Discord for:
 
 ### Web Dashboard (`web/server.py`)
 
-Provides a web interface at `http://localhost:8080` (configurable):
+Provides a web interface at `http://localhost:8080` (configurable, can be disabled with `WEB_UI_ENABLED=false`):
 - Real-time system statistics
 - CPU, Memory, Disk, Network data
 - GPU information (if available)
@@ -209,6 +209,9 @@ Provides a web interface at `http://localhost:8080` (configurable):
 - `GET /api/stats` - JSON API for system statistics
 - `GET /health` - Comprehensive health check endpoint with system status
 - `GET /js/main.js` - JavaScript frontend
+
+**Disabling the Web UI:**
+Set `WEB_UI_ENABLED=false` in your `.env` file to disable the web server entirely. This is useful for headless servers or when you only need Discord alerts.
 
 **Health Check Endpoint (`/health`):**
 Returns detailed health status with checks for:
@@ -329,6 +332,7 @@ All configuration is done via environment variables (`.env` file):
 
 ### Web Server
 - `WEB_PORT` - Web dashboard port (default: 8080)
+- `WEB_UI_ENABLED` - Enable/disable web UI (default: true). Set to false/0/no/off to disable
 
 ### Error Recovery
 - `ALERT_LOG_PATH` - Path for fallback alert logging when Discord fails (default: /var/log/server-monitor-alerts.log)
@@ -509,6 +513,7 @@ main(cpu_monitor=mock_cpu, memory_monitor=mock_memory)
 - Some systems may not expose temperature sensors
 
 **Web dashboard not accessible:**
+- Check `WEB_UI_ENABLED` is not set to false
 - Check `WEB_PORT` is not blocked by firewall
 - Verify port is not already in use
 - Check logs for server startup errors
@@ -541,6 +546,8 @@ main(cpu_monitor=mock_cpu, memory_monitor=mock_memory)
 - Check that the monitor has permission to read kernel logs
 - Some systems may not expose all kernel log sources
 - Stability checks run more frequently (every 10 iterations) than crash checks (every 30)
+- False positives from driver warnings (e.g., asus_wmi) are automatically filtered out
+- The monitor's own log messages are excluded from crash detection
 
 ## 📚 Dependencies
 
@@ -573,6 +580,8 @@ The codebase follows clean code principles:
 - **Separate webhook routing** - Dedicated webhooks for disk, crash, and qBittorrent alerts
 - **System stability risk assessment** - Risk scoring with early warning detection
 - **Unexpected reboot detection** - Tracks and alerts on unexpected system reboots
+- **Web UI disable option** - Can disable web dashboard with `WEB_UI_ENABLED=false` environment variable
+- **Improved graceful shutdown** - Handles multiple Ctrl+C signals without log spam
 
 **Code Quality & Bug Fixes:**
 - Fixed IndexError issues in kernel monitoring (added bounds checking)
@@ -583,6 +592,10 @@ The codebase follows clean code principles:
 - Moved inline imports to module level for better performance
 - Comprehensive code review and bug fixes applied
 - All critical and medium priority issues resolved
+- Fixed kernel monitoring false positives (driver warnings, self-detection)
+- Improved signal handling to prevent shutdown log spam
+- Changed Discord embed colors to black for consistent styling
+- Removed all code comments for cleaner codebase
 
 **Existing Improvements:**
 - Fixed duplicate qBittorrent monitoring code

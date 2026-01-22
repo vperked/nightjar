@@ -1478,13 +1478,16 @@ def main(
     else:
         logger.debug("Disk webhook not configured (set DISK_WEBHOOK to enable)")
 
+    web_ui_enabled = get_env_bool('WEB_UI_ENABLED', True)
+    
     crash_webhook = None
     crash_webhook_url = get_cached_env('CRASH_WEBHOOK')
     if crash_webhook_url:
         try:
             crash_webhook = DiscordWebhook(webhook_url=crash_webhook_url)
             logger.info("Crash Discord webhook connected")
-            set_crash_webhook(crash_webhook)
+            if web_ui_enabled:
+                set_crash_webhook(crash_webhook)
         except ValueError:
             logger.warning("Crash webhook URL invalid")
         except Exception as e:
@@ -1646,16 +1649,22 @@ def main(
 
     logger.info(f"Settings: Check every {check_interval:.1f}s | Cooldown {alert_cooldown:.1f}s")
 
-    web_port = get_env_int('WEB_PORT', 8080)
-    logger.info("Starting web server...")
-    try:
-        set_monitors(cpu_monitor, memory_monitor, system_monitor, gpu_monitor,
-                    disk_monitor, network_monitor, sensors_monitor)
-        start_server(port=web_port)
-        logger.info(f"Web server started successfully on port {web_port}")
-        logger.info(f"Access the web UI at http://localhost:{web_port}")
-    except Exception as e:
-        logger.warning(f"Failed to start web server: {e}")
+    web_server_started = False
+    
+    if web_ui_enabled:
+        web_port = get_env_int('WEB_PORT', 8080)
+        logger.info("Starting web server...")
+        try:
+            set_monitors(cpu_monitor, memory_monitor, system_monitor, gpu_monitor,
+                        disk_monitor, network_monitor, sensors_monitor)
+            start_server(port=web_port)
+            web_server_started = True
+            logger.info(f"Web server started successfully on port {web_port}")
+            logger.info(f"Access the web UI at http://localhost:{web_port}")
+        except Exception as e:
+            logger.warning(f"Failed to start web server: {e}")
+    else:
+        logger.info("Web UI disabled (set WEB_UI_ENABLED=true to enable)")
 
     if webhook:
         logger.info("Sending system info to Discord...")
@@ -1825,6 +1834,7 @@ def main(
         'graceful_shutdown': False,
         'shutdown_reason': 'unknown',
         'shutdown_time': None,
+        'shutdown_in_progress': False,
         'lock': threading.Lock()
     }
 
@@ -1832,9 +1842,12 @@ def main(
         """Handle shutdown signals gracefully."""
         signal_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
         with shutdown_state['lock']:
+            if shutdown_state['shutdown_in_progress']:
+                return
             shutdown_state['graceful_shutdown'] = True
             shutdown_state['shutdown_reason'] = f'signal_{signal_name}'
             shutdown_state['shutdown_time'] = time.time()
+            shutdown_state['shutdown_in_progress'] = True
         logger.info(f"Received {signal_name} signal - initiating graceful shutdown...")
         raise KeyboardInterrupt
 
@@ -3363,14 +3376,13 @@ def main(
         with shutdown_state['lock']:
             is_graceful = shutdown_state['graceful_shutdown']
             shutdown_reason = shutdown_state.get('shutdown_reason', 'keyboard_interrupt')
+            shutdown_state['shutdown_in_progress'] = True
+            shutdown_state['shutdown_time'] = shutdown_start
 
         if is_graceful:
             logger.info(f"Monitoring stopped gracefully ({shutdown_reason})")
         else:
             logger.info("Monitoring stopped by user (Ctrl+C)")
-
-        with shutdown_state['lock']:
-            shutdown_state['shutdown_time'] = shutdown_start
 
         if watchdog_monitor:
             try:
@@ -3393,16 +3405,15 @@ def main(
                 except Exception as e:
                     logger.debug(f"Error stopping freeze monitor: {e}")
         except KeyboardInterrupt:
-            logger.warning("Shutdown interrupted, exiting immediately")
-            raise
+            pass
 
-        try:
-            stop_server(timeout=3.0)
-        except KeyboardInterrupt:
-            logger.warning("Server shutdown interrupted, exiting immediately")
-            raise
-        except Exception as e:
-            logger.warning(f"Error stopping web server: {e}")
+        if web_server_started:
+            try:
+                stop_server(timeout=3.0)
+            except KeyboardInterrupt:
+                pass
+            except Exception as e:
+                logger.warning(f"Error stopping web server: {e}")
 
         shutdown_seconds = time.time() - shutdown_start
         logger.info(f"Shutdown complete ({shutdown_seconds:.2f}s)")
@@ -3465,10 +3476,11 @@ def main(
                 freeze_monitor.stop_watchdog()
             except Exception:
                 pass
-        try:
-            stop_server()
-        except Exception:
-            pass
+        if web_server_started:
+            try:
+                stop_server()
+            except Exception:
+                pass
     finally:
         with shutdown_state['lock']:
             final_reason = shutdown_state.get('shutdown_reason', 'unknown')
