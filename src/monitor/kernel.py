@@ -613,12 +613,21 @@ class KernelMonitor:
                             if line.strip():
                                 try:
                                     entry = json.loads(line)
+                                    message = entry.get('MESSAGE', '')
+                                    message_lower = message.lower()
+                                    
+                                    if 'servermonitor' in message_lower or 'server monitor' in message_lower:
+                                        continue
+                                    
+                                    if 'python3' in message_lower and ('discord kernel crash alert' in message_lower or 'servermonitor' in message_lower):
+                                        continue
+                                    
                                     crash_id = f"{entry.get('__REALTIME_TIMESTAMP', '')}_{keyword}"
                                     if crash_id not in self.detected_crashes:
                                         crashes.append({
                                             'type': 'kernel_error',
                                             'keyword': keyword,
-                                            'message': entry.get('MESSAGE', ''),
+                                            'message': message,
                                             'timestamp': entry.get('__REALTIME_TIMESTAMP', ''),
                                             'source': 'journalctl'
                                         })
@@ -680,8 +689,16 @@ class KernelMonitor:
                                 pass
 
                         line_lower = line.lower()
-                        critical_keywords = ['panic', 'oops', 'bug:', 'crash', 'fault',
-                                           'segmentation', 'general protection', 'double fault']
+                        
+                        if 'servermonitor' in line_lower or 'python3' in line_lower:
+                            continue
+                        
+                        if any(ignore in line_lower for ignore in ['failed:', 'failed (', 'error -', 'warn:', 'warning:']):
+                            if not any(critical in line_lower for critical in ['panic', 'oops', 'bug:', 'crash', 'segmentation fault', 'general protection fault', 'double fault', 'unhandled page fault']):
+                                continue
+                        
+                        critical_keywords = ['panic', 'oops', 'bug:', 'crash',
+                                           'segmentation fault', 'general protection fault', 'double fault', 'unhandled page fault']
 
                         for keyword in critical_keywords:
                             if keyword in line_lower:
@@ -741,9 +758,16 @@ class KernelMonitor:
                             continue
 
                         line_lower = line.lower()
+                        
+                        if 'servermonitor' in line_lower or 'server monitor' in line_lower:
+                            continue
+                        
+                        if 'python3' in line_lower and ('servermonitor' in line_lower or 'discord kernel crash alert' in line_lower):
+                            continue
+                        
                         critical_keywords = ['kernel panic', 'kernel oops', 'kernel crash',
                                            'bug:', 'panic:', 'oops:', 'crash:',
-                                           'general protection fault', 'segmentation fault']
+                                           'general protection fault', 'segmentation fault', 'double fault', 'unhandled page fault']
 
                         for keyword in critical_keywords:
                             if keyword in line_lower:

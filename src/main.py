@@ -116,7 +116,6 @@ def analyze_system_usage_patterns() -> Dict[str, Any]:
         except Exception:
             pass
 
-        # Determine system type based on usage patterns
         if analysis['typical_cpu'] > 0:
             if analysis['typical_cpu'] > 30 or analysis['process_count'] > 100:
                 analysis['system_type'] = 'server'
@@ -167,7 +166,6 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
         logger.debug(f"Could not detect CPU cores: {e}")
 
     try:
-        # Detect total memory
         mem = psutil.virtual_memory()
         detected['total_memory_gb'] = mem.total / BYTES_PER_GB
         detected['adaptations'].append(f"Detected {detected['total_memory_gb']:.1f} GB total memory")
@@ -191,7 +189,6 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
         logger.debug(f"Could not detect GPU: {e}")
 
     try:
-        # Detect qBittorrent availability
         qb_host = os.getenv('QBITTORRENT_HOST', 'localhost')
         qb_port = int(os.getenv('QBITTORRENT_PORT', '8080'))
 
@@ -201,10 +198,9 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
                 result = sock.connect_ex((qb_host, qb_port))
         except Exception as e:
             logger.debug(f"Socket error checking qBittorrent: {e}")
-            result = 1  # Connection failed
+            result = 1
 
         if result == 0:
-            # Port is open, try to authenticate
             try:
                 import qbittorrentapi
                 qb_client = qbittorrentapi.Client(
@@ -224,7 +220,6 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
 
     try:
         if platform.system() == 'Windows':
-            # On Windows, use the drive where the script is running
             root_path = os.path.splitdrive(sys.executable)[0] + '\\'
         else:
             root_path = '/'
@@ -260,7 +255,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
     adaptations_applied = []
     auto_detected_values = {}
 
-    # Adapt thresholds based on system specs AND usage patterns
     usage = detected.get('usage_analysis', {})
 
     if not os.getenv('CPU_THRESHOLD'):
@@ -280,7 +274,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
         else:
             base_threshold = DEFAULT_CPU_THRESHOLD
 
-        # Adjust based on typical usage patterns
         typical_cpu = usage.get('typical_cpu', 0)
         peak_cpu = usage.get('peak_cpu', 0)
         system_type = usage.get('system_type', 'unknown')
@@ -293,7 +286,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
                 threshold = min(90.0, base_threshold + 5.0)
                 reasoning.append(f"moderate typical usage ({typical_cpu:.1f}%)")
             elif typical_cpu < 10:
-                # Low usage system - more conservative threshold
                 threshold = max(70.0, base_threshold - 5.0)
                 reasoning.append(f"low typical usage ({typical_cpu:.1f}%)")
             else:
@@ -301,7 +293,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
                 reasoning.append(f"typical usage ({typical_cpu:.1f}%)")
 
             if system_type == 'server':
-                # Servers can handle higher sustained loads
                 threshold = min(90.0, threshold + 5.0)
                 reasoning.append("server workload")
             elif system_type == 'desktop':
@@ -310,7 +301,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
         else:
             threshold = base_threshold
 
-        # Ensure threshold is within reasonable bounds
         threshold = max(65.0, min(95.0, threshold))
 
         os.environ['CPU_THRESHOLD'] = str(threshold)
@@ -322,7 +312,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
         threshold = None
         reasoning = []
 
-        # Base threshold on total memory
         if detected['total_memory_gb'] > 0:
             if detected['total_memory_gb'] < 4:
                 base_threshold = 70.0
@@ -334,17 +323,15 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
                 base_threshold = 80.0
                 reasoning.append(f"{detected['total_memory_gb']:.1f} GB")
             else:
-                base_threshold = 82.0  # More headroom for high-memory systems
+                base_threshold = 82.0
                 reasoning.append(f"{detected['total_memory_gb']:.1f} GB (high memory)")
         else:
             base_threshold = DEFAULT_MEMORY_THRESHOLD
 
-        # Adjust based on typical memory usage
         typical_memory = usage.get('typical_memory', 0)
         peak_memory = usage.get('peak_memory', 0)
 
         if typical_memory > 0:
-            # If system typically uses a lot of memory, set threshold higher
             if typical_memory > 60:
                 threshold = min(90.0, base_threshold + 8.0)
                 reasoning.append(f"high typical usage ({typical_memory:.1f}%)")
@@ -352,7 +339,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
                 threshold = min(87.0, base_threshold + 5.0)
                 reasoning.append(f"moderate typical usage ({typical_memory:.1f}%)")
             elif typical_memory < 20:
-                # Low usage - more conservative
                 threshold = max(70.0, base_threshold - 5.0)
                 reasoning.append(f"low typical usage ({typical_memory:.1f}%)")
             else:
@@ -361,7 +347,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
         else:
             threshold = base_threshold
 
-        # Ensure threshold is within reasonable bounds
         threshold = max(65.0, min(92.0, threshold))
 
         os.environ['MEMORY_THRESHOLD'] = str(threshold)
@@ -373,7 +358,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
         threshold = None
         reasoning = []
 
-        # Base threshold on total disk space
         if detected['total_disk_gb'] > 0:
             if detected['total_disk_gb'] < 100:
                 base_threshold = 85.0
@@ -385,21 +369,18 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
                 base_threshold = 85.0
                 reasoning.append(f"{detected['total_disk_gb']:.1f} GB")
             else:
-                base_threshold = 88.0  # Large disks can go higher
+                base_threshold = 88.0
                 reasoning.append(f"{detected['total_disk_gb']:.1f} GB (large disk)")
         else:
             base_threshold = DEFAULT_DISK_THRESHOLD
 
-        # Adjust based on current disk usage
         typical_disk = usage.get('typical_disk', 0)
 
         if typical_disk > 0:
-            # If disk is already quite full, be more conservative
             if typical_disk > 70:
                 threshold = max(85.0, base_threshold - 3.0)
                 reasoning.append(f"current usage {typical_disk:.1f}% (already high)")
             elif typical_disk < 30:
-                # Lots of free space - can allow higher threshold
                 threshold = min(90.0, base_threshold + 3.0)
                 reasoning.append(f"current usage {typical_disk:.1f}% (plenty of space)")
             else:
@@ -408,7 +389,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
         else:
             threshold = base_threshold
 
-        # Ensure threshold is within reasonable bounds
         threshold = max(80.0, min(92.0, threshold))
 
         os.environ['DISK_THRESHOLD'] = str(threshold)
@@ -416,15 +396,12 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
         reasoning_str = ", ".join(reasoning)
         adaptations_applied.append(f"DISK_THRESHOLD set to {threshold:.1f}% (based on: {reasoning_str})")
 
-    # Auto-enable GPU monitoring if GPU is available and not explicitly disabled
     if detected['gpu_available'] and not os.getenv('GPU_THRESHOLD'):
         os.environ['GPU_THRESHOLD'] = str(DEFAULT_GPU_THRESHOLD)
         auto_detected_values['GPU_THRESHOLD'] = str(DEFAULT_GPU_THRESHOLD)
         adaptations_applied.append("GPU monitoring enabled (NVIDIA GPU detected)")
 
-    # Suggest qBittorrent monitoring if available
     if detected['qbittorrent_available'] and not os.getenv('QBITTORRENT_MONITOR'):
-        # Don't auto-enable, but log suggestion
         logger.info("qBittorrent is available. Set QBITTORRENT_MONITOR=true to enable monitoring")
 
 
@@ -547,12 +524,10 @@ def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root
             new_entries.append(f"{key}={escaped_value}")
 
     if not new_entries:
-        return False  # Nothing new to add
+        return False
 
-    # Write to .env file
     try:
         with open(env_file, 'a', encoding='utf-8') as f:
-            # Add newline if file exists and doesn't end with newline
             if existing_lines and not existing_lines[-1].endswith('\n'):
                 f.write('\n')
 
@@ -1782,7 +1757,7 @@ def main(
                     title='Monitoring Error Detected',
                     description=f'An error occurred in the monitoring system',
                     fields=fields,
-                    color=0xFF6B6B,
+                    color=0x000000,
                     footer='Server Monitor - Error Alert',
                     timestamp=True
                 )
@@ -2375,7 +2350,6 @@ def main(
                                             {'name': 'Free', 'value': format_bytes(partition_free), 'inline': True},
                                         ]
 
-                                        # Get largest directories for this partition
                                         largest_dirs = []
                                         try:
                                             if partition.get('percent', 0) >= disk_threshold:
@@ -2416,7 +2390,6 @@ def main(
                                     remaining_cooldown = alert_cooldown - time_since_last_alert
                                     logger.debug(f"Disk {partition_key} alert cooldown: {remaining_cooldown:.0f}s")
                             else:
-                                # Reset alert flag if below threshold
                                 mountpoint = partition.get('mountpoint', partition.get('device', 'unknown'))
                                 partition_key = mountpoint
                                 if partition_alert_sent.get(partition_key, False):
@@ -2424,7 +2397,6 @@ def main(
                 except Exception as e:
                     logger.debug(f"Error checking individual disks: {e}")
 
-                # Also check aggregated total for backward compatibility (only if no individual partitions detected)
                 if not all_partitions and disk_percent >= disk_threshold:
                     time_since_last_alert = current_time - last_disk_alert_time
 
@@ -2481,14 +2453,11 @@ def main(
                         remaining_cooldown = alert_cooldown - time_since_last_alert
                         logger.debug(f"Disk alert cooldown: {remaining_cooldown:.0f}s")
                 elif not all_partitions:
-                    # Reset alert flag if below threshold and no partitions detected
                     if disk_alert_sent:
                         disk_alert_sent = False
 
                 if monitor_individual_partitions:
                     try:
-                        # Use cached all_partitions from earlier in loop (already fetched at line 1947)
-                        # all_partitions already available from start of loop iteration
                         nvme_partitions = disk_monitor.get_nvme_partitions()
 
                         for partition in all_partitions:
@@ -3050,7 +3019,6 @@ def main(
                                     if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
                                         all_logs_dict[log_path] = log_info
 
-                            # Convert to list for iteration (dict.values() is a view, list() allows multiple iterations)
                             logs_to_check = list(all_logs_dict.values())
                             logger.info(f"[LOG CHECK] Disk at {disk_percent:.1f}% - cleaning ALL logs proactively")
                         else:
@@ -3392,7 +3360,6 @@ def main(
     except KeyboardInterrupt:
         shutdown_start = time.time()
 
-        # Check if this was a graceful shutdown (signal) or user interrupt
         with shutdown_state['lock']:
             is_graceful = shutdown_state['graceful_shutdown']
             shutdown_reason = shutdown_state.get('shutdown_reason', 'keyboard_interrupt')
@@ -3406,7 +3373,14 @@ def main(
             shutdown_state['shutdown_time'] = shutdown_start
 
         if watchdog_monitor:
-            watchdog_monitor.stop()
+            try:
+                watchdog_monitor.stop()
+            except KeyboardInterrupt:
+                if is_graceful:
+                    pass
+                else:
+                    logger.warning("Watchdog stop interrupted, exiting immediately")
+                    raise
 
         uptime_seconds = shutdown_start - monitoring_start_time
 
@@ -3433,7 +3407,6 @@ def main(
         shutdown_seconds = time.time() - shutdown_start
         logger.info(f"Shutdown complete ({shutdown_seconds:.2f}s)")
 
-        # Only send shutdown notification for graceful shutdowns (not crashes)
         if webhook and is_graceful:
             try:
                 logger.info("Sending shutdown notification...")
@@ -3447,7 +3420,6 @@ def main(
         elif not is_graceful:
             logger.debug("Skipping shutdown notification (not a graceful shutdown)")
     except Exception as e:
-        # This is a crash - unhandled exception
         with shutdown_state['lock']:
             shutdown_state['graceful_shutdown'] = False
             shutdown_state['shutdown_reason'] = 'crash_exception'
@@ -3457,7 +3429,6 @@ def main(
         logger.error(f"Traceback: {traceback.format_exc()}")
         logger.critical("CRITICAL: Monitoring loop crashed (unhandled exception).")
 
-        # Send crash alert (not shutdown notification)
         crash_webhook_to_use = crash_webhook if crash_webhook else webhook
         if crash_webhook_to_use:
             try:
@@ -3475,7 +3446,7 @@ def main(
                         {'name': 'Traceback', 'value': f"```\n{traceback_text}\n```", 'inline': False},
                         {'name': 'Status', 'value': 'CRITICAL - Program crashed unexpectedly', 'inline': False},
                     ],
-                    color=0xFF0000,  # Red for crashes
+                    color=0x000000,
                     footer='Server Monitor - Crash Alert',
                     timestamp=True
                 )
@@ -3499,7 +3470,6 @@ def main(
         except Exception:
             pass
     finally:
-        # Final check: if we reach finally without graceful shutdown flag, it might be a crash
         with shutdown_state['lock']:
             final_reason = shutdown_state.get('shutdown_reason', 'unknown')
             is_graceful_final = shutdown_state.get('graceful_shutdown', False)
@@ -3513,5 +3483,8 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
 

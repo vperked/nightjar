@@ -947,7 +947,7 @@ def _run_server(port: int, host: str) -> None:
                                 {'name': 'Error Message', 'value': str(e2)[:500], 'inline': False},
                                 {'name': 'Port', 'value': str(port), 'inline': True},
                             ],
-                            color=0xFF6B6B,
+                            color=0x000000,
                             footer='Server Monitor - Web Server Error',
                             timestamp=True
                         )
@@ -987,7 +987,7 @@ def _run_server(port: int, host: str) -> None:
                         {'name': 'Error Message', 'value': str(e)[:500], 'inline': False},
                         {'name': 'Traceback', 'value': f"```\n{traceback_text}\n```", 'inline': False},
                     ],
-                    color=0xFF6B6B,
+                    color=0x000000,
                     footer='Server Monitor - Web Server Error',
                     timestamp=True
                 )

@@ -44,7 +44,7 @@ class RateLimiter:
 
 class DiscordWebhook:
     """Discord webhook client for sending messages."""
-    DEFAULT_EMBED_COLOR = 0xDC3545
+    DEFAULT_EMBED_COLOR = 0x000000
 
     def __init__(self, webhook_url: Optional[str] = None):
         """
@@ -145,7 +145,7 @@ class DiscordWebhook:
         uptime_formatted = format_duration(uptime_seconds)
         shutdown_formatted = format_duration(shutdown_seconds)
 
-        color = 0x3498DB
+        color = 0x000000
 
         fields = [
             {
@@ -285,7 +285,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0x000000 if cpu_percent >= threshold else 0xdc3545
+        color = 0x000000
 
         fields = [
             {
@@ -382,7 +382,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0x000000 if memory_percent >= threshold else 0xdc3545
+        color = 0x000000
 
         fields = [
             {
@@ -597,7 +597,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0xff6b00 if temperature >= threshold * 1.1 else 0xdc3545
+        color = 0x000000
 
         fields = [
             {
@@ -702,7 +702,7 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0x000000 if gpu_utilization >= threshold else 0xdc3545
+        color = 0x000000
 
         fields = [
             {
@@ -929,7 +929,7 @@ class DiscordWebhook:
         size_formatted = format_bytes(size_bytes)
         threshold_formatted = format_bytes(threshold_bytes)
 
-        color = 0xff6b00 if size_bytes >= threshold_bytes * 1.1 else 0xdc3545
+        color = 0x000000
 
         fields = [
             {
@@ -1088,7 +1088,7 @@ class DiscordWebhook:
         size_formatted = log_info.get('size_formatted', 'N/A')
         file_count = log_info.get('file_count')
 
-        color = 0xdc3545
+        color = 0x000000
 
         if cleanup_performed:
             description = f'Log file exceeded threshold and was auto-cleaned'
@@ -1159,7 +1159,7 @@ class DiscordWebhook:
         if not cleaned_logs:
             return False
 
-        color = 0xdc3545
+        color = 0x000000
         log_count = len(cleaned_logs)
 
         if log_count == 1:

@@ -246,9 +246,12 @@ class WatchdogMonitor:
             self.running['value'] = False
 
         if self.watchdog_thread and self.watchdog_thread.is_alive():
-            self.watchdog_thread.join(timeout=5.0)
-            if self.watchdog_thread.is_alive():
-                logger.warning("[WATCHDOG] Watchdog thread did not stop within timeout")
+            try:
+                self.watchdog_thread.join(timeout=5.0)
+                if self.watchdog_thread.is_alive():
+                    logger.warning("[WATCHDOG] Watchdog thread did not stop within timeout")
+            except KeyboardInterrupt:
+                pass
 
     def get_restart_count(self) -> int:
         """Get the total number of restart attempts."""
