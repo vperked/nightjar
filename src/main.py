@@ -3239,27 +3239,61 @@ def main(
                                     if hardware_errors:
                                         hw_details = []
                                         for hw_error in hardware_errors[:MAX_HARDWARE_ERRORS_DISPLAY]:
+                                            error_text = None
+                                            
                                             if 'count_increase' in hw_error:
                                                 source = hw_error.get('source', 'unknown')
                                                 count_increase = hw_error['count_increase']
                                                 total_count = hw_error.get('count', 0)
                                                 error_type = hw_error.get('error_type', 'unknown')
-                                                hw_details.append(f"{source}: {count_increase} new {error_type} errors (total: {total_count})")
+                                                error_text = f"**{source}**: {count_increase} new {error_type} errors (total: {total_count})"
+
                                             elif 'count' in hw_error:
                                                 source = hw_error.get('source', 'unknown')
                                                 error_type = hw_error.get('error_type', 'unknown')
                                                 count = hw_error['count']
-                                                hw_details.append(f"{source}: {count} {error_type} errors")
+                                                if 'device' in hw_error:
+                                                    device = hw_error['device']
+                                                    error_text = f"**{source}** ({device}): {count} {error_type} errors"
+                                                else:
+                                                    error_text = f"**{source}**: {count} {error_type} errors"
+                                            
                                             elif 'message' in hw_error:
                                                 source = hw_error.get('source', 'unknown')
-                                                hw_details.append(f"{source}: {hw_error['message'][:100]}")
-
+                                                message = hw_error['message']
+                                                if len(message) > 200:
+                                                    message = message[:197] + "..."
+                                                error_text = f"**{source}**: {message}"
+                                            
+                                            elif 'type' in hw_error:
+                                                error_type = hw_error.get('type', 'unknown')
+                                                source = hw_error.get('source', 'unknown')
+                                                if 'message' in hw_error:
+                                                    message = hw_error['message'][:150]
+                                                    error_text = f"**{source}** ({error_type}): {message}"
+                                                else:
+                                                    error_text = f"**{source}**: {error_type} error detected"
+                                            
+                                            if not error_text:
+                                                source = hw_error.get('source', 'unknown')
+                                                error_type = hw_error.get('error_type', hw_error.get('type', 'unknown'))
+                                                error_text = f"**{source}**: {error_type} error"
+                                            
+                                            if error_text:
+                                                hw_details.append(error_text)
+                                        
                                         if hw_details:
-                                            fields.append({
-                                                'name': 'Hardware Errors',
+                                            fields[2] = {
+                                                'name': f'Hardware Error Details ({len(hardware_errors)} total)',
                                                 'value': '\n'.join(hw_details),
                                                 'inline': False
-                                            })
+                                            }
+                                        elif len(hardware_errors) > MAX_HARDWARE_ERRORS_DISPLAY:
+                                            fields[2] = {
+                                                'name': f'Hardware Errors ({len(hardware_errors)} total)',
+                                                'value': f'Too many errors to display. Showing first {MAX_HARDWARE_ERRORS_DISPLAY} of {len(hardware_errors)} errors.',
+                                                'inline': False
+                                            }
 
                                     if critical_warnings:
                                         warning_details = []
