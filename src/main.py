@@ -29,6 +29,7 @@ import hashlib
 import json
 import traceback
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -769,6 +770,31 @@ def run_self_test() -> bool:
     return success
 
 
+def run_with_timeout(func, timeout: float = 5.0, default_value=None, operation_name: str = "operation"):
+    """
+    Run a function with a timeout using ThreadPoolExecutor.
+    
+    Args:
+        func: Function to execute (callable that takes no arguments)
+        timeout: Maximum time to wait in seconds (default: 5.0)
+        default_value: Value to return if timeout occurs (default: None)
+        operation_name: Name of the operation for logging (default: "operation")
+    
+    Returns:
+        Function result or default_value if timeout
+    """
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func)
+            return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        logger.warning(f"{operation_name} timed out after {timeout}s, using default value")
+        return default_value
+    except Exception as e:
+        logger.error(f"Error in {operation_name}: {e}")
+        raise
+
+
 def main(
     cpu_monitor: Optional[CpuMonitor] = None,
     memory_monitor: Optional[MemoryMonitor] = None,
@@ -1309,8 +1335,18 @@ def main(
                     logger.warning(f"Error updating freeze monitor heartbeat: {e}")
 
                 try:
-                    cpu_percent = cpu_monitor.get_cpu_percent(interval=1.0)
-                    cpu_per_core = cpu_monitor.get_cpu_percent_per_core(interval=0.1)
+                    cpu_percent = run_with_timeout(
+                        lambda: cpu_monitor.get_cpu_percent(interval=1.0),
+                        timeout=3.0,
+                        default_value=0.0,
+                        operation_name="CPU percent collection"
+                    )
+                    cpu_per_core = run_with_timeout(
+                        lambda: cpu_monitor.get_cpu_percent_per_core(interval=0.1),
+                        timeout=2.0,
+                        default_value=[],
+                        operation_name="CPU per-core collection"
+                    )
                 except Exception as e:
                     logger.error(f"Error getting CPU metrics: {e}")
                     log_error_to_file_and_webhook(e, context="CPU metrics collection", include_traceback=True)
@@ -1338,8 +1374,18 @@ def main(
                 gpu_data = None
                 try:
                     if gpu_monitor.nvidia_smi_available and gpu_monitor.get_gpu_count() > 0:
-                        gpu_utilization = gpu_monitor.get_gpu_utilization(0)
-                        gpu_data = gpu_monitor.get_gpu_comprehensive(0)
+                        gpu_utilization = run_with_timeout(
+                            lambda: gpu_monitor.get_gpu_utilization(0),
+                            timeout=15.0,
+                            default_value={'gpu': 0.0, 'memory': 0.0},
+                            operation_name="GPU utilization collection"
+                        )
+                        gpu_data = run_with_timeout(
+                            lambda: gpu_monitor.get_gpu_comprehensive(0),
+                            timeout=20.0,
+                            default_value={},
+                            operation_name="GPU comprehensive data collection"
+                        )
                 except Exception as e:
                     logger.debug(f"Error getting GPU metrics: {e}")
 
@@ -1361,7 +1407,12 @@ def main(
                     if time_since_last_cleanup >= LOG_CLEANUP_INTERVAL_SECONDS:
                         logger.warning(f"[CLEANUP] Disk at {disk_percent:.1f}% - starting log cleanup...")
                         try:
-                            cleanup_stats = disk_monitor.cleanup_logs_and_restart_services(log_monitor=log_monitor)
+                            cleanup_stats = run_with_timeout(
+                                lambda: disk_monitor.cleanup_logs_and_restart_services(log_monitor=log_monitor),
+                                timeout=300.0,
+                                default_value={'logs_cleaned': 0, 'total_size_cleared': 0},
+                                operation_name="Log cleanup operation"
+                            )
                             
                             with monitoring_heartbeat['lock']:
                                 monitoring_heartbeat['last_update'] = time.time()
@@ -1387,7 +1438,12 @@ def main(
                         logger.critical(f"[EMERGENCY] Disk usage at {disk_percent:.1f}% (emergency threshold: {disk_emergency_threshold:.1f}%) - CRITICAL! Starting emergency cleanup...")
 
                         try:
-                            cleanup_stats = disk_monitor.emergency_cleanup_disk_space(mountpoint='/', log_monitor=log_monitor)
+                            cleanup_stats = run_with_timeout(
+                                lambda: disk_monitor.emergency_cleanup_disk_space(mountpoint='/', log_monitor=log_monitor),
+                                timeout=600.0,
+                                default_value={'total_size_cleared': 0, 'files_removed': 0, 'dirs_removed': 0, 'logs_cleaned': 0, 'errors': []},
+                                operation_name="Emergency disk cleanup operation"
+                            )
                             
                             with monitoring_heartbeat['lock']:
                                 monitoring_heartbeat['last_update'] = time.time()
@@ -1473,7 +1529,12 @@ def main(
 
                         try:
                             target_free_percent = 20.0
-                            cleanup_stats = disk_monitor.cleanup_disk_space(mountpoint='/', target_free_percent=target_free_percent, log_monitor=log_monitor)
+                            cleanup_stats = run_with_timeout(
+                                lambda: disk_monitor.cleanup_disk_space(mountpoint='/', target_free_percent=target_free_percent, log_monitor=log_monitor),
+                                timeout=300.0,
+                                default_value={'total_size_cleared': 0, 'files_removed': 0, 'dirs_removed': 0, 'logs_cleaned': 0},
+                                operation_name="Disk cleanup operation"
+                            )
                             
                             with monitoring_heartbeat['lock']:
                                 monitoring_heartbeat['last_update'] = time.time()
