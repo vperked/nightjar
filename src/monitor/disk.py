@@ -537,7 +537,7 @@ class DiskMonitor:
             for item in os.listdir(parent_path):
                 item_path = parent_path_obj / item
                 if item_path.is_dir():
-                    size_info = self.get_directory_size(item_path)
+                    size_info = self.get_directory_size(str(item_path))
                     if size_info:
                         subdirs.append(size_info)
         except (OSError, PermissionError):
@@ -1213,7 +1213,7 @@ class DiskMonitor:
         nginx_log_dir = os.getenv('NGINX_LOG_DIR', '/var/log/nginx')
         nginx_user_group = os.getenv('NGINX_USER_GROUP', 'www-data:adm')
         nginx_service_name = os.getenv('NGINX_SERVICE_NAME', 'nginx')
-        
+
         import re
         if not re.match(r'^[a-z_][a-z0-9_-]*[$]?:[a-z_][a-z0-9_-]*[$]?$', nginx_user_group):
             logger.error(f"Invalid NGINX_USER_GROUP format: {nginx_user_group}. Expected format: 'user:group'")

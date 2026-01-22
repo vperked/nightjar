@@ -82,7 +82,7 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
     }
 
     root_dir = str(Path(__file__).resolve().parent.parent.parent)
-    
+
     if use_find and platform.system() != 'Windows':
         try:
             result = subprocess.run(
@@ -96,7 +96,7 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
                 for cache_dir in cache_dirs:
                     if any(ignore in cache_dir for ignore in ['venv', '.venv', 'env', '.env', 'node_modules', '.git']):
                         continue
-                    
+
                     try:
                         total_size = 0
                         for dirpath, dirnames, filenames in os.walk(cache_dir):
@@ -106,17 +106,17 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
                                     total_size += filepath.stat().st_size
                                 except (OSError, FileNotFoundError):
                                     pass
-                        
+
                         subprocess.run(
                             ['find', cache_dir, '-depth', '-delete'],
                             capture_output=True,
                             text=True,
                             timeout=10
                         )
-                        
+
                         stats['cache_dirs_removed'] += 1
                         stats['total_size_cleared'] += total_size
-                        
+
                         if verbose:
                             logger.debug(f"Removed cache directory: {cache_dir} ({_format_bytes(total_size)})")
                     except subprocess.TimeoutExpired:
@@ -129,7 +129,7 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
                         stats['errors'].append(error_msg)
                         if verbose:
                             logger.warning(error_msg)
-            
+
             result = subprocess.run(
                 ['find', root_dir, '-name', '*.pyc', '-type', 'f'],
                 capture_output=True,
@@ -141,13 +141,13 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
                 for pyc_file in pyc_files:
                     if any(ignore in pyc_file for ignore in ['venv', '.venv', 'env', '.env', 'node_modules', '.git']):
                         continue
-                    
+
                     try:
                         file_size = Path(pyc_file).stat().st_size
                         os.remove(pyc_file)
                         stats['pyc_files_removed'] += 1
                         stats['total_size_cleared'] += file_size
-                        
+
                         if verbose:
                             logger.debug(f"Removed .pyc file: {pyc_file} ({_format_bytes(file_size)})")
                     except Exception as e:
@@ -155,13 +155,13 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
                         stats['errors'].append(error_msg)
                         if verbose:
                             logger.warning(error_msg)
-            
+
             return stats
         except (FileNotFoundError, subprocess.SubprocessError) as e:
             if verbose:
                 logger.debug(f"'find' command not available, using Python-based method: {e}")
             use_find = False
-    
+
     if not use_find or platform.system() == 'Windows':
         cache_dirs = find_cache_directories(root_dir)
         pyc_files = find_pyc_files(root_dir)

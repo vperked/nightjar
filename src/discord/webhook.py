@@ -668,9 +668,11 @@ class DiscordWebhook:
                     'inline': False
                 })
 
-        description = f'CPU temperature has exceeded the threshold of {threshold:.1f}°C'
+
+        description_parts = [f'CPU temperature has exceeded the threshold of {threshold:.1f}°C']
         if duration is not None and duration > 0:
-            description += f' for {duration:.0f} seconds'
+            description_parts.append(f' for {duration:.0f} seconds')
+        description = ''.join(description_parts)
 
         return self.send_embed(
             title='Temperature Alert',

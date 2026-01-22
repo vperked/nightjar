@@ -14,8 +14,8 @@ logger = get_logger('WebServer')
 
 
 class WebServerState:
-    """Encapsulates web server state to avoid global variables."""
-    
+    """Web server state to avoid global variables."""
+
     def __init__(self):
         self.cpu_monitor = None
         self.memory_monitor = None
@@ -30,17 +30,6 @@ class WebServerState:
 
 
 _state = WebServerState()
-
-cpu_monitor = None
-memory_monitor = None
-system_monitor = None
-gpu_monitor = None
-disk_monitor = None
-network_monitor = None
-sensors_monitor = None
-httpd = None
-server_thread = None
-crash_webhook = None
 
 _process_cache = {
     'top_cpu': [],
@@ -103,9 +92,6 @@ def set_monitors(
         network (NetworkMonitor): Network monitor instance
         sensors (SensorsMonitor): Sensors monitor instance
     """
-    global cpu_monitor, memory_monitor, system_monitor, gpu_monitor
-    global disk_monitor, network_monitor, sensors_monitor
-
     _state.cpu_monitor = cpu
     _state.memory_monitor = memory
     _state.system_monitor = system
@@ -113,14 +99,6 @@ def set_monitors(
     _state.disk_monitor = disk
     _state.network_monitor = network
     _state.sensors_monitor = sensors
-
-    cpu_monitor = cpu
-    memory_monitor = memory
-    system_monitor = system
-    gpu_monitor = gpu
-    disk_monitor = disk
-    network_monitor = network
-    sensors_monitor = sensors
 
 
 def set_crash_webhook(webhook: 'DiscordWebhook') -> None:
@@ -130,24 +108,22 @@ def set_crash_webhook(webhook: 'DiscordWebhook') -> None:
     Args:
         webhook (DiscordWebhook): DiscordWebhook instance for crash/error notifications
     """
-    global crash_webhook
     _state.crash_webhook = webhook
-    crash_webhook = webhook
 
 
 def create_request_handler(monitors: Optional[Dict] = None):
     """
     Factory function to create WebRequestHandler with dependency injection.
-    
+
     Args:
         monitors: Optional dictionary with monitor instances. If None, uses global state.
-    
+
     Returns:
         WebRequestHandler class with monitors injected
     """
     class WebRequestHandler(BaseHTTPRequestHandler):
         """HTTP request handler for serving the web UI and API."""
-        
+
         def __init__(self, *args, **kwargs):
             """Initialize handler with injected monitors."""
             if monitors:
@@ -163,7 +139,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                     'sensors': _state.sensors_monitor,
                 }
             super().__init__(*args, **kwargs)
-        
+
         def log_message(self, format_str, *args):
             """
             Override to use our logger instead of default logging.
@@ -874,7 +850,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                     }
 
             return stats
-    
+
     return WebRequestHandler
 
 
@@ -928,13 +904,10 @@ def _run_server(port: int, host: str) -> None:
 
     This function is called by the server thread and runs the server's main loop.
     """
-    global httpd
-
     server_address = (host, port)
-    
+
     try:
         _state.httpd = HTTPServer(server_address, WebRequestHandler)
-        httpd = _state.httpd
     except (OSError, socket.error) as e:
         error_str = str(e).lower()
         is_port_in_use = (
@@ -945,7 +918,7 @@ def _run_server(port: int, host: str) -> None:
                 "already in use" in error_str
             )
         )
-        
+
         if is_port_in_use:
             logger.warning(f"Port {port} is already in use, trying port 8081 instead")
             port = 8081
@@ -961,7 +934,6 @@ def _run_server(port: int, host: str) -> None:
                     'sensors': _state.sensors_monitor,
                 })
                 _state.httpd = HTTPServer(server_address, handler_class)
-                httpd = _state.httpd
                 logger.info(f"Successfully bound to port {port}")
             except (OSError, socket.error) as e2:
                 logger.error(f"Failed to bind to port {port}: {e2}")
@@ -1006,7 +978,7 @@ def _run_server(port: int, host: str) -> None:
                 traceback_text = traceback.format_exc()
                 if len(traceback_text) > 1000:
                     traceback_text = traceback_text[:1000] + "... (truncated)"
-                
+
                 crash_webhook.send_embed(
                     title='Web Server Error',
                     description=f'An error occurred in the web server',
@@ -1031,15 +1003,12 @@ def start_server(port: int = 8080, host: str = '0.0.0.0') -> None:
         port (int): Port to listen on (default: 8080)
         host (str): Host to bind to (default: 0.0.0.0)
     """
-    global server_thread
-
     if _state.server_thread and _state.server_thread.is_alive():
         logger.warning("Web server is already running")
         return
 
     _state.server_thread = threading.Thread(target=_run_server, args=(port, host), daemon=True)
     _state.server_thread.start()
-    server_thread = _state.server_thread
     logger.info("Web server thread started")
 
 
@@ -1052,8 +1021,6 @@ def stop_server(timeout: float = 5.0) -> None:
     """
     import time
     import threading
-
-    global httpd, server_thread
 
     if _state.httpd:
         try:
@@ -1084,8 +1051,6 @@ def stop_server(timeout: float = 5.0) -> None:
             logger.warning(f"Error stopping web server: {e}")
         finally:
             _state.httpd = None
-            httpd = None
 
     _state.server_thread = None
-    server_thread = None
 

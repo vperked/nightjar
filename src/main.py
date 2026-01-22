@@ -10,13 +10,14 @@ from monitor.freeze import FreezeMonitor
 from monitor.qbittorrent import QBittorrentMonitor
 from monitor.log import LogMonitor
 from monitor.kernel import KernelMonitor
+from monitor.watchdog import WatchdogMonitor
 from discord.webhook import DiscordWebhook
 from util.util import format_bytes, format_bytes_per_second, BYTES_PER_KB, BYTES_PER_MB, BYTES_PER_GB
 from util.systemd import install_systemd_service, is_systemd_available
 from cache.cache import clear_cache_on_startup, clear_cache_on_exit
 from logger import get_logger
 from web.server import set_monitors, start_server, stop_server, set_crash_webhook
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Any
 from datetime import datetime
 from pathlib import Path
 import os
@@ -30,6 +31,8 @@ import json
 import traceback
 import threading
 import socket
+import signal
+import atexit
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dotenv import load_dotenv
 
@@ -41,9 +44,9 @@ logger = get_logger()
 def analyze_system_usage_patterns() -> Dict[str, Any]:
     """
     Analyze current system usage patterns to determine optimal thresholds.
-    
+
     Samples CPU, memory, disk, and load averages to understand typical workload.
-    
+
     Returns:
         Dictionary with usage analysis results
     """
@@ -58,64 +61,61 @@ def analyze_system_usage_patterns() -> Dict[str, Any]:
         'typical_disk': 0.0,
         'peak_cpu': 0.0,
         'peak_memory': 0.0,
-        'system_type': 'unknown'  # 'server', 'desktop', 'workstation'
+        'system_type': 'unknown'
     }
-    
+
     try:
         import time
-        # Sample system metrics over a short period
+
         sample_count = 5
-        sample_interval = 0.5  # 0.5 seconds between samples
-        
+        sample_interval = 0.5
+
         for i in range(sample_count):
             try:
-                # CPU usage
+
                 cpu_percent = psutil.cpu_percent(interval=0.1)
                 analysis['cpu_samples'].append(cpu_percent)
-                
-                # Memory usage
+
+
                 mem = psutil.virtual_memory()
                 analysis['memory_samples'].append(mem.percent)
-                
-                # Disk usage
+
+
                 if platform.system() == 'Windows':
                     root_path = os.path.splitdrive(sys.executable)[0] + '\\'
                 else:
                     root_path = '/'
                 disk = psutil.disk_usage(root_path)
                 analysis['disk_samples'].append(disk.percent)
-                
-                # Load average (Linux only)
+
                 try:
                     load_avg = psutil.getloadavg()
                     analysis['load_averages'].append(load_avg)
                 except (AttributeError, OSError):
                     pass
-                
+
                 if i < sample_count - 1:
                     time.sleep(sample_interval)
             except Exception as e:
                 logger.debug(f"Error sampling system metrics: {e}")
                 break
-        
-        # Calculate typical and peak values
+
         if analysis['cpu_samples']:
             analysis['typical_cpu'] = sum(analysis['cpu_samples']) / len(analysis['cpu_samples'])
             analysis['peak_cpu'] = max(analysis['cpu_samples'])
-        
+
         if analysis['memory_samples']:
             analysis['typical_memory'] = sum(analysis['memory_samples']) / len(analysis['memory_samples'])
             analysis['peak_memory'] = max(analysis['memory_samples'])
-        
+
         if analysis['disk_samples']:
             analysis['typical_disk'] = sum(analysis['disk_samples']) / len(analysis['disk_samples'])
-        
-        # Count processes
+
         try:
             analysis['process_count'] = len(psutil.pids())
         except Exception:
             pass
-        
+
         # Determine system type based on usage patterns
         if analysis['typical_cpu'] > 0:
             if analysis['typical_cpu'] > 30 or analysis['process_count'] > 100:
@@ -124,25 +124,28 @@ def analyze_system_usage_patterns() -> Dict[str, Any]:
                 analysis['system_type'] = 'desktop'
             else:
                 analysis['system_type'] = 'workstation'
-        
+
     except Exception as e:
         logger.debug(f"Could not analyze system usage patterns: {e}")
-    
+
     return analysis
 
 
-def detect_system_config() -> Dict[str, Any]:
+def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
     """
     Auto-detect system capabilities and adapt configuration.
-    
+
     Detects:
     - GPU availability (NVIDIA)
     - qBittorrent availability
     - CPU and memory specs to adapt thresholds
     - Disk space to adapt thresholds
     - Platform-specific features
-    - System usage patterns for optimal thresholds
-    
+    - System usage patterns for optimal thresholds (if skip_usage_analysis=False)
+
+    Args:
+        skip_usage_analysis: If True, skip expensive usage pattern analysis (default: False)
+
     Returns:
         Dictionary with detected configuration values
     """
@@ -156,14 +159,13 @@ def detect_system_config() -> Dict[str, Any]:
         'usage_analysis': {},
         'adaptations': []
     }
-    
+
     try:
-        # Detect CPU cores
         detected['cpu_cores'] = psutil.cpu_count(logical=True)
         detected['adaptations'].append(f"Detected {detected['cpu_cores']} CPU cores")
     except Exception as e:
         logger.debug(f"Could not detect CPU cores: {e}")
-    
+
     try:
         # Detect total memory
         mem = psutil.virtual_memory()
@@ -171,9 +173,8 @@ def detect_system_config() -> Dict[str, Any]:
         detected['adaptations'].append(f"Detected {detected['total_memory_gb']:.1f} GB total memory")
     except Exception as e:
         logger.debug(f"Could not detect memory: {e}")
-    
+
     try:
-        # Detect GPU availability
         try:
             result = subprocess.run(
                 ['nvidia-smi', '--version'],
@@ -188,18 +189,20 @@ def detect_system_config() -> Dict[str, Any]:
             pass
     except Exception as e:
         logger.debug(f"Could not detect GPU: {e}")
-    
+
     try:
         # Detect qBittorrent availability
         qb_host = os.getenv('QBITTORRENT_HOST', 'localhost')
         qb_port = int(os.getenv('QBITTORRENT_PORT', '8080'))
-        
-        # Try to connect to qBittorrent Web UI
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        result = sock.connect_ex((qb_host, qb_port))
-        sock.close()
-        
+
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(2)
+                result = sock.connect_ex((qb_host, qb_port))
+        except Exception as e:
+            logger.debug(f"Socket error checking qBittorrent: {e}")
+            result = 1  # Connection failed
+
         if result == 0:
             # Port is open, try to authenticate
             try:
@@ -218,51 +221,52 @@ def detect_system_config() -> Dict[str, Any]:
                 pass
     except Exception as e:
         logger.debug(f"Could not detect qBittorrent: {e}")
-    
+
     try:
-        # Detect total disk space (use root partition)
         if platform.system() == 'Windows':
             # On Windows, use the drive where the script is running
             root_path = os.path.splitdrive(sys.executable)[0] + '\\'
         else:
             root_path = '/'
-        
+
         disk = psutil.disk_usage(root_path)
         detected['total_disk_gb'] = disk.total / BYTES_PER_GB
         detected['adaptations'].append(f"Detected {detected['total_disk_gb']:.1f} GB total disk space")
     except Exception as e:
         logger.debug(f"Could not detect disk space: {e}")
-    
-    # Analyze system usage patterns for optimal threshold determination
-    logger.info("Analyzing system usage patterns to determine optimal thresholds...")
-    detected['usage_analysis'] = analyze_system_usage_patterns()
-    if detected['usage_analysis'].get('system_type') != 'unknown':
-        detected['adaptations'].append(f"System type: {detected['usage_analysis']['system_type']}")
-    
+
+    if not skip_usage_analysis:
+        logger.info("Analyzing system usage patterns to determine optimal thresholds...")
+        detected['usage_analysis'] = analyze_system_usage_patterns()
+        if detected['usage_analysis'].get('system_type') != 'unknown':
+            detected['adaptations'].append(f"System type: {detected['usage_analysis']['system_type']}")
+    else:
+        logger.info("Skipping usage pattern analysis (thresholds already configured)")
+        detected['usage_analysis'] = {'system_type': 'unknown'}
+
     return detected
 
 
 def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
     """
     Apply auto-detected system adaptations to environment variables if not already set.
-    
+
     Args:
         detected: Dictionary from detect_system_config()
-    
+
     Returns:
         Dictionary of auto-detected values that were set (key -> value)
     """
     adaptations_applied = []
     auto_detected_values = {}
-    
+
     # Adapt thresholds based on system specs AND usage patterns
     usage = detected.get('usage_analysis', {})
-    
+
     if not os.getenv('CPU_THRESHOLD'):
         threshold = None
         reasoning = []
-        
-        # Base threshold on CPU cores
+
         if detected['cpu_cores'] > 0:
             if detected['cpu_cores'] <= 2:
                 base_threshold = 70.0
@@ -275,14 +279,13 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
                 reasoning.append(f"{detected['cpu_cores']} cores")
         else:
             base_threshold = DEFAULT_CPU_THRESHOLD
-        
+
         # Adjust based on typical usage patterns
         typical_cpu = usage.get('typical_cpu', 0)
         peak_cpu = usage.get('peak_cpu', 0)
         system_type = usage.get('system_type', 'unknown')
-        
+
         if typical_cpu > 0:
-            # If system typically runs high, set threshold higher (more headroom)
             if typical_cpu > 50:
                 threshold = min(95.0, base_threshold + 10.0)
                 reasoning.append(f"high typical usage ({typical_cpu:.1f}%)")
@@ -296,31 +299,29 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
             else:
                 threshold = base_threshold
                 reasoning.append(f"typical usage ({typical_cpu:.1f}%)")
-            
-            # Adjust for system type
+
             if system_type == 'server':
                 # Servers can handle higher sustained loads
                 threshold = min(90.0, threshold + 5.0)
                 reasoning.append("server workload")
             elif system_type == 'desktop':
-                # Desktops should alert earlier
                 threshold = max(70.0, threshold - 5.0)
                 reasoning.append("desktop workload")
         else:
             threshold = base_threshold
-        
+
         # Ensure threshold is within reasonable bounds
         threshold = max(65.0, min(95.0, threshold))
-        
+
         os.environ['CPU_THRESHOLD'] = str(threshold)
         auto_detected_values['CPU_THRESHOLD'] = str(threshold)
         reasoning_str = ", ".join(reasoning)
         adaptations_applied.append(f"CPU_THRESHOLD set to {threshold:.1f}% (based on: {reasoning_str})")
-    
+
     if not os.getenv('MEMORY_THRESHOLD'):
         threshold = None
         reasoning = []
-        
+
         # Base threshold on total memory
         if detected['total_memory_gb'] > 0:
             if detected['total_memory_gb'] < 4:
@@ -337,11 +338,11 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
                 reasoning.append(f"{detected['total_memory_gb']:.1f} GB (high memory)")
         else:
             base_threshold = DEFAULT_MEMORY_THRESHOLD
-        
+
         # Adjust based on typical memory usage
         typical_memory = usage.get('typical_memory', 0)
         peak_memory = usage.get('peak_memory', 0)
-        
+
         if typical_memory > 0:
             # If system typically uses a lot of memory, set threshold higher
             if typical_memory > 60:
@@ -359,19 +360,19 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
                 reasoning.append(f"typical usage ({typical_memory:.1f}%)")
         else:
             threshold = base_threshold
-        
+
         # Ensure threshold is within reasonable bounds
         threshold = max(65.0, min(92.0, threshold))
-        
+
         os.environ['MEMORY_THRESHOLD'] = str(threshold)
         auto_detected_values['MEMORY_THRESHOLD'] = str(threshold)
         reasoning_str = ", ".join(reasoning)
         adaptations_applied.append(f"MEMORY_THRESHOLD set to {threshold:.1f}% (based on: {reasoning_str})")
-    
+
     if not os.getenv('DISK_THRESHOLD'):
         threshold = None
         reasoning = []
-        
+
         # Base threshold on total disk space
         if detected['total_disk_gb'] > 0:
             if detected['total_disk_gb'] < 100:
@@ -388,10 +389,10 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
                 reasoning.append(f"{detected['total_disk_gb']:.1f} GB (large disk)")
         else:
             base_threshold = DEFAULT_DISK_THRESHOLD
-        
+
         # Adjust based on current disk usage
         typical_disk = usage.get('typical_disk', 0)
-        
+
         if typical_disk > 0:
             # If disk is already quite full, be more conservative
             if typical_disk > 70:
@@ -406,73 +407,73 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
                 reasoning.append(f"current usage {typical_disk:.1f}%")
         else:
             threshold = base_threshold
-        
+
         # Ensure threshold is within reasonable bounds
         threshold = max(80.0, min(92.0, threshold))
-        
+
         os.environ['DISK_THRESHOLD'] = str(threshold)
         auto_detected_values['DISK_THRESHOLD'] = str(threshold)
         reasoning_str = ", ".join(reasoning)
         adaptations_applied.append(f"DISK_THRESHOLD set to {threshold:.1f}% (based on: {reasoning_str})")
-    
+
     # Auto-enable GPU monitoring if GPU is available and not explicitly disabled
     if detected['gpu_available'] and not os.getenv('GPU_THRESHOLD'):
         os.environ['GPU_THRESHOLD'] = str(DEFAULT_GPU_THRESHOLD)
         auto_detected_values['GPU_THRESHOLD'] = str(DEFAULT_GPU_THRESHOLD)
         adaptations_applied.append("GPU monitoring enabled (NVIDIA GPU detected)")
-    
+
     # Suggest qBittorrent monitoring if available
     if detected['qbittorrent_available'] and not os.getenv('QBITTORRENT_MONITOR'):
         # Don't auto-enable, but log suggestion
         logger.info("qBittorrent is available. Set QBITTORRENT_MONITOR=true to enable monitoring")
-    
-    # Platform-specific adaptations
+
+
     if detected['platform'] == 'Windows':
-        # Disable some Linux-specific features on Windows
+
         if not os.getenv('FREEZE_MONITOR_ENABLED'):
-            # Freeze monitor may not work well on Windows
+
             pass
     elif detected['platform'] == 'Linux':
-        # Linux-specific optimizations
+
         if not os.getenv('MONITOR_INDIVIDUAL_PARTITIONS'):
             os.environ['MONITOR_INDIVIDUAL_PARTITIONS'] = 'true'
             auto_detected_values['MONITOR_INDIVIDUAL_PARTITIONS'] = 'true'
             adaptations_applied.append("MONITOR_INDIVIDUAL_PARTITIONS enabled (Linux detected)")
-    
+
     if adaptations_applied:
         logger.info("System auto-detection applied the following adaptations:")
         for adaptation in adaptations_applied:
             logger.info(f"  - {adaptation}")
     else:
         logger.info("System auto-detection completed (no adaptations needed - using defaults or existing config)")
-    
+
     return auto_detected_values
 
 
 def prompt_save_config(auto_detected_values: Dict[str, str]) -> bool:
     """
     Prompt user interactively if they want to save auto-detected configuration.
-    
+
     Args:
         auto_detected_values: Dictionary of auto-detected values (key -> value)
-    
+
     Returns:
         True if user wants to save, False otherwise
     """
     if not auto_detected_values:
         return False
-    
+
     if not sys.stdin.isatty():
         logger.info("Non-interactive mode detected - skipping save prompt")
         return False
-    
+
     try:
         print("The following configuration values were auto-detected:")
         print()
         for key, value in auto_detected_values.items():
             print(f"  {key}={value}")
         print()
-        
+
         while True:
             response = input("Save these settings to .env file? (y/n): ").strip().lower()
             if response in ('y', 'yes'):
@@ -482,7 +483,7 @@ def prompt_save_config(auto_detected_values: Dict[str, str]) -> bool:
             else:
                 print("Please enter 'y' for yes or 'n' for no.")
     except (EOFError, KeyboardInterrupt):
-        # User pressed Ctrl+C or EOF
+
         logger.info("Save prompt cancelled by user")
         return False
     except Exception as e:
@@ -493,39 +494,39 @@ def prompt_save_config(auto_detected_values: Dict[str, str]) -> bool:
 def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root: Optional[Path] = None) -> bool:
     """
     Save auto-detected configuration values to .env file.
-    
+
     Preserves existing .env values and only adds auto-detected values that aren't already set.
     Adds comments to indicate auto-generated values.
-    
+
     Args:
         auto_detected_values: Dictionary of auto-detected values (key -> value)
         project_root: Optional project root path (defaults to detecting from script location)
-    
+
     Returns:
         True if .env file was updated, False otherwise
     """
     if not auto_detected_values:
         return False
-    
+
     if project_root is None:
         script_path = Path(__file__).resolve()
         project_root = script_path.parent
-    
+
     env_file = project_root / '.env'
-    
-    # Read existing .env file if it exists
+
+
     existing_lines = []
     existing_keys = set()
     has_auto_detected_section = False
-    
+
     if env_file.exists():
         try:
             with open(env_file, 'r', encoding='utf-8') as f:
                 existing_lines = f.readlines()
-                # Extract existing keys (handle comments and empty lines)
+
                 for line in existing_lines:
                     line_stripped = line.strip()
-                    # Check if auto-detected section already exists
+
                     if 'Auto-detected configuration' in line_stripped:
                         has_auto_detected_section = True
                     if line_stripped and not line_stripped.startswith('#') and '=' in line_stripped:
@@ -534,34 +535,34 @@ def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root
         except Exception as e:
             logger.warning(f"Could not read existing .env file: {e}")
             existing_lines = []
-    
-    # Prepare new entries for auto-detected values that aren't already set in .env file
-    # Note: We don't check os.getenv() here because apply_system_adaptations() already
-    # set these values in os.environ. We only need to check if they're in the .env file.
+
+
+
+
     new_entries = []
-    for key, value in auto_detected_values.items():     
+    for key, value in auto_detected_values.items():
         if key not in existing_keys:
-            # Escape value if it contains special characters
+
             escaped_value = value.replace('\\', '\\\\').replace('$', '\\$')
             new_entries.append(f"{key}={escaped_value}")
-    
+
     if not new_entries:
         return False  # Nothing new to add
-    
+
     # Write to .env file
     try:
         with open(env_file, 'a', encoding='utf-8') as f:
             # Add newline if file exists and doesn't end with newline
             if existing_lines and not existing_lines[-1].endswith('\n'):
                 f.write('\n')
-            
-            # Write new entries (no comments)
+
+
             for entry in new_entries:
                 f.write(f"{entry}\n")
-        
+
         logger.info(f"Saved {len(new_entries)} auto-detected configuration value(s) to {env_file}")
         logger.info(f"  File location: {env_file.absolute()}")
-        saved_keys = [key for key, value in auto_detected_values.items() 
+        saved_keys = [key for key, value in auto_detected_values.items()
                      if key not in existing_keys]
         logger.info("  Values saved: " + ", ".join(saved_keys))
         return True
@@ -573,19 +574,19 @@ def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root
 def validate_config() -> None:
     """
     Validate configuration at startup.
-    
+
     Checks required environment variables and validates their values.
     Raises ValueError if critical configuration is missing or invalid.
     """
     errors = []
     warnings = []
-    
+
     webhook_url = os.getenv('WEBHOOK')
     if not webhook_url:
         warnings.append("WEBHOOK environment variable not set - Discord notifications will be disabled")
     elif not webhook_url.startswith('https://discord.com/api/webhooks/'):
         warnings.append(f"WEBHOOK URL does not match expected Discord webhook format: {webhook_url[:50]}...")
-    
+
     numeric_vars = {
         'CPU_THRESHOLD': (0.0, 100.0),
         'MEMORY_THRESHOLD': (0.0, 100.0),
@@ -594,7 +595,7 @@ def validate_config() -> None:
         'TEMP_THRESHOLD': (0.0, 150.0),
         'CHECK_INTERVAL': (1.0, 3600.0),
     }
-    
+
     for var_name, (min_val, max_val) in numeric_vars.items():
         value = os.getenv(var_name)
         if value:
@@ -604,13 +605,13 @@ def validate_config() -> None:
                     errors.append(f"{var_name}={float_val} is outside valid range [{min_val}, {max_val}]")
             except ValueError:
                 errors.append(f"{var_name}={value} is not a valid number")
-    
+
     boolean_vars = ['QBITTORRENT_MONITOR', 'MEDIA_MONITOR_ENABLED', 'INSTALL_SYSTEMD']
     for var_name in boolean_vars:
         value = os.getenv(var_name)
         if value and value.lower() not in ('true', 'false', '1', '0', 'yes', 'no', 'on', 'off', ''):
             warnings.append(f"{var_name}={value} is not a valid boolean value (use true/false)")
-    
+
     path_vars = ['MEDIA_DIRECTORY', 'LOG_FILE', 'ALERT_LOG_PATH']
     for var_name in path_vars:
         value = os.getenv(var_name)
@@ -619,15 +620,15 @@ def validate_config() -> None:
                 errors.append(f"{var_name} path is invalid or too long")
             elif '..' in value or '\x00' in value:
                 errors.append(f"{var_name} contains invalid characters")
-    
+
     for warning in warnings:
         logger.warning(f"Configuration warning: {warning}")
-    
+
     if errors:
         error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
         logger.error(error_msg)
         raise ValueError(error_msg)
-    
+
     if not warnings:
         logger.info("Configuration validation passed")
 
@@ -656,6 +657,19 @@ DEFAULT_KERNEL_CHECK_INTERVAL = 30
 DEFAULT_KERNEL_STABILITY_CHECK_INTERVAL = 10
 DEFAULT_KERNEL_CHECK_SINCE_MINUTES = 60
 DEFAULT_MONITORING_WATCHDOG_TIMEOUT = 30.0
+DEFAULT_WATCHDOG_AUTO_RESTART = False
+DEFAULT_WATCHDOG_RESTART_COOLDOWN = 300.0
+
+
+MAX_PARTITIONS_DISPLAY = 6
+MAX_PROCESSES_DISPLAY = 5
+MAX_REASONS_DISPLAY = 3
+MAX_INDICATORS_DISPLAY = 8
+MAX_RECOMMENDATIONS_DISPLAY = 5
+MAX_CRASH_TYPES_DISPLAY = 5
+MAX_HARDWARE_ERRORS_DISPLAY = 5
+MAX_WARNINGS_DISPLAY = 5
+MAX_DIRECTORIES_DISPLAY = 5
 
 LOG_CLEANUP_INTERVAL_SECONDS = 1800
 DISK_CLEANUP_COOLDOWN_HIGH = 300
@@ -758,17 +772,17 @@ def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core:
                     break
 
     if download_processes:
-        download_names = [p.get('name', 'Unknown') for p in download_processes[:3]]
+        download_names = [p.get('name', 'Unknown') for p in download_processes[:MAX_REASONS_DISPLAY]]
         if len(download_names) == 1:
             reasons.append(f"Download/media activity: {download_names[0]}")
         else:
             reasons.append(f"Download/media activity: {', '.join(download_names[:2])}")
 
     if top_processes:
-        high_cpu_procs = [p for p in top_processes[:5] if p.get('cpu_percent', 0) > 5 and p not in download_processes]
+        high_cpu_procs = [p for p in top_processes[:MAX_PROCESSES_DISPLAY] if p.get('cpu_percent', 0) > 5 and p not in download_processes]
         if high_cpu_procs:
             proc_details = []
-            for proc in high_cpu_procs[:3]:
+            for proc in high_cpu_procs[:MAX_REASONS_DISPLAY]:
                 name = proc.get('name', 'Unknown')
                 cpu_usage = proc.get('cpu_percent', 0)
                 proc_details.append(f"{name} ({cpu_usage:.1f}%)")
@@ -1248,8 +1262,8 @@ def run_self_test() -> bool:
 
     try:
         process_monitor = ProcessMonitor()
-        top_cpu = process_monitor.get_top_processes(limit=5, sort_by='cpu')
-        top_memory = process_monitor.get_top_processes(limit=5, sort_by='memory')
+        top_cpu = process_monitor.get_top_processes(limit=MAX_PROCESSES_DISPLAY, sort_by='cpu')
+        top_memory = process_monitor.get_top_processes(limit=MAX_PROCESSES_DISPLAY, sort_by='memory')
         process_count = process_monitor.get_process_count()
         add_result("Process monitor", True, f"{process_count.get('total', 0)} total, {len(top_cpu)} top CPU, {len(top_memory)} top memory")
     except Exception as e:
@@ -1306,13 +1320,13 @@ def run_self_test() -> bool:
 def run_with_timeout(func, timeout: float = 5.0, default_value=None, operation_name: str = "operation"):
     """
     Run a function with a timeout using ThreadPoolExecutor.
-    
+
     Args:
         func: Function to execute (callable that takes no arguments)
         timeout: Maximum time to wait in seconds (default: 5.0)
         default_value: Value to return if timeout occurs (default: None)
         operation_name: Name of the operation for logging (default: "operation")
-    
+
     Returns:
         Function result or default_value if timeout
     """
@@ -1386,31 +1400,39 @@ def main(
     clear_cache_on_startup(verbose=True)
 
     logger.info("Starting Server Monitor...")
-    
-    # Auto-detect system capabilities and adapt configuration
+
+
+    thresholds_already_set = (
+        os.getenv('CPU_THRESHOLD') is not None or
+        os.getenv('MEMORY_THRESHOLD') is not None or
+        os.getenv('DISK_THRESHOLD') is not None
+    )
+
+
+
     logger.info("Detecting system capabilities...")
-    detected_config = detect_system_config()
+    detected_config = detect_system_config(skip_usage_analysis=thresholds_already_set)
     if detected_config['adaptations']:
         logger.info("System detection results:")
         for adaptation in detected_config['adaptations']:
             logger.info(f"  - {adaptation}")
-    
-    # Apply auto-detected adaptations (only if env vars not set)
+
+
     auto_detected_values = apply_system_adaptations(detected_config)
-    
-    # Ask user if they want to save auto-detected values to .env file
+
+
     if auto_detected_values:
         if prompt_save_config(auto_detected_values):
             save_auto_detected_config(auto_detected_values)
         else:
             logger.info("Auto-detected configuration not saved (user declined or non-interactive mode)")
-    
+
     try:
         validate_config()
     except ValueError as e:
         logger.error(f"Configuration validation failed: {e}")
         sys.exit(1)
-    
+
     logger.info("Initializing monitors...")
     qbittorrent_monitor_enabled = get_env_bool('QBITTORRENT_MONITOR', False)
 
@@ -1510,6 +1532,22 @@ def main(
     process_memory_threshold = get_env_float('PROCESS_MEMORY_THRESHOLD', DEFAULT_PROCESS_MEMORY_THRESHOLD)
     check_interval = get_env_float('CHECK_INTERVAL', DEFAULT_CHECK_INTERVAL)
     alert_cooldown = get_env_float('ALERT_COOLDOWN', DEFAULT_ALERT_COOLDOWN)
+    monitoring_watchdog_timeout = get_env_float('MONITORING_WATCHDOG_TIMEOUT', DEFAULT_MONITORING_WATCHDOG_TIMEOUT)
+    watchdog_auto_restart = get_env_bool('WATCHDOG_AUTO_RESTART', DEFAULT_WATCHDOG_AUTO_RESTART)
+    watchdog_restart_cooldown = get_env_float('WATCHDOG_RESTART_COOLDOWN', DEFAULT_WATCHDOG_RESTART_COOLDOWN)
+    systemd_service_name = get_cached_env('SYSTEMD_SERVICE_NAME', 'server-monitor')
+    
+    watchdog_monitor = WatchdogMonitor(
+        timeout=monitoring_watchdog_timeout,
+        auto_restart=watchdog_auto_restart,
+        restart_cooldown=watchdog_restart_cooldown,
+        service_name=systemd_service_name,
+        alert_cooldown=alert_cooldown,
+        webhook=webhook,
+        crash_webhook=crash_webhook
+    )
+    watchdog_monitor.start()
+    
     freeze_threshold = get_env_float('FREEZE_THRESHOLD', DEFAULT_FREEZE_THRESHOLD)
     freeze_heartbeat_timeout = get_env_float('FREEZE_HEARTBEAT_TIMEOUT', DEFAULT_FREEZE_HEARTBEAT_TIMEOUT)
     freeze_monitor_enabled = get_env_bool('FREEZE_MONITOR_ENABLED', False)
@@ -1804,75 +1842,71 @@ def main(
 
 
     monitoring_watchdog_timeout = get_env_float('MONITORING_WATCHDOG_TIMEOUT', DEFAULT_MONITORING_WATCHDOG_TIMEOUT)
-    monitoring_heartbeat = {'last_update': time.time(), 'lock': threading.Lock()}
-    monitoring_watchdog_running = {'value': True, 'lock': threading.Lock()}
-    monitoring_alert_state = {'alert_sent': False, 'last_alert_time': 0, 'lock': threading.Lock()}
+    watchdog_auto_restart = get_env_bool('WATCHDOG_AUTO_RESTART', DEFAULT_WATCHDOG_AUTO_RESTART)
+    watchdog_restart_cooldown = get_env_float('WATCHDOG_RESTART_COOLDOWN', DEFAULT_WATCHDOG_RESTART_COOLDOWN)
+    systemd_service_name = get_cached_env('SYSTEMD_SERVICE_NAME', 'server-monitor')
 
-    def monitoring_watchdog():
-        """Watchdog thread that detects if monitoring loop has stopped."""
-        while True:
-            with monitoring_watchdog_running['lock']:
-                if not monitoring_watchdog_running['value']:
-                    break
+    shutdown_state = {
+        'graceful_shutdown': False,
+        'shutdown_reason': 'unknown',
+        'shutdown_time': None,
+        'lock': threading.Lock()
+    }
 
-            time.sleep(monitoring_watchdog_timeout)
+    def signal_handler(signum, frame):
+        """Handle shutdown signals gracefully."""
+        signal_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
+        with shutdown_state['lock']:
+            shutdown_state['graceful_shutdown'] = True
+            shutdown_state['shutdown_reason'] = f'signal_{signal_name}'
+            shutdown_state['shutdown_time'] = time.time()
+        logger.info(f"Received {signal_name} signal - initiating graceful shutdown...")
+        raise KeyboardInterrupt
 
-            with monitoring_heartbeat['lock']:
-                time_since_heartbeat = time.time() - monitoring_heartbeat['last_update']
-
-            if time_since_heartbeat > monitoring_watchdog_timeout:
-                current_time = time.time()
-
-                with monitoring_alert_state['lock']:
-                    time_since_last_alert = current_time - monitoring_alert_state['last_alert_time']
-                    alert_sent = monitoring_alert_state['alert_sent']
-
-
-                if not alert_sent or time_since_last_alert >= alert_cooldown:
-                    logger.critical(f"[WATCHDOG] CRITICAL: Monitoring loop appears to have stopped! "
-                                  f"No heartbeat for {time_since_heartbeat:.1f}s (timeout: {monitoring_watchdog_timeout:.1f}s)")
-
-                    target_webhook = crash_webhook if crash_webhook else webhook
-                    if target_webhook:
-                        try:
-                            success = target_webhook.send_embed(
-                                title='CRITICAL: Monitoring Loop Stopped',
-                                description=f'Monitoring loop has stopped responding. No heartbeat detected for {time_since_heartbeat:.1f} seconds.',
-                                fields=[
-                                    {'name': 'Time Since Last Heartbeat', 'value': f"{time_since_heartbeat:.1f} seconds", 'inline': True},
-                                    {'name': 'Watchdog Timeout', 'value': f"{monitoring_watchdog_timeout:.1f} seconds", 'inline': True},
-                                    {'name': 'Status', 'value': 'CRITICAL - Monitoring may have crashed', 'inline': False},
-                                ],
-                                footer='Server Monitor - Watchdog Alert',
-                                timestamp=True
-                            )
-                            if success:
-                                webhook_name = "Crash webhook" if crash_webhook else "Discord"
-                                logger.info(f"    Discord watchdog alert sent to {webhook_name}")
-                        except Exception as e:
-                            logger.error(f"Error sending watchdog alert: {e}")
+    def atexit_handler():
+        """Handler called on normal program exit."""
+        with shutdown_state['lock']:
+            if not shutdown_state['graceful_shutdown']:
 
 
-                    with monitoring_alert_state['lock']:
-                        monitoring_alert_state['alert_sent'] = True
-                        monitoring_alert_state['last_alert_time'] = current_time
+                if shutdown_state['shutdown_reason'] == 'unknown':
 
+                    shutdown_state['shutdown_reason'] = 'atexit_unknown_crash'
+                    logger.warning("Program exited via atexit without graceful shutdown flag - possible crash")
+                elif shutdown_state['shutdown_reason'] == 'crash_exception':
 
-    watchdog_thread = threading.Thread(target=monitoring_watchdog, daemon=True)
-    watchdog_thread.start()
-    logger.info(f"Monitoring watchdog started (timeout: {monitoring_watchdog_timeout:.1f}s)")
+                    pass
+                else:
+                    shutdown_state['graceful_shutdown'] = True
+
+    if platform.system() != 'Windows':
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        try:
+            signal.signal(signal.SIGQUIT, signal_handler)
+        except (AttributeError, ValueError):
+            pass
+    else:
+        try:
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
+        except (AttributeError, ValueError):
+            pass
+
+    atexit.register(atexit_handler)
+
 
     try:
         while True:
             try:
 
-                with monitoring_heartbeat['lock']:
-                    monitoring_heartbeat['last_update'] = time.time()
+                if watchdog_monitor:
+                    watchdog_monitor.update_heartbeat()
 
 
-                with monitoring_alert_state['lock']:
-                    if monitoring_alert_state['alert_sent']:
-                        monitoring_alert_state['alert_sent'] = False
+
+                if watchdog_monitor:
+                    watchdog_monitor.reset_alert_state()
 
                 current_time = time.time()
                 top_cpu_processes = None
@@ -1904,8 +1938,8 @@ def main(
                     cpu_percent = 0.0
                     cpu_per_core = []
 
-                with monitoring_heartbeat['lock']:
-                    monitoring_heartbeat['last_update'] = time.time()
+                if watchdog_monitor:
+                    watchdog_monitor.update_heartbeat()
 
                 try:
                     memory_percent = memory_monitor.get_memory_percent()
@@ -1918,8 +1952,8 @@ def main(
                     memory_info = {}
                     swap_info = {}
 
-                with monitoring_heartbeat['lock']:
-                    monitoring_heartbeat['last_update'] = time.time()
+                if watchdog_monitor:
+                    watchdog_monitor.update_heartbeat()
 
                 gpu_utilization = None
                 gpu_data = None
@@ -1940,9 +1974,10 @@ def main(
                 except Exception as e:
                     logger.debug(f"Error getting GPU metrics: {e}")
 
-                try:    
+                try:
+
                     all_partitions = disk_monitor.get_all_partitions()
-                    # Keep total_disk for backward compatibility with cleanup logic
+
                     total_disk = disk_monitor.get_total_disk_usage()
                     disk_percent = total_disk.get('percent', 0.0) if total_disk else 0.0
                 except Exception as e:
@@ -1952,8 +1987,8 @@ def main(
                     total_disk = {}
                     disk_percent = 0.0
 
-                with monitoring_heartbeat['lock']:
-                    monitoring_heartbeat['last_update'] = time.time()
+                if watchdog_monitor:
+                    watchdog_monitor.update_heartbeat()
 
                 if disk_percent >= 50.0:
                     time_since_last_cleanup = current_time - last_disk_cleanup_time
@@ -1967,9 +2002,9 @@ def main(
                                 default_value={'logs_cleaned': 0, 'total_size_cleared': 0},
                                 operation_name="Log cleanup operation"
                             )
-                            
-                            with monitoring_heartbeat['lock']:
-                                monitoring_heartbeat['last_update'] = time.time()
+
+                            if watchdog_monitor:
+                                watchdog_monitor.update_heartbeat()
 
                             if cleanup_stats.get('logs_cleaned', 0) > 0:
                                 logger.warning(f"[CLEANUP] Cleared {cleanup_stats['logs_cleaned']} log file(s), "
@@ -1998,9 +2033,9 @@ def main(
                                 default_value={'total_size_cleared': 0, 'files_removed': 0, 'dirs_removed': 0, 'logs_cleaned': 0, 'errors': []},
                                 operation_name="Emergency disk cleanup operation"
                             )
-                            
-                            with monitoring_heartbeat['lock']:
-                                monitoring_heartbeat['last_update'] = time.time()
+
+                            if watchdog_monitor:
+                                watchdog_monitor.update_heartbeat()
 
                             if cleanup_stats['total_size_cleared'] > 0:
                                 logger.critical(f"[EMERGENCY] Emergency cleanup cleared {format_bytes(cleanup_stats['total_size_cleared'])} "
@@ -2089,9 +2124,6 @@ def main(
                                 default_value={'total_size_cleared': 0, 'files_removed': 0, 'dirs_removed': 0, 'logs_cleaned': 0},
                                 operation_name="Disk cleanup operation"
                             )
-                            
-                            with monitoring_heartbeat['lock']:
-                                monitoring_heartbeat['last_update'] = time.time()
 
                             if cleanup_stats['total_size_cleared'] > 0:
                                 logger.info(f"[CLEANUP] Cleaned {format_bytes(cleanup_stats['total_size_cleared'])} "
@@ -2162,9 +2194,8 @@ def main(
                             if mb_per_sec > 0:
                                 network_bandwidth = total_bandwidth / mb_per_sec
                         network_io_data = network_monitor.get_total_network_io()
-                        
-                        with monitoring_heartbeat['lock']:
-                            monitoring_heartbeat['last_update'] = time.time()
+                        if watchdog_monitor:
+                            watchdog_monitor.update_heartbeat()
                     except (ValueError, ZeroDivisionError) as e:
                         logger.debug(f"Error calculating network bandwidth: {e}")
                     except Exception as e:
@@ -2185,14 +2216,12 @@ def main(
 
                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
-                # Build disk status - show each disk separately
                 disk_status_parts = []
                 try:
                     if all_partitions:
                         for partition in all_partitions:
                             mountpoint = partition.get('mountpoint', partition.get('device', 'unknown'))
                             percent = partition.get('percent', 0.0)
-                            # Shorten mountpoint for display (e.g., /mnt/data -> data, C:\ -> C:)
                             if platform.system() == 'Windows':
                                 display_name = mountpoint.rstrip('\\').split('\\')[-1] or mountpoint[:2]
                             else:
@@ -2201,25 +2230,30 @@ def main(
                                     display_name = mountpoint
                             disk_status_parts.append(f"{display_name}: {percent:.1f}%")
                     else:
-                        # Fallback to total if no partitions found
                         disk_status_parts.append(f"{disk_percent:.1f}%")
                 except Exception as e:
                     logger.debug(f"Error formatting disk status: {e}")
                     disk_status_parts.append(f"{disk_percent:.1f}%")
-                
+
                 disk_status = " | ".join(disk_status_parts) if disk_status_parts else f"{disk_percent:.1f}%"
 
-                metrics_str = f"[{timestamp}] CPU: {cpu_percent:.1f}% | Memory: {memory_percent:.1f}% | Disk: {disk_status}"
+                metrics_parts = [
+                    f"[{timestamp}] CPU: {cpu_percent:.1f}%",
+                    f"Memory: {memory_percent:.1f}%",
+                    f"Disk: {disk_status}"
+                ]
                 if gpu_utilization is not None:
-                    metrics_str += f" | GPU: {gpu_utilization['gpu']:.1f}%"
+                    metrics_parts.append(f"GPU: {gpu_utilization['gpu']:.1f}%")
                 if cpu_temp is not None:
-                    metrics_str += f" | Temp: {cpu_temp:.1f}C"
+                    metrics_parts.append(f"Temp: {cpu_temp:.1f}C")
                 if network_bandwidth is not None:
-                    metrics_str += f" | Network: {network_bandwidth:.1f} MB/s"
+                    metrics_parts.append(f"Network: {network_bandwidth:.1f} MB/s")
+
+                metrics_str = " | ".join(metrics_parts)
                 logger.info(metrics_str)
 
-                with monitoring_heartbeat['lock']:
-                    monitoring_heartbeat['last_update'] = time.time()
+                if watchdog_monitor:
+                    watchdog_monitor.update_heartbeat()
 
                 if cpu_percent >= cpu_threshold:
                     time_since_last_alert = current_time - last_cpu_alert_time
@@ -2312,7 +2346,6 @@ def main(
                     if gpu_alert_sent:
                         gpu_alert_sent = False
 
-                # Check each disk/partition separately for alerts
                 try:
                     if all_partitions:
                         for partition in all_partitions:
@@ -2320,21 +2353,19 @@ def main(
                             if partition_percent >= disk_threshold:
                                 mountpoint = partition.get('mountpoint', partition.get('device', 'unknown'))
                                 partition_key = mountpoint
-                                
-                                # Use partition-specific alert tracking
+
                                 last_alert_time = last_partition_alert_times.get(partition_key, 0)
                                 alert_sent = partition_alert_sent.get(partition_key, False)
                                 time_since_last_alert = current_time - last_alert_time
-                                
+
                                 if not alert_sent or time_since_last_alert >= alert_cooldown:
                                     if disk_webhook:
                                         logger.warning(f"[ALERT] Disk {partition_key}: {partition_percent:.1f}% (threshold: {disk_threshold:.1f}%)")
-                                        
-                                        # Use partition-specific data for alert
+
                                         partition_total = partition.get('total', 0)
                                         partition_used = partition.get('used', 0)
                                         partition_free = partition.get('free', 0)
-                                        
+
                                         fields = [
                                             {'name': 'Mountpoint', 'value': partition_key, 'inline': True},
                                             {'name': 'Usage', 'value': f'{partition_percent:.1f}%', 'inline': True},
@@ -2343,28 +2374,28 @@ def main(
                                             {'name': 'Used', 'value': format_bytes(partition_used), 'inline': True},
                                             {'name': 'Free', 'value': format_bytes(partition_free), 'inline': True},
                                         ]
-                                        
+
                                         # Get largest directories for this partition
                                         largest_dirs = []
                                         try:
                                             if partition.get('percent', 0) >= disk_threshold:
-                                                largest_dirs = disk_monitor.get_largest_directories_human(mountpoint, limit=5)
+                                                largest_dirs = disk_monitor.get_largest_directories_human(mountpoint, limit=MAX_DIRECTORIES_DISPLAY)
                                         except Exception as e:
                                             logger.debug(f"Could not get largest directories for {mountpoint}: {e}")
-                                        
+
                                         if largest_dirs:
                                             dir_list = []
                                             for i, dir_info in enumerate(largest_dirs, 1):
                                                 dir_name = Path(dir_info['path']).name
                                                 dir_size = dir_info['size']
                                                 dir_list.append(f"{i}. `{dir_name}`: {dir_size}")
-                                            
+
                                             fields.append({
                                                 'name': f'Largest Directories ({mountpoint})',
                                                 'value': '\n'.join(dir_list) if dir_list else 'Unable to determine',
                                                 'inline': False
                                             })
-                                        
+
                                         success = disk_webhook.send_embed(
                                             title=f'Disk Usage Alert: {partition_key}',
                                             description=f'Disk usage on {partition_key} has exceeded the threshold of {disk_threshold:.1f}%',
@@ -2378,7 +2409,7 @@ def main(
                                             logger.warning("    Discord alert failed")
                                     else:
                                         logger.warning(f"Disk {partition_key}: {partition_percent:.1f}% (threshold: {disk_threshold:.1f}%)")
-                                    
+
                                     last_partition_alert_times[partition_key] = current_time
                                     partition_alert_sent[partition_key] = True
                                 else:
@@ -2392,7 +2423,7 @@ def main(
                                     partition_alert_sent[partition_key] = False
                 except Exception as e:
                     logger.debug(f"Error checking individual disks: {e}")
-                
+
                 # Also check aggregated total for backward compatibility (only if no individual partitions detected)
                 if not all_partitions and disk_percent >= disk_threshold:
                     time_since_last_alert = current_time - last_disk_alert_time
@@ -2413,10 +2444,7 @@ def main(
                             try:
                                 root_partition = disk_monitor.get_disk_usage('/')
                                 if root_partition and root_partition['percent'] >= disk_threshold:
-                                    largest_dirs = disk_monitor.get_largest_directories_human('/', limit=5)
-                                    
-                                    with monitoring_heartbeat['lock']:
-                                        monitoring_heartbeat['last_update'] = time.time()
+                                    largest_dirs = disk_monitor.get_largest_directories_human('/', limit=MAX_DIRECTORIES_DISPLAY)
                             except Exception as e:
                                 logger.debug(f"Could not get largest directories: {e}")
 
@@ -2459,7 +2487,8 @@ def main(
 
                 if monitor_individual_partitions:
                     try:
-                        all_partitions = disk_monitor.get_all_partitions()
+                        # Use cached all_partitions from earlier in loop (already fetched at line 1947)
+                        # all_partitions already available from start of loop iteration
                         nvme_partitions = disk_monitor.get_nvme_partitions()
 
                         for partition in all_partitions:
@@ -2775,8 +2804,8 @@ def main(
                     process_check_counter = 0
 
                     try:
-                        top_cpu_processes = process_monitor.get_top_processes(limit=5, sort_by='cpu')
-                        top_memory_processes = process_monitor.get_top_processes(limit=5, sort_by='memory')
+                        top_cpu_processes = process_monitor.get_top_processes(limit=MAX_PROCESSES_DISPLAY, sort_by='cpu')
+                        top_memory_processes = process_monitor.get_top_processes(limit=MAX_PROCESSES_DISPLAY, sort_by='memory')
 
                         for proc in top_cpu_processes:
                             cpu_usage = proc.get('cpu_percent', 0)
@@ -2882,28 +2911,19 @@ def main(
                     media_check_counter = 0
                     try:
                         media_size_info = disk_monitor.get_directory_size(media_directory)
-                        
-                        with monitoring_heartbeat['lock']:
-                            monitoring_heartbeat['last_update'] = time.time()
-                        
+
                         if media_size_info and media_size_info['size'] >= media_directory_threshold_bytes:
                             time_since_last_alert = current_time - last_media_alert_time
 
                             if not media_alert_sent or time_since_last_alert >= alert_cooldown:
                                 subdirs = disk_monitor.get_subdirectories_sizes(media_directory)
-                                
-                                with monitoring_heartbeat['lock']:
-                                    monitoring_heartbeat['last_update'] = time.time()
-                                
+
                                 subdirs_human = []
                                 for subdir in subdirs:
                                     subdir_human = disk_monitor.get_directory_size_human(subdir['path'])
                                     if subdir_human:
                                         subdir_human['size_bytes'] = subdir['size']
                                         subdirs_human.append(subdir_human)
-                                
-                                with monitoring_heartbeat['lock']:
-                                    monitoring_heartbeat['last_update'] = time.time()
 
                                 if disk_webhook:
                                     size_formatted = format_bytes(media_size_info['size'])
@@ -2928,8 +2948,6 @@ def main(
                                 remaining_cooldown = alert_cooldown - time_since_last_alert
                                 logger.debug(f"Directory alert cooldown: {remaining_cooldown:.0f}s")
                         else:
-                            with monitoring_heartbeat['lock']:
-                                monitoring_heartbeat['last_update'] = time.time()
                             if media_alert_sent:
                                 media_alert_sent = False
                     except Exception as e:
@@ -3032,6 +3050,7 @@ def main(
                                     if log_path not in all_logs_dict or log_info.get('size_bytes', 0) > all_logs_dict[log_path].get('size_bytes', 0):
                                         all_logs_dict[log_path] = log_info
 
+                            # Convert to list for iteration (dict.values() is a view, list() allows multiple iterations)
                             logs_to_check = list(all_logs_dict.values())
                             logger.info(f"[LOG CHECK] Disk at {disk_percent:.1f}% - cleaning ALL logs proactively")
                         else:
@@ -3132,7 +3151,7 @@ def main(
                                     if indicators:
                                         fields.append({
                                             'name': 'Warning Indicators',
-                                            'value': '\n'.join(indicators[:8]),
+                                            'value': '\n'.join(indicators[:MAX_INDICATORS_DISPLAY]),
                                             'inline': False
                                         })
 
@@ -3140,7 +3159,7 @@ def main(
                                     if recommendations:
                                         fields.append({
                                             'name': 'Recommended Actions',
-                                            'value': '\n'.join(recommendations[:5]),
+                                            'value': '\n'.join(recommendations[:MAX_RECOMMENDATIONS_DISPLAY]),
                                             'inline': False
                                         })
 
@@ -3238,7 +3257,7 @@ def main(
 
                                     if hardware_errors:
                                         hw_details = []
-                                        for hw_error in hardware_errors[:5]:
+                                        for hw_error in hardware_errors[:MAX_HARDWARE_ERRORS_DISPLAY]:
                                             if 'count_increase' in hw_error:
                                                 source = hw_error.get('source', 'unknown')
                                                 count_increase = hw_error['count_increase']
@@ -3317,7 +3336,7 @@ def main(
                                     ]
 
                                     crash_details = []
-                                    for i, (crash_type, crash_list) in enumerate(list(crash_summary.items())[:5]):
+                                    for i, (crash_type, crash_list) in enumerate(list(crash_summary.items())[:MAX_CRASH_TYPES_DISPLAY]):
                                         latest_crash = crash_list[0]
                                         message = latest_crash.get('message', '')[:200]
                                         source = latest_crash.get('source', 'unknown')
@@ -3365,18 +3384,29 @@ def main(
                 log_error_to_file_and_webhook(e, context="Monitoring loop iteration", include_traceback=True)
                 logger.warning("Continuing monitoring despite error...")
 
-            with monitoring_heartbeat['lock']:
-                monitoring_heartbeat['last_update'] = time.time()
+                if watchdog_monitor:
+                    watchdog_monitor.update_heartbeat()
 
             time.sleep(check_interval)
 
     except KeyboardInterrupt:
         shutdown_start = time.time()
-        logger.info("Monitoring stopped by user")
 
+        # Check if this was a graceful shutdown (signal) or user interrupt
+        with shutdown_state['lock']:
+            is_graceful = shutdown_state['graceful_shutdown']
+            shutdown_reason = shutdown_state.get('shutdown_reason', 'keyboard_interrupt')
 
-        with monitoring_watchdog_running['lock']:
-            monitoring_watchdog_running['value'] = False
+        if is_graceful:
+            logger.info(f"Monitoring stopped gracefully ({shutdown_reason})")
+        else:
+            logger.info("Monitoring stopped by user (Ctrl+C)")
+
+        with shutdown_state['lock']:
+            shutdown_state['shutdown_time'] = shutdown_start
+
+        if watchdog_monitor:
+            watchdog_monitor.stop()
 
         uptime_seconds = shutdown_start - monitoring_start_time
 
@@ -3403,7 +3433,8 @@ def main(
         shutdown_seconds = time.time() - shutdown_start
         logger.info(f"Shutdown complete ({shutdown_seconds:.2f}s)")
 
-        if webhook:
+        # Only send shutdown notification for graceful shutdowns (not crashes)
+        if webhook and is_graceful:
             try:
                 logger.info("Sending shutdown notification...")
                 success = webhook.send_shutdown_notification(uptime_seconds=uptime_seconds, shutdown_seconds=shutdown_seconds)
@@ -3413,17 +3444,49 @@ def main(
                     logger.warning("Shutdown notification failed")
             except (KeyboardInterrupt, Exception) as e:
                 logger.warning(f"Shutdown notification skipped: {e}")
+        elif not is_graceful:
+            logger.debug("Skipping shutdown notification (not a graceful shutdown)")
     except Exception as e:
+        # This is a crash - unhandled exception
+        with shutdown_state['lock']:
+            shutdown_state['graceful_shutdown'] = False
+            shutdown_state['shutdown_reason'] = 'crash_exception'
+            shutdown_state['shutdown_time'] = time.time()
+
         logger.error(f"Unexpected error in monitoring loop: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
-        logger.critical("CRITICAL: Monitoring loop crashed.")
+        logger.critical("CRITICAL: Monitoring loop crashed (unhandled exception).")
 
+        # Send crash alert (not shutdown notification)
+        crash_webhook_to_use = crash_webhook if crash_webhook else webhook
+        if crash_webhook_to_use:
+            try:
+                traceback_text = traceback.format_exc()
+                if len(traceback_text) > 1500:
+                    traceback_text = traceback_text[:1500] + "... (truncated)"
+
+                crash_webhook_to_use.send_embed(
+                    title='CRITICAL: Server Monitor Crashed',
+                    description='The monitoring loop crashed due to an unhandled exception',
+                    fields=[
+                        {'name': 'Error Type', 'value': type(e).__name__, 'inline': True},
+                        {'name': 'Error Message', 'value': str(e)[:500], 'inline': False},
+                        {'name': 'Uptime Before Crash', 'value': f"{(time.time() - monitoring_start_time):.1f} seconds", 'inline': True},
+                        {'name': 'Traceback', 'value': f"```\n{traceback_text}\n```", 'inline': False},
+                        {'name': 'Status', 'value': 'CRITICAL - Program crashed unexpectedly', 'inline': False},
+                    ],
+                    color=0xFF0000,  # Red for crashes
+                    footer='Server Monitor - Crash Alert',
+                    timestamp=True
+                )
+                logger.info("Crash alert sent to Discord")
+            except Exception as webhook_error:
+                logger.warning(f"Failed to send crash alert: {webhook_error}")
 
         log_error_to_file_and_webhook(e, context="CRITICAL: Monitoring loop crash", include_traceback=True)
 
-
-        with monitoring_watchdog_running['lock']:
-            monitoring_watchdog_running['value'] = False
+        if watchdog_monitor:
+            watchdog_monitor.stop()
 
         logger.info("Shutting down due to critical error...")
         if freeze_monitor_enabled and freeze_monitor:
@@ -3436,8 +3499,17 @@ def main(
         except Exception:
             pass
     finally:
+        # Final check: if we reach finally without graceful shutdown flag, it might be a crash
+        with shutdown_state['lock']:
+            final_reason = shutdown_state.get('shutdown_reason', 'unknown')
+            is_graceful_final = shutdown_state.get('graceful_shutdown', False)
+
         clear_cache_on_exit(verbose=True)
-        logger.info("Server Monitor stopped")
+
+        if is_graceful_final:
+            logger.info(f"Server Monitor stopped gracefully ({final_reason})")
+        else:
+            logger.warning(f"Server Monitor stopped unexpectedly ({final_reason}) - may have crashed")
 
 
 if __name__ == "__main__":
