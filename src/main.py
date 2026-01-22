@@ -29,12 +29,545 @@ import hashlib
 import json
 import traceback
 import threading
+import socket
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dotenv import load_dotenv
 
 load_dotenv()
 
 logger = get_logger()
+
+
+def analyze_system_usage_patterns() -> Dict[str, Any]:
+    """
+    Analyze current system usage patterns to determine optimal thresholds.
+    
+    Samples CPU, memory, disk, and load averages to understand typical workload.
+    
+    Returns:
+        Dictionary with usage analysis results
+    """
+    analysis = {
+        'cpu_samples': [],
+        'memory_samples': [],
+        'disk_samples': [],
+        'load_averages': [],
+        'process_count': 0,
+        'typical_cpu': 0.0,
+        'typical_memory': 0.0,
+        'typical_disk': 0.0,
+        'peak_cpu': 0.0,
+        'peak_memory': 0.0,
+        'system_type': 'unknown'  # 'server', 'desktop', 'workstation'
+    }
+    
+    try:
+        import time
+        # Sample system metrics over a short period
+        sample_count = 5
+        sample_interval = 0.5  # 0.5 seconds between samples
+        
+        for i in range(sample_count):
+            try:
+                # CPU usage
+                cpu_percent = psutil.cpu_percent(interval=0.1)
+                analysis['cpu_samples'].append(cpu_percent)
+                
+                # Memory usage
+                mem = psutil.virtual_memory()
+                analysis['memory_samples'].append(mem.percent)
+                
+                # Disk usage
+                if platform.system() == 'Windows':
+                    root_path = os.path.splitdrive(sys.executable)[0] + '\\'
+                else:
+                    root_path = '/'
+                disk = psutil.disk_usage(root_path)
+                analysis['disk_samples'].append(disk.percent)
+                
+                # Load average (Linux only)
+                try:
+                    load_avg = psutil.getloadavg()
+                    analysis['load_averages'].append(load_avg)
+                except (AttributeError, OSError):
+                    pass
+                
+                if i < sample_count - 1:
+                    time.sleep(sample_interval)
+            except Exception as e:
+                logger.debug(f"Error sampling system metrics: {e}")
+                break
+        
+        # Calculate typical and peak values
+        if analysis['cpu_samples']:
+            analysis['typical_cpu'] = sum(analysis['cpu_samples']) / len(analysis['cpu_samples'])
+            analysis['peak_cpu'] = max(analysis['cpu_samples'])
+        
+        if analysis['memory_samples']:
+            analysis['typical_memory'] = sum(analysis['memory_samples']) / len(analysis['memory_samples'])
+            analysis['peak_memory'] = max(analysis['memory_samples'])
+        
+        if analysis['disk_samples']:
+            analysis['typical_disk'] = sum(analysis['disk_samples']) / len(analysis['disk_samples'])
+        
+        # Count processes
+        try:
+            analysis['process_count'] = len(psutil.pids())
+        except Exception:
+            pass
+        
+        # Determine system type based on usage patterns
+        if analysis['typical_cpu'] > 0:
+            if analysis['typical_cpu'] > 30 or analysis['process_count'] > 100:
+                analysis['system_type'] = 'server'
+            elif analysis['typical_cpu'] < 10 and analysis['process_count'] < 50:
+                analysis['system_type'] = 'desktop'
+            else:
+                analysis['system_type'] = 'workstation'
+        
+    except Exception as e:
+        logger.debug(f"Could not analyze system usage patterns: {e}")
+    
+    return analysis
+
+
+def detect_system_config() -> Dict[str, Any]:
+    """
+    Auto-detect system capabilities and adapt configuration.
+    
+    Detects:
+    - GPU availability (NVIDIA)
+    - qBittorrent availability
+    - CPU and memory specs to adapt thresholds
+    - Disk space to adapt thresholds
+    - Platform-specific features
+    - System usage patterns for optimal thresholds
+    
+    Returns:
+        Dictionary with detected configuration values
+    """
+    detected = {
+        'gpu_available': False,
+        'qbittorrent_available': False,
+        'cpu_cores': 0,
+        'total_memory_gb': 0.0,
+        'total_disk_gb': 0.0,
+        'platform': platform.system(),
+        'usage_analysis': {},
+        'adaptations': []
+    }
+    
+    try:
+        # Detect CPU cores
+        detected['cpu_cores'] = psutil.cpu_count(logical=True)
+        detected['adaptations'].append(f"Detected {detected['cpu_cores']} CPU cores")
+    except Exception as e:
+        logger.debug(f"Could not detect CPU cores: {e}")
+    
+    try:
+        # Detect total memory
+        mem = psutil.virtual_memory()
+        detected['total_memory_gb'] = mem.total / BYTES_PER_GB
+        detected['adaptations'].append(f"Detected {detected['total_memory_gb']:.1f} GB total memory")
+    except Exception as e:
+        logger.debug(f"Could not detect memory: {e}")
+    
+    try:
+        # Detect GPU availability
+        try:
+            result = subprocess.run(
+                ['nvidia-smi', '--version'],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            if result.returncode == 0:
+                detected['gpu_available'] = True
+                detected['adaptations'].append("NVIDIA GPU detected - GPU monitoring will be enabled")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    except Exception as e:
+        logger.debug(f"Could not detect GPU: {e}")
+    
+    try:
+        # Detect qBittorrent availability
+        qb_host = os.getenv('QBITTORRENT_HOST', 'localhost')
+        qb_port = int(os.getenv('QBITTORRENT_PORT', '8080'))
+        
+        # Try to connect to qBittorrent Web UI
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((qb_host, qb_port))
+        sock.close()
+        
+        if result == 0:
+            # Port is open, try to authenticate
+            try:
+                import qbittorrentapi
+                qb_client = qbittorrentapi.Client(
+                    host=qb_host,
+                    port=qb_port,
+                    username=os.getenv('QBITTORRENT_USERNAME', 'admin'),
+                    password=os.getenv('QBITTORRENT_PASSWORD', '')
+                )
+                qb_client.auth_log_in()
+                detected['qbittorrent_available'] = True
+                detected['adaptations'].append("qBittorrent detected - qBittorrent monitoring can be enabled")
+                qb_client.auth_log_out()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"Could not detect qBittorrent: {e}")
+    
+    try:
+        # Detect total disk space (use root partition)
+        if platform.system() == 'Windows':
+            # On Windows, use the drive where the script is running
+            root_path = os.path.splitdrive(sys.executable)[0] + '\\'
+        else:
+            root_path = '/'
+        
+        disk = psutil.disk_usage(root_path)
+        detected['total_disk_gb'] = disk.total / BYTES_PER_GB
+        detected['adaptations'].append(f"Detected {detected['total_disk_gb']:.1f} GB total disk space")
+    except Exception as e:
+        logger.debug(f"Could not detect disk space: {e}")
+    
+    # Analyze system usage patterns for optimal threshold determination
+    logger.info("Analyzing system usage patterns to determine optimal thresholds...")
+    detected['usage_analysis'] = analyze_system_usage_patterns()
+    if detected['usage_analysis'].get('system_type') != 'unknown':
+        detected['adaptations'].append(f"System type: {detected['usage_analysis']['system_type']}")
+    
+    return detected
+
+
+def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Apply auto-detected system adaptations to environment variables if not already set.
+    
+    Args:
+        detected: Dictionary from detect_system_config()
+    
+    Returns:
+        Dictionary of auto-detected values that were set (key -> value)
+    """
+    adaptations_applied = []
+    auto_detected_values = {}
+    
+    # Adapt thresholds based on system specs AND usage patterns
+    usage = detected.get('usage_analysis', {})
+    
+    if not os.getenv('CPU_THRESHOLD'):
+        threshold = None
+        reasoning = []
+        
+        # Base threshold on CPU cores
+        if detected['cpu_cores'] > 0:
+            if detected['cpu_cores'] <= 2:
+                base_threshold = 70.0
+                reasoning.append(f"{detected['cpu_cores']} cores (conservative)")
+            elif detected['cpu_cores'] <= 4:
+                base_threshold = 75.0
+                reasoning.append(f"{detected['cpu_cores']} cores")
+            else:
+                base_threshold = 80.0
+                reasoning.append(f"{detected['cpu_cores']} cores")
+        else:
+            base_threshold = DEFAULT_CPU_THRESHOLD
+        
+        # Adjust based on typical usage patterns
+        typical_cpu = usage.get('typical_cpu', 0)
+        peak_cpu = usage.get('peak_cpu', 0)
+        system_type = usage.get('system_type', 'unknown')
+        
+        if typical_cpu > 0:
+            # If system typically runs high, set threshold higher (more headroom)
+            if typical_cpu > 50:
+                threshold = min(95.0, base_threshold + 10.0)
+                reasoning.append(f"high typical usage ({typical_cpu:.1f}%)")
+            elif typical_cpu > 30:
+                threshold = min(90.0, base_threshold + 5.0)
+                reasoning.append(f"moderate typical usage ({typical_cpu:.1f}%)")
+            elif typical_cpu < 10:
+                # Low usage system - more conservative threshold
+                threshold = max(70.0, base_threshold - 5.0)
+                reasoning.append(f"low typical usage ({typical_cpu:.1f}%)")
+            else:
+                threshold = base_threshold
+                reasoning.append(f"typical usage ({typical_cpu:.1f}%)")
+            
+            # Adjust for system type
+            if system_type == 'server':
+                # Servers can handle higher sustained loads
+                threshold = min(90.0, threshold + 5.0)
+                reasoning.append("server workload")
+            elif system_type == 'desktop':
+                # Desktops should alert earlier
+                threshold = max(70.0, threshold - 5.0)
+                reasoning.append("desktop workload")
+        else:
+            threshold = base_threshold
+        
+        # Ensure threshold is within reasonable bounds
+        threshold = max(65.0, min(95.0, threshold))
+        
+        os.environ['CPU_THRESHOLD'] = str(threshold)
+        auto_detected_values['CPU_THRESHOLD'] = str(threshold)
+        reasoning_str = ", ".join(reasoning)
+        adaptations_applied.append(f"CPU_THRESHOLD set to {threshold:.1f}% (based on: {reasoning_str})")
+    
+    if not os.getenv('MEMORY_THRESHOLD'):
+        threshold = None
+        reasoning = []
+        
+        # Base threshold on total memory
+        if detected['total_memory_gb'] > 0:
+            if detected['total_memory_gb'] < 4:
+                base_threshold = 70.0
+                reasoning.append(f"{detected['total_memory_gb']:.1f} GB (low memory)")
+            elif detected['total_memory_gb'] < 8:
+                base_threshold = 75.0
+                reasoning.append(f"{detected['total_memory_gb']:.1f} GB")
+            elif detected['total_memory_gb'] < 16:
+                base_threshold = 80.0
+                reasoning.append(f"{detected['total_memory_gb']:.1f} GB")
+            else:
+                base_threshold = 82.0  # More headroom for high-memory systems
+                reasoning.append(f"{detected['total_memory_gb']:.1f} GB (high memory)")
+        else:
+            base_threshold = DEFAULT_MEMORY_THRESHOLD
+        
+        # Adjust based on typical memory usage
+        typical_memory = usage.get('typical_memory', 0)
+        peak_memory = usage.get('peak_memory', 0)
+        
+        if typical_memory > 0:
+            # If system typically uses a lot of memory, set threshold higher
+            if typical_memory > 60:
+                threshold = min(90.0, base_threshold + 8.0)
+                reasoning.append(f"high typical usage ({typical_memory:.1f}%)")
+            elif typical_memory > 40:
+                threshold = min(87.0, base_threshold + 5.0)
+                reasoning.append(f"moderate typical usage ({typical_memory:.1f}%)")
+            elif typical_memory < 20:
+                # Low usage - more conservative
+                threshold = max(70.0, base_threshold - 5.0)
+                reasoning.append(f"low typical usage ({typical_memory:.1f}%)")
+            else:
+                threshold = base_threshold
+                reasoning.append(f"typical usage ({typical_memory:.1f}%)")
+        else:
+            threshold = base_threshold
+        
+        # Ensure threshold is within reasonable bounds
+        threshold = max(65.0, min(92.0, threshold))
+        
+        os.environ['MEMORY_THRESHOLD'] = str(threshold)
+        auto_detected_values['MEMORY_THRESHOLD'] = str(threshold)
+        reasoning_str = ", ".join(reasoning)
+        adaptations_applied.append(f"MEMORY_THRESHOLD set to {threshold:.1f}% (based on: {reasoning_str})")
+    
+    if not os.getenv('DISK_THRESHOLD'):
+        threshold = None
+        reasoning = []
+        
+        # Base threshold on total disk space
+        if detected['total_disk_gb'] > 0:
+            if detected['total_disk_gb'] < 100:
+                base_threshold = 85.0
+                reasoning.append(f"{detected['total_disk_gb']:.1f} GB (small disk)")
+            elif detected['total_disk_gb'] < 500:
+                base_threshold = 87.0
+                reasoning.append(f"{detected['total_disk_gb']:.1f} GB")
+            elif detected['total_disk_gb'] < 1000:
+                base_threshold = 85.0
+                reasoning.append(f"{detected['total_disk_gb']:.1f} GB")
+            else:
+                base_threshold = 88.0  # Large disks can go higher
+                reasoning.append(f"{detected['total_disk_gb']:.1f} GB (large disk)")
+        else:
+            base_threshold = DEFAULT_DISK_THRESHOLD
+        
+        # Adjust based on current disk usage
+        typical_disk = usage.get('typical_disk', 0)
+        
+        if typical_disk > 0:
+            # If disk is already quite full, be more conservative
+            if typical_disk > 70:
+                threshold = max(85.0, base_threshold - 3.0)
+                reasoning.append(f"current usage {typical_disk:.1f}% (already high)")
+            elif typical_disk < 30:
+                # Lots of free space - can allow higher threshold
+                threshold = min(90.0, base_threshold + 3.0)
+                reasoning.append(f"current usage {typical_disk:.1f}% (plenty of space)")
+            else:
+                threshold = base_threshold
+                reasoning.append(f"current usage {typical_disk:.1f}%")
+        else:
+            threshold = base_threshold
+        
+        # Ensure threshold is within reasonable bounds
+        threshold = max(80.0, min(92.0, threshold))
+        
+        os.environ['DISK_THRESHOLD'] = str(threshold)
+        auto_detected_values['DISK_THRESHOLD'] = str(threshold)
+        reasoning_str = ", ".join(reasoning)
+        adaptations_applied.append(f"DISK_THRESHOLD set to {threshold:.1f}% (based on: {reasoning_str})")
+    
+    # Auto-enable GPU monitoring if GPU is available and not explicitly disabled
+    if detected['gpu_available'] and not os.getenv('GPU_THRESHOLD'):
+        os.environ['GPU_THRESHOLD'] = str(DEFAULT_GPU_THRESHOLD)
+        auto_detected_values['GPU_THRESHOLD'] = str(DEFAULT_GPU_THRESHOLD)
+        adaptations_applied.append("GPU monitoring enabled (NVIDIA GPU detected)")
+    
+    # Suggest qBittorrent monitoring if available
+    if detected['qbittorrent_available'] and not os.getenv('QBITTORRENT_MONITOR'):
+        # Don't auto-enable, but log suggestion
+        logger.info("qBittorrent is available. Set QBITTORRENT_MONITOR=true to enable monitoring")
+    
+    # Platform-specific adaptations
+    if detected['platform'] == 'Windows':
+        # Disable some Linux-specific features on Windows
+        if not os.getenv('FREEZE_MONITOR_ENABLED'):
+            # Freeze monitor may not work well on Windows
+            pass
+    elif detected['platform'] == 'Linux':
+        # Linux-specific optimizations
+        if not os.getenv('MONITOR_INDIVIDUAL_PARTITIONS'):
+            os.environ['MONITOR_INDIVIDUAL_PARTITIONS'] = 'true'
+            auto_detected_values['MONITOR_INDIVIDUAL_PARTITIONS'] = 'true'
+            adaptations_applied.append("MONITOR_INDIVIDUAL_PARTITIONS enabled (Linux detected)")
+    
+    if adaptations_applied:
+        logger.info("System auto-detection applied the following adaptations:")
+        for adaptation in adaptations_applied:
+            logger.info(f"  - {adaptation}")
+    else:
+        logger.info("System auto-detection completed (no adaptations needed - using defaults or existing config)")
+    
+    return auto_detected_values
+
+
+def prompt_save_config(auto_detected_values: Dict[str, str]) -> bool:
+    """
+    Prompt user interactively if they want to save auto-detected configuration.
+    
+    Args:
+        auto_detected_values: Dictionary of auto-detected values (key -> value)
+    
+    Returns:
+        True if user wants to save, False otherwise
+    """
+    if not auto_detected_values:
+        return False
+    
+    if not sys.stdin.isatty():
+        logger.info("Non-interactive mode detected - skipping save prompt")
+        return False
+    
+    try:
+        print("The following configuration values were auto-detected:")
+        print()
+        for key, value in auto_detected_values.items():
+            print(f"  {key}={value}")
+        print()
+        
+        while True:
+            response = input("Save these settings to .env file? (y/n): ").strip().lower()
+            if response in ('y', 'yes'):
+                return True
+            elif response in ('n', 'no'):
+                return False
+            else:
+                print("Please enter 'y' for yes or 'n' for no.")
+    except (EOFError, KeyboardInterrupt):
+        # User pressed Ctrl+C or EOF
+        logger.info("Save prompt cancelled by user")
+        return False
+    except Exception as e:
+        logger.warning(f"Error prompting for save: {e}")
+        return False
+
+
+def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root: Optional[Path] = None) -> bool:
+    """
+    Save auto-detected configuration values to .env file.
+    
+    Preserves existing .env values and only adds auto-detected values that aren't already set.
+    Adds comments to indicate auto-generated values.
+    
+    Args:
+        auto_detected_values: Dictionary of auto-detected values (key -> value)
+        project_root: Optional project root path (defaults to detecting from script location)
+    
+    Returns:
+        True if .env file was updated, False otherwise
+    """
+    if not auto_detected_values:
+        return False
+    
+    if project_root is None:
+        script_path = Path(__file__).resolve()
+        project_root = script_path.parent
+    
+    env_file = project_root / '.env'
+    
+    # Read existing .env file if it exists
+    existing_lines = []
+    existing_keys = set()
+    has_auto_detected_section = False
+    
+    if env_file.exists():
+        try:
+            with open(env_file, 'r', encoding='utf-8') as f:
+                existing_lines = f.readlines()
+                # Extract existing keys (handle comments and empty lines)
+                for line in existing_lines:
+                    line_stripped = line.strip()
+                    # Check if auto-detected section already exists
+                    if 'Auto-detected configuration' in line_stripped:
+                        has_auto_detected_section = True
+                    if line_stripped and not line_stripped.startswith('#') and '=' in line_stripped:
+                        key = line_stripped.split('=')[0].strip()
+                        existing_keys.add(key)
+        except Exception as e:
+            logger.warning(f"Could not read existing .env file: {e}")
+            existing_lines = []
+    
+    # Prepare new entries for auto-detected values that aren't already set in .env file
+    # Note: We don't check os.getenv() here because apply_system_adaptations() already
+    # set these values in os.environ. We only need to check if they're in the .env file.
+    new_entries = []
+    for key, value in auto_detected_values.items():     
+        if key not in existing_keys:
+            # Escape value if it contains special characters
+            escaped_value = value.replace('\\', '\\\\').replace('$', '\\$')
+            new_entries.append(f"{key}={escaped_value}")
+    
+    if not new_entries:
+        return False  # Nothing new to add
+    
+    # Write to .env file
+    try:
+        with open(env_file, 'a', encoding='utf-8') as f:
+            # Add newline if file exists and doesn't end with newline
+            if existing_lines and not existing_lines[-1].endswith('\n'):
+                f.write('\n')
+            
+            # Write new entries (no comments)
+            for entry in new_entries:
+                f.write(f"{entry}\n")
+        
+        logger.info(f"Saved {len(new_entries)} auto-detected configuration value(s) to {env_file}")
+        logger.info(f"  File location: {env_file.absolute()}")
+        saved_keys = [key for key, value in auto_detected_values.items() 
+                     if key not in existing_keys]
+        logger.info("  Values saved: " + ", ".join(saved_keys))
+        return True
+    except Exception as e:
+        logger.warning(f"Could not save auto-detected configuration to .env file: {e}")
+        return False
 
 
 def validate_config() -> None:
@@ -854,6 +1387,24 @@ def main(
 
     logger.info("Starting Server Monitor...")
     
+    # Auto-detect system capabilities and adapt configuration
+    logger.info("Detecting system capabilities...")
+    detected_config = detect_system_config()
+    if detected_config['adaptations']:
+        logger.info("System detection results:")
+        for adaptation in detected_config['adaptations']:
+            logger.info(f"  - {adaptation}")
+    
+    # Apply auto-detected adaptations (only if env vars not set)
+    auto_detected_values = apply_system_adaptations(detected_config)
+    
+    # Ask user if they want to save auto-detected values to .env file
+    if auto_detected_values:
+        if prompt_save_config(auto_detected_values):
+            save_auto_detected_config(auto_detected_values)
+        else:
+            logger.info("Auto-detected configuration not saved (user declined or non-interactive mode)")
+    
     try:
         validate_config()
     except ValueError as e:
@@ -1031,7 +1582,7 @@ def main(
 
     if sensors_monitor.is_available():
         cpu_temp = sensors_monitor.get_cpu_temperature()
-        logger.info(f"Sensors: {sensors_monitor.format_temperature(cpu_temp)} | Threshold: {temp_threshold:.1f}°C | Alert Duration: {temp_alert_duration:.1f}s")
+        logger.info(f"Sensors: {sensors_monitor.format_temperature(cpu_temp)} | Threshold: {temp_threshold:.1f}C | Alert Duration: {temp_alert_duration:.1f}s")
 
     logger.info(f"Processes: CPU threshold {process_cpu_threshold:.1f}% | Memory threshold {process_memory_threshold:.1f}%")
     logger.info(f"Network: Bandwidth threshold {network_bandwidth_threshold:.1f} MB/s")
@@ -1389,12 +1940,15 @@ def main(
                 except Exception as e:
                     logger.debug(f"Error getting GPU metrics: {e}")
 
-                try:
+                try:    
+                    all_partitions = disk_monitor.get_all_partitions()
+                    # Keep total_disk for backward compatibility with cleanup logic
                     total_disk = disk_monitor.get_total_disk_usage()
                     disk_percent = total_disk.get('percent', 0.0) if total_disk else 0.0
                 except Exception as e:
                     logger.error(f"Error getting disk usage: {e}")
                     log_error_to_file_and_webhook(e, context="Disk usage collection", include_traceback=True)
+                    all_partitions = []
                     total_disk = {}
                     disk_percent = 0.0
 
@@ -1631,11 +2185,35 @@ def main(
 
                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
-                metrics_str = f"[{timestamp}] CPU: {cpu_percent:.1f}% | Memory: {memory_percent:.1f}% | Disk: {disk_percent:.1f}%"
+                # Build disk status - show each disk separately
+                disk_status_parts = []
+                try:
+                    if all_partitions:
+                        for partition in all_partitions:
+                            mountpoint = partition.get('mountpoint', partition.get('device', 'unknown'))
+                            percent = partition.get('percent', 0.0)
+                            # Shorten mountpoint for display (e.g., /mnt/data -> data, C:\ -> C:)
+                            if platform.system() == 'Windows':
+                                display_name = mountpoint.rstrip('\\').split('\\')[-1] or mountpoint[:2]
+                            else:
+                                display_name = mountpoint.split('/')[-1] if mountpoint != '/' else 'root'
+                                if not display_name:
+                                    display_name = mountpoint
+                            disk_status_parts.append(f"{display_name}: {percent:.1f}%")
+                    else:
+                        # Fallback to total if no partitions found
+                        disk_status_parts.append(f"{disk_percent:.1f}%")
+                except Exception as e:
+                    logger.debug(f"Error formatting disk status: {e}")
+                    disk_status_parts.append(f"{disk_percent:.1f}%")
+                
+                disk_status = " | ".join(disk_status_parts) if disk_status_parts else f"{disk_percent:.1f}%"
+
+                metrics_str = f"[{timestamp}] CPU: {cpu_percent:.1f}% | Memory: {memory_percent:.1f}% | Disk: {disk_status}"
                 if gpu_utilization is not None:
                     metrics_str += f" | GPU: {gpu_utilization['gpu']:.1f}%"
                 if cpu_temp is not None:
-                    metrics_str += f" | Temp: {cpu_temp:.1f}°C"
+                    metrics_str += f" | Temp: {cpu_temp:.1f}C"
                 if network_bandwidth is not None:
                     metrics_str += f" | Network: {network_bandwidth:.1f} MB/s"
                 logger.info(metrics_str)
@@ -1734,7 +2312,89 @@ def main(
                     if gpu_alert_sent:
                         gpu_alert_sent = False
 
-                if disk_percent >= disk_threshold:
+                # Check each disk/partition separately for alerts
+                try:
+                    if all_partitions:
+                        for partition in all_partitions:
+                            partition_percent = partition.get('percent', 0.0)
+                            if partition_percent >= disk_threshold:
+                                mountpoint = partition.get('mountpoint', partition.get('device', 'unknown'))
+                                partition_key = mountpoint
+                                
+                                # Use partition-specific alert tracking
+                                last_alert_time = last_partition_alert_times.get(partition_key, 0)
+                                alert_sent = partition_alert_sent.get(partition_key, False)
+                                time_since_last_alert = current_time - last_alert_time
+                                
+                                if not alert_sent or time_since_last_alert >= alert_cooldown:
+                                    if disk_webhook:
+                                        logger.warning(f"[ALERT] Disk {partition_key}: {partition_percent:.1f}% (threshold: {disk_threshold:.1f}%)")
+                                        
+                                        # Use partition-specific data for alert
+                                        partition_total = partition.get('total', 0)
+                                        partition_used = partition.get('used', 0)
+                                        partition_free = partition.get('free', 0)
+                                        
+                                        fields = [
+                                            {'name': 'Mountpoint', 'value': partition_key, 'inline': True},
+                                            {'name': 'Usage', 'value': f'{partition_percent:.1f}%', 'inline': True},
+                                            {'name': 'Threshold', 'value': f'{disk_threshold:.1f}%', 'inline': True},
+                                            {'name': 'Total Capacity', 'value': format_bytes(partition_total), 'inline': False},
+                                            {'name': 'Used', 'value': format_bytes(partition_used), 'inline': True},
+                                            {'name': 'Free', 'value': format_bytes(partition_free), 'inline': True},
+                                        ]
+                                        
+                                        # Get largest directories for this partition
+                                        largest_dirs = []
+                                        try:
+                                            if partition.get('percent', 0) >= disk_threshold:
+                                                largest_dirs = disk_monitor.get_largest_directories_human(mountpoint, limit=5)
+                                        except Exception as e:
+                                            logger.debug(f"Could not get largest directories for {mountpoint}: {e}")
+                                        
+                                        if largest_dirs:
+                                            dir_list = []
+                                            for i, dir_info in enumerate(largest_dirs, 1):
+                                                dir_name = Path(dir_info['path']).name
+                                                dir_size = dir_info['size']
+                                                dir_list.append(f"{i}. `{dir_name}`: {dir_size}")
+                                            
+                                            fields.append({
+                                                'name': f'Largest Directories ({mountpoint})',
+                                                'value': '\n'.join(dir_list) if dir_list else 'Unable to determine',
+                                                'inline': False
+                                            })
+                                        
+                                        success = disk_webhook.send_embed(
+                                            title=f'Disk Usage Alert: {partition_key}',
+                                            description=f'Disk usage on {partition_key} has exceeded the threshold of {disk_threshold:.1f}%',
+                                            fields=fields,
+                                            footer='Server Monitor',
+                                            timestamp=True
+                                        )
+                                        if success:
+                                            logger.info("    Discord alert sent")
+                                        else:
+                                            logger.warning("    Discord alert failed")
+                                    else:
+                                        logger.warning(f"Disk {partition_key}: {partition_percent:.1f}% (threshold: {disk_threshold:.1f}%)")
+                                    
+                                    last_partition_alert_times[partition_key] = current_time
+                                    partition_alert_sent[partition_key] = True
+                                else:
+                                    remaining_cooldown = alert_cooldown - time_since_last_alert
+                                    logger.debug(f"Disk {partition_key} alert cooldown: {remaining_cooldown:.0f}s")
+                            else:
+                                # Reset alert flag if below threshold
+                                mountpoint = partition.get('mountpoint', partition.get('device', 'unknown'))
+                                partition_key = mountpoint
+                                if partition_alert_sent.get(partition_key, False):
+                                    partition_alert_sent[partition_key] = False
+                except Exception as e:
+                    logger.debug(f"Error checking individual disks: {e}")
+                
+                # Also check aggregated total for backward compatibility (only if no individual partitions detected)
+                if not all_partitions and disk_percent >= disk_threshold:
                     time_since_last_alert = current_time - last_disk_alert_time
 
                     if not disk_alert_sent or time_since_last_alert >= alert_cooldown:
@@ -1744,42 +2404,10 @@ def main(
                             fields = [
                                 {'name': 'Overall Usage', 'value': f'{disk_percent:.1f}%', 'inline': True},
                                 {'name': 'Threshold', 'value': f'{disk_threshold:.1f}%', 'inline': True},
-                                {'name': 'Total Capacity', 'value': format_bytes(total_disk['total']), 'inline': False},
-                                {'name': 'Used', 'value': format_bytes(total_disk['used']), 'inline': True},
-                                {'name': 'Free', 'value': format_bytes(total_disk['free']), 'inline': True},
+                                {'name': 'Total Capacity', 'value': format_bytes(total_disk.get('total', 0)), 'inline': False},
+                                {'name': 'Used', 'value': format_bytes(total_disk.get('used', 0)), 'inline': True},
+                                {'name': 'Free', 'value': format_bytes(total_disk.get('free', 0)), 'inline': True},
                             ]
-
-                            try:
-                                all_partitions = disk_monitor.get_all_partitions()
-                                if all_partitions:
-                                    partition_lines = []
-                                    for partition in all_partitions[:6]:
-                                        mount = partition['mountpoint']
-                                        if len(mount) > 20:
-                                            mount = mount[:17] + '...'
-                                        device = partition['device']
-                                        if len(device) > 15:
-                                            device = '...' + device[-12:]
-                                        percent = partition['percent']
-                                        used = format_bytes(partition['used'])
-                                        total = format_bytes(partition['total'])
-
-                                        bar_filled = int(percent / 10)
-                                        bar_empty = 10 - bar_filled
-                                        bar = '█' * bar_filled + '░' * bar_empty
-
-                                        partition_lines.append(
-                                            f"`{mount:20s}` {bar} {percent:5.1f}%\n"
-                                            f"└ {used} / {total}"
-                                        )
-
-                                    fields.append({
-                                        'name': 'Partition Breakdown',
-                                        'value': '\n\n'.join(partition_lines) if partition_lines else 'No partitions found',
-                                        'inline': False
-                                    })
-                            except Exception as e:
-                                logger.debug(f"Could not get partition details: {e}")
 
                             largest_dirs = []
                             try:
@@ -1824,7 +2452,8 @@ def main(
                     else:
                         remaining_cooldown = alert_cooldown - time_since_last_alert
                         logger.debug(f"Disk alert cooldown: {remaining_cooldown:.0f}s")
-                else:
+                elif not all_partitions:
+                    # Reset alert flag if below threshold and no partitions detected
                     if disk_alert_sent:
                         disk_alert_sent = False
 
@@ -2061,7 +2690,7 @@ def main(
                                     gpu_temp=gpu_temp
                                 )
 
-                                logger.warning(f"[ALERT] Temperature: {cpu_temp:.1f}°C (threshold: {temp_threshold:.1f}°C) for {temp_high_duration:.0f}s")
+                                logger.warning(f"[ALERT] Temperature: {cpu_temp:.1f}C (threshold: {temp_threshold:.1f}C) for {temp_high_duration:.0f}s")
                                 logger.info(f"    Likely cause: {reason}")
 
                                 success = webhook.send_temperature_alert(
@@ -2079,7 +2708,7 @@ def main(
                                 else:
                                     logger.warning("    Discord alert failed")
                             else:
-                                logger.warning(f"Temperature: {cpu_temp:.1f}°C (threshold: {temp_threshold:.1f}°C) for {temp_high_duration:.0f}s")
+                                logger.warning(f"Temperature: {cpu_temp:.1f}C (threshold: {temp_threshold:.1f}C) for {temp_high_duration:.0f}s")
 
                             last_temp_alert_time = current_time
                             temp_alert_sent = True
@@ -2088,7 +2717,7 @@ def main(
                             logger.debug(f"Temperature alert cooldown: {remaining_cooldown:.0f}s")
                     else:
                         remaining_duration = temp_alert_duration - temp_high_duration
-                        logger.debug(f"Temperature high ({cpu_temp:.1f}°C) but needs to persist for {remaining_duration:.0f}s more before alert")
+                        logger.debug(f"Temperature high ({cpu_temp:.1f}C) but needs to persist for {remaining_duration:.0f}s more before alert")
                 else:
                     if temp_high_start_time is not None:
                         temp_high_start_time = None

@@ -785,7 +785,7 @@ class DiskMonitor:
                         size_after = log_monitor.get_log_size(log_path)
                         size_after_bytes = size_after.get('size_bytes', 0) if size_after else 0
                         stats['total_size_cleared'] += max(0, original_size - size_after_bytes)
-                        logger.info(f"    Cleaned log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
+                        logger.info(f"    Cleaned log: {log_path} ({format_bytes(original_size)} -> {format_bytes(size_after_bytes)})")
                 except Exception as e:
                     logger.error(f"Unexpected error cleaning log {log_info.get('path', 'unknown')}: {e}", exc_info=True)
                     stats['errors'].append(f"Error cleaning log {log_info.get('path', 'unknown')}: {e}")
@@ -1150,7 +1150,7 @@ class DiskMonitor:
                         size_after = log_monitor.get_log_size(log_path)
                         size_after_bytes = size_after.get('size_bytes', 0) if size_after else 0
                         stats['total_size_cleared'] += max(0, original_size - size_after_bytes)
-                        logger.info(f"    Cleared log: {log_path} ({format_bytes(original_size)} → {format_bytes(size_after_bytes)})")
+                        logger.info(f"    Cleared log: {log_path} ({format_bytes(original_size)} -> {format_bytes(size_after_bytes)})")
                 except (OSError, PermissionError) as e:
                     stats['errors'].append(f"Permission error cleaning log {log_info.get('path', 'unknown')}: {e}")
                 except Exception as e:

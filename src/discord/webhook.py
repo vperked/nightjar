@@ -1191,7 +1191,7 @@ class DiscordWebhook:
             original_size = log_info.get('original_size_formatted')
             if original_size:
                 size_formatted = log_info.get('size_formatted', 'N/A')
-                log_list.append(f"• `{log_path}` - {original_size} → {size_formatted}")
+                log_list.append(f"• `{log_path}` - {original_size} -> {size_formatted}")
             else:
                 size_formatted = log_info.get('size_formatted', 'N/A')
                 log_list.append(f"• `{log_path}` - {size_formatted}")
