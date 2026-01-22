@@ -1317,6 +1317,9 @@ def main(
                     cpu_percent = 0.0
                     cpu_per_core = []
 
+                with monitoring_heartbeat['lock']:
+                    monitoring_heartbeat['last_update'] = time.time()
+
                 try:
                     memory_percent = memory_monitor.get_memory_percent()
                     memory_info = memory_monitor.get_memory_info()
@@ -1327,6 +1330,9 @@ def main(
                     memory_percent = 0.0
                     memory_info = {}
                     swap_info = {}
+
+                with monitoring_heartbeat['lock']:
+                    monitoring_heartbeat['last_update'] = time.time()
 
                 gpu_utilization = None
                 gpu_data = None
@@ -1346,6 +1352,9 @@ def main(
                     total_disk = {}
                     disk_percent = 0.0
 
+                with monitoring_heartbeat['lock']:
+                    monitoring_heartbeat['last_update'] = time.time()
+
                 if disk_percent >= 50.0:
                     time_since_last_cleanup = current_time - last_disk_cleanup_time
 
@@ -1353,6 +1362,9 @@ def main(
                         logger.warning(f"[CLEANUP] Disk at {disk_percent:.1f}% - starting log cleanup...")
                         try:
                             cleanup_stats = disk_monitor.cleanup_logs_and_restart_services(log_monitor=log_monitor)
+                            
+                            with monitoring_heartbeat['lock']:
+                                monitoring_heartbeat['last_update'] = time.time()
 
                             if cleanup_stats.get('logs_cleaned', 0) > 0:
                                 logger.warning(f"[CLEANUP] Cleared {cleanup_stats['logs_cleaned']} log file(s), "
@@ -1376,6 +1388,9 @@ def main(
 
                         try:
                             cleanup_stats = disk_monitor.emergency_cleanup_disk_space(mountpoint='/', log_monitor=log_monitor)
+                            
+                            with monitoring_heartbeat['lock']:
+                                monitoring_heartbeat['last_update'] = time.time()
 
                             if cleanup_stats['total_size_cleared'] > 0:
                                 logger.critical(f"[EMERGENCY] Emergency cleanup cleared {format_bytes(cleanup_stats['total_size_cleared'])} "
@@ -1459,6 +1474,9 @@ def main(
                         try:
                             target_free_percent = 20.0
                             cleanup_stats = disk_monitor.cleanup_disk_space(mountpoint='/', target_free_percent=target_free_percent, log_monitor=log_monitor)
+                            
+                            with monitoring_heartbeat['lock']:
+                                monitoring_heartbeat['last_update'] = time.time()
 
                             if cleanup_stats['total_size_cleared'] > 0:
                                 logger.info(f"[CLEANUP] Cleaned {format_bytes(cleanup_stats['total_size_cleared'])} "
@@ -1529,6 +1547,9 @@ def main(
                             if mb_per_sec > 0:
                                 network_bandwidth = total_bandwidth / mb_per_sec
                         network_io_data = network_monitor.get_total_network_io()
+                        
+                        with monitoring_heartbeat['lock']:
+                            monitoring_heartbeat['last_update'] = time.time()
                     except (ValueError, ZeroDivisionError) as e:
                         logger.debug(f"Error calculating network bandwidth: {e}")
                     except Exception as e:
@@ -1557,6 +1578,9 @@ def main(
                 if network_bandwidth is not None:
                     metrics_str += f" | Network: {network_bandwidth:.1f} MB/s"
                 logger.info(metrics_str)
+
+                with monitoring_heartbeat['lock']:
+                    monitoring_heartbeat['last_update'] = time.time()
 
                 if cpu_percent >= cpu_threshold:
                     time_since_last_alert = current_time - last_cpu_alert_time
@@ -1701,6 +1725,9 @@ def main(
                                 root_partition = disk_monitor.get_disk_usage('/')
                                 if root_partition and root_partition['percent'] >= disk_threshold:
                                     largest_dirs = disk_monitor.get_largest_directories_human('/', limit=5)
+                                    
+                                    with monitoring_heartbeat['lock']:
+                                        monitoring_heartbeat['last_update'] = time.time()
                             except Exception as e:
                                 logger.debug(f"Could not get largest directories: {e}")
 
@@ -2165,17 +2192,28 @@ def main(
                     media_check_counter = 0
                     try:
                         media_size_info = disk_monitor.get_directory_size(media_directory)
+                        
+                        with monitoring_heartbeat['lock']:
+                            monitoring_heartbeat['last_update'] = time.time()
+                        
                         if media_size_info and media_size_info['size'] >= media_directory_threshold_bytes:
                             time_since_last_alert = current_time - last_media_alert_time
 
                             if not media_alert_sent or time_since_last_alert >= alert_cooldown:
                                 subdirs = disk_monitor.get_subdirectories_sizes(media_directory)
+                                
+                                with monitoring_heartbeat['lock']:
+                                    monitoring_heartbeat['last_update'] = time.time()
+                                
                                 subdirs_human = []
                                 for subdir in subdirs:
                                     subdir_human = disk_monitor.get_directory_size_human(subdir['path'])
                                     if subdir_human:
                                         subdir_human['size_bytes'] = subdir['size']
                                         subdirs_human.append(subdir_human)
+                                
+                                with monitoring_heartbeat['lock']:
+                                    monitoring_heartbeat['last_update'] = time.time()
 
                                 if disk_webhook:
                                     size_formatted = format_bytes(media_size_info['size'])
@@ -2200,6 +2238,8 @@ def main(
                                 remaining_cooldown = alert_cooldown - time_since_last_alert
                                 logger.debug(f"Directory alert cooldown: {remaining_cooldown:.0f}s")
                         else:
+                            with monitoring_heartbeat['lock']:
+                                monitoring_heartbeat['last_update'] = time.time()
                             if media_alert_sent:
                                 media_alert_sent = False
                     except Exception as e:
@@ -2634,6 +2674,9 @@ def main(
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 log_error_to_file_and_webhook(e, context="Monitoring loop iteration", include_traceback=True)
                 logger.warning("Continuing monitoring despite error...")
+
+            with monitoring_heartbeat['lock']:
+                monitoring_heartbeat['last_update'] = time.time()
 
             time.sleep(check_interval)
 
