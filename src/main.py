@@ -17,7 +17,30 @@ from util.systemd import install_systemd_service, is_systemd_available
 from cache.cache import clear_cache_on_startup, clear_cache_on_exit
 from logger import get_logger
 from web.server import set_monitors, start_server, stop_server, set_crash_webhook
-from typing import Optional, Tuple, Dict, List, Any
+from core.config import (
+    get_cached_env, get_env_float, get_env_int, get_env_bool, clamp_threshold, validate_config,
+    DEFAULT_CPU_THRESHOLD, DEFAULT_MEMORY_THRESHOLD, DEFAULT_GPU_THRESHOLD, DEFAULT_DISK_THRESHOLD,
+    DEFAULT_DISK_EARLY_WARNING_THRESHOLD, DEFAULT_DISK_CLEANUP_THRESHOLD, DEFAULT_DISK_EMERGENCY_THRESHOLD,
+    DEFAULT_TEMP_THRESHOLD, DEFAULT_TEMP_ALERT_DURATION, DEFAULT_NETWORK_BANDWIDTH_THRESHOLD,
+    DEFAULT_PROCESS_CPU_THRESHOLD, DEFAULT_PROCESS_MEMORY_THRESHOLD, DEFAULT_CHECK_INTERVAL,
+    DEFAULT_ALERT_COOLDOWN, DEFAULT_FREEZE_THRESHOLD, DEFAULT_FREEZE_HEARTBEAT_TIMEOUT,
+    DEFAULT_MEDIA_DIRECTORY_THRESHOLD_GB, DEFAULT_MEDIA_CHECK_INTERVAL, DEFAULT_KERNEL_CHECK_INTERVAL,
+    DEFAULT_KERNEL_STABILITY_CHECK_INTERVAL, DEFAULT_KERNEL_CHECK_SINCE_MINUTES,
+    DEFAULT_MONITORING_WATCHDOG_TIMEOUT, DEFAULT_WATCHDOG_AUTO_RESTART, DEFAULT_WATCHDOG_RESTART_COOLDOWN,
+    DEFAULT_STALLED_TORRENT_THRESHOLD,
+    EMBED_SEND_DELAY, MAX_TRACKED_TORRENTS, MAX_PARTITIONS_DISPLAY, MAX_PROCESSES_DISPLAY,
+    MAX_REASONS_DISPLAY, MAX_INDICATORS_DISPLAY, MAX_RECOMMENDATIONS_DISPLAY, MAX_CRASH_TYPES_DISPLAY,
+    MAX_HARDWARE_ERRORS_DISPLAY, MAX_WARNINGS_DISPLAY, MAX_DIRECTORIES_DISPLAY,
+    LOG_CLEANUP_INTERVAL_SECONDS, DISK_CLEANUP_COOLDOWN_HIGH, DISK_CLEANUP_COOLDOWN_MEDIUM,
+    DISK_CLEANUP_COOLDOWN_LOW, DISK_CLEANUP_COOLDOWN_NORMAL, DISK_EMERGENCY_COOLDOWN
+)
+from core.system import (
+    detect_system_config, apply_system_adaptations, prompt_save_config, save_auto_detected_config
+)
+from core.alert import AlertCooldownManager
+from core.temperature import analyze_temperature_reason
+from core.metrics import MetricsCollector
+from typing import Optional, Tuple, Dict, List, Any, Callable, TypeVar
 from datetime import datetime
 from pathlib import Path
 import os
@@ -40,908 +63,7 @@ load_dotenv()
 
 logger = get_logger()
 
-
-def analyze_system_usage_patterns() -> Dict[str, Any]:
-    """
-    Analyze current system usage patterns to determine optimal thresholds.
-
-    Samples CPU, memory, disk, and load averages to understand typical workload.
-
-    Returns:
-        Dictionary with usage analysis results
-    """
-    analysis = {
-        'cpu_samples': [],
-        'memory_samples': [],
-        'disk_samples': [],
-        'load_averages': [],
-        'process_count': 0,
-        'typical_cpu': 0.0,
-        'typical_memory': 0.0,
-        'typical_disk': 0.0,
-        'peak_cpu': 0.0,
-        'peak_memory': 0.0,
-        'system_type': 'unknown'
-    }
-
-    try:
-        import time
-
-        sample_count = 5
-        sample_interval = 0.5
-
-        for i in range(sample_count):
-            try:
-
-                cpu_percent = psutil.cpu_percent(interval=0.1)
-                analysis['cpu_samples'].append(cpu_percent)
-
-
-                mem = psutil.virtual_memory()
-                analysis['memory_samples'].append(mem.percent)
-
-
-                if platform.system() == 'Windows':
-                    root_path = os.path.splitdrive(sys.executable)[0] + '\\'
-                else:
-                    root_path = '/'
-                disk = psutil.disk_usage(root_path)
-                analysis['disk_samples'].append(disk.percent)
-
-                try:
-                    load_avg = psutil.getloadavg()
-                    analysis['load_averages'].append(load_avg)
-                except (AttributeError, OSError):
-                    pass
-
-                if i < sample_count - 1:
-                    time.sleep(sample_interval)
-            except Exception as e:
-                logger.debug(f"Error sampling system metrics: {e}")
-                break
-
-        if analysis['cpu_samples']:
-            analysis['typical_cpu'] = sum(analysis['cpu_samples']) / len(analysis['cpu_samples'])
-            analysis['peak_cpu'] = max(analysis['cpu_samples'])
-
-        if analysis['memory_samples']:
-            analysis['typical_memory'] = sum(analysis['memory_samples']) / len(analysis['memory_samples'])
-            analysis['peak_memory'] = max(analysis['memory_samples'])
-
-        if analysis['disk_samples']:
-            analysis['typical_disk'] = sum(analysis['disk_samples']) / len(analysis['disk_samples'])
-
-        try:
-            analysis['process_count'] = len(psutil.pids())
-        except Exception:
-            pass
-
-        if analysis['typical_cpu'] > 0:
-            if analysis['typical_cpu'] > 30 or analysis['process_count'] > 100:
-                analysis['system_type'] = 'server'
-            elif analysis['typical_cpu'] < 10 and analysis['process_count'] < 50:
-                analysis['system_type'] = 'desktop'
-            else:
-                analysis['system_type'] = 'workstation'
-
-    except Exception as e:
-        logger.debug(f"Could not analyze system usage patterns: {e}")
-
-    return analysis
-
-
-def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
-    """
-    Auto-detect system capabilities and adapt configuration.
-
-    Detects:
-    - GPU availability (NVIDIA)
-    - qBittorrent availability
-    - CPU and memory specs to adapt thresholds
-    - Disk space to adapt thresholds
-    - Platform-specific features
-    - System usage patterns for optimal thresholds (if skip_usage_analysis=False)
-
-    Args:
-        skip_usage_analysis: If True, skip expensive usage pattern analysis (default: False)
-
-    Returns:
-        Dictionary with detected configuration values
-    """
-    detected = {
-        'gpu_available': False,
-        'qbittorrent_available': False,
-        'cpu_cores': 0,
-        'total_memory_gb': 0.0,
-        'total_disk_gb': 0.0,
-        'platform': platform.system(),
-        'usage_analysis': {},
-        'adaptations': []
-    }
-
-    try:
-        detected['cpu_cores'] = psutil.cpu_count(logical=True)
-        detected['adaptations'].append(f"Detected {detected['cpu_cores']} CPU cores")
-    except Exception as e:
-        logger.debug(f"Could not detect CPU cores: {e}")
-
-    try:
-        mem = psutil.virtual_memory()
-        detected['total_memory_gb'] = mem.total / BYTES_PER_GB
-        detected['adaptations'].append(f"Detected {detected['total_memory_gb']:.1f} GB total memory")
-    except Exception as e:
-        logger.debug(f"Could not detect memory: {e}")
-
-    try:
-        try:
-            result = subprocess.run(
-                ['nvidia-smi', '--version'],
-                capture_output=True,
-                text=True,
-                timeout=3
-            )
-            if result.returncode == 0:
-                detected['gpu_available'] = True
-                detected['adaptations'].append("NVIDIA GPU detected - GPU monitoring will be enabled")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-    except Exception as e:
-        logger.debug(f"Could not detect GPU: {e}")
-
-    try:
-        qb_host = os.getenv('QBITTORRENT_HOST', 'localhost')
-        qb_port = int(os.getenv('QBITTORRENT_PORT', '8080'))
-
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(2)
-                result = sock.connect_ex((qb_host, qb_port))
-        except Exception as e:
-            logger.debug(f"Socket error checking qBittorrent: {e}")
-            result = 1
-
-        if result == 0:
-            try:
-                import qbittorrentapi
-                qb_client = qbittorrentapi.Client(
-                    host=qb_host,
-                    port=qb_port,
-                    username=os.getenv('QBITTORRENT_USERNAME', 'admin'),
-                    password=os.getenv('QBITTORRENT_PASSWORD', '')
-                )
-                qb_client.auth_log_in()
-                detected['qbittorrent_available'] = True
-                detected['adaptations'].append("qBittorrent detected - qBittorrent monitoring can be enabled")
-                qb_client.auth_log_out()
-            except Exception:
-                pass
-    except Exception as e:
-        logger.debug(f"Could not detect qBittorrent: {e}")
-
-    try:
-        if platform.system() == 'Windows':
-            root_path = os.path.splitdrive(sys.executable)[0] + '\\'
-        else:
-            root_path = '/'
-
-        disk = psutil.disk_usage(root_path)
-        detected['total_disk_gb'] = disk.total / BYTES_PER_GB
-        detected['adaptations'].append(f"Detected {detected['total_disk_gb']:.1f} GB total disk space")
-    except Exception as e:
-        logger.debug(f"Could not detect disk space: {e}")
-
-    if not skip_usage_analysis:
-        logger.info("Analyzing system usage patterns to determine optimal thresholds...")
-        detected['usage_analysis'] = analyze_system_usage_patterns()
-        if detected['usage_analysis'].get('system_type') != 'unknown':
-            detected['adaptations'].append(f"System type: {detected['usage_analysis']['system_type']}")
-    else:
-        logger.info("Skipping usage pattern analysis (thresholds already configured)")
-        detected['usage_analysis'] = {'system_type': 'unknown'}
-
-    return detected
-
-
-def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Apply auto-detected system adaptations to environment variables if not already set.
-
-    Args:
-        detected: Dictionary from detect_system_config()
-
-    Returns:
-        Dictionary of auto-detected values that were set (key -> value)
-    """
-    adaptations_applied = []
-    auto_detected_values = {}
-
-    usage = detected.get('usage_analysis', {})
-
-    if not os.getenv('CPU_THRESHOLD'):
-        threshold = None
-        reasoning = []
-
-        if detected['cpu_cores'] > 0:
-            if detected['cpu_cores'] <= 2:
-                base_threshold = 70.0
-                reasoning.append(f"{detected['cpu_cores']} cores (conservative)")
-            elif detected['cpu_cores'] <= 4:
-                base_threshold = 75.0
-                reasoning.append(f"{detected['cpu_cores']} cores")
-            else:
-                base_threshold = 80.0
-                reasoning.append(f"{detected['cpu_cores']} cores")
-        else:
-            base_threshold = DEFAULT_CPU_THRESHOLD
-
-        typical_cpu = usage.get('typical_cpu', 0)
-        peak_cpu = usage.get('peak_cpu', 0)
-        system_type = usage.get('system_type', 'unknown')
-
-        if typical_cpu > 0:
-            if typical_cpu > 50:
-                threshold = min(95.0, base_threshold + 10.0)
-                reasoning.append(f"high typical usage ({typical_cpu:.1f}%)")
-            elif typical_cpu > 30:
-                threshold = min(90.0, base_threshold + 5.0)
-                reasoning.append(f"moderate typical usage ({typical_cpu:.1f}%)")
-            elif typical_cpu < 10:
-                threshold = max(70.0, base_threshold - 5.0)
-                reasoning.append(f"low typical usage ({typical_cpu:.1f}%)")
-            else:
-                threshold = base_threshold
-                reasoning.append(f"typical usage ({typical_cpu:.1f}%)")
-
-            if system_type == 'server':
-                threshold = min(90.0, threshold + 5.0)
-                reasoning.append("server workload")
-            elif system_type == 'desktop':
-                threshold = max(70.0, threshold - 5.0)
-                reasoning.append("desktop workload")
-        else:
-            threshold = base_threshold
-
-        threshold = max(65.0, min(95.0, threshold))
-
-        os.environ['CPU_THRESHOLD'] = str(threshold)
-        auto_detected_values['CPU_THRESHOLD'] = str(threshold)
-        reasoning_str = ", ".join(reasoning)
-        adaptations_applied.append(f"CPU_THRESHOLD set to {threshold:.1f}% (based on: {reasoning_str})")
-
-    if not os.getenv('MEMORY_THRESHOLD'):
-        threshold = None
-        reasoning = []
-
-        if detected['total_memory_gb'] > 0:
-            if detected['total_memory_gb'] < 4:
-                base_threshold = 70.0
-                reasoning.append(f"{detected['total_memory_gb']:.1f} GB (low memory)")
-            elif detected['total_memory_gb'] < 8:
-                base_threshold = 75.0
-                reasoning.append(f"{detected['total_memory_gb']:.1f} GB")
-            elif detected['total_memory_gb'] < 16:
-                base_threshold = 80.0
-                reasoning.append(f"{detected['total_memory_gb']:.1f} GB")
-            else:
-                base_threshold = 82.0
-                reasoning.append(f"{detected['total_memory_gb']:.1f} GB (high memory)")
-        else:
-            base_threshold = DEFAULT_MEMORY_THRESHOLD
-
-        typical_memory = usage.get('typical_memory', 0)
-        peak_memory = usage.get('peak_memory', 0)
-
-        if typical_memory > 0:
-            if typical_memory > 60:
-                threshold = min(90.0, base_threshold + 8.0)
-                reasoning.append(f"high typical usage ({typical_memory:.1f}%)")
-            elif typical_memory > 40:
-                threshold = min(87.0, base_threshold + 5.0)
-                reasoning.append(f"moderate typical usage ({typical_memory:.1f}%)")
-            elif typical_memory < 20:
-                threshold = max(70.0, base_threshold - 5.0)
-                reasoning.append(f"low typical usage ({typical_memory:.1f}%)")
-            else:
-                threshold = base_threshold
-                reasoning.append(f"typical usage ({typical_memory:.1f}%)")
-        else:
-            threshold = base_threshold
-
-        threshold = max(65.0, min(92.0, threshold))
-
-        os.environ['MEMORY_THRESHOLD'] = str(threshold)
-        auto_detected_values['MEMORY_THRESHOLD'] = str(threshold)
-        reasoning_str = ", ".join(reasoning)
-        adaptations_applied.append(f"MEMORY_THRESHOLD set to {threshold:.1f}% (based on: {reasoning_str})")
-
-    if not os.getenv('DISK_THRESHOLD'):
-        threshold = None
-        reasoning = []
-
-        if detected['total_disk_gb'] > 0:
-            if detected['total_disk_gb'] < 100:
-                base_threshold = 85.0
-                reasoning.append(f"{detected['total_disk_gb']:.1f} GB (small disk)")
-            elif detected['total_disk_gb'] < 500:
-                base_threshold = 87.0
-                reasoning.append(f"{detected['total_disk_gb']:.1f} GB")
-            elif detected['total_disk_gb'] < 1000:
-                base_threshold = 85.0
-                reasoning.append(f"{detected['total_disk_gb']:.1f} GB")
-            else:
-                base_threshold = 88.0
-                reasoning.append(f"{detected['total_disk_gb']:.1f} GB (large disk)")
-        else:
-            base_threshold = DEFAULT_DISK_THRESHOLD
-
-        typical_disk = usage.get('typical_disk', 0)
-
-        if typical_disk > 0:
-            if typical_disk > 70:
-                threshold = max(85.0, base_threshold - 3.0)
-                reasoning.append(f"current usage {typical_disk:.1f}% (already high)")
-            elif typical_disk < 30:
-                threshold = min(90.0, base_threshold + 3.0)
-                reasoning.append(f"current usage {typical_disk:.1f}% (plenty of space)")
-            else:
-                threshold = base_threshold
-                reasoning.append(f"current usage {typical_disk:.1f}%")
-        else:
-            threshold = base_threshold
-
-        threshold = max(80.0, min(92.0, threshold))
-
-        os.environ['DISK_THRESHOLD'] = str(threshold)
-        auto_detected_values['DISK_THRESHOLD'] = str(threshold)
-        reasoning_str = ", ".join(reasoning)
-        adaptations_applied.append(f"DISK_THRESHOLD set to {threshold:.1f}% (based on: {reasoning_str})")
-
-    if detected['gpu_available'] and not os.getenv('GPU_THRESHOLD'):
-        os.environ['GPU_THRESHOLD'] = str(DEFAULT_GPU_THRESHOLD)
-        auto_detected_values['GPU_THRESHOLD'] = str(DEFAULT_GPU_THRESHOLD)
-        adaptations_applied.append("GPU monitoring enabled (NVIDIA GPU detected)")
-
-    if detected['qbittorrent_available'] and not os.getenv('QBITTORRENT_MONITOR'):
-        logger.info("qBittorrent is available. Set QBITTORRENT_MONITOR=true to enable monitoring")
-
-
-    if detected['platform'] == 'Windows':
-
-        if not os.getenv('FREEZE_MONITOR_ENABLED'):
-
-            pass
-    elif detected['platform'] == 'Linux':
-
-        if not os.getenv('MONITOR_INDIVIDUAL_PARTITIONS'):
-            os.environ['MONITOR_INDIVIDUAL_PARTITIONS'] = 'true'
-            auto_detected_values['MONITOR_INDIVIDUAL_PARTITIONS'] = 'true'
-            adaptations_applied.append("MONITOR_INDIVIDUAL_PARTITIONS enabled (Linux detected)")
-
-    if adaptations_applied:
-        logger.info("System auto-detection applied the following adaptations:")
-        for adaptation in adaptations_applied:
-            logger.info(f"  - {adaptation}")
-    else:
-        logger.info("System auto-detection completed (no adaptations needed - using defaults or existing config)")
-
-    return auto_detected_values
-
-
-def prompt_save_config(auto_detected_values: Dict[str, str]) -> bool:
-    """
-    Prompt user interactively if they want to save auto-detected configuration.
-
-    Args:
-        auto_detected_values: Dictionary of auto-detected values (key -> value)
-
-    Returns:
-        True if user wants to save, False otherwise
-    """
-    if not auto_detected_values:
-        return False
-
-    if not sys.stdin.isatty():
-        logger.info("Non-interactive mode detected - skipping save prompt")
-        return False
-
-    try:
-        print("The following configuration values were auto-detected:")
-        print()
-        for key, value in auto_detected_values.items():
-            print(f"  {key}={value}")
-        print()
-
-        while True:
-            response = input("Save these settings to .env file? (y/n): ").strip().lower()
-            if response in ('y', 'yes'):
-                return True
-            elif response in ('n', 'no'):
-                return False
-            else:
-                print("Please enter 'y' for yes or 'n' for no.")
-    except (EOFError, KeyboardInterrupt):
-
-        logger.info("Save prompt cancelled by user")
-        return False
-    except Exception as e:
-        logger.warning(f"Error prompting for save: {e}")
-        return False
-
-
-def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root: Optional[Path] = None) -> bool:
-    """
-    Save auto-detected configuration values to .env file.
-
-    Preserves existing .env values and only adds auto-detected values that aren't already set.
-    Adds comments to indicate auto-generated values.
-
-    Args:
-        auto_detected_values: Dictionary of auto-detected values (key -> value)
-        project_root: Optional project root path (defaults to detecting from script location)
-
-    Returns:
-        True if .env file was updated, False otherwise
-    """
-    if not auto_detected_values:
-        return False
-
-    if project_root is None:
-        script_path = Path(__file__).resolve()
-        project_root = script_path.parent
-
-    env_file = project_root / '.env'
-
-
-    existing_lines = []
-    existing_keys = set()
-    has_auto_detected_section = False
-
-    if env_file.exists():
-        try:
-            with open(env_file, 'r', encoding='utf-8') as f:
-                existing_lines = f.readlines()
-
-                for line in existing_lines:
-                    line_stripped = line.strip()
-
-                    if 'Auto-detected configuration' in line_stripped:
-                        has_auto_detected_section = True
-                    if line_stripped and not line_stripped.startswith('#') and '=' in line_stripped:
-                        key = line_stripped.split('=')[0].strip()
-                        existing_keys.add(key)
-        except Exception as e:
-            logger.warning(f"Could not read existing .env file: {e}")
-            existing_lines = []
-
-
-
-
-    new_entries = []
-    for key, value in auto_detected_values.items():
-        if key not in existing_keys:
-
-            escaped_value = value.replace('\\', '\\\\').replace('$', '\\$')
-            new_entries.append(f"{key}={escaped_value}")
-
-    if not new_entries:
-        return False
-
-    try:
-        with open(env_file, 'a', encoding='utf-8') as f:
-            if existing_lines and not existing_lines[-1].endswith('\n'):
-                f.write('\n')
-
-
-            for entry in new_entries:
-                f.write(f"{entry}\n")
-
-        logger.info(f"Saved {len(new_entries)} auto-detected configuration value(s) to {env_file}")
-        logger.info(f"  File location: {env_file.absolute()}")
-        saved_keys = [key for key, value in auto_detected_values.items()
-                     if key not in existing_keys]
-        logger.info("  Values saved: " + ", ".join(saved_keys))
-        return True
-    except Exception as e:
-        logger.warning(f"Could not save auto-detected configuration to .env file: {e}")
-        return False
-
-
-def validate_config() -> None:
-    """
-    Validate configuration at startup.
-
-    Checks required environment variables and validates their values.
-    Raises ValueError if critical configuration is missing or invalid.
-    """
-    errors = []
-    warnings = []
-
-    webhook_url = os.getenv('WEBHOOK')
-    if not webhook_url:
-        warnings.append("WEBHOOK environment variable not set - Discord notifications will be disabled")
-    elif not webhook_url.startswith('https://discord.com/api/webhooks/'):
-        warnings.append(f"WEBHOOK URL does not match expected Discord webhook format: {webhook_url[:50]}...")
-
-    numeric_vars = {
-        'CPU_THRESHOLD': (0.0, 100.0),
-        'MEMORY_THRESHOLD': (0.0, 100.0),
-        'GPU_THRESHOLD': (0.0, 100.0),
-        'DISK_THRESHOLD': (0.0, 100.0),
-        'TEMP_THRESHOLD': (0.0, 150.0),
-        'CHECK_INTERVAL': (1.0, 3600.0),
-    }
-
-    for var_name, (min_val, max_val) in numeric_vars.items():
-        value = os.getenv(var_name)
-        if value:
-            try:
-                float_val = float(value)
-                if not (min_val <= float_val <= max_val):
-                    errors.append(f"{var_name}={float_val} is outside valid range [{min_val}, {max_val}]")
-            except ValueError:
-                errors.append(f"{var_name}={value} is not a valid number")
-
-    boolean_vars = ['QBITTORRENT_MONITOR', 'MEDIA_MONITOR_ENABLED', 'INSTALL_SYSTEMD']
-    for var_name in boolean_vars:
-        value = os.getenv(var_name)
-        if value and value.lower() not in ('true', 'false', '1', '0', 'yes', 'no', 'on', 'off', ''):
-            warnings.append(f"{var_name}={value} is not a valid boolean value (use true/false)")
-
-    path_vars = ['MEDIA_DIRECTORY', 'LOG_FILE', 'ALERT_LOG_PATH']
-    for var_name in path_vars:
-        value = os.getenv(var_name)
-        if value:
-            if not isinstance(value, str) or len(value) > 1000:
-                errors.append(f"{var_name} path is invalid or too long")
-            elif '..' in value or '\x00' in value:
-                errors.append(f"{var_name} contains invalid characters")
-
-    for warning in warnings:
-        logger.warning(f"Configuration warning: {warning}")
-
-    if errors:
-        error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
-        logger.error(error_msg)
-        raise ValueError(error_msg)
-
-    if not warnings:
-        logger.info("Configuration validation passed")
-
-EMBED_SEND_DELAY = 0.2
-MAX_TRACKED_TORRENTS = 1000
-
-DEFAULT_CPU_THRESHOLD = 80.0
-DEFAULT_MEMORY_THRESHOLD = 80.0
-DEFAULT_GPU_THRESHOLD = 80.0
-DEFAULT_DISK_THRESHOLD = 80.0
-DEFAULT_DISK_EARLY_WARNING_THRESHOLD = 75.0
-DEFAULT_DISK_CLEANUP_THRESHOLD = 40.0
-DEFAULT_DISK_EMERGENCY_THRESHOLD = 95.0
-DEFAULT_TEMP_THRESHOLD = 80.0
-DEFAULT_TEMP_ALERT_DURATION = 30.0
-DEFAULT_NETWORK_BANDWIDTH_THRESHOLD = 1000.0
-DEFAULT_PROCESS_CPU_THRESHOLD = 50.0
-DEFAULT_PROCESS_MEMORY_THRESHOLD = 10.0
-DEFAULT_CHECK_INTERVAL = 5.0
-DEFAULT_ALERT_COOLDOWN = 300.0
-DEFAULT_FREEZE_THRESHOLD = 30.0
-DEFAULT_FREEZE_HEARTBEAT_TIMEOUT = 60.0
-DEFAULT_MEDIA_DIRECTORY_THRESHOLD_GB = 500.0
-DEFAULT_MEDIA_CHECK_INTERVAL = 10
-DEFAULT_KERNEL_CHECK_INTERVAL = 30
-DEFAULT_KERNEL_STABILITY_CHECK_INTERVAL = 10
-DEFAULT_KERNEL_CHECK_SINCE_MINUTES = 60
-DEFAULT_MONITORING_WATCHDOG_TIMEOUT = 30.0
-DEFAULT_WATCHDOG_AUTO_RESTART = False
-DEFAULT_WATCHDOG_RESTART_COOLDOWN = 300.0
-
-
-MAX_PARTITIONS_DISPLAY = 6
-MAX_PROCESSES_DISPLAY = 5
-MAX_REASONS_DISPLAY = 3
-MAX_INDICATORS_DISPLAY = 8
-MAX_RECOMMENDATIONS_DISPLAY = 5
-MAX_CRASH_TYPES_DISPLAY = 5
-MAX_HARDWARE_ERRORS_DISPLAY = 5
-MAX_WARNINGS_DISPLAY = 5
-MAX_DIRECTORIES_DISPLAY = 5
-
-LOG_CLEANUP_INTERVAL_SECONDS = 1800
-DISK_CLEANUP_COOLDOWN_HIGH = 300
-DISK_CLEANUP_COOLDOWN_MEDIUM = 900
-DISK_CLEANUP_COOLDOWN_LOW = 1800
-DISK_CLEANUP_COOLDOWN_NORMAL = 3600
-DISK_EMERGENCY_COOLDOWN = 300
-
-_env_cache = {}
-
-
-def get_cached_env(key: str, default: str = None) -> Optional[str]:
-    """
-    Get environment variable with caching to avoid repeated lookups.
-
-    Environment variables are cached after first access to improve performance.
-    Values are validated for security before caching.
-
-    Args:
-        key: Environment variable name
-        default: Default value if variable is not set (default: None)
-
-    Returns:
-        Environment variable value or default if not set
-    """
-    if key not in _env_cache:
-        value = os.getenv(key, default)
-        if value:
-            from util.security import validate_environment_variable
-            is_valid, error_msg = validate_environment_variable(key, value, max_length=10000)
-            if not is_valid:
-                logger.warning(f"Environment variable {key} validation failed: {error_msg}")
-        _env_cache[key] = value
-    return _env_cache[key]
-
-
-def analyze_temperature_reason(cpu_percent: float, cpu_freq: Dict, cpu_per_core: List[float],
-                               top_processes: List[Dict], load_avg: Optional[Tuple[float, float, float]],
-                               fan_speeds: Optional[List[Dict]] = None,
-                               disk_io: Optional[Dict] = None,
-                               network_io: Optional[Dict] = None,
-                               gpu_temp: Optional[float] = None) -> str:
-    """
-    Analyze the likely reason for high CPU temperature.
-
-    Args:
-        cpu_percent: Overall CPU usage percentage
-        cpu_freq: CPU frequency information dictionary
-        cpu_per_core: Per-core CPU usage percentages
-        top_processes: List of top CPU-consuming processes
-        load_avg: System load average tuple (1min, 5min, 15min) or None
-        fan_speeds: Optional list of fan speed information
-        disk_io: Optional disk I/O statistics
-        network_io: Optional network I/O statistics
-        gpu_temp: Optional GPU temperature for comparison
-
-    Returns:
-        Human-readable string describing the likely cause
-    """
-    reasons = []
-
-    if cpu_percent >= 80:
-        reasons.append(f"Very high CPU usage ({cpu_percent:.1f}%)")
-    elif cpu_percent >= 60:
-        reasons.append(f"High CPU usage ({cpu_percent:.1f}%)")
-    elif cpu_percent >= 40:
-        reasons.append(f"Moderate CPU usage ({cpu_percent:.1f}%)")
-
-    freq_current = cpu_freq.get('current', 0)
-    freq_max = cpu_freq.get('max', 0)
-    if freq_max > 0:
-        freq_percent = (freq_current / freq_max) * 100
-        if freq_percent >= 95:
-            reasons.append(f"CPU running at maximum frequency ({freq_current:.0f} MHz)")
-        elif freq_percent >= 85:
-            reasons.append(f"CPU running at high frequency ({freq_percent:.0f}% of max)")
-
-    if cpu_per_core and len(cpu_per_core) > 0:
-        max_core = max(cpu_per_core)
-        if max_core >= 90:
-            high_cores = sum(1 for core in cpu_per_core if core >= 80)
-            if high_cores == 1:
-                reasons.append("Single core under heavy load (single-threaded workload)")
-            elif high_cores <= len(cpu_per_core) // 2:
-                reasons.append(f"{high_cores} cores under heavy load")
-
-    download_processes = []
-    download_keywords = ['qbittorrent', 'transmission', 'deluge', 'rtorrent', 'aria2',
-                        'wget', 'curl', 'sabnzbd', 'nzbget', 'youtube-dl', 'yt-dlp',
-                        'plex', 'jellyfin', 'emby', 'radarr', 'sonarr', 'lidarr',
-                        'jackett', 'prowlarr', 'download', 'torrent']
-
-    if top_processes:
-        for proc in top_processes:
-            proc_name = proc.get('name', '').lower()
-            proc_cmdline = ' '.join(proc.get('cmdline', [])).lower() if proc.get('cmdline') else ''
-            for keyword in download_keywords:
-                if keyword in proc_name or keyword in proc_cmdline:
-                    download_processes.append(proc)
-                    break
-
-    if download_processes:
-        download_names = [p.get('name', 'Unknown') for p in download_processes[:MAX_REASONS_DISPLAY]]
-        if len(download_names) == 1:
-            reasons.append(f"Download/media activity: {download_names[0]}")
-        else:
-            reasons.append(f"Download/media activity: {', '.join(download_names[:2])}")
-
-    if top_processes:
-        high_cpu_procs = [p for p in top_processes[:MAX_PROCESSES_DISPLAY] if p.get('cpu_percent', 0) > 5 and p not in download_processes]
-        if high_cpu_procs:
-            proc_details = []
-            for proc in high_cpu_procs[:MAX_REASONS_DISPLAY]:
-                name = proc.get('name', 'Unknown')
-                cpu_usage = proc.get('cpu_percent', 0)
-                proc_details.append(f"{name} ({cpu_usage:.1f}%)")
-            if len(proc_details) == 1:
-                reasons.append(f"Process: {proc_details[0]}")
-            else:
-                reasons.append(f"Top processes: {', '.join(proc_details)}")
-
-    if load_avg:
-        load_1min = load_avg[0]
-        cpu_count = len(cpu_per_core) if cpu_per_core else 1
-        if load_1min > cpu_count * 1.5:
-            reasons.append(f"High system load ({load_1min:.1f} vs {cpu_count} cores)")
-        elif load_1min > cpu_count:
-            reasons.append(f"Elevated system load ({load_1min:.1f} vs {cpu_count} cores)")
-
-    if fan_speeds:
-        fan_speed_list = [f.get('speed_rpm', 0) for f in fan_speeds if f.get('speed_rpm', 0) > 0]
-        if fan_speed_list:
-            avg_fan_speed = sum(fan_speed_list) / len(fan_speed_list)
-            min_fan_speed = min(fan_speed_list)
-            if min_fan_speed < 500:
-                reasons.append(f"Very low fan speeds (min: {min_fan_speed:.0f} RPM) - cooling issue likely")
-            elif avg_fan_speed < 1000:
-                reasons.append(f"Low fan speeds (avg: {avg_fan_speed:.0f} RPM) - possible cooling issue")
-        else:
-            reasons.append("No fan speed data available - cannot verify cooling")
-
-    if disk_io:
-        read_bytes = disk_io.get('read_bytes', 0)
-        write_bytes = disk_io.get('write_bytes', 0)
-        if write_bytes > 5 * BYTES_PER_GB:
-            gb_written = write_bytes / BYTES_PER_GB
-            if download_processes:
-                reasons.append(f"Writing downloaded data to disk ({gb_written:.1f} GB written)")
-            else:
-                reasons.append(f"High disk write activity ({gb_written:.1f} GB written)")
-        elif read_bytes > 5 * BYTES_PER_GB:
-            gb_read = read_bytes / BYTES_PER_GB
-            reasons.append(f"High disk read activity ({gb_read:.1f} GB read)")
-        elif read_bytes > 0 or write_bytes > 0:
-            total_io = read_bytes + write_bytes
-            if total_io > 10 * BYTES_PER_GB:
-                reasons.append("High disk I/O activity detected")
-
-    if network_io:
-        bytes_sent = network_io.get('bytes_sent', 0)
-        bytes_recv = network_io.get('bytes_recv', 0)
-        if bytes_recv > 50 * BYTES_PER_MB:
-            mb_recv = bytes_recv / BYTES_PER_MB
-            if download_processes:
-                reasons.append(f"Active download in progress ({mb_recv:.1f} MB received)")
-            else:
-                reasons.append(f"High network download activity ({mb_recv:.1f} MB received)")
-        elif bytes_sent > 50 * BYTES_PER_MB:
-            mb_sent = bytes_sent / BYTES_PER_MB
-            reasons.append(f"High network upload activity ({mb_sent:.1f} MB sent)")
-        total_net = bytes_sent + bytes_recv
-        if total_net > 100 * BYTES_PER_MB and not download_processes:
-            reasons.append("High network activity detected")
-
-    if gpu_temp is not None and gpu_temp > 0:
-        if gpu_temp > 70:
-            reasons.append(f"GPU also hot ({gpu_temp:.1f}°C) - possible ambient temperature or case airflow issue")
-
-    if not reasons:
-        if cpu_percent > 30:
-            reasons.append(f"Sustained CPU activity ({cpu_percent:.1f}%) without specific high-load process")
-        elif cpu_percent > 10:
-            reasons.append(f"Low-moderate CPU usage ({cpu_percent:.1f}%) with high temperature - check cooling system")
-        else:
-            reasons.append(f"Very low CPU usage ({cpu_percent:.1f}%) with high temperature - likely cooling system failure or ambient temperature issue")
-
-    return " | ".join(reasons[:4])
-
-
-def get_env_float(key: str, default: float, min_val: Optional[float] = None, max_val: Optional[float] = None) -> float:
-    """
-    Safely get float value from environment variable with optional range validation.
-
-    Handles empty strings, None values, and invalid conversions gracefully.
-    Returns default value on any error. Validates range if min_val/max_val provided.
-
-    Args:
-        key (str): Environment variable name
-        default (float): Default value to return if variable is not set or invalid
-        min_val (Optional[float]): Optional minimum allowed value
-        max_val (Optional[float]): Optional maximum allowed value
-
-    Returns:
-        float: Float value from environment variable or default
-    """
-    value = get_cached_env(key, str(default))
-    if not value or value.strip() == '':
-        return default
-    try:
-        float_value = float(value)
-
-        if min_val is not None and float_value < min_val:
-            logger.warning(f"{key}={float_value} is below minimum {min_val}, using default {default}")
-            return default
-        if max_val is not None and float_value > max_val:
-            logger.warning(f"{key}={float_value} is above maximum {max_val}, using default {default}")
-            return default
-
-        return float_value
-    except (ValueError, TypeError):
-        return default
-
-
-def get_env_int(key: str, default: int, min_val: Optional[int] = None, max_val: Optional[int] = None) -> int:
-    """
-    Safely get integer value from environment variable with optional range validation.
-
-    Handles empty strings, None values, and invalid conversions gracefully.
-    Returns default value on any error. Validates range if min_val/max_val provided.
-
-    Args:
-        key (str): Environment variable name
-        default (int): Default value to return if variable is not set or invalid
-        min_val (Optional[int]): Optional minimum allowed value
-        max_val (Optional[int]): Optional maximum allowed value
-
-    Returns:
-        int: Integer value from environment variable or default
-    """
-    value = get_cached_env(key, str(default))
-    if not value or value.strip() == '':
-        return default
-    try:
-        int_value = int(value)
-
-        if min_val is not None and int_value < min_val:
-            logger.warning(f"{key}={int_value} is below minimum {min_val}, using default {default}")
-            return default
-        if max_val is not None and int_value > max_val:
-            logger.warning(f"{key}={int_value} is above maximum {max_val}, using default {default}")
-            return default
-
-        return int_value
-    except (ValueError, TypeError):
-        return default
-
-
-def clamp_threshold(value: float, min_val: float, max_val: float) -> float:
-    """
-    Clamp a threshold value between minimum and maximum bounds.
-
-    Args:
-        value: Value to clamp
-        min_val: Minimum allowed value
-        max_val: Maximum allowed value
-
-    Returns:
-        Clamped value within [min_val, max_val] range
-    """
-    return max(min_val, min(max_val, value))
-
-
-def get_env_bool(key: str, default: bool = False) -> bool:
-    """
-    Safely get boolean value from environment variable.
-
-    Accepts various string representations: 'true', '1', 'yes', 'on' for True,
-    and 'false', '0', 'no', 'off', '' for False. Case-insensitive.
-
-    Args:
-        key: Environment variable name
-        default: Default value to return if variable is not set or invalid (default: False)
-
-    Returns:
-        Boolean value from environment variable or default
-    """
-    value = get_cached_env(key, str(default).lower())
-    if not value or value.strip() == '':
-        return default
-    value_lower = value.strip().lower()
-    if value_lower in ('true', '1', 'yes', 'on'):
-        return True
-    elif value_lower in ('false', '0', 'no', 'off', ''):
-        return False
-    else:
-        logger.warning(f"Invalid boolean value '{value}' for {key}, defaulting to {default}")
-        return default
+T = TypeVar('T')
 
 
 def run_self_test() -> bool:
@@ -1292,7 +414,12 @@ def run_self_test() -> bool:
     return success
 
 
-def run_with_timeout(func, timeout: float = 5.0, default_value=None, operation_name: str = "operation"):
+def run_with_timeout(
+    func: Callable[[], T],
+    timeout: float = 5.0,
+    default_value: Optional[T] = None,
+    operation_name: str = "operation"
+) -> Optional[T]:
     """
     Run a function with a timeout using ThreadPoolExecutor.
 
@@ -1392,9 +519,7 @@ def main(
         for adaptation in detected_config['adaptations']:
             logger.info(f"  - {adaptation}")
 
-
     auto_detected_values = apply_system_adaptations(detected_config)
-
 
     if auto_detected_values:
         if prompt_save_config(auto_detected_values):
@@ -1494,6 +619,10 @@ def main(
             logger.warning(f"Failed to connect to crash webhook: {e}")
     else:
         logger.debug("Crash webhook not configured (set CRASH_WEBHOOK to enable)")
+
+    metrics_collector = MetricsCollector()
+    metrics_report_interval = get_env_float('METRICS_REPORT_INTERVAL', 3600.0)
+    last_metrics_report_time = 0
 
     cpu_threshold = get_env_float('CPU_THRESHOLD', DEFAULT_CPU_THRESHOLD)
     memory_threshold = get_env_float('MEMORY_THRESHOLD', DEFAULT_MEMORY_THRESHOLD)
@@ -1817,8 +946,7 @@ def main(
     kernel_alert_sent = False
     kernel_stability_alert_sent = False
     last_kernel_stability_alert_hash = None
-    # Track per-error-type alert times to prevent spam
-    last_hardware_error_alert_times = {}  # key: error_type, value: timestamp
+    last_hardware_error_alert_times = {}
     qbittorrent_check_counter = 0
     NETWORK_CHECK_INTERVAL = 2
     PROCESS_CHECK_INTERVAL = 3
@@ -1899,6 +1027,21 @@ def main(
                     watchdog_monitor.reset_alert_state()
 
                 current_time = time.time()
+                
+                if webhook and (current_time - last_metrics_report_time) >= metrics_report_interval:
+                    try:
+                        metrics_summary = metrics_collector.get_summary()
+                        success = webhook.send_metrics_report(metrics_summary)
+                        metrics_collector.record_webhook_result(success)
+                        if success:
+                            logger.info("Metrics report sent to Discord")
+                            last_metrics_report_time = current_time
+                        else:
+                            logger.warning("Failed to send metrics report to Discord")
+                    except Exception as e:
+                        logger.error(f"Error sending metrics report: {e}")
+                        metrics_collector.record_error('metrics_report')
+                
                 top_cpu_processes = None
                 top_memory_processes = None
 
@@ -1910,6 +1053,7 @@ def main(
                     logger.warning(f"Error updating freeze monitor heartbeat: {e}")
 
                 try:
+                    metrics_collector.start_monitor_execution('cpu')
                     cpu_percent = run_with_timeout(
                         lambda: cpu_monitor.get_cpu_percent(interval=1.0),
                         timeout=3.0,
@@ -1922,7 +1066,10 @@ def main(
                         default_value=[],
                         operation_name="CPU per-core collection"
                     )
+                    metrics_collector.end_monitor_execution('cpu')
                 except Exception as e:
+                    metrics_collector.end_monitor_execution('cpu')
+                    metrics_collector.record_error('cpu_monitor')
                     logger.error(f"Error getting CPU metrics: {e}")
                     log_error_to_file_and_webhook(e, context="CPU metrics collection", include_traceback=True)
                     cpu_percent = 0.0
@@ -1932,10 +1079,14 @@ def main(
                     watchdog_monitor.update_heartbeat()
 
                 try:
+                    metrics_collector.start_monitor_execution('memory')
                     memory_percent = memory_monitor.get_memory_percent()
                     memory_info = memory_monitor.get_memory_info()
                     swap_info = memory_monitor.get_swap_info()
+                    metrics_collector.end_monitor_execution('memory')
                 except Exception as e:
+                    metrics_collector.end_monitor_execution('memory')
+                    metrics_collector.record_error('memory_monitor')
                     logger.error(f"Error getting memory metrics: {e}")
                     log_error_to_file_and_webhook(e, context="Memory metrics collection", include_traceback=True)
                     memory_percent = 0.0
@@ -1965,12 +1116,15 @@ def main(
                     logger.debug(f"Error getting GPU metrics: {e}")
 
                 try:
-
+                    metrics_collector.start_monitor_execution('disk')
                     all_partitions = disk_monitor.get_all_partitions()
 
                     total_disk = disk_monitor.get_total_disk_usage()
                     disk_percent = total_disk.get('percent', 0.0) if total_disk else 0.0
+                    metrics_collector.end_monitor_execution('disk')
                 except Exception as e:
+                    metrics_collector.end_monitor_execution('disk')
+                    metrics_collector.record_error('disk_monitor')
                     logger.error(f"Error getting disk usage: {e}")
                     log_error_to_file_and_webhook(e, context="Disk usage collection", include_traceback=True)
                     all_partitions = []
@@ -2214,6 +1368,8 @@ def main(
                             percent = partition.get('percent', 0.0)
                             if platform.system() == 'Windows':
                                 display_name = mountpoint.rstrip('\\').split('\\')[-1] or mountpoint[:2]
+                                if display_name.endswith(':'):
+                                    display_name = display_name[:-1]
                             else:
                                 display_name = mountpoint.split('/')[-1] if mountpoint != '/' else 'root'
                                 if not display_name:
@@ -2251,11 +1407,13 @@ def main(
                     if not cpu_alert_sent or time_since_last_alert >= alert_cooldown:
                         if webhook:
                             logger.warning(f"[ALERT] CPU: {cpu_percent:.1f}% (threshold: {cpu_threshold:.1f}%)")
+                            metrics_collector.record_alert('cpu')
                             success = webhook.send_cpu_alert(
                                 cpu_percent=cpu_percent,
                                 threshold=cpu_threshold,
                                 per_core=cpu_per_core
                             )
+                            metrics_collector.record_webhook_result(success)
                             if success:
                                 logger.info("    Discord alert sent")
                             else:
@@ -2278,12 +1436,14 @@ def main(
                     if not memory_alert_sent or time_since_last_alert >= alert_cooldown:
                         if webhook:
                             logger.warning(f"[ALERT] Memory: {memory_percent:.1f}% (threshold: {memory_threshold:.1f}%)")
+                            metrics_collector.record_alert('memory')
                             success = webhook.send_memory_alert(
                                 memory_percent=memory_percent,
                                 threshold=memory_threshold,
                                 memory_info=memory_info,
                                 swap_info=swap_info
                             )
+                            metrics_collector.record_webhook_result(success)
                             if success:
                                 logger.info("    Discord alert sent")
                             else:
@@ -2312,6 +1472,7 @@ def main(
                     if not gpu_alert_sent or time_since_last_alert >= alert_cooldown:
                         if webhook and gpu_data:
                             logger.warning(f"[ALERT] GPU: {gpu_utilization['gpu']:.1f}% (threshold: {gpu_threshold:.1f}%)")
+                            metrics_collector.record_alert('gpu')
                             success = webhook.send_gpu_alert(
                                 gpu_utilization=gpu_utilization['gpu'],
                                 threshold=gpu_threshold,
@@ -2706,6 +1867,7 @@ def main(
                                 logger.warning(f"[ALERT] Temperature: {cpu_temp:.1f}C (threshold: {temp_threshold:.1f}C) for {temp_high_duration:.0f}s")
                                 logger.info(f"    Likely cause: {reason}")
 
+                                metrics_collector.record_alert('temperature')
                                 success = webhook.send_temperature_alert(
                                     temperature=cpu_temp,
                                     threshold=temp_threshold,
@@ -2716,6 +1878,7 @@ def main(
                                     top_processes=top_cpu_procs,
                                     fan_speeds=fans
                                 )
+                                metrics_collector.record_webhook_result(success)
                                 if success:
                                     logger.info("    Discord alert sent")
                                 else:
@@ -2958,7 +2121,9 @@ def main(
                                             'progress': progress,
                                             'name': torrent.get('name', 'Unknown'),
                                             'notified_download': False,
-                                            'notified_seeding': False
+                                            'notified_seeding': False,
+                                            'notified_stalled': False,
+                                            'stalled_since': None
                                         }
                                         continue
 
@@ -2966,6 +2131,35 @@ def main(
                                     prev_progress = tracked_torrents[torrent_hash]['progress']
                                     prev_was_seeding = prev_state in ['uploading', 'stalledup', 'queuedup']
                                     prev_was_downloading = prev_state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']
+                                    
+                                    is_stalled_dl = state == 'stalleddl' and torrent.get('dlspeed', 0) == 0 and progress < 1.0
+                                    is_stalled_up = state == 'stalledup' and torrent.get('upspeed', 0) == 0
+                                    is_stalled = is_stalled_dl or is_stalled_up
+                                    
+                                    prev_was_stalled = prev_state in ['stalleddl', 'stalledup']
+                                    
+                                    if is_stalled and not prev_was_stalled:
+                                        tracked_torrents[torrent_hash]['stalled_since'] = current_time
+                                    elif not is_stalled and prev_was_stalled:
+                                        tracked_torrents[torrent_hash]['stalled_since'] = None
+                                        tracked_torrents[torrent_hash]['notified_stalled'] = False
+                                    
+                                    stalled_since = tracked_torrents[torrent_hash].get('stalled_since')
+                                    if is_stalled and stalled_since and not tracked_torrents[torrent_hash]['notified_stalled']:
+                                        stalled_duration = current_time - stalled_since
+                                        stalled_threshold = get_env_float('STALLED_TORRENT_THRESHOLD', DEFAULT_STALLED_TORRENT_THRESHOLD)
+                                        
+                                        if stalled_duration >= stalled_threshold:
+                                            if qbittorrent_webhook:
+                                                logger.warning(f"[qBittorrent] Torrent stalled: {torrent.get('name', 'Unknown')} (stalled for {stalled_duration:.0f}s)")
+                                                success = qbittorrent_webhook.send_stalled_torrent_alert(torrent, stalled_duration)
+                                                metrics_collector.record_alert('torrent_stalled')
+                                                metrics_collector.record_webhook_result(success)
+                                                if success:
+                                                    logger.info("    Discord stalled torrent alert sent")
+                                                else:
+                                                    logger.warning("    Discord stalled torrent alert failed")
+                                            tracked_torrents[torrent_hash]['notified_stalled'] = True
 
                                     if is_seeding and progress >= 1.0:
                                         if not tracked_torrents[torrent_hash]['notified_download'] and prev_was_downloading:
@@ -3226,22 +2420,17 @@ def main(
 
                         critical_warnings = [w for w in early_warnings if w.get('severity') == 'critical']
                         if critical_warnings or hardware_errors:
-                            # Use longer cooldown for non-critical errors to prevent spam
-                            # Critical warnings use normal cooldown, hardware errors use 4x cooldown
                             should_alert = False
                             
-                            # Check critical warnings first (always use normal cooldown)
                             critical_should_alert = False
                             if critical_warnings:
                                 time_since_last_alert = current_time - last_kernel_alert_time
                                 critical_should_alert = (not kernel_alert_sent or time_since_last_alert >= alert_cooldown)
                             
-                            # Check hardware errors (use extended cooldown for non-critical)
                             hardware_should_alert = False
                             if hardware_errors:
                                 extended_cooldown = alert_cooldown * 4
                                 
-                                # Check if any hardware error type needs alerting
                                 for hw_error in hardware_errors:
                                     error_type = hw_error.get('type', 'unknown')
                                     error_key = f"{error_type}_{hw_error.get('device', '')}_{hw_error.get('source', '')}"
@@ -3249,15 +2438,13 @@ def main(
                                     last_alert_time = last_hardware_error_alert_times.get(error_key, 0)
                                     time_since_last_alert = current_time - last_alert_time
                                     
-                                    # Use extended cooldown for non-critical errors
                                     severity = hw_error.get('severity', 'warning')
                                     error_cooldown = alert_cooldown if severity == 'critical' else extended_cooldown
                                     
                                     if time_since_last_alert >= error_cooldown:
                                         hardware_should_alert = True
-                                        break  # Only need one error to trigger alert
+                                        break
                             
-                            # Alert if either critical warnings or hardware errors need alerting
                             should_alert = critical_should_alert or hardware_should_alert
 
                             if should_alert:
@@ -3275,11 +2462,9 @@ def main(
                                         for hw_error in hardware_errors[:MAX_HARDWARE_ERRORS_DISPLAY]:
                                             error_text = None
                                             
-                                            # Handle high_interrupts errors specifically
                                             if hw_error.get('type') == 'high_interrupts':
                                                 device = hw_error.get('device', 'unknown')
                                                 count = hw_error.get('count', 0)
-                                                # Format large numbers
                                                 if count >= 1000000:
                                                     count_str = f"{count / 1000000:.2f}M"
                                                 elif count >= 1000:
@@ -3288,7 +2473,6 @@ def main(
                                                     count_str = str(count)
                                                 error_text = f"**High Interrupts** on {device}: {count_str} interrupts - possible hardware issue"
                                             
-                                            # Handle EDAC errors with count_increase
                                             elif 'count_increase' in hw_error:
                                                 source = hw_error.get('source', 'unknown')
                                                 count_increase = hw_error['count_increase']
@@ -3296,7 +2480,6 @@ def main(
                                                 error_type = hw_error.get('error_type', 'unknown')
                                                 error_text = f"**{source}**: {count_increase} new {error_type} errors (total: {total_count})"
 
-                                            # Handle errors with count but no increase
                                             elif 'count' in hw_error:
                                                 source = hw_error.get('source', 'unknown')
                                                 error_type = hw_error.get('error_type', 'unknown')
@@ -3307,16 +2490,13 @@ def main(
                                                 else:
                                                     error_text = f"**{source}**: {count} {error_type} errors"
                                             
-                                            # Handle errors with message
                                             elif 'message' in hw_error:
                                                 source = hw_error.get('source', 'unknown')
                                                 message = hw_error['message']
-                                                # Truncate long messages but keep important info
                                                 if len(message) > 200:
                                                     message = message[:197] + "..."
                                                 error_text = f"**{source}**: {message}"
                                             
-                                            # Handle errors with type and other fields
                                             elif 'type' in hw_error:
                                                 error_type = hw_error.get('type', 'unknown')
                                                 source = hw_error.get('source', 'unknown')
@@ -3326,7 +2506,6 @@ def main(
                                                 else:
                                                     error_text = f"**{source}**: {error_type} error detected"
                                             
-                                            # Fallback: show all available fields
                                             if not error_text:
                                                 source = hw_error.get('source', 'unknown')
                                                 error_type = hw_error.get('error_type', hw_error.get('type', 'unknown'))
@@ -3378,7 +2557,6 @@ def main(
                                     if success:
                                         logger.info("    Discord kernel early warning alert sent")
                                         
-                                        # Update alert times for hardware errors (per-error-type tracking)
                                         if hardware_errors:
                                             for hw_error in hardware_errors:
                                                 error_type = hw_error.get('type', 'unknown')
@@ -3387,12 +2565,9 @@ def main(
                                     else:
                                         logger.warning("    Discord kernel early warning alert failed")
 
-                                # Update main alert time for critical warnings
                                 if critical_warnings:
                                     last_kernel_alert_time = current_time
                                     kernel_alert_sent = True
-                                # For hardware errors only, we track per-error-type, so don't update main time
-                                # This allows critical warnings to still alert even if hardware errors were recently sent
 
                         crashes = crash_results.get('crashes_found', [])
                         if crashes:

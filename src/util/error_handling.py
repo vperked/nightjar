@@ -11,6 +11,31 @@ logger = get_logger('ErrorHandling')
 T = TypeVar('T')
 
 
+class MonitorError(Exception):
+    """Base exception for monitor-related errors."""
+    pass
+
+
+class ConfigurationError(MonitorError):
+    """Raised when configuration is invalid."""
+    pass
+
+
+class MonitorInitializationError(MonitorError):
+    """Raised when a monitor fails to initialize."""
+    pass
+
+
+class MonitorExecutionError(MonitorError):
+    """Raised when a monitor fails during execution."""
+    pass
+
+
+class WebhookError(MonitorError):
+    """Raised when webhook operations fail."""
+    pass
+
+
 def log_and_continue(
     error_message: str,
     log_level: str = 'warning',

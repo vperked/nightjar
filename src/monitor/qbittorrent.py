@@ -362,3 +362,32 @@ class QBittorrentMonitor:
 
         return result
 
+    def get_stalled_torrents(self, min_stalled_seconds: int = 300) -> List[Dict]:
+        """
+        Get torrents that are stalled (not downloading/uploading).
+
+        Args:
+            min_stalled_seconds: Minimum seconds a torrent must be stalled to be included (default: 300 = 5 minutes)
+
+        Returns:
+            List of dictionaries containing stalled torrent information
+        """
+        all_torrents = self.get_all_torrents()
+        stalled = []
+        import time
+        current_time = time.time()
+
+        for torrent in all_torrents:
+            state = torrent.get('state', '').lower()
+            dlspeed = torrent.get('dlspeed', 0)
+            upspeed = torrent.get('upspeed', 0)
+            progress = torrent.get('progress', 0.0)
+            
+            is_stalled_download = state == 'stalleddl' and dlspeed == 0 and progress < 1.0
+            is_stalled_upload = state == 'stalledup' and upspeed == 0
+            
+            if is_stalled_download or is_stalled_upload:
+                stalled.append(torrent)
+
+        return stalled
+

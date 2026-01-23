@@ -141,11 +141,8 @@ def create_request_handler(monitors: Optional[Dict] = None):
             try:
                 super().__init__(*args, **kwargs)
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
-                # Client disconnected before request could be processed
-                # This is normal behavior (e.g., browser cancelling requests, network issues)
                 logger.debug(f"Connection closed during initialization: {e}")
             except Exception as e:
-                # Log unexpected errors but don't crash the server
                 logger.error(f"Unexpected error in request handler initialization: {e}", exc_info=True)
 
         def handle(self):
@@ -158,10 +155,8 @@ def create_request_handler(monitors: Optional[Dict] = None):
             try:
                 super().handle()
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
-                # Client disconnected - this is normal (browser refresh, network issues, etc.)
                 logger.debug(f"Connection closed by client during request handling: {e}")
             except Exception as e:
-                # Log unexpected errors
                 logger.error(f"Unexpected error handling request: {e}", exc_info=True)
 
         def handle_one_request(self):
@@ -173,10 +168,8 @@ def create_request_handler(monitors: Optional[Dict] = None):
             try:
                 super().handle_one_request()
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
-                # Client disconnected before sending complete request
                 logger.debug(f"Connection closed during request: {e}")
             except Exception as e:
-                # Log unexpected errors
                 logger.error(f"Unexpected error processing request: {e}", exc_info=True)
 
         def log_message(self, format_str, *args):

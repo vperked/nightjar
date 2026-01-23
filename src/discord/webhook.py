@@ -1369,6 +1369,111 @@ class DiscordWebhook:
             timestamp=True
         )
 
+    def send_stalled_torrent_alert(self, torrent_info: Dict, stalled_duration_seconds: float = 0.0) -> bool:
+        """
+        Send a notification when a torrent is stalled.
+
+        Args:
+            torrent_info: Dictionary containing torrent information
+            stalled_duration_seconds: How long the torrent has been stalled (optional)
+
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        name = torrent_info.get('name', 'Unknown')
+        state = torrent_info.get('state', 'Unknown')
+        progress = torrent_info.get('progress_percent', 0.0)
+        dlspeed = torrent_info.get('dlspeed', 0)
+        upspeed = torrent_info.get('upspeed', 0)
+        seeds = torrent_info.get('seeds', 0)
+        peers = torrent_info.get('peers', 0)
+        eta = torrent_info.get('eta', -1)
+        save_path = torrent_info.get('save_path', 'N/A')
+        size = torrent_info.get('size', 0)
+
+        is_download_stalled = state.lower() == 'stalleddl'
+        stalled_type = "Download" if is_download_stalled else "Upload"
+
+        fields = [
+            {
+                'name': 'Torrent Name',
+                'value': name[:256],
+                'inline': False
+            },
+            {
+                'name': 'State',
+                'value': state,
+                'inline': True
+            },
+            {
+                'name': 'Progress',
+                'value': f"{progress:.1f}%",
+                'inline': True
+            },
+            {
+                'name': 'Size',
+                'value': format_bytes(size),
+                'inline': True
+            }
+        ]
+
+        if is_download_stalled:
+            fields.append({
+                'name': 'Download Speed',
+                'value': format_bytes_per_second(dlspeed),
+                'inline': True
+            })
+            if eta >= 0:
+                fields.append({
+                    'name': 'ETA',
+                    'value': f"{eta // 3600}h {(eta % 3600) // 60}m" if eta >= 3600 else f"{eta // 60}m",
+                    'inline': True
+                })
+        else:
+            fields.append({
+                'name': 'Upload Speed',
+                'value': format_bytes_per_second(upspeed),
+                'inline': True
+            })
+
+        fields.append({
+            'name': 'Seeds',
+            'value': str(seeds),
+            'inline': True
+        })
+        fields.append({
+            'name': 'Peers',
+            'value': str(peers),
+            'inline': True
+        })
+
+        if stalled_duration_seconds > 0:
+            hours = int(stalled_duration_seconds // 3600)
+            minutes = int((stalled_duration_seconds % 3600) // 60)
+            duration_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+            fields.append({
+                'name': 'Stalled Duration',
+                'value': duration_str,
+                'inline': True
+            })
+
+        fields.append({
+            'name': 'Save Path',
+            'value': save_path[:256] if save_path != 'N/A' else 'N/A',
+            'inline': False
+        })
+
+        color = 0x000000
+
+        return self.send_embed(
+            title=f'Torrent Stalled ({stalled_type})',
+            description=f'Torrent **{name[:100]}** has stalled and is not downloading/uploading',
+            color=color,
+            fields=fields,
+            footer='Server Monitor - qBittorrent',
+            timestamp=True
+        )
+
     def send_seeding_notification(self, torrent_info: Dict) -> bool:
         """
         Send a notification when a torrent starts seeding.
@@ -1497,6 +1602,113 @@ class DiscordWebhook:
             color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor - qBittorrent',
+            timestamp=True
+        )
+
+    def send_metrics_report(self, metrics: Dict[str, Any]) -> bool:
+        """
+        Send a metrics report to Discord.
+
+        Args:
+            metrics: Dictionary containing metrics data from MetricsCollector.get_summary()
+
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        uptime = metrics.get('uptime_formatted', 'N/A')
+        total_alerts = metrics.get('total_alerts', 0)
+        total_errors = metrics.get('total_errors', 0)
+        webhook_success_rate = metrics.get('webhook_success_rate', 0.0)
+        webhook_total = metrics.get('webhook_total_calls', 0)
+        webhook_success = metrics.get('webhook_success', 0)
+        webhook_failure = metrics.get('webhook_failure', 0)
+
+        alert_freq = metrics.get('alert_frequency_per_hour', {})
+        alert_freq_text = "None"
+        if alert_freq:
+            freq_items = [f"{k}: {v:.1f}/hr" for k, v in sorted(alert_freq.items()) if v > 0]
+            if freq_items:
+                alert_freq_text = "\n".join(freq_items[:10])
+
+        alert_counts = metrics.get('alert_counts', {})
+        alert_counts_text = "None"
+        if alert_counts:
+            count_items = [f"{k}: {v}" for k, v in sorted(alert_counts.items(), key=lambda x: x[1], reverse=True) if v > 0]
+            if count_items:
+                alert_counts_text = "\n".join(count_items[:10])
+
+        error_counts = metrics.get('error_counts', {})
+        error_counts_text = "None"
+        if error_counts:
+            error_items = [f"{k}: {v}" for k, v in sorted(error_counts.items(), key=lambda x: x[1], reverse=True) if v > 0]
+            if error_items:
+                error_counts_text = "\n".join(error_items[:10])
+
+        exec_times = metrics.get('monitor_execution_times', {})
+        exec_times_text = "None"
+        if exec_times:
+            time_items = [f"{k}: {v*1000:.2f}ms" for k, v in sorted(exec_times.items()) if v > 0]
+            if time_items:
+                exec_times_text = "\n".join(time_items[:10])
+
+        fields = [
+            {
+                'name': 'Uptime',
+                'value': uptime,
+                'inline': True
+            },
+            {
+                'name': 'Total Alerts',
+                'value': str(total_alerts),
+                'inline': True
+            },
+            {
+                'name': 'Total Errors',
+                'value': str(total_errors),
+                'inline': True
+            },
+            {
+                'name': 'Webhook Stats',
+                'value': f"Success Rate: {webhook_success_rate:.1f}%\n"
+                        f"Total: {webhook_total}\n"
+                        f"Success: {webhook_success}\n"
+                        f"Failure: {webhook_failure}",
+                'inline': False
+            },
+            {
+                'name': 'Alert Frequency (per hour)',
+                'value': alert_freq_text if len(alert_freq_text) <= 1024 else alert_freq_text[:1021] + "...",
+                'inline': False
+            },
+            {
+                'name': 'Alert Counts',
+                'value': alert_counts_text if len(alert_counts_text) <= 1024 else alert_counts_text[:1021] + "...",
+                'inline': False
+            }
+        ]
+
+        if error_counts_text != "None":
+            fields.append({
+                'name': 'Error Counts',
+                'value': error_counts_text if len(error_counts_text) <= 1024 else error_counts_text[:1021] + "...",
+                'inline': False
+            })
+
+        if exec_times_text != "None":
+            fields.append({
+                'name': 'Avg Execution Times',
+                'value': exec_times_text if len(exec_times_text) <= 1024 else exec_times_text[:1021] + "...",
+                'inline': False
+            })
+
+        color = 0x000000
+
+        return self.send_embed(
+            title="Server Monitor Metrics Report",
+            description="Performance and health metrics for the monitoring system",
+            color=color,
+            fields=fields,
+            footer="Metrics Report",
             timestamp=True
         )
 
