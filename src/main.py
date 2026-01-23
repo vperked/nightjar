@@ -1817,6 +1817,8 @@ def main(
     kernel_alert_sent = False
     kernel_stability_alert_sent = False
     last_kernel_stability_alert_hash = None
+    # Track per-error-type alert times to prevent spam
+    last_hardware_error_alert_times = {}  # key: error_type, value: timestamp
     qbittorrent_check_counter = 0
     NETWORK_CHECK_INTERVAL = 2
     PROCESS_CHECK_INTERVAL = 3
@@ -3224,9 +3226,41 @@ def main(
 
                         critical_warnings = [w for w in early_warnings if w.get('severity') == 'critical']
                         if critical_warnings or hardware_errors:
-                            time_since_last_alert = current_time - last_kernel_alert_time
+                            # Use longer cooldown for non-critical errors to prevent spam
+                            # Critical warnings use normal cooldown, hardware errors use 4x cooldown
+                            should_alert = False
+                            
+                            # Check critical warnings first (always use normal cooldown)
+                            critical_should_alert = False
+                            if critical_warnings:
+                                time_since_last_alert = current_time - last_kernel_alert_time
+                                critical_should_alert = (not kernel_alert_sent or time_since_last_alert >= alert_cooldown)
+                            
+                            # Check hardware errors (use extended cooldown for non-critical)
+                            hardware_should_alert = False
+                            if hardware_errors:
+                                extended_cooldown = alert_cooldown * 4
+                                
+                                # Check if any hardware error type needs alerting
+                                for hw_error in hardware_errors:
+                                    error_type = hw_error.get('type', 'unknown')
+                                    error_key = f"{error_type}_{hw_error.get('device', '')}_{hw_error.get('source', '')}"
+                                    
+                                    last_alert_time = last_hardware_error_alert_times.get(error_key, 0)
+                                    time_since_last_alert = current_time - last_alert_time
+                                    
+                                    # Use extended cooldown for non-critical errors
+                                    severity = hw_error.get('severity', 'warning')
+                                    error_cooldown = alert_cooldown if severity == 'critical' else extended_cooldown
+                                    
+                                    if time_since_last_alert >= error_cooldown:
+                                        hardware_should_alert = True
+                                        break  # Only need one error to trigger alert
+                            
+                            # Alert if either critical warnings or hardware errors need alerting
+                            should_alert = critical_should_alert or hardware_should_alert
 
-                            if not kernel_alert_sent or time_since_last_alert >= alert_cooldown:
+                            if should_alert:
                                 logger.warning(f"[KERNEL] Early warning signs detected: {len(critical_warnings)} critical warnings, {len(hardware_errors)} hardware errors")
 
                                 if crash_webhook:
@@ -3241,13 +3275,28 @@ def main(
                                         for hw_error in hardware_errors[:MAX_HARDWARE_ERRORS_DISPLAY]:
                                             error_text = None
                                             
-                                            if 'count_increase' in hw_error:
+                                            # Handle high_interrupts errors specifically
+                                            if hw_error.get('type') == 'high_interrupts':
+                                                device = hw_error.get('device', 'unknown')
+                                                count = hw_error.get('count', 0)
+                                                # Format large numbers
+                                                if count >= 1000000:
+                                                    count_str = f"{count / 1000000:.2f}M"
+                                                elif count >= 1000:
+                                                    count_str = f"{count / 1000:.2f}K"
+                                                else:
+                                                    count_str = str(count)
+                                                error_text = f"**High Interrupts** on {device}: {count_str} interrupts - possible hardware issue"
+                                            
+                                            # Handle EDAC errors with count_increase
+                                            elif 'count_increase' in hw_error:
                                                 source = hw_error.get('source', 'unknown')
                                                 count_increase = hw_error['count_increase']
                                                 total_count = hw_error.get('count', 0)
                                                 error_type = hw_error.get('error_type', 'unknown')
                                                 error_text = f"**{source}**: {count_increase} new {error_type} errors (total: {total_count})"
 
+                                            # Handle errors with count but no increase
                                             elif 'count' in hw_error:
                                                 source = hw_error.get('source', 'unknown')
                                                 error_type = hw_error.get('error_type', 'unknown')
@@ -3258,13 +3307,16 @@ def main(
                                                 else:
                                                     error_text = f"**{source}**: {count} {error_type} errors"
                                             
+                                            # Handle errors with message
                                             elif 'message' in hw_error:
                                                 source = hw_error.get('source', 'unknown')
                                                 message = hw_error['message']
+                                                # Truncate long messages but keep important info
                                                 if len(message) > 200:
                                                     message = message[:197] + "..."
                                                 error_text = f"**{source}**: {message}"
                                             
+                                            # Handle errors with type and other fields
                                             elif 'type' in hw_error:
                                                 error_type = hw_error.get('type', 'unknown')
                                                 source = hw_error.get('source', 'unknown')
@@ -3274,6 +3326,7 @@ def main(
                                                 else:
                                                     error_text = f"**{source}**: {error_type} error detected"
                                             
+                                            # Fallback: show all available fields
                                             if not error_text:
                                                 source = hw_error.get('source', 'unknown')
                                                 error_type = hw_error.get('error_type', hw_error.get('type', 'unknown'))
@@ -3324,11 +3377,22 @@ def main(
                                     )
                                     if success:
                                         logger.info("    Discord kernel early warning alert sent")
+                                        
+                                        # Update alert times for hardware errors (per-error-type tracking)
+                                        if hardware_errors:
+                                            for hw_error in hardware_errors:
+                                                error_type = hw_error.get('type', 'unknown')
+                                                error_key = f"{error_type}_{hw_error.get('device', '')}_{hw_error.get('source', '')}"
+                                                last_hardware_error_alert_times[error_key] = current_time
                                     else:
                                         logger.warning("    Discord kernel early warning alert failed")
 
-                                last_kernel_alert_time = current_time
-                                kernel_alert_sent = True
+                                # Update main alert time for critical warnings
+                                if critical_warnings:
+                                    last_kernel_alert_time = current_time
+                                    kernel_alert_sent = True
+                                # For hardware errors only, we track per-error-type, so don't update main time
+                                # This allows critical warnings to still alert even if hardware errors were recently sent
 
                         crashes = crash_results.get('crashes_found', [])
                         if crashes:
