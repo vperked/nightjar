@@ -1031,7 +1031,12 @@ def main(
                 if webhook and (current_time - last_metrics_report_time) >= metrics_report_interval:
                     try:
                         metrics_summary = metrics_collector.get_summary()
-                        success = webhook.send_metrics_report(metrics_summary)
+                        success = run_with_timeout(
+                            lambda: webhook.send_metrics_report(metrics_summary),
+                            timeout=10.0,
+                            default_value=False,
+                            operation_name="Metrics report webhook"
+                        )
                         metrics_collector.record_webhook_result(success)
                         if success:
                             logger.info("Metrics report sent to Discord")
@@ -1080,9 +1085,24 @@ def main(
 
                 try:
                     metrics_collector.start_monitor_execution('memory')
-                    memory_percent = memory_monitor.get_memory_percent()
-                    memory_info = memory_monitor.get_memory_info()
-                    swap_info = memory_monitor.get_swap_info()
+                    memory_percent = run_with_timeout(
+                        lambda: memory_monitor.get_memory_percent(),
+                        timeout=3.0,
+                        default_value=0.0,
+                        operation_name="Memory percent collection"
+                    )
+                    memory_info = run_with_timeout(
+                        lambda: memory_monitor.get_memory_info(),
+                        timeout=3.0,
+                        default_value={},
+                        operation_name="Memory info collection"
+                    )
+                    swap_info = run_with_timeout(
+                        lambda: memory_monitor.get_swap_info(),
+                        timeout=3.0,
+                        default_value={},
+                        operation_name="Swap info collection"
+                    )
                     metrics_collector.end_monitor_execution('memory')
                 except Exception as e:
                     metrics_collector.end_monitor_execution('memory')
@@ -1117,9 +1137,19 @@ def main(
 
                 try:
                     metrics_collector.start_monitor_execution('disk')
-                    all_partitions = disk_monitor.get_all_partitions()
+                    all_partitions = run_with_timeout(
+                        lambda: disk_monitor.get_all_partitions(),
+                        timeout=10.0,
+                        default_value=[],
+                        operation_name="Disk partitions collection"
+                    )
 
-                    total_disk = disk_monitor.get_total_disk_usage()
+                    total_disk = run_with_timeout(
+                        lambda: disk_monitor.get_total_disk_usage(),
+                        timeout=10.0,
+                        default_value={},
+                        operation_name="Total disk usage collection"
+                    )
                     disk_percent = total_disk.get('percent', 0.0) if total_disk else 0.0
                     metrics_collector.end_monitor_execution('disk')
                 except Exception as e:
@@ -1154,7 +1184,12 @@ def main(
                                 logger.warning(f"[CLEANUP] Cleared {cleanup_stats['logs_cleaned']} log file(s), "
                                              f"freed {format_bytes(cleanup_stats['total_size_cleared'])}")
 
-                                final_disk = disk_monitor.get_disk_usage('/')
+                                final_disk = run_with_timeout(
+                                    lambda: disk_monitor.get_disk_usage('/'),
+                                    timeout=5.0,
+                                    default_value=None,
+                                    operation_name="Final disk usage check"
+                                )
                                 if final_disk:
                                     logger.info(f"[CLEANUP] Disk usage after log cleanup: {final_disk['percent']:.1f}%")
 
@@ -1168,7 +1203,10 @@ def main(
                     time_since_last_cleanup = current_time - last_disk_cleanup_time
 
                     if time_since_last_cleanup >= disk_emergency_cooldown:
-                        logger.critical(f"[EMERGENCY] Disk usage at {disk_percent:.1f}% (emergency threshold: {disk_emergency_threshold:.1f}%) - CRITICAL! Starting emergency cleanup...")
+                        try:
+                            logger.critical(f"[EMERGENCY] Disk usage at {disk_percent:.1f}% (emergency threshold: {disk_emergency_threshold:.1f}%) - CRITICAL! Starting emergency cleanup...")
+                        except (OSError, Exception):
+                            print(f"[EMERGENCY] Disk usage at {disk_percent:.1f}% (emergency threshold: {disk_emergency_threshold:.1f}%) - CRITICAL! Starting emergency cleanup...", file=sys.stderr)
 
                         try:
                             cleanup_stats = run_with_timeout(
@@ -1182,14 +1220,24 @@ def main(
                                 watchdog_monitor.update_heartbeat()
 
                             if cleanup_stats['total_size_cleared'] > 0:
-                                logger.critical(f"[EMERGENCY] Emergency cleanup cleared {format_bytes(cleanup_stats['total_size_cleared'])} "
-                                              f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs, {cleanup_stats.get('logs_cleaned', 0)} logs)")
+                                try:
+                                    logger.critical(f"[EMERGENCY] Emergency cleanup cleared {format_bytes(cleanup_stats['total_size_cleared'])} "
+                                                  f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs, {cleanup_stats.get('logs_cleaned', 0)} logs)")
+                                except (OSError, Exception):
+                                    print(f"[EMERGENCY] Emergency cleanup cleared {format_bytes(cleanup_stats['total_size_cleared'])} "
+                                          f"({cleanup_stats['files_removed']} files, {cleanup_stats['dirs_removed']} dirs, {cleanup_stats.get('logs_cleaned', 0)} logs)", file=sys.stderr)
 
                                 if cleanup_stats.get('final_usage'):
-                                    logger.critical(f"[EMERGENCY] Disk usage after emergency cleanup: {cleanup_stats['final_usage']:.1f}%")
+                                    try:
+                                        logger.critical(f"[EMERGENCY] Disk usage after emergency cleanup: {cleanup_stats['final_usage']:.1f}%")
+                                    except (OSError, Exception):
+                                        print(f"[EMERGENCY] Disk usage after emergency cleanup: {cleanup_stats['final_usage']:.1f}%", file=sys.stderr)
 
                                     if cleanup_stats['final_usage'] >= disk_emergency_threshold:
-                                        logger.critical(f"[EMERGENCY] Disk still critically full after cleanup! Manual intervention required!")
+                                        try:
+                                            logger.critical(f"[EMERGENCY] Disk still critically full after cleanup! Manual intervention required!")
+                                        except (OSError, Exception):
+                                            print(f"[EMERGENCY] Disk still critically full after cleanup! Manual intervention required!", file=sys.stderr)
 
                                 if disk_webhook:
                                     fields = [
@@ -1216,34 +1264,56 @@ def main(
                                             'inline': False
                                         })
 
-                                    success = disk_webhook.send_embed(
-                                        title='EMERGENCY: Disk Critically Full',
-                                        description=f'Emergency cleanup performed to prevent disk from reaching 100%',
-                                        fields=fields,
-                                        footer='Server Monitor - Emergency',
-                                        timestamp=True
+                                    success = run_with_timeout(
+                                        lambda: disk_webhook.send_embed(
+                                            title='EMERGENCY: Disk Critically Full',
+                                            description=f'Emergency cleanup performed to prevent disk from reaching 100%',
+                                            fields=fields,
+                                            footer='Server Monitor - Emergency',
+                                            timestamp=True
+                                        ),
+                                        timeout=10.0,
+                                        default_value=False,
+                                        operation_name="Emergency cleanup webhook"
                                     )
                                     if success:
-                                        logger.info("    Discord emergency notification sent")
+                                        try:
+                                            logger.info("    Discord emergency notification sent")
+                                        except (OSError, Exception):
+                                            pass
                             else:
-                                logger.critical(f"[EMERGENCY] No space could be freed! Disk may crash if it reaches 100%!")
+                                try:
+                                    logger.critical(f"[EMERGENCY] No space could be freed! Disk may crash if it reaches 100%!")
+                                except (OSError, Exception):
+                                    print(f"[EMERGENCY] No space could be freed! Disk may crash if it reaches 100%!", file=sys.stderr)
                                 if disk_webhook:
-                                    disk_webhook.send_embed(
-                                        title='CRITICAL: Disk Cleanup Failed',
-                                        description=f'Disk at {disk_percent:.1f}% and emergency cleanup could not free space! Manual intervention required immediately!',
-                                        fields=[
-                                            {'name': 'Current Usage', 'value': f"{disk_percent:.1f}%", 'inline': False},
-                                            {'name': 'Emergency Threshold', 'value': f"{disk_emergency_threshold:.1f}%", 'inline': True},
-                                            {'name': 'Status', 'value': 'CRITICAL - Manual intervention required', 'inline': False},
-                                        ],
-                                        footer='Server Monitor - Critical Alert',
-                                        timestamp=True
+                                    run_with_timeout(
+                                        lambda: disk_webhook.send_embed(
+                                            title='CRITICAL: Disk Cleanup Failed',
+                                            description=f'Disk at {disk_percent:.1f}% and emergency cleanup could not free space! Manual intervention required immediately!',
+                                            fields=[
+                                                {'name': 'Current Usage', 'value': f"{disk_percent:.1f}%", 'inline': False},
+                                                {'name': 'Emergency Threshold', 'value': f"{disk_emergency_threshold:.1f}%", 'inline': True},
+                                                {'name': 'Status', 'value': 'CRITICAL - Manual intervention required', 'inline': False},
+                                            ],
+                                            footer='Server Monitor - Critical Alert',
+                                            timestamp=True
+                                        ),
+                                        timeout=10.0,
+                                        default_value=False,
+                                        operation_name="Critical disk cleanup failed webhook"
                                     )
 
                             last_disk_cleanup_time = current_time
                         except Exception as e:
-                            logger.critical(f"[EMERGENCY] Error during emergency disk cleanup: {e}")
-                            log_error_to_file_and_webhook(e, context="Emergency disk cleanup operation", include_traceback=True)
+                            try:
+                                logger.critical(f"[EMERGENCY] Error during emergency disk cleanup: {e}")
+                            except (OSError, Exception):
+                                print(f"[EMERGENCY] Error during emergency disk cleanup: {e}", file=sys.stderr)
+                            try:
+                                log_error_to_file_and_webhook(e, context="Emergency disk cleanup operation", include_traceback=True)
+                            except (OSError, Exception):
+                                pass
                             last_disk_cleanup_time = current_time
 
                 elif disk_percent >= disk_cleanup_threshold:
@@ -1293,12 +1363,17 @@ def main(
                                             'inline': False
                                         })
 
-                                    success = disk_webhook.send_embed(
-                                        title='Disk Cleanup Performed',
-                                        description=f'Automatic disk cleanup completed to prevent disk from filling up',
-                                        fields=fields,
-                                        footer='Server Monitor',
-                                        timestamp=True
+                                    success = run_with_timeout(
+                                        lambda: disk_webhook.send_embed(
+                                            title='Disk Cleanup Performed',
+                                            description=f'Automatic disk cleanup completed to prevent disk from filling up',
+                                            fields=fields,
+                                            footer='Server Monitor',
+                                            timestamp=True
+                                        ),
+                                        timeout=10.0,
+                                        default_value=False,
+                                        operation_name="Disk cleanup webhook"
                                     )
                                     if success:
                                         logger.info("    Discord cleanup notification sent")
@@ -1317,12 +1392,20 @@ def main(
                 cpu_temp = None
                 try:
                     if sensors_monitor.is_available():
-                        cpu_temp = sensors_monitor.get_cpu_temperature()
+                        cpu_temp = run_with_timeout(
+                            lambda: sensors_monitor.get_cpu_temperature(),
+                            timeout=3.0,
+                            default_value=None,
+                            operation_name="CPU temperature collection"
+                        )
                         if cpu_temp is None:
                             cpu_temp = 0.0
                 except Exception as e:
                     logger.debug(f"Error getting temperature: {e}")
                     cpu_temp = None
+
+                if watchdog_monitor:
+                    watchdog_monitor.update_heartbeat()
 
                 network_bandwidth = None
                 network_check_counter += 1
@@ -1331,13 +1414,23 @@ def main(
                 if network_check_counter >= NETWORK_CHECK_INTERVAL:
                     network_check_counter = 0
                     try:
-                        bandwidth = network_monitor.get_bandwidth_usage(interval=1.0)
+                        bandwidth = run_with_timeout(
+                            lambda: network_monitor.get_bandwidth_usage(interval=1.0),
+                            timeout=5.0,
+                            default_value=None,
+                            operation_name="Network bandwidth collection"
+                        )
                         if bandwidth:
                             total_bandwidth = bandwidth.get('bytes_sent_per_sec', 0) + bandwidth.get('bytes_recv_per_sec', 0)
                             mb_per_sec = 1024 * 1024
                             if mb_per_sec > 0:
                                 network_bandwidth = total_bandwidth / mb_per_sec
-                        network_io_data = network_monitor.get_total_network_io()
+                        network_io_data = run_with_timeout(
+                            lambda: network_monitor.get_total_network_io(),
+                            timeout=5.0,
+                            default_value=None,
+                            operation_name="Network I/O collection"
+                        )
                         if watchdog_monitor:
                             watchdog_monitor.update_heartbeat()
                     except (ValueError, ZeroDivisionError) as e:
@@ -1346,7 +1439,12 @@ def main(
                         logger.debug(f"Unexpected error in network bandwidth calculation: {e}")
 
                 try:
-                    disk_io_data = system_monitor.get_disk_io()
+                    disk_io_data = run_with_timeout(
+                        lambda: system_monitor.get_disk_io(),
+                        timeout=5.0,
+                        default_value=None,
+                        operation_name="Disk I/O collection"
+                    )
                 except (OSError, psutil.Error) as e:
                     logger.debug(f"Error getting disk I/O: {e}")
 
@@ -1357,6 +1455,9 @@ def main(
                         disk_io=disk_io_data,
                         network_io=network_io_data
                     )
+
+                if watchdog_monitor:
+                    watchdog_monitor.update_heartbeat()
 
                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 

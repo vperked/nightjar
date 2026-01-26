@@ -1,6 +1,7 @@
 import psutil
 import time
 import os
+import sys
 import platform
 import shutil
 import glob
@@ -664,11 +665,19 @@ class DiskMonitor:
                                 filepath.unlink()
                                 stats['files_removed'] += 1
                                 stats['total_size_cleared'] += file_size
-                                logger.debug(f"Removed old temp file: {filepath} ({format_bytes(file_size)})")
+                                try:
+                                    logger.debug(f"Removed old temp file: {filepath} ({format_bytes(file_size)})")
+                                except (OSError, Exception):
+                                    pass
                         except (OSError, PermissionError) as e:
+                            if isinstance(e, OSError) and e.errno == 28:
+                                stats['errors'].append(f"Disk full while removing {filepath}: {e}")
                             continue
                         except Exception as e:
-                            logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
+                            try:
+                                logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
+                            except (OSError, Exception):
+                                pass
                             stats['errors'].append(f"Error removing {filepath}: {e}")
 
                     for dirname in dirs:
@@ -704,10 +713,15 @@ class DiskMonitor:
                                     filepath_obj.unlink()
                                     stats['files_removed'] += 1
                                     stats['total_size_cleared'] += file_size
-                            except (OSError, PermissionError):
+                            except (OSError, PermissionError) as e:
+                                if isinstance(e, OSError) and e.errno == 28:
+                                    stats['errors'].append(f"Disk full while removing {filepath}: {e}")
                                 continue
                             except Exception as e:
-                                logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
+                                try:
+                                    logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
+                                except (OSError, Exception):
+                                    pass
                                 stats['errors'].append(f"Error removing {filepath}: {e}")
                     except Exception as e:
                         logger.error(f"Unexpected error processing pattern {pattern}: {e}", exc_info=True)
@@ -836,15 +850,24 @@ class DiskMonitor:
             stats['final_usage'] = initial_usage['percent']
             return stats
 
-        logger.info(f"[CLEANUP] Starting disk cleanup: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free (target: {target_free_percent:.1f}% free)")
+        try:
+            logger.info(f"[CLEANUP] Starting disk cleanup: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free (target: {target_free_percent:.1f}% free)")
+        except (OSError, Exception):
+            print(f"[CLEANUP] Starting disk cleanup: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free (target: {target_free_percent:.1f}% free)", file=sys.stderr)
 
         if log_monitor:
             aggressive_cleanup = initial_usage['percent'] >= 40.0
 
             if aggressive_cleanup:
-                logger.info("[CLEANUP] Step 1: Aggressive log cleanup (disk >= 40%, cleaning ALL logs in /var/log)...")
+                try:
+                    logger.info("[CLEANUP] Step 1: Aggressive log cleanup (disk >= 40%, cleaning ALL logs in /var/log)...")
+                except (OSError, Exception):
+                    print("[CLEANUP] Step 1: Aggressive log cleanup (disk >= 40%, cleaning ALL logs in /var/log)...", file=sys.stderr)
             else:
-                logger.info("[CLEANUP] Step 1: Cleaning log files (all logs in /var/log exceeding threshold)...")
+                try:
+                    logger.info("[CLEANUP] Step 1: Cleaning log files (all logs in /var/log exceeding threshold)...")
+                except (OSError, Exception):
+                    print("[CLEANUP] Step 1: Cleaning log files (all logs in /var/log exceeding threshold)...", file=sys.stderr)
 
             log_cleanup_stats = self._perform_log_cleanup(log_monitor, aggressive=aggressive_cleanup, mountpoint=mountpoint)
             stats['logs_cleaned'] = log_cleanup_stats['logs_cleaned']
@@ -861,7 +884,11 @@ class DiskMonitor:
                         stats['final_usage'] = final_usage['percent']
                     return stats
 
-        logger.info("[CLEANUP] Step 2: Cleaning temporary files...")
+        try:
+            logger.info("[CLEANUP] Step 2: Cleaning temporary files...")
+        except (OSError, Exception):
+            print("[CLEANUP] Step 2: Cleaning temporary files...", file=sys.stderr)
+        
         max_attempts = 4
         for attempt, max_age_days in enumerate([7, 3, 1, 0]):
             if attempt >= max_attempts:
@@ -882,7 +909,10 @@ class DiskMonitor:
                     break
 
         if initial_usage['percent'] >= 50.0:
-            logger.info("[CLEANUP] Step 3: Cleaning package caches and other space consumers...")
+            try:
+                logger.info("[CLEANUP] Step 3: Cleaning package caches and other space consumers...")
+            except (OSError, Exception):
+                print("[CLEANUP] Step 3: Cleaning package caches and other space consumers...", file=sys.stderr)
             cache_cleanup_stats = self._cleanup_package_caches()
             stats['files_removed'] += cache_cleanup_stats.get('files_removed', 0)
             stats['dirs_removed'] += cache_cleanup_stats.get('dirs_removed', 0)
@@ -902,9 +932,14 @@ class DiskMonitor:
         if final_usage:
             stats['final_usage'] = final_usage['percent']
             final_free_percent = 100.0 - final_usage['percent']
-            logger.info(f"[CLEANUP] Disk cleanup complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
-                       f"Cleared {format_bytes(stats['total_size_cleared'])} "
-                       f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)")
+            try:
+                logger.info(f"[CLEANUP] Disk cleanup complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
+                           f"Cleared {format_bytes(stats['total_size_cleared'])} "
+                           f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)")
+            except (OSError, Exception):
+                print(f"[CLEANUP] Disk cleanup complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
+                      f"Cleared {format_bytes(stats['total_size_cleared'])} "
+                      f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)", file=sys.stderr)
 
         return stats
 
@@ -986,6 +1021,7 @@ class DiskMonitor:
         """
         Emergency cleanup when disk is critically full (near 100%).
         Performs aggressive cleanup including logs and all temporary files.
+        Handles disk full errors gracefully to ensure cleanup can proceed.
 
         Args:
             mountpoint: Mount point to clean (default: '/')
@@ -1012,9 +1048,16 @@ class DiskMonitor:
         stats['initial_usage'] = initial_usage['percent']
         current_free_percent = 100.0 - initial_usage['percent']
 
-        logger.warning(f"[EMERGENCY] Disk critically full: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free")
+        try:
+            logger.warning(f"[EMERGENCY] Disk critically full: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free")
+        except (OSError, Exception):
+            print(f"[EMERGENCY] Disk critically full: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free", file=sys.stderr)
 
-        logger.info("[EMERGENCY] Step 1: Cleaning all temporary files...")
+        try:
+            logger.info("[EMERGENCY] Step 1: Cleaning all temporary files...")
+        except (OSError, Exception):
+            print("[EMERGENCY] Step 1: Cleaning all temporary files...", file=sys.stderr)
+        
         cleanup_stats = self.cleanup_temporary_files(mountpoint, max_age_days=0)
         stats['files_removed'] += cleanup_stats['files_removed']
         stats['dirs_removed'] += cleanup_stats['dirs_removed']
@@ -1022,13 +1065,20 @@ class DiskMonitor:
         stats['errors'].extend(cleanup_stats['errors'])
 
         if log_monitor:
-            logger.info("[EMERGENCY] Step 2: Cleaning log files (aggressive - ALL logs in /var/log)...")
+            try:
+                logger.info("[EMERGENCY] Step 2: Cleaning log files (aggressive - ALL logs in /var/log)...")
+            except (OSError, Exception):
+                print("[EMERGENCY] Step 2: Cleaning log files (aggressive - ALL logs in /var/log)...", file=sys.stderr)
+            
             log_cleanup_stats = self._perform_log_cleanup(log_monitor, aggressive=True, mountpoint=mountpoint)
             stats['logs_cleaned'] = log_cleanup_stats['logs_cleaned']
             stats['total_size_cleared'] += log_cleanup_stats['total_size_cleared']
             stats['errors'].extend(log_cleanup_stats['errors'])
 
-        logger.info("[EMERGENCY] Step 3: Cleaning additional cache directories...")
+        try:
+            logger.info("[EMERGENCY] Step 3: Cleaning additional cache directories...")
+        except (OSError, Exception):
+            print("[EMERGENCY] Step 3: Cleaning additional cache directories...", file=sys.stderr)
         emergency_cache_dirs_env = os.getenv('EMERGENCY_CACHE_DIRS', None)
         if emergency_cache_dirs_env:
             cache_dirs = emergency_cache_dirs_env.split(':')
@@ -1062,10 +1112,15 @@ class DiskMonitor:
                                 filepath.unlink()
                                 stats['files_removed'] += 1
                                 stats['total_size_cleared'] += file_size
-                        except (OSError, PermissionError):
+                        except (OSError, PermissionError) as e:
+                            if isinstance(e, OSError) and e.errno == 28:
+                                stats['errors'].append(f"Disk full while removing {filepath}: {e}")
                             continue
                         except Exception as e:
-                            logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
+                            try:
+                                logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
+                            except (OSError, Exception):
+                                pass
                             stats['errors'].append(f"Error removing {filepath}: {e}")
 
                     for dirname in dirs:
@@ -1077,7 +1132,10 @@ class DiskMonitor:
                         except (OSError, PermissionError):
                             continue
             except Exception as e:
-                logger.error(f"Unexpected error cleaning cache directory {cache_dir}: {e}", exc_info=True)
+                try:
+                    logger.error(f"Unexpected error cleaning cache directory {cache_dir}: {e}", exc_info=True)
+                except (OSError, Exception):
+                    pass
                 stats['errors'].append(f"Error cleaning cache directory {cache_dir}: {e}")
 
         if stats['logs_cleaned'] > 0:
@@ -1087,9 +1145,14 @@ class DiskMonitor:
         if final_usage:
             stats['final_usage'] = final_usage['percent']
             final_free_percent = 100.0 - final_usage['percent']
-            logger.warning(f"[EMERGENCY] Complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
-                          f"Cleared {format_bytes(stats['total_size_cleared'])} "
-                          f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)")
+            try:
+                logger.warning(f"[EMERGENCY] Complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
+                              f"Cleared {format_bytes(stats['total_size_cleared'])} "
+                              f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)")
+            except (OSError, Exception):
+                print(f"[EMERGENCY] Complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
+                      f"Cleared {format_bytes(stats['total_size_cleared'])} "
+                      f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)", file=sys.stderr)
 
         return stats
 
