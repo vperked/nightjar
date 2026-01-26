@@ -12,7 +12,7 @@ from monitor.log import LogMonitor
 from monitor.kernel import KernelMonitor
 from monitor.watchdog import WatchdogMonitor
 from discord.webhook import DiscordWebhook
-from util.util import format_bytes, format_bytes_per_second, BYTES_PER_KB, BYTES_PER_MB, BYTES_PER_GB
+from util.util import format_bytes, format_bytes_per_second, BYTES_PER_GB
 from util.systemd import install_systemd_service, is_systemd_available
 from cache.cache import clear_cache_on_startup, clear_cache_on_exit
 from logger import get_logger
@@ -28,9 +28,9 @@ from core.config import (
     DEFAULT_KERNEL_STABILITY_CHECK_INTERVAL, DEFAULT_KERNEL_CHECK_SINCE_MINUTES,
     DEFAULT_MONITORING_WATCHDOG_TIMEOUT, DEFAULT_WATCHDOG_AUTO_RESTART, DEFAULT_WATCHDOG_RESTART_COOLDOWN,
     DEFAULT_STALLED_TORRENT_THRESHOLD,
-    EMBED_SEND_DELAY, MAX_TRACKED_TORRENTS, MAX_PARTITIONS_DISPLAY, MAX_PROCESSES_DISPLAY,
+    EMBED_SEND_DELAY, MAX_TRACKED_TORRENTS, MAX_PROCESSES_DISPLAY,
     MAX_REASONS_DISPLAY, MAX_INDICATORS_DISPLAY, MAX_RECOMMENDATIONS_DISPLAY, MAX_CRASH_TYPES_DISPLAY,
-    MAX_HARDWARE_ERRORS_DISPLAY, MAX_WARNINGS_DISPLAY, MAX_DIRECTORIES_DISPLAY,
+    MAX_HARDWARE_ERRORS_DISPLAY, MAX_DIRECTORIES_DISPLAY,
     LOG_CLEANUP_INTERVAL_SECONDS, DISK_CLEANUP_COOLDOWN_HIGH, DISK_CLEANUP_COOLDOWN_MEDIUM,
     DISK_CLEANUP_COOLDOWN_LOW, DISK_CLEANUP_COOLDOWN_NORMAL, DISK_EMERGENCY_COOLDOWN
 )
@@ -40,7 +40,7 @@ from core.system import (
 from core.alert import AlertCooldownManager
 from core.temperature import analyze_temperature_reason
 from core.metrics import MetricsCollector
-from typing import Optional, Tuple, Dict, List, Any, Callable, TypeVar
+from typing import Optional, Dict, List, Any, Callable, TypeVar
 from datetime import datetime
 from pathlib import Path
 import os
@@ -1060,13 +1060,13 @@ def main(
                 try:
                     metrics_collector.start_monitor_execution('cpu')
                     cpu_percent = run_with_timeout(
-                        lambda: cpu_monitor.get_cpu_percent(interval=1.0),
+                        lambda: cpu_monitor.get_cpu_percent(interval=0.0),
                         timeout=3.0,
                         default_value=0.0,
                         operation_name="CPU percent collection"
                     )
                     cpu_per_core = run_with_timeout(
-                        lambda: cpu_monitor.get_cpu_percent_per_core(interval=0.1),
+                        lambda: cpu_monitor.get_cpu_percent_per_core(interval=0.0),
                         timeout=2.0,
                         default_value=[],
                         operation_name="CPU per-core collection"
