@@ -2130,9 +2130,14 @@ def main(
                                         except Exception:
                                             current_system_info = None
 
-                                        success = webhook.send_freeze_alert(
-                                            freeze_status=freeze_status,
-                                            system_info=current_system_info
+                                        success = run_with_timeout(
+                                            lambda: webhook.send_freeze_alert(
+                                                freeze_status=freeze_status,
+                                                system_info=current_system_info
+                                            ),
+                                            timeout=10.0,
+                                            default_value=False,
+                                            operation_name="Freeze alert webhook"
                                         )
                                         if success:
                                             logger.info("    Discord freeze alert sent")
@@ -2158,17 +2163,32 @@ def main(
                 if media_monitor_enabled and media_check_counter >= media_check_interval and Path(media_directory).exists():
                     media_check_counter = 0
                     try:
-                        media_size_info = disk_monitor.get_directory_size(media_directory)
+                        media_size_info = run_with_timeout(
+                            lambda: disk_monitor.get_directory_size(media_directory),
+                            timeout=60.0,
+                            default_value=None,
+                            operation_name="Get media directory size"
+                        )
 
                         if media_size_info and media_size_info['size'] >= media_directory_threshold_bytes:
                             time_since_last_alert = current_time - last_media_alert_time
 
                             if not media_alert_sent or time_since_last_alert >= alert_cooldown:
-                                subdirs = disk_monitor.get_subdirectories_sizes(media_directory)
+                                subdirs = run_with_timeout(
+                                    lambda: disk_monitor.get_subdirectories_sizes(media_directory),
+                                    timeout=60.0,
+                                    default_value=[],
+                                    operation_name="Get media subdirectories sizes"
+                                )
 
                                 subdirs_human = []
                                 for subdir in subdirs:
-                                    subdir_human = disk_monitor.get_directory_size_human(subdir['path'])
+                                    subdir_human = run_with_timeout(
+                                        lambda: disk_monitor.get_directory_size_human(subdir['path']),
+                                        timeout=30.0,
+                                        default_value=None,
+                                        operation_name=f"Get subdirectory size for {subdir['path']}"
+                                    )
                                     if subdir_human:
                                         subdir_human['size_bytes'] = subdir['size']
                                         subdirs_human.append(subdir_human)
@@ -2176,11 +2196,16 @@ def main(
                                 if disk_webhook:
                                     size_formatted = format_bytes(media_size_info['size'])
                                     logger.warning(f"[ALERT] Directory {media_directory}: {size_formatted} (threshold: {format_bytes(media_directory_threshold_bytes)})")
-                                    success = disk_webhook.send_directory_size_alert(
-                                        directory_path=media_directory,
-                                        size_bytes=media_size_info['size'],
-                                        threshold_bytes=media_directory_threshold_bytes,
-                                        subdirectories=subdirs_human
+                                    success = run_with_timeout(
+                                        lambda: disk_webhook.send_directory_size_alert(
+                                            directory_path=media_directory,
+                                            size_bytes=media_size_info['size'],
+                                            threshold_bytes=media_directory_threshold_bytes,
+                                            subdirectories=subdirs_human
+                                        ),
+                                        timeout=10.0,
+                                        default_value=False,
+                                        operation_name="Directory size alert webhook"
                                     )
                                     if success:
                                         logger.info("    Discord directory alert sent")
@@ -2207,7 +2232,12 @@ def main(
                         qbittorrent_check_counter = 0
                         if qbittorrent_monitor and qbittorrent_monitor.is_available():
                             try:
-                                all_torrents = qbittorrent_monitor.get_all_torrents()
+                                all_torrents = run_with_timeout(
+                                    lambda: qbittorrent_monitor.get_all_torrents(),
+                                    timeout=15.0,
+                                    default_value=[],
+                                    operation_name="qBittorrent get all torrents"
+                                )
                                 current_torrents = {torrent['hash']: torrent for torrent in all_torrents}
 
                                 for torrent_hash, torrent in current_torrents.items():
@@ -2253,7 +2283,12 @@ def main(
                                         if stalled_duration >= stalled_threshold:
                                             if qbittorrent_webhook:
                                                 logger.warning(f"[qBittorrent] Torrent stalled: {torrent.get('name', 'Unknown')} (stalled for {stalled_duration:.0f}s)")
-                                                success = qbittorrent_webhook.send_stalled_torrent_alert(torrent, stalled_duration)
+                                                success = run_with_timeout(
+                                                    lambda: qbittorrent_webhook.send_stalled_torrent_alert(torrent, stalled_duration),
+                                                    timeout=10.0,
+                                                    default_value=False,
+                                                    operation_name="Stalled torrent alert webhook"
+                                                )
                                                 metrics_collector.record_alert('torrent_stalled')
                                                 metrics_collector.record_webhook_result(success)
                                                 if success:
@@ -2266,7 +2301,12 @@ def main(
                                         if not tracked_torrents[torrent_hash]['notified_download'] and prev_was_downloading:
                                             if qbittorrent_webhook:
                                                 logger.info(f"[qBittorrent] Download complete: {torrent.get('name', 'Unknown')}")
-                                                success = qbittorrent_webhook.send_download_complete_alert(torrent)
+                                                success = run_with_timeout(
+                                                    lambda: qbittorrent_webhook.send_download_complete_alert(torrent),
+                                                    timeout=10.0,
+                                                    default_value=False,
+                                                    operation_name="Download complete alert webhook"
+                                                )
                                                 if success:
                                                     logger.info("    Discord download complete notification sent")
                                                 else:
@@ -2277,7 +2317,12 @@ def main(
                                         if not tracked_torrents[torrent_hash]['notified_seeding']:
                                             if qbittorrent_webhook:
                                                 logger.info(f"[qBittorrent] Torrent seeding: {torrent.get('name', 'Unknown')}")
-                                                success = qbittorrent_webhook.send_seeding_notification(torrent)
+                                                success = run_with_timeout(
+                                                    lambda: qbittorrent_webhook.send_seeding_notification(torrent),
+                                                    timeout=10.0,
+                                                    default_value=False,
+                                                    operation_name="Seeding notification webhook"
+                                                )
                                                 if success:
                                                     logger.info("    Discord seeding notification sent")
                                                 else:
@@ -2300,8 +2345,17 @@ def main(
                                 logger.debug(f"Error checking qBittorrent: {e}")
                             except Exception as e:
                                 logger.warning(f"Unexpected error checking qBittorrent: {e}")
+                    
+                    if watchdog_monitor:
+                        watchdog_monitor.update_heartbeat()
+                
                 log_check_counter += 1
-                root_disk_usage = disk_monitor.get_disk_usage('/')
+                root_disk_usage = run_with_timeout(
+                    lambda: disk_monitor.get_disk_usage('/'),
+                    timeout=5.0,
+                    default_value=None,
+                    operation_name="Root disk usage check for log cleanup"
+                )
                 disk_percent = root_disk_usage.get('percent', 0) if root_disk_usage else 0
 
                 effective_log_interval = log_check_interval if disk_percent < 40.0 else 5
@@ -2311,10 +2365,20 @@ def main(
                     try:
                         aggressive_log_cleanup = disk_percent >= 35.0
 
-                        all_log_sizes = log_monitor.get_all_log_sizes()
+                        all_log_sizes = run_with_timeout(
+                            lambda: log_monitor.get_all_log_sizes(),
+                            timeout=10.0,
+                            default_value={},
+                            operation_name="Get all log sizes"
+                        )
 
                         if aggressive_log_cleanup:
-                            all_log_files = log_monitor.get_all_log_files_in_directory('/var/log')
+                            all_log_files = run_with_timeout(
+                                lambda: log_monitor.get_all_log_files_in_directory('/var/log'),
+                                timeout=30.0,
+                                default_value=[],
+                                operation_name="Get all log files in directory"
+                            )
                             monitored_logs = []
                             if all_log_sizes.get('application_log'):
                                 monitored_logs.append(all_log_sizes['application_log'])
@@ -2330,7 +2394,10 @@ def main(
                                         all_logs_dict[log_path] = log_info
 
                             logs_to_check = list(all_logs_dict.values())
-                            logger.info(f"[LOG CHECK] Disk at {disk_percent:.1f}% - cleaning ALL logs proactively")
+                            try:
+                                logger.info(f"[LOG CHECK] Disk at {disk_percent:.1f}% - cleaning ALL logs proactively")
+                            except (OSError, Exception):
+                                pass
                         else:
                             logs_to_check = all_log_sizes.get('exceeded_logs', [])
 
@@ -2343,7 +2410,12 @@ def main(
                             if log_path in cleaned_logs:
                                 continue
 
-                            current_log_info = log_monitor.get_log_size(log_path)
+                            current_log_info = run_with_timeout(
+                                lambda: log_monitor.get_log_size(log_path),
+                                timeout=5.0,
+                                default_value=None,
+                                operation_name=f"Get log size for {log_path}"
+                            )
                             if not current_log_info:
                                 continue
 
@@ -2351,7 +2423,10 @@ def main(
                             threshold_bytes = log_monitor.threshold_bytes
 
                             if not aggressive_log_cleanup and current_size_bytes <= threshold_bytes:
-                                logger.debug(f"    Skipping {log_path}: {format_bytes(current_size_bytes)} <= {format_bytes(threshold_bytes)}")
+                                try:
+                                    logger.debug(f"    Skipping {log_path}: {format_bytes(current_size_bytes)} <= {format_bytes(threshold_bytes)}")
+                                except (OSError, Exception):
+                                    pass
                                 continue
 
                             last_alert_time = last_log_alert_time.get(log_path, 0)
@@ -2360,37 +2435,70 @@ def main(
                             if time_since_last_alert >= alert_cooldown:
                                 original_size = current_size_bytes
                                 if aggressive_log_cleanup:
-                                    logger.info(f"    Proactive cleanup (disk {disk_percent:.1f}%): {log_path} ({format_bytes(original_size)})")
+                                    try:
+                                        logger.info(f"    Proactive cleanup (disk {disk_percent:.1f}%): {log_path} ({format_bytes(original_size)})")
+                                    except (OSError, Exception):
+                                        pass
                                 else:
-                                    logger.info(f"    Cleaning {log_path}: {format_bytes(original_size)} > {format_bytes(threshold_bytes)}")
-                                cleanup_success = log_monitor.cleanup_log(current_log_info, force=aggressive_log_cleanup)
+                                    try:
+                                        logger.info(f"    Cleaning {log_path}: {format_bytes(original_size)} > {format_bytes(threshold_bytes)}")
+                                    except (OSError, Exception):
+                                        pass
+                                cleanup_success = run_with_timeout(
+                                    lambda: log_monitor.cleanup_log(current_log_info, force=aggressive_log_cleanup),
+                                    timeout=30.0,
+                                    default_value=False,
+                                    operation_name=f"Cleanup log {log_path}"
+                                )
 
                                 if cleanup_success:
-                                    logger.info(f"    Log cleanup successful for {log_path} (was {format_bytes(original_size)})")
+                                    try:
+                                        logger.info(f"    Log cleanup successful for {log_path} (was {format_bytes(original_size)})")
+                                    except (OSError, Exception):
+                                        pass
                                     cleaned_logs.add(log_path)
 
-                                    size_after = log_monitor.get_log_size(log_path)
+                                    size_after = run_with_timeout(
+                                        lambda: log_monitor.get_log_size(log_path),
+                                        timeout=5.0,
+                                        default_value=None,
+                                        operation_name=f"Get log size after cleanup for {log_path}"
+                                    )
                                     if size_after:
                                         cleaned_log_info = size_after
                                         cleaned_log_info['original_size_bytes'] = original_size
                                         cleaned_log_info['original_size_formatted'] = format_bytes(original_size)
-                                        logger.info(f"    Log size after cleanup: {cleaned_log_info.get('size_formatted', 'N/A')}")
+                                        try:
+                                            logger.info(f"    Log size after cleanup: {cleaned_log_info.get('size_formatted', 'N/A')}")
+                                        except (OSError, Exception):
+                                            pass
                                         cleaned_logs_batch.append(cleaned_log_info)
                                     else:
-                                        logger.warning(f"    Could not get log size after cleanup for {log_path}")
+                                        try:
+                                            logger.warning(f"    Could not get log size after cleanup for {log_path}")
+                                        except (OSError, Exception):
+                                            pass
                                         current_log_info['original_size_bytes'] = original_size
                                         current_log_info['original_size_formatted'] = format_bytes(original_size)
                                         cleaned_logs_batch.append(current_log_info)
                                 else:
-                                    logger.error(f"    Log cleanup failed for {log_path} - check permissions (may need root/sudo)")
+                                    try:
+                                        logger.error(f"    Log cleanup failed for {log_path} - check permissions (may need root/sudo)")
+                                    except (OSError, Exception):
+                                        pass
 
                                 last_log_alert_time[log_path] = current_time
 
                         if cleaned_logs_batch and webhook:
                             logger.warning(f"[ALERT] {len(cleaned_logs_batch)} log file(s) exceeded threshold and were auto-cleaned")
-                            success = webhook.send_batched_log_cleanup_alert(
-                                cleaned_logs=cleaned_logs_batch,
-                                threshold_formatted=threshold_formatted
+                            success = run_with_timeout(
+                                lambda: webhook.send_batched_log_cleanup_alert(
+                                    cleaned_logs=cleaned_logs_batch,
+                                    threshold_formatted=threshold_formatted
+                                ),
+                                timeout=10.0,
+                                default_value=False,
+                                operation_name="Batched log cleanup alert webhook"
                             )
                             if success:
                                 logger.info(f"    Discord batched log cleanup alert sent for {len(cleaned_logs_batch)} log(s)")
@@ -2402,7 +2510,13 @@ def main(
                         current_exceeded_paths = {log.get('path') for log in exceeded_logs}
                         cleaned_logs = {path for path in cleaned_logs if path not in current_exceeded_paths}
                     except Exception as e:
-                        logger.debug(f"Error checking log sizes: {e}")
+                        try:
+                            logger.debug(f"Error checking log sizes: {e}")
+                        except (OSError, Exception):
+                            pass
+                    
+                    if watchdog_monitor:
+                        watchdog_monitor.update_heartbeat()
 
                 kernel_stability_check_counter += 1
                 if kernel_monitor_enabled and kernel_stability_check_counter >= kernel_stability_check_interval:
