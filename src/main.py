@@ -10,6 +10,7 @@ from monitor.freeze import FreezeMonitor
 from monitor.qbittorrent import QBittorrentMonitor
 from monitor.log import LogMonitor
 from monitor.kernel import KernelMonitor
+from monitor.system_updates import run_system_update
 from monitor.watchdog import WatchdogMonitor
 from discord.webhook import DiscordWebhook
 from util.util import format_bytes, format_bytes_per_second, BYTES_PER_GB
@@ -28,6 +29,7 @@ from core.config import (
     DEFAULT_KERNEL_STABILITY_CHECK_INTERVAL, DEFAULT_KERNEL_CHECK_SINCE_MINUTES,
     DEFAULT_MONITORING_WATCHDOG_TIMEOUT, DEFAULT_WATCHDOG_AUTO_RESTART, DEFAULT_WATCHDOG_RESTART_COOLDOWN,
     DEFAULT_STALLED_TORRENT_THRESHOLD,
+    DEFAULT_SYSTEM_UPDATE_INTERVAL_SECONDS, DEFAULT_SYSTEM_UPDATE_TIMEOUT,
     EMBED_SEND_DELAY, MAX_TRACKED_TORRENTS, MAX_PROCESSES_DISPLAY,
     MAX_REASONS_DISPLAY, MAX_INDICATORS_DISPLAY, MAX_RECOMMENDATIONS_DISPLAY, MAX_CRASH_TYPES_DISPLAY,
     MAX_HARDWARE_ERRORS_DISPLAY, MAX_DIRECTORIES_DISPLAY,
@@ -772,6 +774,28 @@ def main(
     else:
         logger.info("Kernel Monitoring: Disabled (set KERNEL_MONITOR_ENABLED=true to enable)")
 
+    system_update_enabled = get_env_bool('SYSTEM_UPDATE_ENABLED', True)
+    system_update_interval_seconds = get_env_float(
+        'SYSTEM_UPDATE_INTERVAL_SECONDS',
+        DEFAULT_SYSTEM_UPDATE_INTERVAL_SECONDS,
+        min_val=300.0,
+        max_val=2592000.0,
+    )
+    system_update_apply = get_env_bool('SYSTEM_UPDATE_APPLY', True)
+    system_update_timeout = get_env_int(
+        'SYSTEM_UPDATE_TIMEOUT',
+        DEFAULT_SYSTEM_UPDATE_TIMEOUT,
+        min_val=60,
+        max_val=86400,
+    )
+    if system_update_enabled:
+        update_mode = 'apply upgrades' if system_update_apply else 'check only (no install)'
+        logger.info(
+            f"System updates: every {system_update_interval_seconds / 3600:.1f}h | {update_mode} | command timeout {system_update_timeout}s"
+        )
+    else:
+        logger.info("System updates: disabled (set SYSTEM_UPDATE_ENABLED=true to enable)")
+
     qbittorrent_connected = False
     if qbittorrent_monitor:
         if qbittorrent_monitor.password:
@@ -923,6 +947,20 @@ def main(
                 logger.warning(f"Failed to send error notification to webhook: {e}")
 
     monitoring_start_time = time.time()
+    last_system_update_run = [monitoring_start_time]
+    system_update_thread = None
+
+    def _run_system_update_job():
+        try:
+            r = run_system_update(apply=system_update_apply, command_timeout=system_update_timeout)
+            if r.get('ok'):
+                logger.info(f"[SYSTEM_UPDATE] {r.get('message', 'ok')}")
+            else:
+                logger.warning(f"[SYSTEM_UPDATE] {r.get('message', 'failed')}")
+        except Exception as ex:
+            logger.warning(f"[SYSTEM_UPDATE] unexpected error: {ex}")
+        finally:
+            last_system_update_run[0] = time.time()
 
     last_cpu_alert_time = 0
     last_memory_alert_time = 0
@@ -2859,6 +2897,16 @@ def main(
                                 kernel_alert_sent = False
                     except Exception as e:
                         logger.debug(f"Error checking kernel crashes: {e}")
+
+                if system_update_enabled:
+                    if system_update_thread is None or not system_update_thread.is_alive():
+                        if (current_time - last_system_update_run[0]) >= system_update_interval_seconds:
+                            system_update_thread = threading.Thread(
+                                target=_run_system_update_job,
+                                daemon=True,
+                                name='SystemUpdate',
+                            )
+                            system_update_thread.start()
 
             except Exception as e:
 
