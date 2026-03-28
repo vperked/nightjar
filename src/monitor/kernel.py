@@ -347,33 +347,6 @@ class KernelMonitor:
         except Exception as e:
             logger.debug(f"Error checking for OOM killer: {e}")
 
-        try:
-            with open('/proc/interrupts', 'r') as f:
-                interrupts = f.read()
-                lines = interrupts.split('\n')
-                if len(lines) > 10:
-                    for line in lines[1:10]:
-                        parts = line.split()
-                        if len(parts) > 1:
-                            try:
-                                total = sum(int(x) for x in parts[1:] if x.isdigit())
-                                if total > 1000000:
-                                    device = parts[0] if parts else 'unknown'
-                                    errors.append({
-                                        'type': 'high_interrupts',
-                                        'severity': 'warning',
-                                        'device': device,
-                                        'count': total,
-                                        'message': f'High interrupt count on {device} - possible hardware issue'
-                                    })
-                                    break
-                            except (ValueError, IndexError):
-                                continue
-        except (OSError, PermissionError):
-            pass
-        except Exception as e:
-            logger.debug(f"Error checking /proc/interrupts: {e}")
-
         return errors
 
     def check_system_stability(self) -> Dict:

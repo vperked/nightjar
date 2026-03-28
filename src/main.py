@@ -423,6 +423,10 @@ def run_with_timeout(
     """
     Run a function with a timeout using ThreadPoolExecutor.
 
+    If the timeout fires, the executor is shut down with wait=False so the
+    monitoring thread is not blocked forever while the worker remains stuck
+    in a syscall (e.g. slow disk under thermal load).
+
     Args:
         func: Function to execute (callable that takes no arguments)
         timeout: Maximum time to wait in seconds (default: 5.0)
@@ -432,16 +436,27 @@ def run_with_timeout(
     Returns:
         Function result or default_value if timeout
     """
+    executor = ThreadPoolExecutor(max_workers=1)
+    timed_out = False
     try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(func)
+        future = executor.submit(func)
+        try:
             return future.result(timeout=timeout)
-    except FutureTimeoutError:
-        logger.warning(f"{operation_name} timed out after {timeout}s, using default value")
-        return default_value
+        except FutureTimeoutError:
+            timed_out = True
+            logger.warning(f"{operation_name} timed out after {timeout}s, using default value")
+            return default_value
     except Exception as e:
         logger.error(f"Error in {operation_name}: {e}")
         raise
+    finally:
+        if timed_out:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=False)
+        else:
+            executor.shutdown(wait=True)
 
 
 def main(
