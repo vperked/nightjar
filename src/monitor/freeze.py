@@ -2,7 +2,6 @@ import psutil
 import time
 import threading
 from typing import Dict, Optional, Callable
-from datetime import datetime
 from logger import get_logger
 
 logger = get_logger()
@@ -52,23 +51,21 @@ class FreezeMonitor:
         self.last_cpu_value = cpu_percent
         self.last_memory_value = memory_percent
 
-        metrics_changed = False
-
         if self.last_cpu_value is None or abs(cpu_percent - self.last_cpu_value) > 0.1:
-            metrics_changed = True
+            pass
 
         if self.last_memory_value is None or abs(memory_percent - self.last_memory_value) > 0.1:
-            metrics_changed = True
+            pass
 
         if disk_io:
             current_disk_read = disk_io.get('read_bytes', 0)
             current_disk_write = disk_io.get('write_bytes', 0)
             if self.last_disk_io is None:
-                metrics_changed = True
+                pass
             else:
                 if (current_disk_read != self.last_disk_io.get('read_bytes', 0) or
                     current_disk_write != self.last_disk_io.get('write_bytes', 0)):
-                    metrics_changed = True
+                    pass
             self.last_disk_io = {
                 'read_bytes': disk_io.get('read_bytes', 0),
                 'write_bytes': disk_io.get('write_bytes', 0)
@@ -78,11 +75,11 @@ class FreezeMonitor:
             current_net_sent = network_io.get('bytes_sent', 0)
             current_net_recv = network_io.get('bytes_recv', 0)
             if self.last_network_io is None:
-                metrics_changed = True
+                pass
             else:
                 if (current_net_sent != self.last_network_io.get('bytes_sent', 0) or
                     current_net_recv != self.last_network_io.get('bytes_recv', 0)):
-                    metrics_changed = True
+                    pass
             self.last_network_io = {
                 'bytes_sent': network_io.get('bytes_sent', 0),
                 'bytes_recv': network_io.get('bytes_recv', 0)

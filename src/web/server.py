@@ -5,10 +5,20 @@ import time
 import psutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Dict, Optional, Callable, Any
+from typing import Dict, Optional, Callable, Any, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from logger import get_logger
 from util.security import validate_path
+
+if TYPE_CHECKING:
+    from monitor.cpu import CpuMonitor
+    from monitor.memory import MemoryMonitor
+    from monitor.system import SystemMonitor
+    from monitor.gpu import GpuMonitor
+    from monitor.disk import DiskMonitor
+    from monitor.network import NetworkMonitor
+    from monitor.sensors import SensorsMonitor
+    from discord.webhook import DiscordWebhook
 
 logger = get_logger('WebServer')
 
@@ -1011,9 +1021,9 @@ def _run_server(port: int, host: str) -> None:
                 if len(traceback_text) > 1000:
                     traceback_text = traceback_text[:1000] + "... (truncated)"
 
-                crash_webhook.send_embed(
+                _state.crash_webhook.send_embed(
                     title='Web Server Error',
-                    description=f'An error occurred in the web server',
+                    description='An error occurred in the web server',
                     fields=[
                         {'name': 'Error Type', 'value': type(e).__name__, 'inline': True},
                         {'name': 'Error Message', 'value': str(e)[:500], 'inline': False},
@@ -1051,7 +1061,6 @@ def stop_server(timeout: float = 5.0) -> None:
     Args:
         timeout (float): Maximum time to wait for server shutdown in seconds (default: 5.0)
     """
-    import time
     import threading
 
     if _state.httpd:

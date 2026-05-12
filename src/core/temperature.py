@@ -4,7 +4,7 @@ Temperature analysis logic.
 Analyzes system metrics to determine likely causes of high CPU temperature.
 """
 
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 from util.util import BYTES_PER_MB, BYTES_PER_GB
 from core.config import MAX_REASONS_DISPLAY, MAX_PROCESSES_DISPLAY
 

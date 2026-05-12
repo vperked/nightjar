@@ -178,7 +178,6 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
     project_root = get_project_root()
     python_exec = get_python_executable()
     main_script = get_main_script_path()
-    working_dir = project_root
 
     if is_root():
         service_user = os.environ.get('SUDO_USER', 'root')
@@ -251,7 +250,7 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
                 logger.info(f"Falling back to service user home directory: {working_dir_path}")
             except (ImportError, KeyError):
                 working_dir_path = '/tmp'
-                logger.warning(f"Could not determine home directory, using /tmp as fallback")
+                logger.warning("Could not determine home directory, using /tmp as fallback")
 
     logger.info(f"Working directory: {working_dir_path} (service user: {service_user})")
 
@@ -405,7 +404,7 @@ def install_systemd_service(service_name: str = 'server-monitor',
 
         logger.info(f"Writing systemd service file to {service_file}...")
         service_file.write_text(service_content)
-        logger.info(f"Service file written successfully.")
+        logger.info("Service file written successfully.")
 
         logger.debug("Generated service file content:")
         logger.debug(service_content)
@@ -477,8 +476,8 @@ def install_systemd_service(service_name: str = 'server-monitor',
             logger.error(f"  sudo systemctl status {service_name}")
             return False
 
-        logger.info(f"\nService installed and started successfully!")
-        logger.info(f"Service is running and will start automatically on system boot.")
+        logger.info("\nService installed and started successfully!")
+        logger.info("Service is running and will start automatically on system boot.")
         logger.info(f"To check status: sudo systemctl status {service_name}")
         logger.info(f"To view logs: sudo journalctl -u {service_name} -f")
 

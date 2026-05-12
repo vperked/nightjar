@@ -285,8 +285,6 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0x000000
-
         fields = [
             {
                 'name': 'Overall CPU Usage',
@@ -382,8 +380,6 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0x000000
-
         fields = [
             {
                 'name': 'Memory Usage',
@@ -597,8 +593,6 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0x000000
-
         fields = [
             {
                 'name': 'CPU Temperature',
@@ -702,8 +696,6 @@ class DiscordWebhook:
         Returns:
             True if message was sent successfully, False otherwise
         """
-        color = 0x000000
-
         fields = [
             {
                 'name': 'GPU Utilization',
@@ -929,8 +921,6 @@ class DiscordWebhook:
         size_formatted = format_bytes(size_bytes)
         threshold_formatted = format_bytes(threshold_bytes)
 
-        color = 0x000000
-
         fields = [
             {
                 'name': 'Directory Path',
@@ -1091,7 +1081,7 @@ class DiscordWebhook:
         color = 0x000000
 
         if cleanup_performed:
-            description = f'Log file exceeded threshold and was auto-cleaned'
+            description = 'Log file exceeded threshold and was auto-cleaned'
         else:
             description = f'Log file has exceeded the size threshold of {threshold_formatted}'
 
@@ -1163,7 +1153,7 @@ class DiscordWebhook:
         log_count = len(cleaned_logs)
 
         if log_count == 1:
-            description = f'Log file exceeded threshold and was auto-cleaned'
+            description = 'Log file exceeded threshold and was auto-cleaned'
         else:
             description = f'{log_count} log files exceeded threshold and were auto-cleaned'
 
@@ -1229,10 +1219,7 @@ class DiscordWebhook:
         """
         reasons = freeze_status.get('reasons', [])
         time_since_heartbeat = freeze_status.get('time_since_heartbeat', 0)
-        time_since_metric_update = freeze_status.get('time_since_metric_update', 0)
         responsive = freeze_status.get('responsive', False)
-
-        color = 0x000000
 
         primary_reason = reasons[0] if reasons else "System freeze detected"
 

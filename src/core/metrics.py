@@ -7,7 +7,6 @@ Tracks alert frequency, monitor execution times, error rates, and webhook succes
 import time
 from typing import Dict, List, Optional, Any
 from collections import defaultdict, deque
-from datetime import datetime, timezone
 from logger import get_logger
 
 logger = get_logger('Metrics')

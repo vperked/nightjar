@@ -6,7 +6,6 @@ Provides centralized configuration access with caching, validation, and type con
 
 import os
 from typing import Optional
-from pathlib import Path
 from logger import get_logger
 
 logger = get_logger()

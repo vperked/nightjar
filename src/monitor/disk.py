@@ -3,7 +3,6 @@ import time
 import os
 import sys
 import platform
-import shutil
 import glob
 import subprocess
 from pathlib import Path
@@ -398,7 +397,7 @@ class DiskMonitor:
             If timeout is exceeded, returns partial results with 'timed_out': True flag.
         """
         if not path or not isinstance(path, str):
-            logger.warning(f"[SECURITY] Path validation failed: path must be a non-empty string")
+            logger.warning("[SECURITY] Path validation failed: path must be a non-empty string")
             return None
 
         if allowed_base_paths is None:
@@ -1098,7 +1097,6 @@ class DiskMonitor:
 
                 current_time = time.time()
                 max_age_seconds = 24 * 60 * 60
-                resolved_path_obj = Path(resolved_path)
 
                 for root, dirs, files in os.walk(resolved_path, topdown=False):
                     for filename in files:

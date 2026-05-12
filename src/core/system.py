@@ -10,12 +10,12 @@ import platform
 import subprocess
 import socket
 import psutil
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 from pathlib import Path
 from logger import get_logger
 from util.util import BYTES_PER_GB
 from core.config import (
-    get_cached_env, DEFAULT_CPU_THRESHOLD, DEFAULT_MEMORY_THRESHOLD, DEFAULT_DISK_THRESHOLD,
+    DEFAULT_CPU_THRESHOLD, DEFAULT_MEMORY_THRESHOLD, DEFAULT_DISK_THRESHOLD,
     DEFAULT_GPU_THRESHOLD
 )
 
@@ -253,7 +253,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
             base_threshold = DEFAULT_CPU_THRESHOLD
 
         typical_cpu = usage.get('typical_cpu', 0)
-        peak_cpu = usage.get('peak_cpu', 0)
         system_type = usage.get('system_type', 'unknown')
 
         if typical_cpu > 0:
@@ -307,7 +306,6 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
             base_threshold = DEFAULT_MEMORY_THRESHOLD
 
         typical_memory = usage.get('typical_memory', 0)
-        peak_memory = usage.get('peak_memory', 0)
 
         if typical_memory > 0:
             if typical_memory > 60:

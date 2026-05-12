@@ -31,7 +31,7 @@ from core.config import (
     DEFAULT_STALLED_TORRENT_THRESHOLD,
     DEFAULT_SYSTEM_UPDATE_INTERVAL_SECONDS, DEFAULT_SYSTEM_UPDATE_TIMEOUT,
     EMBED_SEND_DELAY, MAX_TRACKED_TORRENTS, MAX_PROCESSES_DISPLAY,
-    MAX_REASONS_DISPLAY, MAX_INDICATORS_DISPLAY, MAX_RECOMMENDATIONS_DISPLAY, MAX_CRASH_TYPES_DISPLAY,
+    MAX_INDICATORS_DISPLAY, MAX_RECOMMENDATIONS_DISPLAY, MAX_CRASH_TYPES_DISPLAY,
     MAX_HARDWARE_ERRORS_DISPLAY, MAX_DIRECTORIES_DISPLAY,
     LOG_CLEANUP_INTERVAL_SECONDS, DISK_CLEANUP_COOLDOWN_HIGH, DISK_CLEANUP_COOLDOWN_MEDIUM,
     DISK_CLEANUP_COOLDOWN_LOW, DISK_CLEANUP_COOLDOWN_NORMAL, DISK_EMERGENCY_COOLDOWN
@@ -39,23 +39,20 @@ from core.config import (
 from core.system import (
     detect_system_config, apply_system_adaptations, prompt_save_config, save_auto_detected_config
 )
-from core.alert import AlertCooldownManager
 from core.temperature import analyze_temperature_reason
 from core.metrics import MetricsCollector
-from typing import Optional, Dict, List, Any, Callable, TypeVar
+from typing import Optional, Callable, TypeVar
 from datetime import datetime
 from pathlib import Path
 import os
 import sys
 import time
 import platform
-import subprocess
 import psutil
 import hashlib
 import json
 import traceback
 import threading
-import socket
 import signal
 import atexit
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -156,8 +153,7 @@ def run_self_test() -> bool:
             add_result("Media directory monitor", False, str(e))
 
     try:
-        log_monitor = LogMonitor()
-        log_sizes = log_monitor.get_all_log_sizes()
+        LogMonitor()
         add_result("Log monitor", True)
     except Exception as e:
         add_result("Log monitor", False, str(e))
@@ -370,7 +366,6 @@ def run_self_test() -> bool:
 
     try:
         kernel_monitor = KernelMonitor()
-        kernel_status = kernel_monitor.get_kernel_status()
         if platform.system() == 'Linux':
             stability = kernel_monitor.check_system_stability()
             add_result("Kernel monitor", True, f"risk level: {stability.get('risk_level', 'unknown')}")
@@ -380,7 +375,6 @@ def run_self_test() -> bool:
         add_result("Kernel monitor", False, str(e))
 
     try:
-        disk_io = disk_monitor.get_disk_io_counters(perdisk=False)
         disk_io_per_disk = disk_monitor.get_disk_io_counters(perdisk=True)
         add_result("Disk I/O counters", True, f"system-wide and {len(disk_io_per_disk)} per-disk")
     except Exception as e:
@@ -393,7 +387,6 @@ def run_self_test() -> bool:
         add_result("Disk partitions", False, str(e))
 
     try:
-        system_info = system_monitor.get_system_info()
         uptime = system_monitor.get_uptime()
         add_result("System info", True, f"uptime: {uptime.get('formatted', 'unknown')}")
     except Exception as e:
@@ -732,7 +725,7 @@ def main(
     logger.info(f"Memory: {memory_info['total']} | Threshold: {memory_threshold:.1f}%")
     logger.info(f"Disk: {total_disk['percent']:.1f}% used | Threshold: {disk_threshold:.1f}% | Early Warning: {disk_early_warning_threshold:.1f}% | Cleanup: {disk_cleanup_threshold:.1f}% | Emergency: {disk_emergency_threshold:.1f}%")
     if monitor_individual_partitions:
-        logger.info(f"Individual partition monitoring: Enabled")
+        logger.info("Individual partition monitoring: Enabled")
 
     if gpu_monitor.nvidia_smi_available:
         gpu_count = gpu_monitor.get_gpu_count()
@@ -932,7 +925,7 @@ def main(
 
                 success = target_webhook.send_embed(
                     title='Monitoring Error Detected',
-                    description=f'An error occurred in the monitoring system',
+                    description='An error occurred in the monitoring system',
                     fields=fields,
                     color=0x000000,
                     footer='Server Monitor - Error Alert',
@@ -974,6 +967,7 @@ def main(
     disk_emergency_cooldown = DISK_EMERGENCY_COOLDOWN
     last_temp_alert_time = 0
     last_freeze_alert_time = 0
+    last_network_alert_time = 0
     temp_high_start_time = None
     last_process_alert_time = {}
     cpu_alert_sent = False
@@ -1288,9 +1282,9 @@ def main(
 
                                     if cleanup_stats['final_usage'] >= disk_emergency_threshold:
                                         try:
-                                            logger.critical(f"[EMERGENCY] Disk still critically full after cleanup! Manual intervention required!")
+                                            logger.critical("[EMERGENCY] Disk still critically full after cleanup! Manual intervention required!")
                                         except (OSError, Exception):
-                                            print(f"[EMERGENCY] Disk still critically full after cleanup! Manual intervention required!", file=sys.stderr)
+                                            print("[EMERGENCY] Disk still critically full after cleanup! Manual intervention required!", file=sys.stderr)
 
                                 if disk_webhook:
                                     fields = [
@@ -1320,7 +1314,7 @@ def main(
                                     success = run_with_timeout(
                                         lambda: disk_webhook.send_embed(
                                             title='EMERGENCY: Disk Critically Full',
-                                            description=f'Emergency cleanup performed to prevent disk from reaching 100%',
+                                            description='Emergency cleanup performed to prevent disk from reaching 100%',
                                             fields=fields,
                                             footer='Server Monitor - Emergency',
                                             timestamp=True
@@ -1336,9 +1330,9 @@ def main(
                                             pass
                             else:
                                 try:
-                                    logger.critical(f"[EMERGENCY] No space could be freed! Disk may crash if it reaches 100%!")
+                                    logger.critical("[EMERGENCY] No space could be freed! Disk may crash if it reaches 100%!")
                                 except (OSError, Exception):
-                                    print(f"[EMERGENCY] No space could be freed! Disk may crash if it reaches 100%!", file=sys.stderr)
+                                    print("[EMERGENCY] No space could be freed! Disk may crash if it reaches 100%!", file=sys.stderr)
                                 if disk_webhook:
                                     run_with_timeout(
                                         lambda: disk_webhook.send_embed(
@@ -1419,7 +1413,7 @@ def main(
                                     success = run_with_timeout(
                                         lambda: disk_webhook.send_embed(
                                             title='Disk Cleanup Performed',
-                                            description=f'Automatic disk cleanup completed to prevent disk from filling up',
+                                            description='Automatic disk cleanup completed to prevent disk from filling up',
                                             fields=fields,
                                             footer='Server Monitor',
                                             timestamp=True
@@ -2312,7 +2306,6 @@ def main(
                                         continue
 
                                     prev_state = tracked_torrents[torrent_hash]['state']
-                                    prev_progress = tracked_torrents[torrent_hash]['progress']
                                     prev_was_seeding = prev_state in ['uploading', 'stalledup', 'queuedup']
                                     prev_was_downloading = prev_state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']
                                     
@@ -2556,11 +2549,11 @@ def main(
                             if success:
                                 logger.info(f"    Discord batched log cleanup alert sent for {len(cleaned_logs_batch)} log(s)")
                             else:
-                                logger.warning(f"    Discord batched log cleanup alert failed")
+                                logger.warning("    Discord batched log cleanup alert failed")
                         elif cleaned_logs_batch:
                             logger.warning(f"{len(cleaned_logs_batch)} log file(s) exceeded threshold and were auto-cleaned (no webhook configured)")
 
-                        current_exceeded_paths = {log.get('path') for log in exceeded_logs}
+                        current_exceeded_paths = {log.get('path') for log in logs_to_check}
                         cleaned_logs = {path for path in cleaned_logs if path not in current_exceeded_paths}
                     except Exception as e:
                         try:
@@ -2880,7 +2873,7 @@ def main(
 
                                     success = crash_webhook.send_embed(
                                         title='Kernel Alert: Crash/Panic Detected',
-                                        description=f'Kernel crashes, panics, or oops detected in system logs',
+                                        description='Kernel crashes, panics, or oops detected in system logs',
                                         fields=fields,
                                         footer='Server Monitor - Kernel',
                                         timestamp=True

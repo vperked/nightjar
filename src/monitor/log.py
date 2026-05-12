@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from util.util import format_bytes
 from util.security import safe_subprocess_path
-from logger import LOG_FILE, LOG_MAX_BYTES, get_logger
+from logger import LOG_FILE, get_logger
 
 logger = get_logger()
 
@@ -394,7 +394,7 @@ class LogMonitor:
 
                     import shutil
                     shutil.move(temp_file_path, log_path)
-                except (OSError, IOError) as e:
+                except (OSError, IOError):
                     try:
                         import os
                         if os.path.exists(temp_file_path):

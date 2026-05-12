@@ -8,7 +8,7 @@ import time
 import threading
 import subprocess
 import psutil
-from typing import Optional, Dict, Any
+from typing import Optional, Any
 from logger import get_logger
 from util.systemd import is_systemd_available
 

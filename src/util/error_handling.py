@@ -2,7 +2,7 @@
 Standardized error handling and logging utilities.
 Provides consistent patterns for exception handling and logging across the codebase.
 """
-from typing import TypeVar, Callable, Optional, Any
+from typing import TypeVar, Callable, Any
 from functools import wraps
 from logger import get_logger
 

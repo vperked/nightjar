@@ -374,8 +374,6 @@ class QBittorrentMonitor:
         """
         all_torrents = self.get_all_torrents()
         stalled = []
-        import time
-        current_time = time.time()
 
         for torrent in all_torrents:
             state = torrent.get('state', '').lower()

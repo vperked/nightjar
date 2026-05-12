@@ -9,7 +9,7 @@ import platform
 import subprocess
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from logger import get_logger
 from util.security import safe_subprocess_path
 

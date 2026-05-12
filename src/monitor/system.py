@@ -3,10 +3,10 @@ import platform
 import socket
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List
 from monitor.cpu import CpuMonitor
 from monitor.memory import MemoryMonitor
-from util.util import format_bytes, CPU_COUNT
+from util.util import format_bytes
 
 
 class SystemMonitor:
