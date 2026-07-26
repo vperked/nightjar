@@ -1,10 +1,18 @@
 """
-Core modules for Server Monitor.
+Server Monitor subsystems.
 
-This package contains the core functionality split from main.py:
-- config: Configuration management and environment variable access
-- system_detection: System detection and adaptation logic
-- temperature_analysis: Temperature analysis logic
-- alert_manager: Alert handling and cooldown management
-- monitoring_loop: Main monitoring loop logic
+Each subsystem is a package holding its own implementation module, and re-exports
+its public names from __init__ so callers import from the package:
+
+    from core.cpu import CpuMonitor
+    from core.disk import DiskMonitor
+
+Reach into an implementation module only for internals that are deliberately not
+public, such as core.config.settings for the environment cache in tests.
+
+Collectors      cpu, memory, disk, network, gpu, sensors, system, processes,
+                freeze, kernel, logs, watchdog, qbittorrent, updates
+Services        webhook (Discord), web (dashboard and API), systemd
+Support         config, detection, metrics, alert, temperature, cache, format,
+                security, circuitBreaker, errors, observability (logging)
 """

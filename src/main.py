@@ -1,27 +1,28 @@
-from monitor.cpu import CpuMonitor
-from monitor.memory import MemoryMonitor
-from monitor.system import SystemMonitor
-from monitor.gpu import GpuMonitor
-from monitor.disk import DiskMonitor
-from monitor.network import NetworkMonitor
-from monitor.sensors import SensorsMonitor
-from monitor.processes import ProcessMonitor
-from monitor.freeze import FreezeMonitor
-from monitor.qbittorrent import QBittorrentMonitor
-from monitor.log import LogMonitor
-from monitor.kernel import KernelMonitor
-from monitor.system_updates import run_system_update
-from monitor.watchdog import WatchdogMonitor
-from discord.webhook import DiscordWebhook
-from util.util import format_bytes, format_bytes_per_second, BYTES_PER_GB
-from util.systemd import install_systemd_service, is_systemd_available
-from cache.cache import clear_cache_on_startup, clear_cache_on_exit
-from logger import get_logger
-from web.server import set_monitors, start_server, stop_server, set_crash_webhook
+from core.cpu import CpuMonitor
+from core.memory import MemoryMonitor
+from core.system import SystemMonitor
+from core.gpu import GpuMonitor
+from core.disk import DiskMonitor
+from core.network import NetworkMonitor
+from core.sensors import SensorsMonitor
+from core.processes import ProcessMonitor
+from core.freeze import FreezeMonitor
+from core.qbittorrent import QBittorrentMonitor
+from core.logs import LogMonitor
+from core.kernel import KernelMonitor
+from core.updates import run_system_update
+from core.watchdog import WatchdogMonitor
+from core.webhook import DiscordWebhook
+from core.format import format_bytes, format_bytes_per_second, BYTES_PER_GB
+from core.systemd import install_systemd_service, is_systemd_available
+from core.cache import clear_cache_on_startup, clear_cache_on_exit
+from core.observability import Component, get_logger
+from core.web import set_monitors, start_server, stop_server, set_crash_webhook
 from core.config import (
     get_cached_env, get_env_float, get_env_int, get_env_bool, clamp_threshold, validate_config,
     DEFAULT_CPU_THRESHOLD, DEFAULT_MEMORY_THRESHOLD, DEFAULT_GPU_THRESHOLD, DEFAULT_DISK_THRESHOLD,
-    DEFAULT_DISK_EARLY_WARNING_THRESHOLD, DEFAULT_DISK_CLEANUP_THRESHOLD, DEFAULT_DISK_EMERGENCY_THRESHOLD,
+    DEFAULT_DISK_EARLY_WARNING_THRESHOLD, DEFAULT_DISK_CLEANUP_THRESHOLD,
+    DEFAULT_DISK_AGGRESSIVE_CLEANUP_THRESHOLD, DEFAULT_DISK_EMERGENCY_THRESHOLD,
     DEFAULT_TEMP_THRESHOLD, DEFAULT_TEMP_ALERT_DURATION, DEFAULT_NETWORK_BANDWIDTH_THRESHOLD,
     DEFAULT_PROCESS_CPU_THRESHOLD, DEFAULT_PROCESS_MEMORY_THRESHOLD, DEFAULT_CHECK_INTERVAL,
     DEFAULT_ALERT_COOLDOWN, DEFAULT_FREEZE_THRESHOLD, DEFAULT_FREEZE_HEARTBEAT_TIMEOUT,
@@ -30,13 +31,15 @@ from core.config import (
     DEFAULT_MONITORING_WATCHDOG_TIMEOUT, DEFAULT_WATCHDOG_AUTO_RESTART, DEFAULT_WATCHDOG_RESTART_COOLDOWN,
     DEFAULT_STALLED_TORRENT_THRESHOLD,
     DEFAULT_SYSTEM_UPDATE_INTERVAL_SECONDS, DEFAULT_SYSTEM_UPDATE_TIMEOUT,
+    DEFAULT_SYSTEM_UPDATE_ENABLED, DEFAULT_SYSTEM_UPDATE_APPLY,
+    DEFAULT_WEB_HOST, DEFAULT_WEB_PORT,
     EMBED_SEND_DELAY, MAX_TRACKED_TORRENTS, MAX_PROCESSES_DISPLAY,
     MAX_INDICATORS_DISPLAY, MAX_RECOMMENDATIONS_DISPLAY, MAX_CRASH_TYPES_DISPLAY,
     MAX_HARDWARE_ERRORS_DISPLAY, MAX_DIRECTORIES_DISPLAY,
     LOG_CLEANUP_INTERVAL_SECONDS, DISK_CLEANUP_COOLDOWN_HIGH, DISK_CLEANUP_COOLDOWN_MEDIUM,
     DISK_CLEANUP_COOLDOWN_LOW, DISK_CLEANUP_COOLDOWN_NORMAL, DISK_EMERGENCY_COOLDOWN
 )
-from core.system import (
+from core.detection import (
     detect_system_config, apply_system_adaptations, prompt_save_config, save_auto_detected_config
 )
 from core.temperature import analyze_temperature_reason
@@ -60,9 +63,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logger = get_logger()
+logger = get_logger(Component.CORE)
 
 T = TypeVar('T')
+
+TIMEOUT_EXECUTOR_WORKERS = 4
+
+_TIMEOUT_EXECUTOR = ThreadPoolExecutor(
+    max_workers=TIMEOUT_EXECUTOR_WORKERS,
+    thread_name_prefix='monitor-timeout'
+)
 
 
 def run_self_test() -> bool:
@@ -431,27 +441,21 @@ def run_with_timeout(
     Returns:
         Function result or default_value if timeout
     """
-    executor = ThreadPoolExecutor(max_workers=1)
-    timed_out = False
     try:
-        future = executor.submit(func)
-        try:
-            return future.result(timeout=timeout)
-        except FutureTimeoutError:
-            timed_out = True
-            logger.warning(f"{operation_name} timed out after {timeout}s, using default value")
-            return default_value
+        future = _TIMEOUT_EXECUTOR.submit(func)
+    except RuntimeError as e:
+        logger.error(f"Could not schedule {operation_name}: {e}")
+        return default_value
+
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        future.cancel()
+        logger.warning(f"{operation_name} timed out after {timeout}s, using default value")
+        return default_value
     except Exception as e:
         logger.error(f"Error in {operation_name}: {e}")
         raise
-    finally:
-        if timed_out:
-            try:
-                executor.shutdown(wait=False, cancel_futures=True)
-            except TypeError:
-                executor.shutdown(wait=False)
-        else:
-            executor.shutdown(wait=True)
 
 
 def main(
@@ -640,6 +644,9 @@ def main(
     disk_threshold = get_env_float('DISK_THRESHOLD', DEFAULT_DISK_THRESHOLD)
     disk_early_warning_threshold = get_env_float('DISK_EARLY_WARNING_THRESHOLD', DEFAULT_DISK_EARLY_WARNING_THRESHOLD)
     disk_cleanup_threshold = get_env_float('DISK_CLEANUP_THRESHOLD', DEFAULT_DISK_CLEANUP_THRESHOLD)
+    disk_aggressive_cleanup_threshold = get_env_float(
+        'DISK_AGGRESSIVE_CLEANUP_THRESHOLD', DEFAULT_DISK_AGGRESSIVE_CLEANUP_THRESHOLD
+    )
     disk_emergency_threshold = get_env_float('DISK_EMERGENCY_THRESHOLD', DEFAULT_DISK_EMERGENCY_THRESHOLD)
     monitor_individual_partitions = get_env_bool('MONITOR_INDIVIDUAL_PARTITIONS', True)
     temp_threshold = get_env_float('TEMP_THRESHOLD', DEFAULT_TEMP_THRESHOLD)
@@ -684,7 +691,14 @@ def main(
     disk_threshold = clamp_threshold(disk_threshold, 0.0, 100.0)
     disk_early_warning_threshold = clamp_threshold(disk_early_warning_threshold, 0.0, 100.0)
     disk_cleanup_threshold = clamp_threshold(disk_cleanup_threshold, 0.0, 100.0)
+    disk_aggressive_cleanup_threshold = clamp_threshold(disk_aggressive_cleanup_threshold, 0.0, 100.0)
     disk_emergency_threshold = clamp_threshold(disk_emergency_threshold, 90.0, 99.0)
+    if disk_aggressive_cleanup_threshold < disk_cleanup_threshold:
+        disk_aggressive_cleanup_threshold = disk_cleanup_threshold
+        logger.warning(
+            f"Aggressive cleanup threshold adjusted to {disk_aggressive_cleanup_threshold:.1f}% "
+            f"(must not be below the cleanup threshold)"
+        )
     if disk_early_warning_threshold >= disk_threshold:
         disk_early_warning_threshold = max(0.0, disk_threshold - 5.0)
         logger.warning(f"Early warning threshold adjusted to {disk_early_warning_threshold:.1f}% (must be less than main threshold)")
@@ -767,14 +781,14 @@ def main(
     else:
         logger.info("Kernel Monitoring: Disabled (set KERNEL_MONITOR_ENABLED=true to enable)")
 
-    system_update_enabled = get_env_bool('SYSTEM_UPDATE_ENABLED', True)
+    system_update_enabled = get_env_bool('SYSTEM_UPDATE_ENABLED', DEFAULT_SYSTEM_UPDATE_ENABLED)
     system_update_interval_seconds = get_env_float(
         'SYSTEM_UPDATE_INTERVAL_SECONDS',
         DEFAULT_SYSTEM_UPDATE_INTERVAL_SECONDS,
         min_val=300.0,
         max_val=2592000.0,
     )
-    system_update_apply = get_env_bool('SYSTEM_UPDATE_APPLY', True)
+    system_update_apply = get_env_bool('SYSTEM_UPDATE_APPLY', DEFAULT_SYSTEM_UPDATE_APPLY)
     system_update_timeout = get_env_int(
         'SYSTEM_UPDATE_TIMEOUT',
         DEFAULT_SYSTEM_UPDATE_TIMEOUT,
@@ -813,12 +827,13 @@ def main(
     web_server_started = False
     
     if web_ui_enabled:
-        web_port = get_env_int('WEB_PORT', 8080)
+        web_port = get_env_int('WEB_PORT', DEFAULT_WEB_PORT, min_val=1, max_val=65535)
+        web_host = get_cached_env('WEB_HOST', DEFAULT_WEB_HOST) or DEFAULT_WEB_HOST
         logger.info("Starting web server...")
         try:
             set_monitors(cpu_monitor, memory_monitor, system_monitor, gpu_monitor,
                         disk_monitor, network_monitor, sensors_monitor)
-            start_server(port=web_port)
+            start_server(port=web_port, host=web_host)
             web_server_started = True
             logger.info(f"Web server started successfully on port {web_port}")
             logger.info(f"Access the web UI at http://localhost:{web_port}")
@@ -1211,7 +1226,7 @@ def main(
                 if watchdog_monitor:
                     watchdog_monitor.update_heartbeat()
 
-                if disk_percent >= 50.0:
+                if disk_percent >= disk_cleanup_threshold:
                     time_since_last_cleanup = current_time - last_disk_cleanup_time
 
                     if time_since_last_cleanup >= LOG_CLEANUP_INTERVAL_SECONDS:
@@ -2404,12 +2419,24 @@ def main(
                 )
                 disk_percent = root_disk_usage.get('percent', 0) if root_disk_usage else 0
 
-                effective_log_interval = log_check_interval if disk_percent < 40.0 else 5
+                effective_log_interval = log_check_interval if disk_percent < disk_cleanup_threshold else 5
 
                 if log_check_counter >= effective_log_interval:
                     log_check_counter = 0
                     try:
-                        aggressive_log_cleanup = disk_percent >= 35.0
+                        aggressive_log_cleanup = disk_percent >= disk_aggressive_cleanup_threshold
+
+                        rotated_cleanup_stats = run_with_timeout(
+                            lambda: log_monitor.cleanup_rotated_logs(force=aggressive_log_cleanup),
+                            timeout=60.0,
+                            default_value={'files_removed': 0, 'total_size_cleared': 0},
+                            operation_name="Rotated log cleanup"
+                        )
+                        if rotated_cleanup_stats.get('files_removed', 0) > 0:
+                            logger.warning(
+                                f"[CLEANUP] Removed {rotated_cleanup_stats['files_removed']} rotated log archive(s), "
+                                f"freed {format_bytes(rotated_cleanup_stats['total_size_cleared'])}"
+                            )
 
                         all_log_sizes = run_with_timeout(
                             lambda: log_monitor.get_all_log_sizes(),

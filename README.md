@@ -6,39 +6,66 @@ A comprehensive server monitoring system with Discord alerts, web dashboard, and
 
 ## Directory Structure
 
+Every subsystem is a package under `src/core/`. Each package holds its
+implementation module and re-exports its public API from `__init__.py`, so you
+import from the package rather than the file inside it:
+
+```python
+from core.cpu import CpuMonitor
+from core.disk import DiskMonitor
+from core.observability import Component, get_logger
+```
+
 ```
 src/
-├── main.py                 # Main entry point and monitoring loop
-├── logger.py              # Logging configuration and utilities
-├── cache/                 # Cache management
-│   └── cache.py
-├── discord/               # Discord webhook integration
-│   └── webhook.py
-├── monitor/               # System monitoring modules
-│   ├── cpu.py            # CPU usage and frequency monitoring
-│   ├── memory.py         # Memory and swap monitoring
-│   ├── disk.py           # Disk usage, directory monitoring, and automatic cleanup
-│   ├── network.py        # Network bandwidth and I/O monitoring
-│   ├── gpu.py            # NVIDIA GPU monitoring (nvidia-smi)
-│   ├── sensors.py        # Temperature and fan speed monitoring
-│   ├── system.py         # System info, processes, and uptime
-│   ├── processes.py      # Process resource usage tracking
-│   ├── freeze.py         # System freeze detection
-│   ├── kernel.py         # Kernel crash detection and system stability monitoring
-│   ├── log.py            # Log file monitoring and cleanup
-│   ├── qbittorrent.py    # qBittorrent Web API integration
-│   └── media.py          # Media directory monitoring
-├── util/                  # Utility modules
-│   ├── util.py           # Formatting and helper functions
-│   ├── systemd.py        # Systemd service installation
-│   └── error_handling.py # Error handling utilities
-└── web/                   # Web dashboard
-    ├── server.py         # HTTP server and API endpoints
-    └── site/             # Frontend files
-        ├── index.html
-        └── js/
-            └── main.js
+├── main.py                    # Entry point, monitoring loop and alerting
+└── core/
+    ├── cpu/monitor.py         # CPU usage, frequency and load average
+    ├── memory/monitor.py      # Memory and swap
+    ├── disk/monitor.py        # Disk usage, partitions, I/O and cleanup
+    ├── network/monitor.py     # Bandwidth, interfaces and connections
+    ├── gpu/monitor.py         # NVIDIA GPU via nvidia-smi
+    ├── sensors/monitor.py     # Temperatures and fan speeds
+    ├── system/monitor.py      # Uptime, boot time and logged-in users
+    ├── processes/monitor.py   # Top CPU and memory consumers
+    ├── freeze/monitor.py      # Freeze detection via heartbeat and staleness
+    ├── kernel/monitor.py      # Kernel crash and hardware error analysis
+    ├── logs/monitor.py        # Log sizes, trimming and rotated log cleanup
+    ├── watchdog/monitor.py    # Supervision of the monitoring loop
+    ├── qbittorrent/monitor.py # qBittorrent Web API integration
+    ├── updates/runner.py      # OS package update checks and installs
+    │
+    ├── webhook/client.py      # Discord webhook client
+    ├── web/server.py          # Dashboard HTTP server and API
+    ├── web/site/              # Dashboard frontend (index.html, js/main.js)
+    ├── systemd/service.py     # systemd service installation
+    │
+    ├── config/settings.py     # Defaults and validated environment access
+    ├── detection/detect.py    # Host detection and threshold adaptation
+    ├── metrics/collector.py   # Metric snapshot aggregation
+    ├── alert/cooldown.py      # Alert cooldown bookkeeping
+    ├── temperature/analysis.py# Temperature cause attribution
+    ├── cache/cache.py         # __pycache__ and .pyc cleanup
+    ├── format/formatters.py   # Byte, duration and percentage formatting
+    ├── security/validation.py # Path, env and subprocess validation
+    ├── circuitBreaker/breaker.py # Thread-safe circuit breaker
+    ├── errors/exceptions.py   # Typed exception hierarchy
+    └── observability/         # Logging system (see below)
 ```
+
+### Logging
+
+All logging goes through `core.observability`. Handlers are attached once to a
+single `ServerMonitor` root logger, and each subsystem logs as a child of it, so
+output identifies its source and can be filtered:
+
+```
+2026-07-26 05:20:08 - ServerMonitor.Kernel - INFO - Kernel monitor: risk level low
+2026-07-26 05:20:08 - ServerMonitor.Disk  - WARNING - Disk at 91%
+```
+
+Component names live in `core/observability/components.py`. Add a constant there
+before using it; the test suite rejects unregistered names.
 
 ## 🚀 Quick Start
 
@@ -83,17 +110,17 @@ The core monitoring application that:
 
 ### Monitor Modules
 
-#### `monitor/cpu.py` - CPU Monitoring
+#### `core/cpu` - CPU Monitoring
 - Overall and per-core CPU usage
 - CPU frequency tracking
 - Load average monitoring
 
-#### `monitor/memory.py` - Memory Monitoring
+#### `core/memory` - Memory Monitoring
 - RAM usage and statistics
 - Swap memory tracking
 - Memory pressure detection
 
-#### `monitor/disk.py` - Disk Monitoring
+#### `core/disk` - Disk Monitoring
 - Disk usage per partition
 - Directory size monitoring
 - Largest directories identification
@@ -105,29 +132,29 @@ The core monitoring application that:
   - Cache directory cleanup (`/var/cache`)
   - Prevents disk from reaching 100% usage
 
-#### `monitor/network.py` - Network Monitoring
+#### `core/network` - Network Monitoring
 - Bandwidth usage (upload/download)
 - Network I/O statistics
 - Connection monitoring
 
-#### `monitor/gpu.py` - GPU Monitoring
+#### `core/gpu` - GPU Monitoring
 - NVIDIA GPU utilization (via nvidia-smi)
 - GPU memory usage
 - Temperature and power monitoring
 - Clock speeds
 
-#### `monitor/sensors.py` - Sensor Monitoring
+#### `core/sensors` - Sensor Monitoring
 - CPU temperature
 - Fan speeds
 - System sensor data
 
-#### `monitor/system.py` - System Information
+#### `core/system` - System Information
 - System uptime
 - Hostname and platform info
 - Process count
 - Top processes by CPU/memory
 
-#### `monitor/kernel.py` - Kernel Crash & Stability Monitoring
+#### `core/kernel` - Kernel Crash & Stability Monitoring
 - **Proactive crash detection** - Early warning signs before crashes
 - Kernel panic and oops detection
 - System stability risk assessment
@@ -139,34 +166,32 @@ The core monitoring application that:
 - Boot time tracking
 - Risk scoring with recommendations
 
-#### `monitor/log.py` - Log File Monitoring
+#### `core/logs` - Log File Monitoring
 - Log file size monitoring
 - Log cleanup integration with disk cleanup
 - Directory log analysis
 
-#### `monitor/processes.py` - Process Monitoring
+#### `core/processes` - Process Monitoring
 - Top processes by resource usage
 - Process details (PID, name, user, cmdline)
 - Resource consumption tracking
 
-#### `monitor/freeze.py` - Freeze Detection
+#### `core/freeze` - Freeze Detection
 - Heartbeat monitoring
 - Metric update tracking
 - System responsiveness checks
 - Configurable thresholds
 
-#### `monitor/qbittorrent.py` - qBittorrent Integration
+#### `core/qbittorrent` - qBittorrent Integration
 - Torrent list and status
 - Download/upload speed tracking
 - Download completion notifications
 - Seeding status monitoring
 
-#### `monitor/media.py` - Media Directory Monitoring
-- Directory size tracking
-- Subdirectory analysis
-- Size threshold alerts
+Media directory monitoring (directory size tracking, subdirectory analysis and
+size threshold alerts) is part of `core/disk`, not a separate module.
 
-### Discord Integration (`discord/webhook.py`)
+### Discord Integration (`core/webhook`)
 
 Sends rich embed alerts to Discord for:
 - CPU usage alerts
@@ -195,7 +220,7 @@ Sends rich embed alerts to Discord for:
 - Rate limiting (30 calls per 60 seconds) to prevent Discord API limits
 - Fallback logging to file when Discord is unavailable
 
-### Web Dashboard (`web/server.py`)
+### Web Dashboard (`core/web`)
 
 Provides a web interface at `http://localhost:8080` (configurable, can be disabled with `WEB_UI_ENABLED=false`):
 - Real-time system statistics
@@ -244,13 +269,13 @@ Example response:
 
 ### Utilities
 
-#### `util/util.py`
+#### `core/format`
 Formatting functions:
 - `format_bytes()` - Human-readable byte formatting
 - `format_bytes_per_second()` - Bandwidth formatting
 - `format_megabytes()` - MB formatting
 
-#### `util/systemd.py`
+#### `core/systemd`
 Systemd service management:
 - Service file generation
 - Automatic installation
@@ -259,20 +284,20 @@ Systemd service management:
 - Permission checking and interactive fixing
 - Smart working directory selection based on user permissions
 
-#### `util/error_handling.py`
+#### `core/errors`
 Standardized error handling utilities:
 - Connection error decorators
 - Logging helpers
 - Error pattern standardization
 
-#### `util/security.py`
+#### `core/security`
 Security utilities:
 - Path validation and traversal protection
 - Safe subprocess execution
 - Environment variable validation
 - Security checks for file operations
 
-#### `cache/cache.py`
+#### `core/cache`
 Cache management:
 - Startup cache clearing
 - Exit cache cleanup
