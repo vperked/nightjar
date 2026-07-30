@@ -1,8 +1,16 @@
 import os
 import platform
 import glob
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from core.format import format_temperature, format_fan_speed
+
+
+HWMON_FAN_BLACKLIST: Set[str] = {
+    'nouveau',
+    'amdgpu',
+    'radeon',
+    'nvidia',
+}
 
 
 class SensorsMonitor:
@@ -115,9 +123,43 @@ class SensorsMonitor:
 
         return temperatures
 
+    def _hwmon_driver_name(self, hwmon_dir: str) -> Optional[str]:
+        """
+        Read the hwmon chip/driver name for a sysfs directory.
+
+        Args:
+            hwmon_dir: Path under /sys/class/hwmon
+
+        Returns:
+            Lowercased driver name, or None if unavailable
+        """
+        name_file = os.path.join(hwmon_dir, 'name')
+        try:
+            with open(name_file, 'r') as f:
+                return f.read().strip().lower()
+        except (IOError, OSError):
+            return None
+
+    def _is_safe_fan_hwmon(self, hwmon_dir: str) -> bool:
+        """
+        Return whether fan*_input reads are safe for this hwmon device.
+
+        Some GPU drivers (notably nouveau) can block forever in uninterruptible
+        sleep when fan tachometers are read via sysfs, which stalls the whole
+        monitoring process.
+        """
+        driver_name = self._hwmon_driver_name(hwmon_dir)
+        if driver_name is None:
+            return False
+        return driver_name not in HWMON_FAN_BLACKLIST
+
     def get_fan_speeds(self) -> List[Dict]:
         """
         Get fan speeds from hardware monitoring.
+
+        Skips GPU hwmon devices whose fan sysfs nodes are known to hang
+        (nouveau and other GPU drivers). Prefer nvidia-smi / vendor tools for
+        GPU fans.
 
         Returns:
             List of dictionaries containing fan speed information
@@ -128,32 +170,37 @@ class SensorsMonitor:
             return fans
 
         hwmon_base = '/sys/class/hwmon'
-        if os.path.exists(hwmon_base):
-            hwmon_dirs = glob.glob(os.path.join(hwmon_base, 'hwmon*'))
-            for hwmon_dir in hwmon_dirs:
-                fans.extend(self._scan_fan_directory(hwmon_dir, hwmon_dir))
+        if not os.path.exists(hwmon_base):
+            return fans
+
+        hwmon_dirs = sorted(glob.glob(os.path.join(hwmon_base, 'hwmon*')))
+        for hwmon_dir in hwmon_dirs:
+            if not self._is_safe_fan_hwmon(hwmon_dir):
+                continue
+            fans.extend(self._scan_fan_directory(hwmon_dir))
 
         if not fans:
             for hwmon_dir in hwmon_dirs:
+                if not self._is_safe_fan_hwmon(hwmon_dir):
+                    continue
                 device_dir = os.path.join(hwmon_dir, 'device')
                 if os.path.exists(device_dir):
-                    fans.extend(self._scan_fan_directory(device_dir, hwmon_dir))
+                    fans.extend(self._scan_fan_directory(device_dir))
 
         return fans
 
-    def _scan_fan_directory(self, scan_dir: str, base_path: str) -> List[Dict]:
+    def _scan_fan_directory(self, scan_dir: str) -> List[Dict]:
         """
         Scan a directory for fan speed files and extract fan information.
 
         Args:
             scan_dir: Directory to scan for fan*_input files
-            base_path: Base path for constructing label file paths
 
         Returns:
             List of fan dictionaries with 'name', 'label', and 'speed_rpm' keys
         """
         fans = []
-        fan_files = glob.glob(os.path.join(scan_dir, 'fan*_input'))
+        fan_files = sorted(glob.glob(os.path.join(scan_dir, 'fan*_input')))
 
         for fan_file in fan_files:
             try:

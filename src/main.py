@@ -1994,24 +1994,48 @@ def main(
                                 if top_cpu_processes is None:
                                     top_cpu_processes = process_monitor.get_top_processes(limit=5, sort_by='cpu')
                                 top_cpu_procs = top_cpu_processes
-                                fans = sensors_monitor.get_fan_speeds()
+                                fans = run_with_timeout(
+                                    lambda: sensors_monitor.get_fan_speeds(),
+                                    timeout=3.0,
+                                    default_value=[],
+                                    operation_name="Fan speed collection"
+                                ) or []
 
                                 gpu_temp = None
                                 if gpu_monitor.nvidia_smi_available and gpu_monitor.get_gpu_count() > 0:
-                                    gpu_data_temp = gpu_monitor.get_gpu_comprehensive(0)
-                                    gpu_temp = gpu_data_temp.get('temperature')
+                                    try:
+                                        gpu_data_temp = run_with_timeout(
+                                            lambda: gpu_monitor.get_gpu_comprehensive(0),
+                                            timeout=5.0,
+                                            default_value=None,
+                                            operation_name="GPU temperature for temp alert"
+                                        )
+                                        if gpu_data_temp:
+                                            gpu_temp = gpu_data_temp.get('temperature')
+                                    except Exception:
+                                        gpu_temp = None
 
                                 temp_disk_io = disk_io_data
                                 if temp_disk_io is None:
                                     try:
-                                        temp_disk_io = system_monitor.get_disk_io()
+                                        temp_disk_io = run_with_timeout(
+                                            lambda: system_monitor.get_disk_io(),
+                                            timeout=5.0,
+                                            default_value=None,
+                                            operation_name="Disk I/O for temp alert"
+                                        )
                                     except Exception:
                                         pass
 
                                 temp_network_io = network_io_data
                                 if temp_network_io is None:
                                     try:
-                                        temp_network_io = network_monitor.get_total_network_io()
+                                        temp_network_io = run_with_timeout(
+                                            lambda: network_monitor.get_total_network_io(),
+                                            timeout=5.0,
+                                            default_value=None,
+                                            operation_name="Network I/O for temp alert"
+                                        )
                                     except Exception:
                                         pass
 
