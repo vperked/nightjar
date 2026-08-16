@@ -1,8 +1,5 @@
 """
-Circuit breaker pattern implementation for external service calls.
-
-Prevents cascading failures by stopping calls to failing services
-and allowing them to recover before retrying.
+Thread-safe circuit breaker for external services.
 """
 
 import threading
@@ -136,3 +133,9 @@ class CircuitBreaker:
         """Check if circuit breaker is open."""
         with self._lock:
             return self.state == CircuitState.OPEN
+
+__all__ = [
+    'CircuitBreaker',
+    'CircuitBreakerOpenError',
+    'CircuitState',
+]

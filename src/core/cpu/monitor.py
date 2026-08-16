@@ -139,38 +139,3 @@ class CpuMonitor:
             'load_average': self.get_cpu_load_average(),
         }
 
-    def monitor_continuous(self, interval: float = 1.0, duration: Optional[float] = None,
-                          callback: Optional[Callable[[Dict], None]] = None) -> List[Dict]:
-        """
-        Continuously monitor CPU usage.
-
-        Args:
-            interval: Time interval between measurements in seconds
-            duration: Total duration to monitor in seconds (None for infinite)
-            callback: Optional callback function to call with each measurement
-
-        Returns:
-            List of CPU usage measurements
-        """
-        measurements = []
-        start_time = time.time()
-
-        while True:
-            if duration and (time.time() - start_time) >= duration:
-                break
-
-            measurement = {
-                'timestamp': time.time(),
-                'cpu_percent': self.get_cpu_percent(interval=interval),
-                'cpu_percent_per_core': self.get_cpu_percent_per_core(interval=0.1),
-            }
-
-            measurements.append(measurement)
-
-            if callback:
-                callback(measurement)
-
-            time.sleep(interval)
-
-        return measurements
-

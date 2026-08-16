@@ -320,45 +320,6 @@ class NetworkMonitor:
             'packets_recv_per_sec': f"{bandwidth['packets_recv_per_sec']:.2f}",
         }
 
-    def monitor_bandwidth(self, interface: Optional[str] = None,
-                         interval: float = 1.0, duration: Optional[float] = None,
-                         callback: Optional[Callable[[Dict], None]] = None) -> List[Dict]:
-        """
-        Continuously monitor bandwidth usage.
-
-        Args:
-            interface: Interface name to monitor (None for system-wide)
-            interval: Time interval between measurements in seconds
-            duration: Total duration to monitor in seconds (None for infinite)
-            callback: Optional callback function to call with each measurement
-
-        Returns:
-            List of bandwidth measurements
-        """
-        measurements = []
-        start_time = time.time()
-
-        while True:
-            if duration and (time.time() - start_time) >= duration:
-                break
-
-            bandwidth = self.get_bandwidth_usage(interface, interval=interval)
-            if bandwidth:
-                measurement = {
-                    'timestamp': time.time(),
-                    'interface': bandwidth.get('interface', interface),
-                    'bandwidth': bandwidth,
-                }
-                measurements.append(measurement)
-
-                if callback:
-                    callback(measurement)
-
-            if _shutdown_event.wait(timeout=interval):
-                return {}
-
-        return measurements
-
     def get_network_connections(self, kind: str = 'inet') -> List[Dict]:
         """
         Get network connections.

@@ -1,5 +1,5 @@
 """
-Utility functions for formatting and common operations.
+Human-readable formatting helpers and unit constants.
 """
 
 import psutil
@@ -123,20 +123,6 @@ def format_fan_speed(speed_rpm: int) -> str:
     return f"{speed_rpm} RPM"
 
 
-def format_percentage(value: float, precision: int = 1) -> str:
-    """
-    Format percentage value.
-
-    Args:
-        value: Percentage value (0-100)
-        precision: Number of decimal places (default: 1)
-
-    Returns:
-        Formatted percentage string (e.g., "45.5%")
-    """
-    return f"{value:.{precision}f}%"
-
-
 def format_duration(seconds: float) -> str:
     """
     Format duration in seconds to human-readable format.
@@ -181,3 +167,17 @@ def format_duration(seconds: float) -> str:
         parts.append(f"{int(secs)} second{'s' if int(secs) != 1 else ''}")
 
     return ", ".join(parts)
+
+__all__ = [
+    'CPU_COUNT',
+    'BYTES_PER_KB',
+    'BYTES_PER_MB',
+    'BYTES_PER_GB',
+    'BYTES_PER_TB',
+    'format_bytes',
+    'format_bytes_per_second',
+    'format_megabytes',
+    'format_temperature',
+    'format_fan_speed',
+    'format_duration',
+]

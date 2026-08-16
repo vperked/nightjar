@@ -127,7 +127,7 @@ class ProcessMonitor:
                     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError):
                         continue
             except (PermissionError, OSError) as e:
-                logger.debug(f"Permission error during process iteration: {e}")
+                logger.debug(f"Process iteration failed: {e}")
                 return []
             except Exception as e:
                 logger.error(f"Failed to iterate processes: {e}", exc_info=True)
@@ -159,7 +159,7 @@ class ProcessMonitor:
                     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError):
                         continue
             except (PermissionError, OSError) as e:
-                logger.debug(f"Permission error during process iteration: {e}")
+                logger.debug(f"Process iteration failed: {e}")
                 return []
             except Exception as e:
                 logger.error(f"Failed to iterate processes: {e}", exc_info=True)

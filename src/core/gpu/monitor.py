@@ -344,36 +344,6 @@ class GpuMonitor:
             'memory': memory,
         }
 
-    def get_all_gpus_info(self) -> List[Dict]:
-        """
-        Get information for all GPUs.
-
-        Returns:
-            List of dictionaries containing information for each GPU
-        """
-        gpu_count = self.get_gpu_count()
-        gpus_info = []
-
-        for i in range(gpu_count):
-            gpu_info = self.get_gpu_info(i)
-            utilization = self.get_gpu_utilization(i)
-            memory = self.get_gpu_memory(i)
-            temperature = self.get_gpu_temperature(i)
-            power = self.get_gpu_power(i)
-            clocks = self.get_gpu_clocks(i)
-
-            gpu_data = {
-                **gpu_info,
-                'utilization': utilization,
-                'memory': memory,
-                'temperature': temperature,
-                'power': power,
-                'clocks': clocks,
-            }
-            gpus_info.append(gpu_data)
-
-        return gpus_info
-
     def get_gpu_comprehensive(self, gpu_index: int = 0) -> Dict:
         """
         Get comprehensive information for a specific GPU.
@@ -391,28 +361,5 @@ class GpuMonitor:
             'temperature': self.get_gpu_temperature(gpu_index),
             'power': self.get_gpu_power(gpu_index),
             'clocks': self.get_gpu_clocks(gpu_index),
-        }
-
-    def get_gpu_memory_human(self, gpu_index: int = 0) -> Dict[str, str]:
-        """
-        Get GPU memory information in human-readable format.
-
-        Args:
-            gpu_index: Index of the GPU (default: 0)
-
-        Returns:
-            Dictionary with memory values formatted as strings (MB, GB)
-        """
-        gpu_count = self.get_gpu_count()
-        if gpu_count == 0 or gpu_index < 0 or gpu_index >= gpu_count:
-            return {'total': '0 MB', 'used': '0 MB', 'free': '0 MB', 'percent': '0.0%'}
-
-        memory = self.get_gpu_memory(gpu_index)
-
-        return {
-            'total': format_megabytes(memory['total']),
-            'used': format_megabytes(memory['used']),
-            'free': format_megabytes(memory['free']),
-            'percent': f"{memory['percent']:.1f}%",
         }
 

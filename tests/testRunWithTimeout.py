@@ -5,11 +5,15 @@ import time
 
 import pytest
 
-import main
+from core.timeout import (
+    TIMEOUT_EXECUTOR_WORKERS,
+    run_with_timeout,
+    send_webhook,
+)
 
 
 def test_returns_function_result():
-    assert main.run_with_timeout(lambda: 42, timeout=5.0) == 42
+    assert run_with_timeout(lambda: 42, timeout=5.0) == 42
 
 
 def test_returns_default_on_timeout():
@@ -20,7 +24,7 @@ def test_returns_default_on_timeout():
         return 'late'
 
     try:
-        result = main.run_with_timeout(
+        result = run_with_timeout(
             slow,
             timeout=0.1,
             default_value='fallback',
@@ -36,7 +40,7 @@ def test_propagates_exceptions():
         raise ValueError('bad')
 
     with pytest.raises(ValueError, match='bad'):
-        main.run_with_timeout(boom, timeout=5.0)
+        run_with_timeout(boom, timeout=5.0)
 
 
 def test_remains_usable_after_repeated_timeouts():
@@ -46,10 +50,10 @@ def test_remains_usable_after_repeated_timeouts():
         stop.wait(30)
 
     try:
-        for _ in range(main.TIMEOUT_EXECUTOR_WORKERS * 2 + 2):
-            main.run_with_timeout(slow, timeout=0.02, default_value=None)
+        for _ in range(TIMEOUT_EXECUTOR_WORKERS * 2 + 2):
+            run_with_timeout(slow, timeout=0.02, default_value=None)
 
-        assert main.run_with_timeout(lambda: 'ok', timeout=1.0, default_value=None) == 'ok'
+        assert run_with_timeout(lambda: 'ok', timeout=1.0, default_value=None) == 'ok'
     finally:
         stop.set()
         time.sleep(0.05)
@@ -64,7 +68,7 @@ def test_timeout_workers_are_daemon_threads():
         stop.wait(30)
 
     try:
-        main.run_with_timeout(slow, timeout=0.05, default_value=None)
+        run_with_timeout(slow, timeout=0.05, default_value=None)
         assert worker_thread['thread'].daemon is True
     finally:
         stop.set()
@@ -79,7 +83,7 @@ def test_send_webhook_uses_timeout_wrapper():
         return True
 
     started = time.time()
-    result = main.send_webhook(hang, operation_name='hanging webhook', timeout=0.05)
+    result = send_webhook(hang, operation_name='hanging webhook', timeout=0.05)
     elapsed = time.time() - started
 
     assert result is False

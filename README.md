@@ -6,20 +6,21 @@ A comprehensive server monitoring system with Discord alerts, web dashboard, and
 
 ## Directory Structure
 
-Every subsystem is a package under `src/core/`. Each package holds its
-implementation module and re-exports its public API from `__init__.py`, so you
-import from the package rather than the file inside it:
+Collectors and services under `src/core/` are packages that re-export their
+public API from `__init__.py`. Small support helpers are single modules:
 
 ```python
 from core.cpu import CpuMonitor
-from core.disk import DiskMonitor
+from core.format import format_bytes
 from core.observability import Component, get_logger
 ```
 
 ```
 src/
-├── main.py                    # Entry point, monitoring loop and alerting
+├── main.py                    # CLI entrypoint (--test, --install-systemd)
 └── core/
+    ├── runtime/app.py         # Monitoring startup, loop and shutdown
+    ├── selfTest/runner.py     # Monitor and webhook self-test
     ├── cpu/monitor.py         # CPU usage, frequency and load average
     ├── memory/monitor.py      # Memory and swap
     ├── disk/monitor.py        # Disk usage, partitions, I/O and cleanup
@@ -41,15 +42,14 @@ src/
     ├── systemd/service.py     # systemd service installation
     │
     ├── config/settings.py     # Defaults and validated environment access
-    ├── detection/detect.py    # Host detection and threshold adaptation
-    ├── metrics/collector.py   # Metric snapshot aggregation
-    ├── alert/cooldown.py      # Alert cooldown bookkeeping
-    ├── temperature/analysis.py# Temperature cause attribution
-    ├── cache/cache.py         # __pycache__ and .pyc cleanup
-    ├── format/formatters.py   # Byte, duration and percentage formatting
-    ├── security/validation.py # Path, env and subprocess validation
-    ├── circuitBreaker/breaker.py # Thread-safe circuit breaker
-    ├── errors/exceptions.py   # Typed exception hierarchy
+    ├── detection.py           # Host detection and threshold adaptation
+    ├── metrics.py             # Metric snapshot aggregation
+    ├── temperature.py         # Temperature cause attribution
+    ├── cache.py               # __pycache__ and .pyc cleanup
+    ├── format.py              # Byte and duration formatting
+    ├── security.py            # Path, env and subprocess validation
+    ├── circuitBreaker.py      # Thread-safe circuit breaker
+    ├── timeout.py             # Daemon-thread timeouts and webhook wrapper
     └── observability/         # Logging system (see below)
 ```
 
@@ -284,12 +284,6 @@ Systemd service management:
 - Permission checking and interactive fixing
 - Smart working directory selection based on user permissions
 
-#### `core/errors`
-Standardized error handling utilities:
-- Connection error decorators
-- Logging helpers
-- Error pattern standardization
-
 #### `core/security`
 Security utilities:
 - Path validation and traversal protection
@@ -319,7 +313,6 @@ All configuration is done via environment variables (`.env` file):
 - `QBITTORRENT_MONITOR` - Enable qBittorrent monitoring (true/false)
 - `MEDIA_MONITOR_ENABLED` - Enable media directory monitoring (true/false)
 - `FREEZE_MONITOR_ENABLED` - Enable freeze detection (true/false)
-- `SELF_TEST_ON_START` - Run self-test on startup (true/false, default: true)
 
 ### Thresholds
 - `CPU_THRESHOLD` - CPU usage alert threshold (default: 80.0%)

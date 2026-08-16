@@ -116,7 +116,7 @@ class LogMonitor:
                     log_info['age_days'] = age_days
                     rotated_logs.append(log_info)
         except (OSError, PermissionError) as e:
-            logger.debug(f"Error scanning {log_dir} for rotated logs: {e}")
+            logger.debug(f"Rotated log scan failed: {e}")
 
         return rotated_logs
 
@@ -352,7 +352,7 @@ class LogMonitor:
                         if log_info:
                             log_files.append(log_info)
         except (OSError, PermissionError) as e:
-            logger.debug(f"Error scanning {log_dir} for log files: {e}")
+            logger.debug(f"Log file scan failed: {e}")
 
         return log_files
 
@@ -513,9 +513,9 @@ class LogMonitor:
                     if result.returncode == 0:
                         logger.info(f"Emergency: Cleared log {log_path} ({format_bytes(current_size)})")
                         return True
-                    logger.debug(f"truncate command failed, trying file operations: {result.stderr}")
+                    logger.debug(f"truncate failed: {result.stderr}")
                 except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-                    logger.debug(f"truncate command unavailable ({e}), using file operations")
+                    logger.debug(f"truncate unavailable, using file operations: {e}")
             else:
                 logger.warning(f"Unsafe path rejected for truncate command: {log_path_str}")
 
@@ -609,6 +609,6 @@ class LogMonitor:
                 logger.debug(f"journalctl vacuum failed: {result.stderr}")
                 return False
         except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
-            logger.debug(f"journalctl vacuum error: {e}")
+            logger.debug(f"journalctl vacuum failed: {e}")
             return False
 

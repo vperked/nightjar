@@ -246,7 +246,7 @@ class FreezeMonitor:
                     try:
                         callback(freeze_status)
                     except (TypeError, ValueError) as e:
-                        logger.debug(f"Error in freeze callback: {e}")
+                        logger.debug(f"Freeze callback failed: {e}")
                     except Exception as e:
                         logger.warning(f"Unexpected error in freeze callback: {e}")
 

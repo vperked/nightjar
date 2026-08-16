@@ -179,7 +179,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
             try:
                 super().__init__(*args, **kwargs)
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection closed during initialization: {e}")
+                logger.debug(f"Client disconnected during initialization: {e}")
             except Exception as e:
                 logger.error(f"Unexpected error in request handler initialization: {e}", exc_info=True)
 
@@ -193,7 +193,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
             try:
                 super().handle()
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection closed by client during request handling: {e}")
+                logger.debug(f"Client disconnected during request: {e}")
             except Exception as e:
                 logger.error(f"Unexpected error handling request: {e}", exc_info=True)
 
@@ -206,7 +206,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
             try:
                 super().handle_one_request()
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection closed during request: {e}")
+                logger.debug(f"Client disconnected during request: {e}")
             except Exception as e:
                 logger.error(f"Unexpected error processing request: {e}", exc_info=True)
 
@@ -304,7 +304,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 self.send_header('Connection', 'keep-alive')
                 self.send_header('Keep-Alive', 'timeout=60, max=1000')
             except Exception as e:
-                logger.debug(f"Error adding connection headers: {e}")
+                logger.debug(f"Connection headers failed: {e}")
 
         def validate_query_params(self):
             """
@@ -374,7 +374,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 else:
                     self.send_error_safe(404, "Not Found")
             except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection error (client may have disconnected): {e}")
+                logger.debug(f"Client disconnected during response: {e}")
             except Exception as e:
                 logger.error(f"Unexpected error handling request: {e}", exc_info=True)
 
@@ -390,7 +390,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 self._add_security_headers()
                 self.end_headers()
             except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection error handling OPTIONS: {e}")
+                logger.debug(f"Client disconnected during OPTIONS: {e}")
             except Exception as e:
                 logger.error(f"Error handling OPTIONS request: {e}")
 
@@ -405,7 +405,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 self._add_security_headers()
                 self.end_headers()
             except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection error sending no content: {e}")
+                logger.debug(f"Client disconnected during empty response: {e}")
             except Exception as e:
                 logger.error(f"Unexpected error sending no content: {e}", exc_info=True)
 
@@ -420,7 +420,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
             try:
                 self.send_error(code, message)
             except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection error sending error {code}: {e}")
+                logger.debug(f"Client disconnected during HTTP {code}: {e}")
             except Exception as e:
                 logger.error(f"Unexpected error sending error {code}: {e}", exc_info=True)
 
@@ -446,7 +446,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 self.end_headers()
                 self.wfile.write(content)
             except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection error serving HTML: {e}")
+                logger.debug(f"Client disconnected during HTML: {e}")
             except Exception as e:
                 logger.error(f"Error serving HTML: {e}", exc_info=True)
                 try:
@@ -505,7 +505,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 self.end_headers()
                 self.wfile.write(content)
             except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection error serving static file: {e}")
+                logger.debug(f"Client disconnected during static file: {e}")
             except Exception as e:
                 logger.error(f"Error serving static file {path}: {e}", exc_info=True)
                 try:
@@ -547,7 +547,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 self.wfile.write(response)
                 self.wfile.flush()
             except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection error serving stats: {e}")
+                logger.debug(f"Client disconnected during stats: {e}")
             except Exception as e:
                 logger.error(f"Error serving stats: {e}", exc_info=True)
                 try:
@@ -565,7 +565,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                     self.wfile.write(error_response)
                     self.wfile.flush()
                 except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                    logger.debug(f"Connection error sending error response: {e}")
+                    logger.debug(f"Client disconnected during error: {e}")
                 except Exception as e:
                     logger.error(f"Failed to send error response: {e}", exc_info=True)
 
@@ -765,7 +765,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 self.end_headers()
                 self.wfile.write(response)
             except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                logger.debug(f"Connection error serving health: {e}")
+                logger.debug(f"Client disconnected during health: {e}")
             except Exception as e:
                 logger.error(f"Error serving health: {e}", exc_info=True)
                 try:
@@ -782,7 +782,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                     self.end_headers()
                     self.wfile.write(error_response)
                 except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                    logger.debug(f"Connection error sending health error response: {e}")
+                    logger.debug(f"Client disconnected during health error: {e}")
 
         def get_system_stats(self) -> Dict:
             """
@@ -933,7 +933,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                                     _process_cache['top_memory'] = system_mon.get_top_processes(limit=5, sort_by='memory')
                                     _process_cache['last_update'] = current_time
                                 except Exception as e:
-                                    logger.debug(f"Error updating process cache: {e}")
+                                    logger.debug(f"Process cache update failed: {e}")
 
                             stats['top_processes_cpu'] = _process_cache['top_cpu']
                             stats['top_processes_memory'] = _process_cache['top_memory']
@@ -1003,7 +1003,7 @@ def get_local_ip_addresses():
             pass
 
     except Exception as e:
-        logger.debug(f"Error getting local IP addresses: {e}")
+        logger.debug(f"Local IP lookup failed: {e}")
 
     return addresses
 

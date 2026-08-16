@@ -43,7 +43,6 @@ class Component:
     SECURITY = 'Security'
     SYSTEMD = 'Systemd'
     CIRCUIT_BREAKER = 'CircuitBreaker'
-    ERRORS = 'Errors'
 
 
 KNOWN_COMPONENTS = frozenset(

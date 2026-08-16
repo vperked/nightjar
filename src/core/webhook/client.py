@@ -16,11 +16,6 @@ load_dotenv()
 logger = get_logger(Component.DISCORD)
 
 
-class RateLimitedError(Exception):
-    """Raised when a send is rejected because the local rate limit is saturated."""
-    pass
-
-
 class RateLimiter:
     """Non-blocking rate limiter for Discord webhook calls."""
 
@@ -126,7 +121,7 @@ class DiscordWebhook:
             True if Discord accepted the request, False otherwise
         """
         if self.circuit_breaker.is_open():
-            logger.debug("Discord circuit breaker is OPEN, using fallback logging")
+            logger.debug("Discord circuit breaker open, using fallback")
             self._log_fallback(fallback_message)
             return False
 
@@ -156,7 +151,7 @@ class DiscordWebhook:
         except KeyboardInterrupt:
             raise
         except CircuitBreakerOpenError:
-            logger.debug("Discord circuit breaker is OPEN, using fallback logging")
+            logger.debug("Discord circuit breaker open, using fallback")
             self._log_fallback(fallback_message)
             return False
         except requests.exceptions.RequestException as e:
@@ -179,7 +174,7 @@ class DiscordWebhook:
             with open(self.alert_log_path, 'a') as f:
                 f.write(log_entry)
         except (OSError, PermissionError) as e:
-            logger.debug(f"Could not write to alert log file {self.alert_log_path}: {e}")
+            logger.debug(f"Alert log write failed: {e}")
 
     def build_embed_payload(self, title: str, description: str = "", color: Optional[int] = None,
                             fields: Optional[List[Dict[str, Any]]] = None,
@@ -358,55 +353,6 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_system_info(self, cpu_info: Dict) -> bool:
-        """
-        Send system CPU information to Discord.
-
-        Args:
-            cpu_info: Dictionary containing CPU information from CpuMonitor.get_cpu_info()
-
-        Returns:
-            True if message was sent successfully, False otherwise
-        """
-        fields = [
-            {
-                'name': 'CPU Count',
-                'value': f"Logical: {cpu_info.get('cpu_count_logical', 'N/A')}\n"
-                        f"Physical: {cpu_info.get('cpu_count_physical', 'N/A')}",
-                'inline': True
-            },
-            {
-                'name': 'CPU Usage',
-                'value': f"{cpu_info.get('cpu_percent', 0):.1f}%",
-                'inline': True
-            }
-        ]
-
-        freq_info = cpu_info.get('cpu_freq', {})
-        if freq_info.get('current', 0) > 0:
-            fields.append({
-                'name': 'CPU Frequency',
-                'value': f"{freq_info.get('current', 0):.0f} MHz",
-                'inline': True
-            })
-
-        load_avg = cpu_info.get('load_average')
-        if load_avg:
-            fields.append({
-                'name': 'Load Average',
-                'value': f"1m: {load_avg[0]:.2f}\n5m: {load_avg[1]:.2f}\n15m: {load_avg[2]:.2f}",
-                'inline': True
-            })
-
-        return self.send_embed(
-            title='System CPU Information',
-            description='Current CPU statistics and usage',
-            color=self.DEFAULT_EMBED_COLOR,
-            fields=fields,
-            footer='Server Monitor',
-            timestamp=True
-        )
-
     def send_memory_alert(self, memory_percent: float, threshold: float = 80.0,
                          memory_info: Optional[Dict] = None,
                          swap_info: Optional[Dict] = None) -> bool:
@@ -457,73 +403,6 @@ class DiscordWebhook:
         return self.send_embed(
             title='Memory Usage Alert',
             description=f'Memory usage has exceeded the threshold of {threshold:.1f}%',
-            color=self.DEFAULT_EMBED_COLOR,
-            fields=fields,
-            footer='Server Monitor',
-            timestamp=True
-        )
-
-    def send_memory_info(self, memory_stats: Dict) -> bool:
-        """
-        Send system memory information to Discord.
-
-        Args:
-            memory_stats: Dictionary containing memory information from MemoryMonitor.get_memory_stats()
-
-        Returns:
-            True if message was sent successfully, False otherwise
-        """
-        mem_info = memory_stats.get('virtual_memory_human', {})
-        mem_percent = memory_stats.get('memory_percent', 0)
-
-        fields = [
-            {
-                'name': 'Memory Usage',
-                'value': f"{mem_percent:.1f}%",
-                'inline': True
-            },
-            {
-                'name': 'Total Memory',
-                'value': mem_info.get('total', 'N/A'),
-                'inline': True
-            },
-            {
-                'name': 'Used Memory',
-                'value': mem_info.get('used', 'N/A'),
-                'inline': True
-            },
-            {
-                'name': 'Available Memory',
-                'value': mem_info.get('available', 'N/A'),
-                'inline': True
-            },
-            {
-                'name': 'Free Memory',
-                'value': mem_info.get('free', 'N/A'),
-                'inline': True
-            }
-        ]
-
-        if mem_info.get('cached', '0 B') != '0.00 B':
-            fields.append({
-                'name': 'Cached',
-                'value': mem_info.get('cached', 'N/A'),
-                'inline': True
-            })
-
-        swap_info = memory_stats.get('swap_memory_human', {})
-        swap_percent = memory_stats.get('swap_memory', {}).get('percent', 0)
-        if swap_info.get('total', '0.00 B') != '0.00 B':
-            fields.append({
-                'name': 'Swap Memory',
-                'value': f"{swap_info.get('used', 'N/A')} / {swap_info.get('total', 'N/A')}\n"
-                        f"({swap_percent:.1f}% used)",
-                'inline': False
-            })
-
-        return self.send_embed(
-            title='System Memory Information',
-            description='Current memory statistics and usage',
             color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor',
@@ -796,78 +675,6 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_gpu_info(self, gpu_data: Dict) -> bool:
-        """
-        Send GPU information to Discord.
-
-        Args:
-            gpu_data: Dictionary containing GPU information from GpuMonitor.get_gpu_comprehensive()
-
-        Returns:
-            True if message was sent successfully, False otherwise
-        """
-        gpu_info = gpu_data.get('info', {})
-        utilization = gpu_data.get('utilization', {})
-        memory = gpu_data.get('memory', {})
-        temperature = gpu_data.get('temperature', 0)
-        power = gpu_data.get('power', {})
-        clocks = gpu_data.get('clocks', {})
-
-        fields = [
-            {
-                'name': 'GPU',
-                'value': gpu_info.get('name', 'N/A'),
-                'inline': False
-            },
-            {
-                'name': 'GPU Utilization',
-                'value': f"{utilization.get('gpu', 0):.1f}%",
-                'inline': True
-            },
-            {
-                'name': 'Memory Utilization',
-                'value': f"{utilization.get('memory', 0):.1f}%",
-                'inline': True
-            },
-            {
-                'name': 'GPU Memory',
-                'value': f"{memory.get('used', 0)} MB / {memory.get('total', 0)} MB\n"
-                        f"({memory.get('percent', 0):.1f}% used)",
-                'inline': True
-            }
-        ]
-
-        if temperature > 0:
-            fields.append({
-                'name': 'Temperature',
-                'value': f'{temperature:.1f}°C',
-                'inline': True
-            })
-
-        if power.get('draw', 0) > 0:
-            fields.append({
-                'name': 'Power',
-                'value': f"{power.get('draw', 0):.1f}W / {power.get('limit', 0):.1f}W",
-                'inline': True
-            })
-
-        if clocks.get('graphics', 0) > 0:
-            fields.append({
-                'name': 'Clocks',
-                'value': f"Graphics: {clocks.get('graphics', 0)} MHz\n"
-                        f"Memory: {clocks.get('memory', 0)} MHz",
-                'inline': True
-            })
-
-        return self.send_embed(
-            title='GPU Information',
-            description='Current GPU statistics and usage',
-            color=self.DEFAULT_EMBED_COLOR,
-            fields=fields,
-            footer='Server Monitor',
-            timestamp=True
-        )
-
     def send_process_alert(self, process_info: Dict, resource_type: str = 'cpu',
                           threshold: float = 80.0) -> bool:
         """
@@ -1099,81 +906,6 @@ class DiscordWebhook:
             color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor - Storage Monitoring',
-            timestamp=True
-        )
-
-    def send_log_size_alert(self, log_info: Dict, threshold_bytes: int, threshold_formatted: str, cleanup_performed: bool = False) -> bool:
-        """
-        Send an alert when a log file exceeds the size threshold.
-
-        Args:
-            log_info: Dictionary containing log file information
-            threshold_bytes: Threshold in bytes
-            threshold_formatted: Formatted threshold string
-            cleanup_performed: Whether automatic cleanup was performed
-
-        Returns:
-            True if message was sent successfully, False otherwise
-        """
-        log_path = log_info.get('path', 'Unknown')
-        size_bytes = log_info.get('size_bytes', 0)
-        size_formatted = log_info.get('size_formatted', 'N/A')
-        file_count = log_info.get('file_count')
-
-        color = 0x000000
-
-        if cleanup_performed:
-            description = 'Log file exceeded threshold and was auto-cleaned'
-        else:
-            description = f'Log file has exceeded the size threshold of {threshold_formatted}'
-
-        fields = [
-            {
-                'name': 'Log Path',
-                'value': log_path[:256],
-                'inline': False
-            },
-            {
-                'name': 'Current Size',
-                'value': size_formatted,
-                'inline': True
-            },
-            {
-                'name': 'Threshold',
-                'value': threshold_formatted,
-                'inline': True
-            }
-        ]
-
-        if file_count is not None:
-            fields.append({
-                'name': 'File Count',
-                'value': str(file_count),
-                'inline': True
-            })
-
-        excess_bytes = size_bytes - threshold_bytes
-        if excess_bytes > 0 and not cleanup_performed:
-            excess_formatted = format_bytes(excess_bytes)
-            fields.append({
-                'name': 'Excess Size',
-                'value': excess_formatted,
-                'inline': True
-            })
-
-        if cleanup_performed:
-            fields.append({
-                'name': 'Status',
-                'value': 'Auto-cleaned',
-                'inline': True
-            })
-
-        return self.send_embed(
-            title='Log Size Alert',
-            description=description,
-            color=color,
-            fields=fields,
-            footer='Server Monitor',
             timestamp=True
         )
 

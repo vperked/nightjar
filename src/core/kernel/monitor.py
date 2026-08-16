@@ -56,7 +56,7 @@ class KernelMonitor:
                 self.last_boot_time = self._get_boot_time()
                 self._load_tracking_data()
             except Exception as e:
-                logger.debug(f"Could not get initial boot time: {e}")
+                logger.debug(f"Boot time read failed: {e}")
 
     def _get_boot_time(self) -> Optional[float]:
         """
@@ -226,7 +226,7 @@ class KernelMonitor:
                     logger.debug(f"journalctl warning check failed for {keyword}: {e}")
                     continue
         except Exception as e:
-            logger.debug(f"Error checking early warning signs: {e}")
+            logger.debug(f"Early warning check failed: {e}")
 
         return warnings
 
@@ -310,7 +310,7 @@ class KernelMonitor:
                                 except (ValueError, OSError, PermissionError):
                                     continue
         except Exception as e:
-            logger.debug(f"Error checking EDAC: {e}")
+            logger.debug(f"EDAC check failed: {e}")
 
         try:
             with open('/proc/meminfo', 'r') as f:
@@ -334,7 +334,7 @@ class KernelMonitor:
                             except (ValueError, IndexError):
                                 pass
         except Exception as e:
-            logger.debug(f"Error checking /proc/meminfo: {e}")
+            logger.debug(f"meminfo check failed: {e}")
 
         try:
             with open('/var/log/kern.log', 'r', encoding='utf-8', errors='ignore') as f:
@@ -354,7 +354,7 @@ class KernelMonitor:
         except (OSError, PermissionError):
             pass
         except Exception as e:
-            logger.debug(f"Error checking for OOM killer: {e}")
+            logger.debug(f"OOM killer check failed: {e}")
 
         return errors
 
@@ -528,7 +528,7 @@ class KernelMonitor:
         try:
             self._save_tracking_data()
         except Exception as e:
-            logger.debug(f"Error saving tracking data: {e}")
+            logger.debug(f"Tracking data save failed: {e}")
 
         if risk_score >= 50:
             stability['risk_level'] = 'critical'
@@ -620,7 +620,7 @@ class KernelMonitor:
                     logger.debug(f"journalctl check failed for {keyword}: {e}")
                     continue
         except Exception as e:
-            logger.debug(f"Error checking journalctl: {e}")
+            logger.debug(f"journalctl check failed: {e}")
 
         return crashes
 
@@ -696,12 +696,12 @@ class KernelMonitor:
                                     self.detected_crashes.add(crash_id)
                                     break
                     except Exception as e:
-                        logger.debug(f"Error parsing dmesg line: {e}")
+                        logger.debug(f"dmesg line parse failed: {e}")
                         continue
         except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
             logger.debug(f"dmesg check failed: {e}")
         except Exception as e:
-            logger.debug(f"Error checking dmesg: {e}")
+            logger.debug(f"dmesg check failed: {e}")
 
         return crashes
 
@@ -772,10 +772,10 @@ class KernelMonitor:
                                 except Exception:
                                     continue
             except (OSError, PermissionError) as e:
-                logger.debug(f"Could not read kernel log {log_path}: {e}")
+                logger.debug(f"Kernel log read failed: {e}")
                 continue
             except Exception as e:
-                logger.debug(f"Error checking kernel log {log_path}: {e}")
+                logger.debug(f"Kernel log check failed: {e}")
                 continue
 
         return crashes
@@ -820,7 +820,7 @@ class KernelMonitor:
 
             return None
         except Exception as e:
-            logger.debug(f"Error checking for unexpected reboot: {e}")
+            logger.debug(f"Unexpected reboot check failed: {e}")
             return None
 
     def check_kernel_crashes(self, since_minutes: int = 60) -> Dict:

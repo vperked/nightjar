@@ -1,6 +1,5 @@
 """
-Cache clearing utility for Python cache files.
-Clears __pycache__ directories and .pyc files on startup and shutdown.
+Python bytecode and __pycache__ cleanup helpers.
 """
 
 import os
@@ -25,7 +24,7 @@ def find_cache_directories(root_dir: str = None) -> List[str]:
         List of paths to __pycache__ directories
     """
     if root_dir is None:
-        root_dir = str(Path(__file__).resolve().parent.parent.parent)
+        root_dir = str(Path(__file__).resolve().parent.parent)
 
     cache_dirs = []
     for root, dirs, files in os.walk(root_dir):
@@ -49,7 +48,7 @@ def find_pyc_files(root_dir: str = None) -> List[str]:
         List of paths to .pyc files
     """
     if root_dir is None:
-        root_dir = str(Path(__file__).resolve().parent.parent.parent)
+        root_dir = str(Path(__file__).resolve().parent.parent)
 
     pyc_files = []
     for root, dirs, files in os.walk(root_dir):
@@ -81,7 +80,7 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
         'errors': []
     }
 
-    root_dir = str(Path(__file__).resolve().parent.parent.parent)
+    root_dir = str(Path(__file__).resolve().parent.parent)
 
     if use_find and platform.system() != 'Windows':
         try:
@@ -159,7 +158,7 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
             return stats
         except (FileNotFoundError, subprocess.SubprocessError) as e:
             if verbose:
-                logger.debug(f"'find' command not available, using Python-based method: {e}")
+                logger.debug(f"find unavailable, using Python walk: {e}")
             use_find = False
 
     if not use_find or platform.system() == 'Windows':
@@ -286,3 +285,10 @@ if __name__ == "__main__":
         for error in stats['errors']:
             logger.warning(f"    - {error}")
 
+__all__ = [
+    'clear_cache',
+    'clear_cache_on_exit',
+    'clear_cache_on_startup',
+    'find_cache_directories',
+    'find_pyc_files',
+]

@@ -1,7 +1,5 @@
 """
-Security utilities for path validation and sanitization.
-Provides functions to prevent path traversal attacks and validate user inputs,
-environment variables, and subprocess paths.
+Path, environment and subprocess input validation.
 """
 
 import os
@@ -176,3 +174,10 @@ def safe_subprocess_path(path: str) -> Optional[str]:
 
     return resolved_path
 
+__all__ = [
+    'SecurityError',
+    'safe_subprocess_path',
+    'sanitize_path',
+    'validate_environment_variable',
+    'validate_path',
+]

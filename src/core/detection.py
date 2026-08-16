@@ -1,7 +1,5 @@
 """
-System detection and adaptation logic.
-
-Detects system capabilities and adapts configuration automatically.
+Host capability detection and threshold auto-adaptation.
 """
 
 import os
@@ -75,7 +73,7 @@ def analyze_system_usage_patterns() -> Dict[str, Any]:
                 if i < sample_count - 1:
                     time.sleep(sample_interval)
             except Exception as e:
-                logger.debug(f"Error sampling system metrics: {e}")
+                logger.debug(f"System metrics sampling failed: {e}")
                 break
 
         if analysis['cpu_samples']:
@@ -103,7 +101,7 @@ def analyze_system_usage_patterns() -> Dict[str, Any]:
                 analysis['system_type'] = 'workstation'
 
     except Exception as e:
-        logger.debug(f"Could not analyze system usage patterns: {e}")
+        logger.debug(f"Usage pattern analysis failed: {e}")
 
     return analysis
 
@@ -141,14 +139,14 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
         detected['cpu_cores'] = psutil.cpu_count(logical=True)
         detected['adaptations'].append(f"Detected {detected['cpu_cores']} CPU cores")
     except Exception as e:
-        logger.debug(f"Could not detect CPU cores: {e}")
+        logger.debug(f"CPU core detection failed: {e}")
 
     try:
         mem = psutil.virtual_memory()
         detected['total_memory_gb'] = mem.total / BYTES_PER_GB
         detected['adaptations'].append(f"Detected {detected['total_memory_gb']:.1f} GB total memory")
     except Exception as e:
-        logger.debug(f"Could not detect memory: {e}")
+        logger.debug(f"Memory detection failed: {e}")
 
     try:
         try:
@@ -164,7 +162,7 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
     except Exception as e:
-        logger.debug(f"Could not detect GPU: {e}")
+        logger.debug(f"GPU detection failed: {e}")
 
     try:
         qb_host = os.getenv('QBITTORRENT_HOST', 'localhost')
@@ -175,7 +173,7 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
                 sock.settimeout(2)
                 result = sock.connect_ex((qb_host, qb_port))
         except Exception as e:
-            logger.debug(f"Socket error checking qBittorrent: {e}")
+            logger.debug(f"qBittorrent socket check failed: {e}")
             result = 1
 
         if result == 0:
@@ -194,7 +192,7 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
             except Exception:
                 pass
     except Exception as e:
-        logger.debug(f"Could not detect qBittorrent: {e}")
+        logger.debug(f"qBittorrent detection failed: {e}")
 
     try:
         if platform.system() == 'Windows':
@@ -206,7 +204,7 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
         detected['total_disk_gb'] = disk.total / BYTES_PER_GB
         detected['adaptations'].append(f"Detected {detected['total_disk_gb']:.1f} GB total disk space")
     except Exception as e:
-        logger.debug(f"Could not detect disk space: {e}")
+        logger.debug(f"Disk space detection failed: {e}")
 
     if not skip_usage_analysis:
         logger.info("Analyzing system usage patterns to determine optimal thresholds...")
@@ -458,7 +456,7 @@ def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root
 
     if project_root is None:
         script_path = Path(__file__).resolve()
-        project_root = script_path.parent.parent.parent
+        project_root = script_path.parent.parent
 
     env_file = project_root / '.env'
 
@@ -507,3 +505,11 @@ def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root
             return False
 
     return False
+
+__all__ = [
+    'analyze_system_usage_patterns',
+    'apply_system_adaptations',
+    'detect_system_config',
+    'prompt_save_config',
+    'save_auto_detected_config',
+]

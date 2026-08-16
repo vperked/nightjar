@@ -1,7 +1,5 @@
 """
-Temperature analysis logic.
-
-Analyzes system metrics to determine likely causes of high CPU temperature.
+Temperature reading analysis and cause attribution.
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -165,3 +163,7 @@ def analyze_temperature_reason(
             reasons.append(f"Very low CPU usage ({cpu_percent:.1f}%) with high temperature - likely cooling system failure or ambient temperature issue")
 
     return " | ".join(reasons[:4])
+
+__all__ = [
+    'analyze_temperature_reason',
+]

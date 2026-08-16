@@ -202,20 +202,6 @@ class DiskMonitor:
         all_partitions = self.get_all_partitions()
         return [p for p in all_partitions if p.get('is_nvme', False)]
 
-    def get_partitions_by_usage(self, min_percent: float = 0.0, max_percent: float = 100.0) -> List[Dict]:
-        """
-        Get partitions filtered by usage percentage.
-
-        Args:
-            min_percent: Minimum usage percentage (inclusive)
-            max_percent: Maximum usage percentage (inclusive)
-
-        Returns:
-            List of partitions within the specified usage range
-        """
-        all_partitions = self.get_all_partitions()
-        return [p for p in all_partitions if min_percent <= p['percent'] <= max_percent]
-
     def get_disk_usage_human(self, path: str = '/') -> Optional[Dict[str, str]]:
         """
         Get disk usage in human-readable format.
@@ -340,96 +326,6 @@ class DiskMonitor:
                 'write_time': f"{io_data['write_time']} ms",
             }
 
-    def monitor_disk_usage(self, path: str = '/', interval: float = 1.0,
-                          duration: Optional[float] = None,
-                          callback: Optional[Callable[[Dict], None]] = None) -> List[Dict]:
-        """
-        Continuously monitor disk usage for a specific path.
-
-        Args:
-            path: Path to monitor
-            interval: Time interval between measurements in seconds
-            duration: Total duration to monitor in seconds (None for infinite)
-            callback: Optional callback function to call with each measurement
-
-        Returns:
-            List of disk usage measurements
-        """
-        measurements = []
-        start_time = time.time()
-
-        while True:
-            if duration and (time.time() - start_time) >= duration:
-                break
-
-            usage = self.get_disk_usage(path)
-            measurement = {
-                'timestamp': time.time(),
-                'path': path,
-                'usage': usage,
-            }
-
-            measurements.append(measurement)
-
-            if callback:
-                callback(measurement)
-
-            time.sleep(interval)
-
-        return measurements
-
-    def get_disk_stats(self) -> Dict:
-        """
-        Get comprehensive disk statistics.
-
-        Returns:
-            Dictionary containing all disk information
-        """
-        return {
-            'partitions': self.get_all_partitions(),
-            'total_usage': self.get_total_disk_usage(),
-            'io_counters': self.get_disk_io_counters(perdisk=False),
-            'io_counters_per_disk': self.get_disk_io_counters(perdisk=True),
-            'io_human': self.get_disk_io_human(perdisk=False),
-        }
-
-    def find_partitions_by_mountpoint(self, mountpoint: str) -> List[Dict]:
-        """
-        Find partitions by mountpoint.
-
-        Args:
-            mountpoint: Mountpoint to search for (partial match)
-
-        Returns:
-            List of matching partition dictionaries
-        """
-        all_partitions = self.get_all_partitions()
-        matching = []
-
-        for partition in all_partitions:
-            if mountpoint.lower() in partition['mountpoint'].lower():
-                matching.append(partition)
-
-        return matching
-
-    def get_partition_by_device(self, device: str) -> Optional[Dict]:
-        """
-        Get partition information by device name.
-
-        Args:
-            device: Device name (e.g., 'C:', '/dev/sda1')
-
-        Returns:
-            Partition dictionary if found, None otherwise
-        """
-        all_partitions = self.get_all_partitions()
-
-        for partition in all_partitions:
-            if partition['device'] == device:
-                return partition
-
-        return None
-
     def get_directory_size(self, path: str, allowed_base_paths: Optional[List[str]] = None,
                           timeout: Optional[float] = None, max_depth: Optional[int] = None) -> Optional[Dict]:
         """
@@ -452,7 +348,7 @@ class DiskMonitor:
 
         if allowed_base_paths is None:
             allowed_base_paths = ['/home', '/var', '/tmp', '/usr/local']
-            logger.debug(f"[SECURITY] Using default safe base paths: {allowed_base_paths}")
+            logger.debug(f"Using default base paths: {allowed_base_paths}")
 
         is_valid, resolved_path, error = validate_path(path, allowed_base_paths=allowed_base_paths, allow_symlinks=False)
         if not is_valid:
@@ -523,7 +419,7 @@ class DiskMonitor:
                     break
 
         except (OSError, PermissionError) as e:
-            logger.debug(f"Permission error calculating directory size for {path}: {e}")
+            logger.debug(f"Directory size failed: {e}")
             if file_count > 0 or dir_count > 0:
                 pass
             else:
@@ -698,7 +594,7 @@ class DiskMonitor:
                                 stats['files_removed'] += 1
                                 stats['total_size_cleared'] += file_size
                                 try:
-                                    logger.debug(f"Removed old temp file: {filepath} ({format_bytes(file_size)})")
+                                    logger.debug(f"Removed temp file: {filepath} ({format_bytes(file_size)})")
                                 except (OSError, Exception):
                                     pass
                         except (OSError, PermissionError) as e:
@@ -719,7 +615,7 @@ class DiskMonitor:
                                 if not any(dirpath.iterdir()):
                                     dirpath.rmdir()
                                     stats['dirs_removed'] += 1
-                                    logger.debug(f"Removed empty temp directory: {dirpath}")
+                                    logger.debug(f"Removed empty directory: {dirpath}")
                         except (OSError, PermissionError):
                             continue
                         except Exception as e:
@@ -1304,9 +1200,9 @@ class DiskMonitor:
                 else:
                     logger.warning(f"    Failed to restart {service}: {result.stderr}")
             except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-                logger.debug(f"    Could not restart {service}: {e}")
+                logger.debug(f"{service} restart failed: {e}")
             except Exception as e:
-                logger.debug(f"    Error restarting {service}: {e}")
+                logger.debug(f"{service} restart failed: {e}")
 
     def setup_nginx_logs(self, max_retries: int = 3):
         """
@@ -1370,7 +1266,7 @@ class DiskMonitor:
                             timeout=10,
                             check=False
                         )
-                        logger.debug(f"    Created nginx log file: {log_path}")
+                        logger.debug(f"Created nginx log file: {log_path}")
                     except (OSError, PermissionError) as e:
                         logger.warning(f"    Permission error creating nginx log file {log_path}: {e}")
                     except Exception as e:

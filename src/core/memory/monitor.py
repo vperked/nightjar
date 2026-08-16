@@ -114,39 +114,3 @@ class MemoryMonitor:
             'memory_percent': self.get_memory_percent(),
         }
 
-    def monitor_continuous(self, interval: float = 1.0, duration: Optional[float] = None,
-                          callback: Optional[Callable[[Dict], None]] = None) -> List[Dict]:
-        """
-        Continuously monitor memory usage.
-
-        Args:
-            interval: Time interval between measurements in seconds
-            duration: Total duration to monitor in seconds (None for infinite)
-            callback: Optional callback function to call with each measurement
-
-        Returns:
-            List of memory usage measurements
-        """
-        measurements = []
-        start_time = time.time()
-
-        while True:
-            if duration and (time.time() - start_time) >= duration:
-                break
-
-            measurement = {
-                'timestamp': time.time(),
-                'memory_percent': self.get_memory_percent(),
-                'memory_info': self.get_memory_info(),
-                'swap_info': self.get_swap_info(),
-            }
-
-            measurements.append(measurement)
-
-            if callback:
-                callback(measurement)
-
-            time.sleep(interval)
-
-        return measurements
-

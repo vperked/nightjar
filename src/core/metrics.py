@@ -1,12 +1,11 @@
 """
-Metrics collection for Server Monitor.
-
-Tracks alert frequency, monitor execution times, error rates, and webhook success/failure rates.
+Aggregation of monitor readings into metric snapshots.
 """
 
 import time
 from typing import Dict, List, Optional, Any
 from collections import defaultdict, deque
+from core.format import format_duration
 from core.observability import Component, get_logger
 
 logger = get_logger(Component.METRICS)
@@ -171,7 +170,7 @@ class MetricsCollector:
         
         return {
             'uptime_seconds': self.get_uptime_seconds(),
-            'uptime_formatted': self._format_duration(self.get_uptime_seconds()),
+            'uptime_formatted': format_duration(self.get_uptime_seconds()),
             'total_alerts': total_alerts,
             'alert_counts': dict(self.alert_counts),
             'alert_frequency_per_hour': self.get_alert_frequency(),
@@ -194,25 +193,6 @@ class MetricsCollector:
         self.last_execution_times.clear()
         self.alert_timestamps.clear()
 
-    @staticmethod
-    def _format_duration(seconds: float) -> str:
-        """
-        Format duration in seconds to human-readable string.
-
-        Args:
-            seconds: Duration in seconds
-
-        Returns:
-            Formatted duration string (e.g., "2h 30m 15s")
-        """
-        if seconds < 60:
-            return f"{seconds:.0f}s"
-        elif seconds < 3600:
-            minutes = int(seconds // 60)
-            secs = int(seconds % 60)
-            return f"{minutes}m {secs}s"
-        else:
-            hours = int(seconds // 3600)
-            minutes = int((seconds % 3600) // 60)
-            secs = int(seconds % 60)
-            return f"{hours}h {minutes}m {secs}s"
+__all__ = [
+    'MetricsCollector',
+]
