@@ -647,7 +647,7 @@ class DiskMonitor:
                 result.append(human)
         return result
 
-    def cleanup_temporary_files(self, mountpoint: str = '/', max_age_days: int = 7) -> Dict:
+    def cleanup_temporary_files(self, mountpoint: str = '/', max_age_days: float = 7) -> Dict:
         """
         Clean up temporary files to free disk space.
         Cleans /tmp, /var/tmp, and other temporary directories.
@@ -667,7 +667,7 @@ class DiskMonitor:
         }
 
         current_time = time.time()
-        max_age_seconds = max_age_days * 24 * 60 * 60
+        max_age_seconds = max(3600.0, float(max_age_days) * 24 * 60 * 60)
 
         temp_dirs_env = os.getenv('TEMP_DIRS', None)
         if temp_dirs_env:
@@ -1101,7 +1101,7 @@ class DiskMonitor:
         except (OSError, Exception):
             print("[EMERGENCY] Step 1: Cleaning all temporary files...", file=sys.stderr)
         
-        cleanup_stats = self.cleanup_temporary_files(mountpoint, max_age_days=0)
+        cleanup_stats = self.cleanup_temporary_files(mountpoint, max_age_days=1.0 / 24.0)
         stats['files_removed'] += cleanup_stats['files_removed']
         stats['dirs_removed'] += cleanup_stats['dirs_removed']
         stats['total_size_cleared'] += cleanup_stats['total_size_cleared']

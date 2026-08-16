@@ -108,10 +108,11 @@ def test_send_message_uses_circuit_breaker(webhook):
     assert session.calls[0]['json']['content'] == 'hello'
 
 
-def test_http_429_is_treated_as_failure(webhook):
+def test_http_429_is_dropped_without_opening_breaker(webhook):
     webhook.session = FakeSession(behaviour=lambda: FakeResponse(429, {'Retry-After': '5'}))
 
     assert webhook.send_embed(title='CPU high') is False
+    assert webhook.circuit_breaker.is_open() is False
 
 
 def test_embed_fields_are_truncated(webhook):

@@ -7,6 +7,49 @@ from core.observability import Component, get_logger
 
 logger = get_logger(Component.QBITTORRENT)
 
+SEEDING_ACTIVE_STATES = frozenset({
+    'uploading',
+    'stalledup',
+    'queuedup',
+    'forcedup',
+})
+DOWNLOADING_STATES = frozenset({
+    'downloading',
+    'stalleddl',
+    'queueddl',
+    'checkingdl',
+    'pauseddl',
+    'forceddl',
+})
+
+
+def is_download_stalled(torrent: Dict) -> bool:
+    """
+    Return True when a torrent is stuck downloading with no progress.
+
+    Idle seeding (stalledup) is normal and is not treated as stalled here.
+    """
+    state = str(torrent.get('state', '')).lower()
+    dlspeed = torrent.get('dlspeed', 0) or 0
+    progress = torrent.get('progress', 0.0) or 0.0
+    return state == 'stalleddl' and dlspeed == 0 and progress < 1.0
+
+
+def is_seeding_ratio_met(torrent: Dict, min_ratio: float = 1.0) -> bool:
+    """
+    Return True when a completed torrent is actively seeding at or above min_ratio.
+
+    Already paused/stopped seeds and torrents still checking are excluded.
+    """
+    if min_ratio <= 0:
+        return False
+    state = str(torrent.get('state', '')).lower()
+    if state not in SEEDING_ACTIVE_STATES:
+        return False
+    progress = torrent.get('progress', 0.0) or 0.0
+    ratio = torrent.get('ratio', 0.0) or 0.0
+    return progress >= 1.0 and ratio >= min_ratio
+
 
 class QBittorrentMonitor:
     """Monitor qBittorrent torrents using the Web API."""
@@ -239,7 +282,7 @@ class QBittorrentMonitor:
 
         for torrent in all_torrents:
             state = torrent.get('state', '').lower()
-            if state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']:
+            if state in DOWNLOADING_STATES:
                 downloading.append(torrent)
 
         return downloading
@@ -256,7 +299,7 @@ class QBittorrentMonitor:
 
         for torrent in all_torrents:
             state = torrent.get('state', '').lower()
-            if state in ['uploading', 'stalledup', 'queuedup', 'checkingup', 'pausedup']:
+            if state in SEEDING_ACTIVE_STATES:
                 seeding.append(torrent)
 
         return seeding
@@ -362,30 +405,149 @@ class QBittorrentMonitor:
 
         return result
 
-    def get_stalled_torrents(self, min_stalled_seconds: int = 300) -> List[Dict]:
+    def get_stalled_torrents(self) -> List[Dict]:
         """
-        Get torrents that are stalled (not downloading/uploading).
+        Get torrents that are stalled while downloading.
 
-        Args:
-            min_stalled_seconds: Minimum seconds a torrent must be stalled to be included (default: 300 = 5 minutes)
+        Idle seeding (stalledup) is excluded because it is expected when there
+        are no connected peers downloading from us.
 
         Returns:
-            List of dictionaries containing stalled torrent information
+            List of dictionaries containing stalled download torrent information
         """
-        all_torrents = self.get_all_torrents()
-        stalled = []
+        return [torrent for torrent in self.get_all_torrents() if is_download_stalled(torrent)]
 
-        for torrent in all_torrents:
-            state = torrent.get('state', '').lower()
-            dlspeed = torrent.get('dlspeed', 0)
-            upspeed = torrent.get('upspeed', 0)
-            progress = torrent.get('progress', 0.0)
-            
-            is_stalled_download = state == 'stalleddl' and dlspeed == 0 and progress < 1.0
-            is_stalled_upload = state == 'stalledup' and upspeed == 0
-            
-            if is_stalled_download or is_stalled_upload:
-                stalled.append(torrent)
+    def _run_torrent_action(self, torrent_hash: str, action_name: str, api_call) -> bool:
+        """
+        Run a qBittorrent torrent API action behind the circuit breaker.
 
-        return stalled
+        Args:
+            torrent_hash: Torrent infohash
+            action_name: Short action label used in log messages
+            api_call: Zero-argument callable that performs the API request
+
+        Returns:
+            True if the API call succeeded, False otherwise
+        """
+        if not torrent_hash or not self._ensure_connected():
+            return False
+
+        try:
+            self.circuit_breaker.call(api_call)
+            return True
+        except CircuitBreakerOpenError:
+            logger.debug(f"qBittorrent circuit breaker is OPEN, skipping {action_name}")
+            return False
+        except (qbittorrentapi.exceptions.APIConnectionError,
+                qbittorrentapi.exceptions.LoginFailed,
+                qbittorrentapi.exceptions.APIError) as e:
+            logger.debug(f"qBittorrent API error during {action_name} for {torrent_hash[:8]}: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Unexpected error during {action_name} for torrent {torrent_hash[:8]}: {e}")
+            return False
+
+    def reannounce_torrent(self, torrent_hash: str) -> bool:
+        """
+        Force-reannounce a torrent to its trackers.
+
+        Args:
+            torrent_hash: Torrent infohash
+
+        Returns:
+            True if the API call succeeded, False otherwise
+        """
+        return self._run_torrent_action(
+            torrent_hash,
+            'reannounce',
+            lambda: self.client.torrents_reannounce(torrent_hashes=torrent_hash),
+        )
+
+    def resume_torrent(self, torrent_hash: str) -> bool:
+        """
+        Resume a torrent.
+
+        Args:
+            torrent_hash: Torrent infohash
+
+        Returns:
+            True if the API call succeeded, False otherwise
+        """
+        return self._run_torrent_action(
+            torrent_hash,
+            'resume',
+            lambda: self.client.torrents_resume(torrent_hashes=torrent_hash),
+        )
+
+    def pause_torrent(self, torrent_hash: str) -> bool:
+        """
+        Pause a torrent.
+
+        Args:
+            torrent_hash: Torrent infohash
+
+        Returns:
+            True if the API call succeeded, False otherwise
+        """
+        return self._run_torrent_action(
+            torrent_hash,
+            'pause',
+            lambda: self.client.torrents_pause(torrent_hashes=torrent_hash),
+        )
+
+    def recover_stalled_torrent(self, torrent_hash: str) -> Dict:
+        """
+        Attempt to unstick a stalled download via reannounce and resume.
+
+        Args:
+            torrent_hash: Torrent infohash
+
+        Returns:
+            Dictionary with success flag and list of actions that succeeded
+        """
+        actions = []
+        if self.reannounce_torrent(torrent_hash):
+            actions.append('reannounce')
+        if self.resume_torrent(torrent_hash):
+            actions.append('resume')
+
+        return {
+            'success': len(actions) > 0,
+            'actions': actions,
+        }
+
+    def handle_ratio_complete_torrent(self, torrent_hash: str) -> Dict:
+        """
+        Pause a torrent that has met its seeding ratio target.
+
+        Args:
+            torrent_hash: Torrent infohash
+
+        Returns:
+            Dictionary with success flag and list of actions that succeeded
+        """
+        actions = []
+        if self.pause_torrent(torrent_hash):
+            actions.append('pause')
+
+        return {
+            'success': len(actions) > 0,
+            'actions': actions,
+        }
+
+    def get_ratio_complete_torrents(self, min_ratio: float = 1.0) -> List[Dict]:
+        """
+        Get completed seeding torrents at or above the ratio target.
+
+        Args:
+            min_ratio: Minimum share ratio required
+
+        Returns:
+            List of matching torrent dictionaries
+        """
+        return [
+            torrent
+            for torrent in self.get_all_torrents()
+            if is_seeding_ratio_met(torrent, min_ratio=min_ratio)
+        ]
 

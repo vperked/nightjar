@@ -84,6 +84,8 @@ class FreezeMonitor:
 
         if metrics_changed or self.last_metric_update is None:
             self.last_metric_update = current_time
+        elif cpu_percent < 15.0:
+            self.last_metric_update = current_time
 
     def check_system_responsiveness(self, timeout: float = 2.0) -> Dict:
         """

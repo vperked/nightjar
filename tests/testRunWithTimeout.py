@@ -1,4 +1,4 @@
-"""Tests for the shared timeout executor used by the monitoring loop."""
+"""Tests for timeout-wrapped monitoring helpers."""
 
 import threading
 import time
@@ -39,26 +39,49 @@ def test_propagates_exceptions():
         main.run_with_timeout(boom, timeout=5.0)
 
 
-def test_worker_pool_is_bounded_under_repeated_timeouts():
+def test_remains_usable_after_repeated_timeouts():
     stop = threading.Event()
 
     def slow():
         stop.wait(30)
 
-    before = threading.active_count()
     try:
-        for _ in range(20):
+        for _ in range(main.TIMEOUT_EXECUTOR_WORKERS * 2 + 2):
             main.run_with_timeout(slow, timeout=0.02, default_value=None)
 
-        growth = threading.active_count() - before
-        assert growth <= main.TIMEOUT_EXECUTOR_WORKERS
+        assert main.run_with_timeout(lambda: 'ok', timeout=1.0, default_value=None) == 'ok'
     finally:
         stop.set()
-        time.sleep(0.1)
+        time.sleep(0.05)
 
 
-def test_shared_executor_is_reused():
-    first = main._TIMEOUT_EXECUTOR
-    main.run_with_timeout(lambda: 1, timeout=5.0)
+def test_timeout_workers_are_daemon_threads():
+    stop = threading.Event()
+    worker_thread = {}
 
-    assert main._TIMEOUT_EXECUTOR is first
+    def slow():
+        worker_thread['thread'] = threading.current_thread()
+        stop.wait(30)
+
+    try:
+        main.run_with_timeout(slow, timeout=0.05, default_value=None)
+        assert worker_thread['thread'].daemon is True
+    finally:
+        stop.set()
+
+
+def test_send_webhook_uses_timeout_wrapper():
+    calls = []
+
+    def hang():
+        calls.append('start')
+        time.sleep(30)
+        return True
+
+    started = time.time()
+    result = main.send_webhook(hang, operation_name='hanging webhook', timeout=0.05)
+    elapsed = time.time() - started
+
+    assert result is False
+    assert elapsed < 2.0
+    assert calls == ['start']

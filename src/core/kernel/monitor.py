@@ -36,6 +36,7 @@ class KernelMonitor:
         self.last_reported_errors = {}
         self.last_alert_time = {}
         self.last_edac_counts = {}
+        self._pending_reboot_alert = None
         self.persistence_file = persistence_file or DEFAULT_PERSISTENCE_FILE
 
         if ignored_devices is None:
@@ -92,9 +93,16 @@ class KernelMonitor:
             saved_boot_time = data.get('boot_time')
             if saved_boot_time and self.last_boot_time:
                 if abs(saved_boot_time - self.last_boot_time) >= 10.0:
-                    logger.debug("System rebooted since last run, resetting tracking data")
+                    logger.info("System rebooted since last run; queueing reboot alert")
+                    self._pending_reboot_alert = {
+                        'type': 'unexpected_reboot',
+                        'previous_boot_time': float(saved_boot_time),
+                        'current_boot_time': float(self.last_boot_time),
+                        'timestamp': time.time(),
+                    }
                     self.last_reported_errors = {}
                     self.last_alert_time = {}
+                    self.last_edac_counts = {}
                     self._save_tracking_data()
                     return
 
@@ -109,6 +117,7 @@ class KernelMonitor:
             logger.warning(f"Error loading tracking data from {self.persistence_file}: {e}, starting fresh")
             self.last_reported_errors = {}
             self.last_alert_time = {}
+            self._pending_reboot_alert = None
 
     def _save_tracking_data(self):
         """Save tracking data to file for persistence across restarts."""
@@ -783,6 +792,11 @@ class KernelMonitor:
             return None
 
         try:
+            if self._pending_reboot_alert:
+                reboot_info = self._pending_reboot_alert
+                self._pending_reboot_alert = None
+                return reboot_info
+
             current_boot_time = self._get_boot_time()
 
             if current_boot_time is None:
@@ -801,6 +815,7 @@ class KernelMonitor:
                     'timestamp': time.time()
                 }
                 self.last_boot_time = current_boot_time
+                self._save_tracking_data()
                 return reboot_info
 
             return None

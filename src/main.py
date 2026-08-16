@@ -7,7 +7,13 @@ from core.network import NetworkMonitor
 from core.sensors import SensorsMonitor
 from core.processes import ProcessMonitor
 from core.freeze import FreezeMonitor
-from core.qbittorrent import QBittorrentMonitor
+from core.qbittorrent import (
+    QBittorrentMonitor,
+    DOWNLOADING_STATES,
+    SEEDING_ACTIVE_STATES,
+    is_download_stalled,
+    is_seeding_ratio_met,
+)
 from core.logs import LogMonitor
 from core.kernel import KernelMonitor
 from core.updates import run_system_update
@@ -30,6 +36,13 @@ from core.config import (
     DEFAULT_KERNEL_STABILITY_CHECK_INTERVAL, DEFAULT_KERNEL_CHECK_SINCE_MINUTES,
     DEFAULT_MONITORING_WATCHDOG_TIMEOUT, DEFAULT_WATCHDOG_AUTO_RESTART, DEFAULT_WATCHDOG_RESTART_COOLDOWN,
     DEFAULT_STALLED_TORRENT_THRESHOLD,
+    DEFAULT_STALLED_TORRENT_ACTION_COOLDOWN,
+    DEFAULT_STALLED_TORRENT_RECOVERY_GRACE,
+    DEFAULT_STALLED_TORRENT_AUTO_HANDLE,
+    DEFAULT_STALLED_TORRENT_RETRY_BACKOFF,
+    DEFAULT_SEEDING_RATIO_LIMIT,
+    DEFAULT_SEEDING_RATIO_ACTION_COOLDOWN,
+    DEFAULT_SEEDING_RATIO_RETRY_BACKOFF,
     DEFAULT_SYSTEM_UPDATE_INTERVAL_SECONDS, DEFAULT_SYSTEM_UPDATE_TIMEOUT,
     DEFAULT_SYSTEM_UPDATE_ENABLED, DEFAULT_SYSTEM_UPDATE_APPLY,
     DEFAULT_WEB_HOST, DEFAULT_WEB_PORT,
@@ -58,7 +71,6 @@ import traceback
 import threading
 import signal
 import atexit
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -67,12 +79,102 @@ logger = get_logger(Component.CORE)
 
 T = TypeVar('T')
 
-TIMEOUT_EXECUTOR_WORKERS = 4
+TIMEOUT_EXECUTOR_WORKERS = 8
+DEFAULT_WEBHOOK_TIMEOUT = 10.0
 
-_TIMEOUT_EXECUTOR = ThreadPoolExecutor(
-    max_workers=TIMEOUT_EXECUTOR_WORKERS,
-    thread_name_prefix='monitor-timeout'
-)
+_ACTIVE_TIMEOUT_THREADS = 0
+_ACTIVE_TIMEOUT_LOCK = threading.Lock()
+
+
+def run_with_timeout(
+    func: Callable[[], T],
+    timeout: float = 5.0,
+    default_value: Optional[T] = None,
+    operation_name: str = "operation"
+) -> Optional[T]:
+    """
+    Run a function with a timeout on a daemon worker thread.
+
+    Daemon workers are used so timed-out I/O cannot exhaust a shared pool or
+    block process exit. If many workers are still alive after timeouts, a
+    warning is logged (hang backlog), but new calls still start immediately.
+
+    Args:
+        func: Function to execute (callable that takes no arguments)
+        timeout: Maximum time to wait in seconds (default: 5.0)
+        default_value: Value to return if timeout occurs (default: None)
+        operation_name: Name of the operation for logging (default: "operation")
+
+    Returns:
+        Function result or default_value if timeout
+    """
+    global _ACTIVE_TIMEOUT_THREADS
+
+    box: dict = {}
+    done = threading.Event()
+
+    def worker() -> None:
+        global _ACTIVE_TIMEOUT_THREADS
+        try:
+            box['result'] = func()
+        except BaseException as exc:
+            box['error'] = exc
+        finally:
+            done.set()
+            with _ACTIVE_TIMEOUT_LOCK:
+                _ACTIVE_TIMEOUT_THREADS = max(0, _ACTIVE_TIMEOUT_THREADS - 1)
+
+    with _ACTIVE_TIMEOUT_LOCK:
+        _ACTIVE_TIMEOUT_THREADS += 1
+        active = _ACTIVE_TIMEOUT_THREADS
+
+    if active > TIMEOUT_EXECUTOR_WORKERS:
+        logger.warning(
+            f"{operation_name}: {active} timeout workers still active "
+            f"(possible I/O hang backlog)"
+        )
+
+    thread = threading.Thread(
+        target=worker,
+        name=f"monitor-timeout-{operation_name[:48]}",
+        daemon=True,
+    )
+    thread.start()
+
+    if done.wait(timeout):
+        if 'error' in box:
+            logger.error(f"Error in {operation_name}: {box['error']}")
+            raise box['error']
+        return box.get('result', default_value)
+
+    logger.warning(f"{operation_name} timed out after {timeout}s, using default value")
+    return default_value
+
+
+def send_webhook(
+    func: Callable[[], T],
+    operation_name: str,
+    timeout: float = DEFAULT_WEBHOOK_TIMEOUT,
+    default_value: Optional[T] = False,
+) -> Optional[T]:
+    """
+    Send a Discord webhook call behind run_with_timeout.
+
+    Args:
+        func: Zero-argument callable that performs the webhook send
+        operation_name: Name used in timeout/error logs
+        timeout: Maximum seconds to wait for Discord (default: 10.0)
+        default_value: Value returned on timeout/failure scheduling (default: False)
+
+    Returns:
+        Webhook call result, or default_value on timeout
+    """
+    return run_with_timeout(
+        func,
+        timeout=timeout,
+        default_value=default_value,
+        operation_name=operation_name,
+    )
 
 
 def run_self_test() -> bool:
@@ -417,45 +519,6 @@ def run_self_test() -> bool:
     else:
         logger.warning(f"Self-test completed with failures in {elapsed_str}. See logs above.")
     return success
-
-
-def run_with_timeout(
-    func: Callable[[], T],
-    timeout: float = 5.0,
-    default_value: Optional[T] = None,
-    operation_name: str = "operation"
-) -> Optional[T]:
-    """
-    Run a function with a timeout using ThreadPoolExecutor.
-
-    If the timeout fires, the executor is shut down with wait=False so the
-    monitoring thread is not blocked forever while the worker remains stuck
-    in a syscall (e.g. slow disk under thermal load).
-
-    Args:
-        func: Function to execute (callable that takes no arguments)
-        timeout: Maximum time to wait in seconds (default: 5.0)
-        default_value: Value to return if timeout occurs (default: None)
-        operation_name: Name of the operation for logging (default: "operation")
-
-    Returns:
-        Function result or default_value if timeout
-    """
-    try:
-        future = _TIMEOUT_EXECUTOR.submit(func)
-    except RuntimeError as e:
-        logger.error(f"Could not schedule {operation_name}: {e}")
-        return default_value
-
-    try:
-        return future.result(timeout=timeout)
-    except FutureTimeoutError:
-        future.cancel()
-        logger.warning(f"{operation_name} timed out after {timeout}s, using default value")
-        return default_value
-    except Exception as e:
-        logger.error(f"Error in {operation_name}: {e}")
-        raise
 
 
 def main(
@@ -848,7 +911,10 @@ def main(
             start_time = time.time()
             all_info = system_monitor.get_all_info(include_top_processes=True)
             elapsed_time = time.time() - start_time
-            success = webhook.send_system_info_comprehensive(all_info)
+            success = send_webhook(
+                lambda: webhook.send_system_info_comprehensive(all_info),
+                operation_name="webhook send_system_info_comprehensive",
+            )
             if success:
                 logger.info(f"System info sent to Discord ({elapsed_time:.2f}s)")
             else:
@@ -865,7 +931,10 @@ def main(
 
                 if downloading or seeding:
                     logger.info(f"Sending qBittorrent status to Discord ({len(downloading)} downloading, {len(seeding)} seeding)...")
-                    success = qbittorrent_webhook.send_torrent_list(downloading, seeding)
+                    success = send_webhook(
+                        lambda: qbittorrent_webhook.send_torrent_list(downloading, seeding),
+                        operation_name="qbittorrent_webhook send_torrent_list",
+                    )
                     if success:
                         logger.info("qBittorrent status sent to Discord")
                     else:
@@ -938,13 +1007,16 @@ def main(
                 if traceback_text:
                     fields.append({'name': 'Traceback', 'value': f"```\n{traceback_text}\n```", 'inline': False})
 
-                success = target_webhook.send_embed(
+                success = send_webhook(
+                    lambda: target_webhook.send_embed(
                     title='Monitoring Error Detected',
                     description='An error occurred in the monitoring system',
                     fields=fields,
                     color=0x000000,
                     footer='Server Monitor - Error Alert',
                     timestamp=True
+                ),
+                    operation_name="target_webhook send_embed",
                 )
 
                 if success:
@@ -1093,11 +1165,9 @@ def main(
                 if webhook and (current_time - last_metrics_report_time) >= metrics_report_interval:
                     try:
                         metrics_summary = metrics_collector.get_summary()
-                        success = run_with_timeout(
+                        success = send_webhook(
                             lambda: webhook.send_metrics_report(metrics_summary),
-                            timeout=10.0,
-                            default_value=False,
-                            operation_name="Metrics report webhook"
+                            operation_name="Metrics report webhook",
                         )
                         metrics_collector.record_webhook_result(success)
                         if success:
@@ -1326,7 +1396,7 @@ def main(
                                             'inline': False
                                         })
 
-                                    success = run_with_timeout(
+                                    success = send_webhook(
                                         lambda: disk_webhook.send_embed(
                                             title='EMERGENCY: Disk Critically Full',
                                             description='Emergency cleanup performed to prevent disk from reaching 100%',
@@ -1334,9 +1404,7 @@ def main(
                                             footer='Server Monitor - Emergency',
                                             timestamp=True
                                         ),
-                                        timeout=10.0,
-                                        default_value=False,
-                                        operation_name="Emergency cleanup webhook"
+                                        operation_name="Emergency cleanup webhook",
                                     )
                                     if success:
                                         try:
@@ -1349,7 +1417,7 @@ def main(
                                 except (OSError, Exception):
                                     print("[EMERGENCY] No space could be freed! Disk may crash if it reaches 100%!", file=sys.stderr)
                                 if disk_webhook:
-                                    run_with_timeout(
+                                    send_webhook(
                                         lambda: disk_webhook.send_embed(
                                             title='CRITICAL: Disk Cleanup Failed',
                                             description=f'Disk at {disk_percent:.1f}% and emergency cleanup could not free space! Manual intervention required immediately!',
@@ -1361,9 +1429,7 @@ def main(
                                             footer='Server Monitor - Critical Alert',
                                             timestamp=True
                                         ),
-                                        timeout=10.0,
-                                        default_value=False,
-                                        operation_name="Critical disk cleanup failed webhook"
+                                        operation_name="Critical disk cleanup failed webhook",
                                     )
 
                             last_disk_cleanup_time = current_time
@@ -1425,7 +1491,7 @@ def main(
                                             'inline': False
                                         })
 
-                                    success = run_with_timeout(
+                                    success = send_webhook(
                                         lambda: disk_webhook.send_embed(
                                             title='Disk Cleanup Performed',
                                             description='Automatic disk cleanup completed to prevent disk from filling up',
@@ -1433,9 +1499,7 @@ def main(
                                             footer='Server Monitor',
                                             timestamp=True
                                         ),
-                                        timeout=10.0,
-                                        default_value=False,
-                                        operation_name="Disk cleanup webhook"
+                                        operation_name="Disk cleanup webhook",
                                     )
                                     if success:
                                         logger.info("    Discord cleanup notification sent")
@@ -1460,8 +1524,6 @@ def main(
                             default_value=None,
                             operation_name="CPU temperature collection"
                         )
-                        if cpu_temp is None:
-                            cpu_temp = 0.0
                 except Exception as e:
                     logger.debug(f"Error getting temperature: {e}")
                     cpu_temp = None
@@ -1571,10 +1633,13 @@ def main(
                         if webhook:
                             logger.warning(f"[ALERT] CPU: {cpu_percent:.1f}% (threshold: {cpu_threshold:.1f}%)")
                             metrics_collector.record_alert('cpu')
-                            success = webhook.send_cpu_alert(
+                            success = send_webhook(
+                                lambda: webhook.send_cpu_alert(
                                 cpu_percent=cpu_percent,
                                 threshold=cpu_threshold,
                                 per_core=cpu_per_core
+                            ),
+                                operation_name="webhook send_cpu_alert",
                             )
                             metrics_collector.record_webhook_result(success)
                             if success:
@@ -1600,11 +1665,14 @@ def main(
                         if webhook:
                             logger.warning(f"[ALERT] Memory: {memory_percent:.1f}% (threshold: {memory_threshold:.1f}%)")
                             metrics_collector.record_alert('memory')
-                            success = webhook.send_memory_alert(
+                            success = send_webhook(
+                                lambda: webhook.send_memory_alert(
                                 memory_percent=memory_percent,
                                 threshold=memory_threshold,
                                 memory_info=memory_info,
                                 swap_info=swap_info
+                            ),
+                                operation_name="webhook send_memory_alert",
                             )
                             metrics_collector.record_webhook_result(success)
                             if success:
@@ -1636,13 +1704,16 @@ def main(
                         if webhook and gpu_data:
                             logger.warning(f"[ALERT] GPU: {gpu_utilization['gpu']:.1f}% (threshold: {gpu_threshold:.1f}%)")
                             metrics_collector.record_alert('gpu')
-                            success = webhook.send_gpu_alert(
+                            success = send_webhook(
+                                lambda: webhook.send_gpu_alert(
                                 gpu_utilization=gpu_utilization['gpu'],
                                 threshold=gpu_threshold,
                                 gpu_info=gpu_data.get('info'),
                                 memory_info=gpu_data.get('memory'),
                                 temperature=gpu_data.get('temperature'),
                                 power=gpu_data.get('power')
+                            ),
+                                operation_name="webhook send_gpu_alert",
                             )
                             if success:
                                 logger.info("    Discord alert sent")
@@ -1709,12 +1780,15 @@ def main(
                                                 'inline': False
                                             })
 
-                                        success = disk_webhook.send_embed(
+                                        success = send_webhook(
+                                            lambda: disk_webhook.send_embed(
                                             title=f'Disk Usage Alert: {partition_key}',
                                             description=f'Disk usage on {partition_key} has exceeded the threshold of {disk_threshold:.1f}%',
                                             fields=fields,
                                             footer='Server Monitor',
                                             timestamp=True
+                                        ),
+                                            operation_name="disk_webhook send_embed",
                                         )
                                         if success:
                                             logger.info("    Discord alert sent")
@@ -1772,12 +1846,15 @@ def main(
                                     'inline': False
                                 })
 
-                            success = disk_webhook.send_embed(
+                            success = send_webhook(
+                                lambda: disk_webhook.send_embed(
                                 title='Disk Usage Alert',
                                 description=f'Disk usage has exceeded the threshold of {disk_threshold:.1f}%',
                                 fields=fields,
                                 footer='Server Monitor',
                                 timestamp=True
+                            ),
+                                operation_name="disk_webhook send_embed",
                             )
                             if success:
                                 logger.info("    Discord alert sent")
@@ -1812,7 +1889,30 @@ def main(
                                     logger.critical(f"[EMERGENCY] Partition {partition_key}: {percent:.1f}% (emergency threshold: {disk_emergency_threshold:.1f}%) - CRITICAL! Starting emergency cleanup...")
 
                                     try:
-                                        cleanup_stats = disk_monitor.emergency_cleanup_disk_space(mountpoint=mountpoint, log_monitor=log_monitor)
+                                        if watchdog_monitor:
+                                            watchdog_monitor.update_heartbeat()
+                                        cleanup_stats = run_with_timeout(
+                                            lambda mp=mountpoint: disk_monitor.emergency_cleanup_disk_space(
+                                                mountpoint=mp, log_monitor=log_monitor
+                                            ),
+                                            timeout=300.0,
+                                            default_value={
+                                                'total_size_cleared': 0,
+                                                'files_removed': 0,
+                                                'dirs_removed': 0,
+                                                'logs_cleaned': 0,
+                                                'errors': ['cleanup timed out'],
+                                            },
+                                            operation_name=f"Emergency cleanup for {partition_key}"
+                                        ) or {
+                                            'total_size_cleared': 0,
+                                            'files_removed': 0,
+                                            'dirs_removed': 0,
+                                            'logs_cleaned': 0,
+                                            'errors': ['cleanup timed out'],
+                                        }
+                                        if watchdog_monitor:
+                                            watchdog_monitor.update_heartbeat()
 
                                         if cleanup_stats['total_size_cleared'] > 0:
                                             logger.critical(f"[EMERGENCY] Partition {partition_key}: Emergency cleanup cleared {format_bytes(cleanup_stats['total_size_cleared'])} "
@@ -1838,12 +1938,15 @@ def main(
                                                         'inline': False
                                                     })
 
-                                                success = disk_webhook.send_embed(
+                                                success = send_webhook(
+                                                    lambda: disk_webhook.send_embed(
                                                     title='EMERGENCY: Partition Critically Full',
                                                     description=f'Emergency cleanup performed for partition {partition_key}',
                                                     fields=fields,
                                                     footer='Server Monitor - Emergency',
                                                     timestamp=True
+                                                ),
+                                                    operation_name="disk_webhook send_embed",
                                                 )
                                                 if success:
                                                     logger.info(f"    Discord emergency notification sent for {partition_key}")
@@ -1863,8 +1966,33 @@ def main(
                                     logger.warning(f"[CLEANUP] Partition {partition_key}: {percent:.1f}% (cleanup threshold: {disk_cleanup_threshold:.1f}%), starting automatic cleanup...")
 
                                     try:
+                                        if watchdog_monitor:
+                                            watchdog_monitor.update_heartbeat()
                                         target_free_percent = 20.0
-                                        cleanup_stats = disk_monitor.cleanup_disk_space(mountpoint=mountpoint, target_free_percent=target_free_percent, log_monitor=log_monitor)
+                                        cleanup_stats = run_with_timeout(
+                                            lambda mp=mountpoint, tfp=target_free_percent: disk_monitor.cleanup_disk_space(
+                                                mountpoint=mp,
+                                                target_free_percent=tfp,
+                                                log_monitor=log_monitor,
+                                            ),
+                                            timeout=300.0,
+                                            default_value={
+                                                'total_size_cleared': 0,
+                                                'files_removed': 0,
+                                                'dirs_removed': 0,
+                                                'logs_cleaned': 0,
+                                                'errors': ['cleanup timed out'],
+                                            },
+                                            operation_name=f"Disk cleanup for {partition_key}"
+                                        ) or {
+                                            'total_size_cleared': 0,
+                                            'files_removed': 0,
+                                            'dirs_removed': 0,
+                                            'logs_cleaned': 0,
+                                            'errors': ['cleanup timed out'],
+                                        }
+                                        if watchdog_monitor:
+                                            watchdog_monitor.update_heartbeat()
 
                                         if cleanup_stats['total_size_cleared'] > 0:
                                             logger.info(f"[CLEANUP] Partition {partition_key}: Cleaned {format_bytes(cleanup_stats['total_size_cleared'])} "
@@ -1891,12 +2019,15 @@ def main(
                                                         'inline': False
                                                     })
 
-                                                success = disk_webhook.send_embed(
+                                                success = send_webhook(
+                                                    lambda: disk_webhook.send_embed(
                                                     title='Partition Cleanup Performed',
                                                     description=f'Automatic cleanup completed for partition {partition_key}',
                                                     fields=fields,
                                                     footer='Server Monitor',
                                                     timestamp=True
+                                                ),
+                                                    operation_name="disk_webhook send_embed",
                                                 )
                                                 if success:
                                                     logger.info(f"    Discord partition cleanup notification sent for {partition_key}")
@@ -1915,10 +2046,13 @@ def main(
                                 if not partition_alert_sent.get(partition_key, False) or time_since_last_alert >= alert_cooldown:
                                     if disk_webhook:
                                         logger.warning(f"[ALERT] Partition {partition_key}: {percent:.1f}% (threshold: {disk_threshold:.1f}%)")
-                                        success = disk_webhook.send_partition_alert(
+                                        success = send_webhook(
+                                            lambda: disk_webhook.send_partition_alert(
                                             partition=partition,
                                             threshold=disk_threshold,
                                             is_early_warning=False
+                                        ),
+                                            operation_name="disk_webhook send_partition_alert",
                                         )
                                         if success:
                                             logger.info(f"    Discord partition alert sent for {partition_key}")
@@ -1936,10 +2070,13 @@ def main(
                                 if not partition_alert_sent.get(partition_key, False) or time_since_last_alert >= alert_cooldown:
                                     if disk_webhook:
                                         logger.warning(f"[WARNING] Partition {partition_key}: {percent:.1f}% (early warning: {disk_early_warning_threshold:.1f}%)")
-                                        success = disk_webhook.send_partition_alert(
+                                        success = send_webhook(
+                                            lambda: disk_webhook.send_partition_alert(
                                             partition=partition,
                                             threshold=disk_early_warning_threshold,
                                             is_early_warning=True
+                                        ),
+                                            operation_name="disk_webhook send_partition_alert",
                                         )
                                         if success:
                                             logger.info(f"    Discord partition early warning sent for {partition_key}")
@@ -1964,10 +2101,13 @@ def main(
                                     if not partition_alert_sent.get(nvme_key, False) or time_since_last_alert >= alert_cooldown:
                                         if disk_webhook:
                                             logger.warning(f"[WARNING] NVMe {nvme_key}: {nvme_percent:.1f}% (early warning: {disk_early_warning_threshold:.1f}%)")
-                                            success = disk_webhook.send_partition_alert(
+                                            success = send_webhook(
+                                                lambda: disk_webhook.send_partition_alert(
                                                 partition=nvme_partition,
                                                 threshold=disk_early_warning_threshold,
                                                 is_early_warning=True
+                                            ),
+                                                operation_name="disk_webhook send_partition_alert",
                                             )
                                             if success:
                                                 logger.info(f"    Discord NVMe early warning sent for {nvme_key}")
@@ -2055,7 +2195,8 @@ def main(
                                 logger.info(f"    Likely cause: {reason}")
 
                                 metrics_collector.record_alert('temperature')
-                                success = webhook.send_temperature_alert(
+                                success = send_webhook(
+                                    lambda: webhook.send_temperature_alert(
                                     temperature=cpu_temp,
                                     threshold=temp_threshold,
                                     duration=temp_high_duration,
@@ -2064,6 +2205,8 @@ def main(
                                     cpu_freq=cpu_freq_info,
                                     top_processes=top_cpu_procs,
                                     fan_speeds=fans
+                                ),
+                                    operation_name="webhook send_temperature_alert",
                                 )
                                 metrics_collector.record_webhook_result(success)
                                 if success:
@@ -2109,12 +2252,15 @@ def main(
                                     'value': format_bytes_per_second(bandwidth_data.get('bytes_recv_per_sec', 0)),
                                     'inline': True
                                 })
-                            success = webhook.send_embed(
+                            success = send_webhook(
+                                lambda: webhook.send_embed(
                                 title='Network Bandwidth Alert',
                                 description=f'Network bandwidth has exceeded the threshold of {network_bandwidth_threshold:.1f} MB/s',
                                 fields=fields,
                                 footer='Server Monitor',
                                 timestamp=True
+                            ),
+                                operation_name="webhook send_embed",
                             )
                             if success:
                                 logger.info("    Discord alert sent")
@@ -2152,10 +2298,13 @@ def main(
                                 if time_since_last_alert >= alert_cooldown:
                                     if webhook:
                                         logger.warning(f"[ALERT] Process {name} (PID: {pid}): CPU {cpu_usage:.1f}% (threshold: {process_cpu_threshold:.1f}%)")
-                                        success = webhook.send_process_alert(
+                                        success = send_webhook(
+                                            lambda: webhook.send_process_alert(
                                             process_info=proc,
                                             resource_type='cpu',
                                             threshold=process_cpu_threshold
+                                        ),
+                                            operation_name="webhook send_process_alert",
                                         )
                                         if success:
                                             logger.info("    Discord alert sent")
@@ -2177,10 +2326,13 @@ def main(
                                 if time_since_last_alert >= alert_cooldown:
                                     if webhook:
                                         logger.warning(f"[ALERT] Process {name} (PID: {pid}): Memory {memory_usage:.1f}% (threshold: {process_memory_threshold:.1f}%)")
-                                        success = webhook.send_process_alert(
+                                        success = send_webhook(
+                                            lambda: webhook.send_process_alert(
                                             process_info=proc,
                                             resource_type='memory',
                                             threshold=process_memory_threshold
+                                        ),
+                                            operation_name="webhook send_process_alert",
                                         )
                                         if success:
                                             logger.info("    Discord alert sent")
@@ -2216,14 +2368,12 @@ def main(
                                         except Exception:
                                             current_system_info = None
 
-                                        success = run_with_timeout(
+                                        success = send_webhook(
                                             lambda: webhook.send_freeze_alert(
                                                 freeze_status=freeze_status,
                                                 system_info=current_system_info
                                             ),
-                                            timeout=10.0,
-                                            default_value=False,
-                                            operation_name="Freeze alert webhook"
+                                            operation_name="Freeze alert webhook",
                                         )
                                         if success:
                                             logger.info("    Discord freeze alert sent")
@@ -2269,11 +2419,12 @@ def main(
 
                                 subdirs_human = []
                                 for subdir in subdirs:
+                                    subdir_path = subdir['path']
                                     subdir_human = run_with_timeout(
-                                        lambda: disk_monitor.get_directory_size_human(subdir['path']),
+                                        lambda p=subdir_path: disk_monitor.get_directory_size_human(p),
                                         timeout=30.0,
                                         default_value=None,
-                                        operation_name=f"Get subdirectory size for {subdir['path']}"
+                                        operation_name=f"Get subdirectory size for {subdir_path}"
                                     )
                                     if subdir_human:
                                         subdir_human['size_bytes'] = subdir['size']
@@ -2282,16 +2433,14 @@ def main(
                                 if disk_webhook:
                                     size_formatted = format_bytes(media_size_info['size'])
                                     logger.warning(f"[ALERT] Directory {media_directory}: {size_formatted} (threshold: {format_bytes(media_directory_threshold_bytes)})")
-                                    success = run_with_timeout(
+                                    success = send_webhook(
                                         lambda: disk_webhook.send_directory_size_alert(
                                             directory_path=media_directory,
                                             size_bytes=media_size_info['size'],
                                             threshold_bytes=media_directory_threshold_bytes,
                                             subdirectories=subdirs_human
                                         ),
-                                        timeout=10.0,
-                                        default_value=False,
-                                        operation_name="Directory size alert webhook"
+                                        operation_name="Directory size alert webhook",
                                     )
                                     if success:
                                         logger.info("    Discord directory alert sent")
@@ -2326,11 +2475,62 @@ def main(
                                 )
                                 current_torrents = {torrent['hash']: torrent for torrent in all_torrents}
 
+                                stalled_threshold = get_env_float(
+                                    'STALLED_TORRENT_THRESHOLD',
+                                    DEFAULT_STALLED_TORRENT_THRESHOLD,
+                                    min_val=30.0,
+                                    max_val=86400.0,
+                                )
+                                stalled_action_cooldown = get_env_float(
+                                    'STALLED_TORRENT_ACTION_COOLDOWN',
+                                    DEFAULT_STALLED_TORRENT_ACTION_COOLDOWN,
+                                    min_val=60.0,
+                                    max_val=86400.0,
+                                )
+                                stalled_recovery_grace = get_env_float(
+                                    'STALLED_TORRENT_RECOVERY_GRACE',
+                                    DEFAULT_STALLED_TORRENT_RECOVERY_GRACE,
+                                    min_val=0.0,
+                                    max_val=3600.0,
+                                )
+                                stalled_auto_handle = get_env_bool(
+                                    'STALLED_TORRENT_AUTO_HANDLE',
+                                    DEFAULT_STALLED_TORRENT_AUTO_HANDLE,
+                                )
+                                stalled_retry_backoff = get_env_float(
+                                    'STALLED_TORRENT_RETRY_BACKOFF',
+                                    DEFAULT_STALLED_TORRENT_RETRY_BACKOFF,
+                                    min_val=5.0,
+                                    max_val=3600.0,
+                                )
+                                seeding_ratio_limit = get_env_float(
+                                    'SEEDING_RATIO_LIMIT',
+                                    DEFAULT_SEEDING_RATIO_LIMIT,
+                                    min_val=0.0,
+                                    max_val=100.0,
+                                )
+                                seeding_ratio_action_cooldown = get_env_float(
+                                    'SEEDING_RATIO_ACTION_COOLDOWN',
+                                    DEFAULT_SEEDING_RATIO_ACTION_COOLDOWN,
+                                    min_val=60.0,
+                                    max_val=86400.0,
+                                )
+                                seeding_ratio_retry_backoff = get_env_float(
+                                    'SEEDING_RATIO_RETRY_BACKOFF',
+                                    DEFAULT_SEEDING_RATIO_RETRY_BACKOFF,
+                                    min_val=5.0,
+                                    max_val=3600.0,
+                                )
+
                                 for torrent_hash, torrent in current_torrents.items():
                                     state = torrent.get('state', '').lower()
                                     progress = torrent.get('progress', 0.0)
 
-                                    is_seeding = state in ['uploading', 'stalledup', 'queuedup']
+                                    is_seeding = state in SEEDING_ACTIVE_STATES
+                                    stalled_download = is_download_stalled(torrent)
+                                    ratio_complete = is_seeding_ratio_met(
+                                        torrent, min_ratio=seeding_ratio_limit
+                                    )
 
                                     if torrent_hash not in tracked_torrents:
                                         tracked_torrents[torrent_hash] = {
@@ -2339,40 +2539,69 @@ def main(
                                             'name': torrent.get('name', 'Unknown'),
                                             'notified_download': False,
                                             'notified_seeding': False,
-                                            'notified_stalled': False,
-                                            'stalled_since': None
+                                            'stalled_since': current_time if stalled_download else None,
+                                            'unstalled_since': None,
+                                            'last_stalled_action': None,
+                                            'last_ratio_action': None,
+                                            'seen_at': current_time,
                                         }
-                                        continue
+                                        prev_state = state
+                                    else:
+                                        prev_state = tracked_torrents[torrent_hash]['state']
 
-                                    prev_state = tracked_torrents[torrent_hash]['state']
-                                    prev_was_seeding = prev_state in ['uploading', 'stalledup', 'queuedup']
-                                    prev_was_downloading = prev_state in ['downloading', 'stalleddl', 'queueddl', 'checkingdl', 'pauseddl']
-                                    
-                                    is_stalled_dl = state == 'stalleddl' and torrent.get('dlspeed', 0) == 0 and progress < 1.0
-                                    is_stalled_up = state == 'stalledup' and torrent.get('upspeed', 0) == 0
-                                    is_stalled = is_stalled_dl or is_stalled_up
-                                    
-                                    prev_was_stalled = prev_state in ['stalleddl', 'stalledup']
-                                    
-                                    if is_stalled and not prev_was_stalled:
-                                        tracked_torrents[torrent_hash]['stalled_since'] = current_time
-                                    elif not is_stalled and prev_was_stalled:
-                                        tracked_torrents[torrent_hash]['stalled_since'] = None
-                                        tracked_torrents[torrent_hash]['notified_stalled'] = False
-                                    
-                                    stalled_since = tracked_torrents[torrent_hash].get('stalled_since')
-                                    if is_stalled and stalled_since and not tracked_torrents[torrent_hash]['notified_stalled']:
+                                    prev_was_seeding = prev_state in SEEDING_ACTIVE_STATES
+                                    prev_was_downloading = prev_state in DOWNLOADING_STATES
+
+                                    if stalled_download:
+                                        tracked_torrents[torrent_hash]['unstalled_since'] = None
+                                        if tracked_torrents[torrent_hash].get('stalled_since') is None:
+                                            tracked_torrents[torrent_hash]['stalled_since'] = current_time
+
+                                        stalled_since = tracked_torrents[torrent_hash]['stalled_since']
                                         stalled_duration = current_time - stalled_since
-                                        stalled_threshold = get_env_float('STALLED_TORRENT_THRESHOLD', DEFAULT_STALLED_TORRENT_THRESHOLD)
-                                        
-                                        if stalled_duration >= stalled_threshold:
+                                        last_action = tracked_torrents[torrent_hash].get('last_stalled_action') or 0.0
+                                        action_due = (
+                                            stalled_duration >= stalled_threshold
+                                            and (current_time - last_action) >= stalled_action_cooldown
+                                        )
+
+                                        if action_due:
+                                            actions_taken = []
+                                            torrent_name = torrent.get('name', 'Unknown')
+                                            recovery_ok = not stalled_auto_handle
+                                            if stalled_auto_handle:
+                                                recovery = run_with_timeout(
+                                                    lambda h=torrent_hash: qbittorrent_monitor.recover_stalled_torrent(h),
+                                                    timeout=15.0,
+                                                    default_value={'success': False, 'actions': []},
+                                                    operation_name="Recover stalled torrent"
+                                                ) or {'success': False, 'actions': []}
+                                                actions_taken = list(recovery.get('actions') or [])
+                                                recovery_ok = bool(actions_taken)
+                                                if recovery_ok:
+                                                    logger.warning(
+                                                        f"[qBittorrent] Recovering stalled torrent: {torrent_name} "
+                                                        f"(stalled for {stalled_duration:.0f}s; actions: {', '.join(actions_taken)})"
+                                                    )
+                                                else:
+                                                    logger.warning(
+                                                        f"[qBittorrent] Failed to recover stalled torrent: {torrent_name} "
+                                                        f"(stalled for {stalled_duration:.0f}s)"
+                                                    )
+                                            else:
+                                                logger.warning(
+                                                    f"[qBittorrent] Torrent stalled: {torrent_name} "
+                                                    f"(stalled for {stalled_duration:.0f}s)"
+                                                )
+
                                             if qbittorrent_webhook:
-                                                logger.warning(f"[qBittorrent] Torrent stalled: {torrent.get('name', 'Unknown')} (stalled for {stalled_duration:.0f}s)")
-                                                success = run_with_timeout(
-                                                    lambda: qbittorrent_webhook.send_stalled_torrent_alert(torrent, stalled_duration),
-                                                    timeout=10.0,
-                                                    default_value=False,
-                                                    operation_name="Stalled torrent alert webhook"
+                                                success = send_webhook(
+                                                    lambda t=torrent, d=stalled_duration, a=actions_taken: (
+                                                        qbittorrent_webhook.send_stalled_torrent_alert(
+                                                            t, d, actions_taken=a or None
+                                                        )
+                                                    ),
+                                                    operation_name="Stalled torrent alert webhook",
                                                 )
                                                 metrics_collector.record_alert('torrent_stalled')
                                                 metrics_collector.record_webhook_result(success)
@@ -2380,17 +2609,76 @@ def main(
                                                     logger.info("    Discord stalled torrent alert sent")
                                                 else:
                                                     logger.warning("    Discord stalled torrent alert failed")
-                                            tracked_torrents[torrent_hash]['notified_stalled'] = True
+
+                                            if recovery_ok:
+                                                tracked_torrents[torrent_hash]['last_stalled_action'] = current_time
+                                            else:
+                                                tracked_torrents[torrent_hash]['last_stalled_action'] = (
+                                                    current_time - stalled_action_cooldown + stalled_retry_backoff
+                                                )
+                                    else:
+                                        if tracked_torrents[torrent_hash].get('stalled_since') is not None:
+                                            unstalled_since = tracked_torrents[torrent_hash].get('unstalled_since')
+                                            if unstalled_since is None:
+                                                tracked_torrents[torrent_hash]['unstalled_since'] = current_time
+                                            elif (current_time - unstalled_since) >= stalled_recovery_grace:
+                                                tracked_torrents[torrent_hash]['stalled_since'] = None
+                                                tracked_torrents[torrent_hash]['unstalled_since'] = None
+
+                                    if ratio_complete:
+                                        last_ratio_action = tracked_torrents[torrent_hash].get('last_ratio_action') or 0.0
+                                        if (current_time - last_ratio_action) >= seeding_ratio_action_cooldown:
+                                            torrent_name = torrent.get('name', 'Unknown')
+                                            ratio_value = torrent.get('ratio', 0.0) or 0.0
+                                            ratio_result = run_with_timeout(
+                                                lambda h=torrent_hash: qbittorrent_monitor.handle_ratio_complete_torrent(h),
+                                                timeout=15.0,
+                                                default_value={'success': False, 'actions': []},
+                                                operation_name="Handle ratio-complete torrent"
+                                            ) or {'success': False, 'actions': []}
+                                            actions_taken = list(ratio_result.get('actions') or [])
+                                            if actions_taken:
+                                                logger.info(
+                                                    f"[qBittorrent] Ratio limit reached: {torrent_name} "
+                                                    f"(ratio {ratio_value:.2f} >= {seeding_ratio_limit:.2f}; "
+                                                    f"actions: {', '.join(actions_taken)})"
+                                                )
+                                            else:
+                                                logger.warning(
+                                                    f"[qBittorrent] Failed to pause ratio-complete torrent: {torrent_name} "
+                                                    f"(ratio {ratio_value:.2f} >= {seeding_ratio_limit:.2f})"
+                                                )
+
+                                            if qbittorrent_webhook:
+                                                success = send_webhook(
+                                                    lambda t=torrent, lim=seeding_ratio_limit, a=actions_taken: (
+                                                        qbittorrent_webhook.send_ratio_limit_alert(
+                                                            t, lim, actions_taken=a or None
+                                                        )
+                                                    ),
+                                                    operation_name="Ratio limit alert webhook",
+                                                )
+                                                metrics_collector.record_alert('torrent_ratio_limit')
+                                                metrics_collector.record_webhook_result(success)
+                                                if success:
+                                                    logger.info("    Discord ratio limit alert sent")
+                                                else:
+                                                    logger.warning("    Discord ratio limit alert failed")
+
+                                            if actions_taken:
+                                                tracked_torrents[torrent_hash]['last_ratio_action'] = current_time
+                                            else:
+                                                tracked_torrents[torrent_hash]['last_ratio_action'] = (
+                                                    current_time - seeding_ratio_action_cooldown + seeding_ratio_retry_backoff
+                                                )
 
                                     if is_seeding and progress >= 1.0:
                                         if not tracked_torrents[torrent_hash]['notified_download'] and prev_was_downloading:
                                             if qbittorrent_webhook:
                                                 logger.info(f"[qBittorrent] Download complete: {torrent.get('name', 'Unknown')}")
-                                                success = run_with_timeout(
-                                                    lambda: qbittorrent_webhook.send_download_complete_alert(torrent),
-                                                    timeout=10.0,
-                                                    default_value=False,
-                                                    operation_name="Download complete alert webhook"
+                                                success = send_webhook(
+                                                    lambda t=torrent: qbittorrent_webhook.send_download_complete_alert(t),
+                                                    operation_name="Download complete alert webhook",
                                                 )
                                                 if success:
                                                     logger.info("    Discord download complete notification sent")
@@ -2402,11 +2690,9 @@ def main(
                                         if not tracked_torrents[torrent_hash]['notified_seeding']:
                                             if qbittorrent_webhook:
                                                 logger.info(f"[qBittorrent] Torrent seeding: {torrent.get('name', 'Unknown')}")
-                                                success = run_with_timeout(
-                                                    lambda: qbittorrent_webhook.send_seeding_notification(torrent),
-                                                    timeout=10.0,
-                                                    default_value=False,
-                                                    operation_name="Seeding notification webhook"
+                                                success = send_webhook(
+                                                    lambda t=torrent: qbittorrent_webhook.send_seeding_notification(t),
+                                                    operation_name="Seeding notification webhook",
                                                 )
                                                 if success:
                                                     logger.info("    Discord seeding notification sent")
@@ -2423,7 +2709,11 @@ def main(
 
                                 if len(tracked_torrents) > MAX_TRACKED_TORRENTS:
                                     logger.warning(f"Tracked torrents dict too large ({len(tracked_torrents)}), clearing old entries")
-                                    oldest_hashes = sorted(tracked_torrents.keys())[:len(tracked_torrents) - MAX_TRACKED_TORRENTS]
+                                    overflow = len(tracked_torrents) - MAX_TRACKED_TORRENTS
+                                    oldest_hashes = sorted(
+                                        tracked_torrents.keys(),
+                                        key=lambda h: tracked_torrents[h].get('seen_at') or 0.0,
+                                    )[:overflow]
                                     for old_hash in oldest_hashes:
                                         del tracked_torrents[old_hash]
                             except (ConnectionError, TimeoutError, ValueError) as e:
@@ -2508,7 +2798,7 @@ def main(
                                 continue
 
                             current_log_info = run_with_timeout(
-                                lambda: log_monitor.get_log_size(log_path),
+                                lambda p=log_path: log_monitor.get_log_size(p),
                                 timeout=5.0,
                                 default_value=None,
                                 operation_name=f"Get log size for {log_path}"
@@ -2542,7 +2832,9 @@ def main(
                                     except (OSError, Exception):
                                         pass
                                 cleanup_success = run_with_timeout(
-                                    lambda: log_monitor.cleanup_log(current_log_info, force=aggressive_log_cleanup),
+                                    lambda info=current_log_info, force=aggressive_log_cleanup: (
+                                        log_monitor.cleanup_log(info, force=force)
+                                    ),
                                     timeout=30.0,
                                     default_value=False,
                                     operation_name=f"Cleanup log {log_path}"
@@ -2556,7 +2848,7 @@ def main(
                                     cleaned_logs.add(log_path)
 
                                     size_after = run_with_timeout(
-                                        lambda: log_monitor.get_log_size(log_path),
+                                        lambda p=log_path: log_monitor.get_log_size(p),
                                         timeout=5.0,
                                         default_value=None,
                                         operation_name=f"Get log size after cleanup for {log_path}"
@@ -2588,14 +2880,12 @@ def main(
 
                         if cleaned_logs_batch and webhook:
                             logger.warning(f"[ALERT] {len(cleaned_logs_batch)} log file(s) exceeded threshold and were auto-cleaned")
-                            success = run_with_timeout(
+                            success = send_webhook(
                                 lambda: webhook.send_batched_log_cleanup_alert(
                                     cleaned_logs=cleaned_logs_batch,
                                     threshold_formatted=threshold_formatted
                                 ),
-                                timeout=10.0,
-                                default_value=False,
-                                operation_name="Batched log cleanup alert webhook"
+                                operation_name="Batched log cleanup alert webhook",
                             )
                             if success:
                                 logger.info(f"    Discord batched log cleanup alert sent for {len(cleaned_logs_batch)} log(s)")
@@ -2665,12 +2955,15 @@ def main(
                                     alert_hash = hashlib.md5(json.dumps(alert_content, sort_keys=True).encode()).hexdigest()
 
                                     if alert_hash != last_kernel_stability_alert_hash:
-                                        success = crash_webhook.send_embed(
+                                        success = send_webhook(
+                                            lambda: crash_webhook.send_embed(
                                             title=alert_content['title'],
                                             description=alert_content['description'],
                                             fields=fields,
                                             footer='Server Monitor - Kernel Stability',
                                             timestamp=True
+                                        ),
+                                            operation_name="crash_webhook send_embed",
                                         )
                                         if success:
                                             logger.info("    Discord kernel stability alert sent")
@@ -2712,12 +3005,15 @@ def main(
                                         {'name': 'Status', 'value': 'System may have crashed or was unexpectedly rebooted', 'inline': False},
                                     ]
 
-                                    success = crash_webhook.send_embed(
+                                    success = send_webhook(
+                                        lambda: crash_webhook.send_embed(
                                         title='Kernel Alert: Unexpected System Reboot',
                                         description='System reboot detected - possible kernel crash or unexpected shutdown',
                                         fields=fields,
                                         footer='Server Monitor - Kernel',
                                         timestamp=True
+                                    ),
+                                        operation_name="crash_webhook send_embed",
                                     )
                                     if success:
                                         logger.info("    Discord kernel reboot alert sent")
@@ -2859,21 +3155,23 @@ def main(
                                         'inline': False
                                     })
 
-                                    success = crash_webhook.send_embed(
+                                    success = send_webhook(
+                                        lambda: crash_webhook.send_embed(
                                         title='Kernel Alert: Early Warning Signs Detected',
                                         description='System showing early warning signs that may indicate impending kernel crash',
                                         fields=fields,
                                         footer='Server Monitor - Kernel Warning',
                                         timestamp=True
+                                    ),
+                                        operation_name="crash_webhook send_embed",
                                     )
+                                    if hardware_errors:
+                                        for hw_error in hardware_errors:
+                                            error_type = hw_error.get('type', 'unknown')
+                                            error_key = f"{error_type}_{hw_error.get('device', '')}_{hw_error.get('source', '')}"
+                                            last_hardware_error_alert_times[error_key] = current_time
                                     if success:
                                         logger.info("    Discord kernel early warning alert sent")
-                                        
-                                        if hardware_errors:
-                                            for hw_error in hardware_errors:
-                                                error_type = hw_error.get('type', 'unknown')
-                                                error_key = f"{error_type}_{hw_error.get('device', '')}_{hw_error.get('source', '')}"
-                                                last_hardware_error_alert_times[error_key] = current_time
                                     else:
                                         logger.warning("    Discord kernel early warning alert failed")
 
@@ -2922,12 +3220,15 @@ def main(
                                             'inline': False
                                         })
 
-                                    success = crash_webhook.send_embed(
+                                    success = send_webhook(
+                                        lambda: crash_webhook.send_embed(
                                         title='Kernel Alert: Crash/Panic Detected',
                                         description='Kernel crashes, panics, or oops detected in system logs',
                                         fields=fields,
                                         footer='Server Monitor - Kernel',
                                         timestamp=True
+                                    ),
+                                        operation_name="crash_webhook send_embed",
                                     )
                                     if success:
                                         logger.info("    Discord kernel crash alert sent")
@@ -3016,7 +3317,10 @@ def main(
         if webhook and is_graceful:
             try:
                 logger.info("Sending shutdown notification...")
-                success = webhook.send_shutdown_notification(uptime_seconds=uptime_seconds, shutdown_seconds=shutdown_seconds)
+                success = send_webhook(
+                    lambda: webhook.send_shutdown_notification(uptime_seconds=uptime_seconds, shutdown_seconds=shutdown_seconds),
+                    operation_name="webhook send_shutdown_notification",
+                )
                 if success:
                     logger.info("Shutdown notification sent")
                 else:
@@ -3042,7 +3346,8 @@ def main(
                 if len(traceback_text) > 1500:
                     traceback_text = traceback_text[:1500] + "... (truncated)"
 
-                crash_webhook_to_use.send_embed(
+                send_webhook(
+                    lambda: crash_webhook_to_use.send_embed(
                     title='CRITICAL: Server Monitor Crashed',
                     description='The monitoring loop crashed due to an unhandled exception',
                     fields=[
@@ -3055,6 +3360,8 @@ def main(
                     color=0x000000,
                     footer='Server Monitor - Crash Alert',
                     timestamp=True
+                ),
+                    operation_name="crash_webhook_to_use send_embed",
                 )
                 logger.info("Crash alert sent to Discord")
             except Exception as webhook_error:

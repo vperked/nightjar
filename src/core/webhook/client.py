@@ -138,16 +138,21 @@ class DiscordWebhook:
             self._log_fallback(fallback_message)
             return False
 
-        def _send_post() -> bool:
+        def _send_post():
             response = self.session.post(self.webhook_url, json=payload, timeout=10)
             if response.status_code == 429:
                 retry_after = response.headers.get('Retry-After', '?')
                 logger.warning(f"Discord returned 429, retry after {retry_after}s")
+                return 'rate_limited'
             response.raise_for_status()
             return True
 
         try:
-            return self.circuit_breaker.call(_send_post)
+            result = self.circuit_breaker.call(_send_post)
+            if result == 'rate_limited':
+                self._log_fallback(fallback_message)
+                return False
+            return bool(result)
         except KeyboardInterrupt:
             raise
         except CircuitBreakerOpenError:
@@ -1393,13 +1398,19 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_stalled_torrent_alert(self, torrent_info: Dict, stalled_duration_seconds: float = 0.0) -> bool:
+    def send_stalled_torrent_alert(
+        self,
+        torrent_info: Dict,
+        stalled_duration_seconds: float = 0.0,
+        actions_taken: Optional[List[str]] = None,
+    ) -> bool:
         """
         Send a notification when a torrent is stalled.
 
         Args:
             torrent_info: Dictionary containing torrent information
             stalled_duration_seconds: How long the torrent has been stalled (optional)
+            actions_taken: Remediation steps already attempted (optional)
 
         Returns:
             True if message was sent successfully, False otherwise
@@ -1415,7 +1426,7 @@ class DiscordWebhook:
         save_path = torrent_info.get('save_path', 'N/A')
         size = torrent_info.get('size', 0)
 
-        is_download_stalled = state.lower() == 'stalleddl'
+        is_download_stalled = str(state).lower() == 'stalleddl'
         stalled_type = "Download" if is_download_stalled else "Upload"
 
         fields = [
@@ -1481,6 +1492,13 @@ class DiscordWebhook:
                 'inline': True
             })
 
+        if actions_taken:
+            fields.append({
+                'name': 'Action Taken',
+                'value': ', '.join(actions_taken),
+                'inline': False
+            })
+
         fields.append({
             'name': 'Save Path',
             'value': save_path[:256] if save_path != 'N/A' else 'N/A',
@@ -1488,11 +1506,127 @@ class DiscordWebhook:
         })
 
         color = 0x000000
+        if actions_taken:
+            description = (
+                f'Torrent **{name[:100]}** has stalled; attempted recovery: '
+                f'{", ".join(actions_taken)}'
+            )
+        else:
+            description = f'Torrent **{name[:100]}** has stalled and is not downloading'
 
         return self.send_embed(
             title=f'Torrent Stalled ({stalled_type})',
-            description=f'Torrent **{name[:100]}** has stalled and is not downloading/uploading',
+            description=description,
             color=color,
+            fields=fields,
+            footer='Server Monitor - qBittorrent',
+            timestamp=True
+        )
+
+    def send_ratio_limit_alert(
+        self,
+        torrent_info: Dict,
+        ratio_limit: float = 1.0,
+        actions_taken: Optional[List[str]] = None,
+    ) -> bool:
+        """
+        Send a notification when a seeding torrent reaches its ratio limit.
+
+        Args:
+            torrent_info: Dictionary containing torrent information
+            ratio_limit: Configured minimum ratio that triggered handling
+            actions_taken: Remediation steps already attempted (optional)
+
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        name = torrent_info.get('name', 'Unknown')
+        state = torrent_info.get('state', 'Unknown')
+        progress = torrent_info.get('progress_percent', 0.0)
+        ratio = torrent_info.get('ratio', 0.0) or 0.0
+        upspeed = torrent_info.get('upspeed', 0)
+        seeds = torrent_info.get('seeds', 0)
+        peers = torrent_info.get('peers', 0)
+        save_path = torrent_info.get('save_path', 'N/A')
+        size = torrent_info.get('size', 0)
+        uploaded = torrent_info.get('uploaded', 0)
+
+        fields = [
+            {
+                'name': 'Torrent Name',
+                'value': name[:256],
+                'inline': False
+            },
+            {
+                'name': 'State',
+                'value': state,
+                'inline': True
+            },
+            {
+                'name': 'Progress',
+                'value': f"{progress:.1f}%",
+                'inline': True
+            },
+            {
+                'name': 'Size',
+                'value': format_bytes(size),
+                'inline': True
+            },
+            {
+                'name': 'Ratio',
+                'value': f'{ratio:.2f}',
+                'inline': True
+            },
+            {
+                'name': 'Ratio Limit',
+                'value': f'{ratio_limit:.2f}',
+                'inline': True
+            },
+            {
+                'name': 'Uploaded',
+                'value': format_bytes(uploaded),
+                'inline': True
+            },
+            {
+                'name': 'Upload Speed',
+                'value': format_bytes_per_second(upspeed),
+                'inline': True
+            },
+            {
+                'name': 'Seeds / Peers',
+                'value': f'{seeds} / {peers}',
+                'inline': True
+            },
+        ]
+
+        if actions_taken:
+            fields.append({
+                'name': 'Action Taken',
+                'value': ', '.join(actions_taken),
+                'inline': False
+            })
+
+        fields.append({
+            'name': 'Save Path',
+            'value': save_path[:256] if save_path != 'N/A' else 'N/A',
+            'inline': False
+        })
+
+        if actions_taken:
+            description = (
+                f'Torrent **{name[:100]}** reached ratio {ratio:.2f}; '
+                f'attempted: {", ".join(actions_taken)}'
+            )
+        else:
+            description = (
+                f'Torrent **{name[:100]}** reached seeding ratio '
+                f'{ratio:.2f} (limit {ratio_limit:.2f})'
+            )
+
+        return self.send_embed(
+            title='Seeding Ratio Limit Reached',
+            description=description,
+            color=self.DEFAULT_EMBED_COLOR,
             fields=fields,
             footer='Server Monitor - qBittorrent',
             timestamp=True

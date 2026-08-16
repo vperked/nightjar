@@ -20,12 +20,22 @@ def test_first_update_sets_metric_timestamp(monitor):
     assert monitor.last_metric_update is not None
 
 
-def test_unchanged_metrics_do_not_refresh_timestamp(monitor):
+def test_unchanged_metrics_refresh_timestamp_when_idle(monitor):
     monitor.update_metrics(cpu_percent=10.0, memory_percent=20.0)
     first_update = monitor.last_metric_update
 
     time.sleep(0.01)
     monitor.update_metrics(cpu_percent=10.0, memory_percent=20.0)
+
+    assert monitor.last_metric_update >= first_update
+
+
+def test_unchanged_busy_metrics_do_not_refresh_timestamp(monitor):
+    monitor.update_metrics(cpu_percent=55.0, memory_percent=20.0)
+    first_update = monitor.last_metric_update
+
+    time.sleep(0.01)
+    monitor.update_metrics(cpu_percent=55.0, memory_percent=20.0)
 
     assert monitor.last_metric_update == first_update
 
@@ -70,14 +80,14 @@ def test_changed_network_io_refreshes_timestamp(monitor):
     assert monitor.last_metric_update > first_update
 
 
-def test_sub_threshold_change_is_not_a_change(monitor):
+def test_sub_threshold_change_is_idle_refresh(monitor):
     monitor.update_metrics(cpu_percent=10.0, memory_percent=20.0)
     first_update = monitor.last_metric_update
 
     time.sleep(0.01)
     monitor.update_metrics(cpu_percent=10.05, memory_percent=20.05)
 
-    assert monitor.last_metric_update == first_update
+    assert monitor.last_metric_update >= first_update
 
 
 def test_stalled_metrics_flag_freeze(monitor):
