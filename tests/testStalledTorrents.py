@@ -4,7 +4,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from core.qbittorrent import QBittorrentMonitor, is_download_stalled, is_seeding_ratio_met
+from core.qbittorrent import (
+    QBittorrentMonitor,
+    is_download_stalled,
+    is_inactive_torrent,
+    is_seeding_ratio_met,
+    should_remove_torrent,
+)
 
 
 @pytest.mark.parametrize('torrent,expected', [
@@ -18,6 +24,26 @@ from core.qbittorrent import QBittorrentMonitor, is_download_stalled, is_seeding
 ])
 def test_is_download_stalled(torrent, expected):
     assert is_download_stalled(torrent) is expected
+
+
+@pytest.mark.parametrize('torrent,expected', [
+    ({'state': 'pausedup'}, True),
+    ({'state': 'stoppedup'}, True),
+    ({'state': 'pauseddl'}, True),
+    ({'state': 'stoppeddl'}, True),
+    ({'state': 'error'}, True),
+    ({'state': 'missingFiles'}, True),
+    ({'state': 'uploading'}, False),
+    ({'state': 'stalledup'}, False),
+    ({'state': 'downloading'}, False),
+    ({'state': 'stalleddl'}, False),
+    ({'state': 'queueddl'}, False),
+    ({'state': 'queuedup'}, False),
+    ({'state': 'checkingdl'}, False),
+    ({'state': 'moving'}, False),
+])
+def test_is_inactive_torrent(torrent, expected):
+    assert is_inactive_torrent(torrent) is expected
 
 
 @pytest.mark.parametrize('torrent,min_ratio,expected', [
@@ -37,6 +63,17 @@ def test_is_seeding_ratio_met(torrent, min_ratio, expected):
     assert is_seeding_ratio_met(torrent, min_ratio=min_ratio) is expected
 
 
+@pytest.mark.parametrize('torrent,min_ratio,expected', [
+    ({'state': 'pausedup', 'progress': 1.0, 'ratio': 0.1}, 1.0, 'inactive'),
+    ({'state': 'error', 'progress': 0.5, 'ratio': 0.0}, 1.0, 'inactive'),
+    ({'state': 'uploading', 'progress': 1.0, 'ratio': 1.0}, 1.0, 'ratio'),
+    ({'state': 'uploading', 'progress': 1.0, 'ratio': 0.5}, 1.0, None),
+    ({'state': 'downloading', 'progress': 0.4, 'ratio': 0.0}, 1.0, None),
+])
+def test_should_remove_torrent(torrent, min_ratio, expected):
+    assert should_remove_torrent(torrent, min_ratio=min_ratio) is expected
+
+
 def test_get_stalled_torrents_ignores_idle_seeds(monkeypatch):
     monitor = QBittorrentMonitor.__new__(QBittorrentMonitor)
     torrents = [
@@ -51,12 +88,28 @@ def test_get_stalled_torrents_ignores_idle_seeds(monkeypatch):
     assert [t['hash'] for t in stalled] == ['a']
 
 
+def test_get_inactive_torrents(monkeypatch):
+    monitor = QBittorrentMonitor.__new__(QBittorrentMonitor)
+    torrents = [
+        {'hash': 'a', 'state': 'pausedup', 'progress': 1.0, 'ratio': 0.2},
+        {'hash': 'b', 'state': 'uploading', 'progress': 1.0, 'ratio': 0.2},
+        {'hash': 'c', 'state': 'error', 'progress': 0.5, 'ratio': 0.0},
+        {'hash': 'd', 'state': 'downloading', 'progress': 0.1, 'ratio': 0.0},
+    ]
+    monkeypatch.setattr(monitor, 'get_all_torrents', lambda: torrents)
+
+    inactive = monitor.get_inactive_torrents()
+
+    assert [t['hash'] for t in inactive] == ['a', 'c']
+
+
 def test_get_ratio_complete_torrents(monkeypatch):
     monitor = QBittorrentMonitor.__new__(QBittorrentMonitor)
     torrents = [
         {'hash': 'a', 'state': 'uploading', 'progress': 1.0, 'ratio': 1.0},
         {'hash': 'b', 'state': 'stalledup', 'progress': 1.0, 'ratio': 0.8},
         {'hash': 'c', 'state': 'pausedup', 'progress': 1.0, 'ratio': 2.0},
+        {'hash': 'd', 'state': 'stoppedup', 'progress': 1.0, 'ratio': 1.5},
     ]
     monkeypatch.setattr(monitor, 'get_all_torrents', lambda: torrents)
 
@@ -98,19 +151,43 @@ def test_recover_stalled_torrent_total_failure(monkeypatch):
     assert result['actions'] == []
 
 
-def test_handle_ratio_complete_torrent_pauses(monkeypatch):
+def test_handle_ratio_complete_torrent_deletes(monkeypatch):
     monitor = QBittorrentMonitor.__new__(QBittorrentMonitor)
-    monkeypatch.setattr(monitor, 'pause_torrent', lambda torrent_hash: True)
+    calls = []
+
+    def fake_delete(torrent_hash, delete_files=False):
+        calls.append((torrent_hash, delete_files))
+        return True
+
+    monkeypatch.setattr(monitor, 'delete_torrent', fake_delete)
 
     result = monitor.handle_ratio_complete_torrent('abc123')
 
     assert result['success'] is True
-    assert result['actions'] == ['pause']
+    assert result['actions'] == ['delete']
+    assert calls == [('abc123', False)]
+
+
+def test_handle_ratio_complete_torrent_deletes_files(monkeypatch):
+    monitor = QBittorrentMonitor.__new__(QBittorrentMonitor)
+    calls = []
+
+    def fake_delete(torrent_hash, delete_files=False):
+        calls.append((torrent_hash, delete_files))
+        return True
+
+    monkeypatch.setattr(monitor, 'delete_torrent', fake_delete)
+
+    result = monitor.handle_ratio_complete_torrent('abc123', delete_files=True)
+
+    assert result['success'] is True
+    assert result['actions'] == ['delete_files']
+    assert calls == [('abc123', True)]
 
 
 def test_handle_ratio_complete_torrent_failure(monkeypatch):
     monitor = QBittorrentMonitor.__new__(QBittorrentMonitor)
-    monkeypatch.setattr(monitor, 'pause_torrent', lambda torrent_hash: False)
+    monkeypatch.setattr(monitor, 'delete_torrent', lambda torrent_hash, delete_files=False: False)
 
     result = monitor.handle_ratio_complete_torrent('abc123')
 
@@ -155,3 +232,19 @@ def test_pause_torrent_calls_api(monkeypatch):
 
     assert monitor.pause_torrent('deadbeef') is True
     client.torrents_pause.assert_called_once_with(torrent_hashes='deadbeef')
+
+
+def test_delete_torrent_calls_api(monkeypatch):
+    monitor = QBittorrentMonitor.__new__(QBittorrentMonitor)
+    client = MagicMock()
+    breaker = MagicMock()
+    breaker.call.side_effect = lambda fn: fn()
+    monitor.client = client
+    monitor.circuit_breaker = breaker
+    monkeypatch.setattr(monitor, '_ensure_connected', lambda: True)
+
+    assert monitor.delete_torrent('deadbeef', delete_files=True) is True
+    client.torrents_delete.assert_called_once_with(
+        torrent_hashes='deadbeef',
+        delete_files=True,
+    )

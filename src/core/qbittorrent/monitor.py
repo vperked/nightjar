@@ -13,13 +13,27 @@ SEEDING_ACTIVE_STATES = frozenset({
     'queuedup',
     'forcedup',
 })
-DOWNLOADING_STATES = frozenset({
+ACTIVE_DOWNLOAD_STATES = frozenset({
     'downloading',
     'stalleddl',
     'queueddl',
     'checkingdl',
-    'pauseddl',
     'forceddl',
+    'metadl',
+    'allocating',
+})
+DOWNLOADING_STATES = frozenset({
+    *ACTIVE_DOWNLOAD_STATES,
+    'pauseddl',
+    'stoppeddl',
+})
+INACTIVE_TORRENT_STATES = frozenset({
+    'pausedup',
+    'stoppedup',
+    'pauseddl',
+    'stoppeddl',
+    'error',
+    'missingfiles',
 })
 
 
@@ -35,11 +49,23 @@ def is_download_stalled(torrent: Dict) -> bool:
     return state == 'stalleddl' and dlspeed == 0 and progress < 1.0
 
 
+def is_inactive_torrent(torrent: Dict) -> bool:
+    """
+    Return True when a torrent is not actively downloading or seeding.
+
+    Covers paused/stopped downloads and seeds, plus error and missing-files
+    states. Transient states such as checking or moving are left alone.
+    """
+    state = str(torrent.get('state', '')).lower()
+    return state in INACTIVE_TORRENT_STATES
+
+
 def is_seeding_ratio_met(torrent: Dict, min_ratio: float = 1.0) -> bool:
     """
     Return True when a completed torrent is actively seeding at or above min_ratio.
 
-    Already paused/stopped seeds and torrents still checking are excluded.
+    Paused/stopped torrents are handled by inactive cleanup instead. Torrents
+    still checking are excluded.
     """
     if min_ratio <= 0:
         return False
@@ -49,6 +75,21 @@ def is_seeding_ratio_met(torrent: Dict, min_ratio: float = 1.0) -> bool:
     progress = torrent.get('progress', 0.0) or 0.0
     ratio = torrent.get('ratio', 0.0) or 0.0
     return progress >= 1.0 and ratio >= min_ratio
+
+
+def should_remove_torrent(torrent: Dict, min_ratio: float = 1.0) -> Optional[str]:
+    """
+    Return a removal reason when a torrent should be deleted, else None.
+
+    Reasons:
+      - inactive: not downloading or seeding
+      - ratio: actively seeding at or above min_ratio
+    """
+    if is_inactive_torrent(torrent):
+        return 'inactive'
+    if is_seeding_ratio_met(torrent, min_ratio=min_ratio):
+        return 'ratio'
+    return None
 
 
 class QBittorrentMonitor:
@@ -494,6 +535,26 @@ class QBittorrentMonitor:
             lambda: self.client.torrents_pause(torrent_hashes=torrent_hash),
         )
 
+    def delete_torrent(self, torrent_hash: str, delete_files: bool = False) -> bool:
+        """
+        Remove a torrent from qBittorrent.
+
+        Args:
+            torrent_hash: Torrent infohash
+            delete_files: When True, also delete downloaded content on disk
+
+        Returns:
+            True if the API call succeeded, False otherwise
+        """
+        return self._run_torrent_action(
+            torrent_hash,
+            'delete',
+            lambda: self.client.torrents_delete(
+                torrent_hashes=torrent_hash,
+                delete_files=delete_files,
+            ),
+        )
+
     def recover_stalled_torrent(self, torrent_hash: str) -> Dict:
         """
         Attempt to unstick a stalled download via reannounce and resume.
@@ -515,24 +576,42 @@ class QBittorrentMonitor:
             'actions': actions,
         }
 
-    def handle_ratio_complete_torrent(self, torrent_hash: str) -> Dict:
+    def handle_ratio_complete_torrent(
+        self,
+        torrent_hash: str,
+        delete_files: bool = False,
+    ) -> Dict:
         """
-        Pause a torrent that has met its seeding ratio target.
+        Remove a torrent under cleanup policy (inactive or ratio-complete).
 
         Args:
             torrent_hash: Torrent infohash
+            delete_files: When True, also delete downloaded content on disk
 
         Returns:
             Dictionary with success flag and list of actions that succeeded
         """
         actions = []
-        if self.pause_torrent(torrent_hash):
-            actions.append('pause')
+        if self.delete_torrent(torrent_hash, delete_files=delete_files):
+            actions.append('delete_files' if delete_files else 'delete')
 
         return {
             'success': len(actions) > 0,
             'actions': actions,
         }
+
+    def get_inactive_torrents(self) -> List[Dict]:
+        """
+        Get torrents that are not actively downloading or seeding.
+
+        Returns:
+            List of matching torrent dictionaries
+        """
+        return [
+            torrent
+            for torrent in self.get_all_torrents()
+            if is_inactive_torrent(torrent)
+        ]
 
     def get_ratio_complete_torrents(self, min_ratio: float = 1.0) -> List[Dict]:
         """

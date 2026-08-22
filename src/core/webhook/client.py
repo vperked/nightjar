@@ -1364,6 +1364,89 @@ class DiscordWebhook:
             timestamp=True
         )
 
+    def send_inactive_torrent_alert(
+        self,
+        torrent_info: Dict,
+        actions_taken: Optional[List[str]] = None,
+    ) -> bool:
+        """
+        Send a notification when an inactive torrent is removed.
+
+        Args:
+            torrent_info: Dictionary containing torrent information
+            actions_taken: Remediation steps already attempted (optional)
+
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
+        name = torrent_info.get('name', 'Unknown')
+        state = torrent_info.get('state', 'Unknown')
+        progress = torrent_info.get('progress_percent', 0.0)
+        ratio = torrent_info.get('ratio', 0.0) or 0.0
+        save_path = torrent_info.get('save_path', 'N/A')
+        size = torrent_info.get('size', 0)
+
+        fields = [
+            {
+                'name': 'Torrent Name',
+                'value': name[:256],
+                'inline': False
+            },
+            {
+                'name': 'State',
+                'value': state,
+                'inline': True
+            },
+            {
+                'name': 'Progress',
+                'value': f"{progress:.1f}%",
+                'inline': True
+            },
+            {
+                'name': 'Size',
+                'value': format_bytes(size),
+                'inline': True
+            },
+            {
+                'name': 'Ratio',
+                'value': f'{ratio:.2f}',
+                'inline': True
+            },
+        ]
+
+        if actions_taken:
+            fields.append({
+                'name': 'Action Taken',
+                'value': ', '.join(actions_taken),
+                'inline': False
+            })
+
+        fields.append({
+            'name': 'Save Path',
+            'value': save_path[:256] if save_path != 'N/A' else 'N/A',
+            'inline': False
+        })
+
+        if actions_taken:
+            description = (
+                f'Torrent **{name[:100]}** is not downloading or seeding; '
+                f'attempted: {", ".join(actions_taken)}'
+            )
+        else:
+            description = (
+                f'Torrent **{name[:100]}** is not downloading or seeding '
+                f'(state: {state})'
+            )
+
+        return self.send_embed(
+            title='Inactive Torrent Removed',
+            description=description,
+            color=self.DEFAULT_EMBED_COLOR,
+            fields=fields,
+            footer='Server Monitor - qBittorrent',
+            timestamp=True
+        )
+
     def send_seeding_notification(self, torrent_info: Dict) -> bool:
         """
         Send a notification when a torrent starts seeding.

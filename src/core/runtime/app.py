@@ -31,7 +31,7 @@ from core.qbittorrent import (
     DOWNLOADING_STATES,
     SEEDING_ACTIVE_STATES,
     is_download_stalled,
-    is_seeding_ratio_met,
+    should_remove_torrent,
 )
 from core.logs import LogMonitor
 from core.kernel import KernelMonitor
@@ -61,6 +61,8 @@ from core.config import (
     DEFAULT_SEEDING_RATIO_LIMIT,
     DEFAULT_SEEDING_RATIO_ACTION_COOLDOWN,
     DEFAULT_SEEDING_RATIO_RETRY_BACKOFF,
+    DEFAULT_SEEDING_RATIO_DELETE_FILES,
+    DEFAULT_INACTIVE_TORRENT_AUTO_REMOVE,
     DEFAULT_SYSTEM_UPDATE_INTERVAL_SECONDS, DEFAULT_SYSTEM_UPDATE_TIMEOUT,
     DEFAULT_SYSTEM_UPDATE_ENABLED, DEFAULT_SYSTEM_UPDATE_APPLY,
     DEFAULT_WEB_HOST, DEFAULT_WEB_PORT,
@@ -2047,6 +2049,14 @@ def run_monitor(
                                     min_val=5.0,
                                     max_val=3600.0,
                                 )
+                                seeding_ratio_delete_files = get_env_bool(
+                                    'SEEDING_RATIO_DELETE_FILES',
+                                    DEFAULT_SEEDING_RATIO_DELETE_FILES,
+                                )
+                                inactive_torrent_auto_remove = get_env_bool(
+                                    'INACTIVE_TORRENT_AUTO_REMOVE',
+                                    DEFAULT_INACTIVE_TORRENT_AUTO_REMOVE,
+                                )
 
                                 for torrent_hash, torrent in current_torrents.items():
                                     state = torrent.get('state', '').lower()
@@ -2054,9 +2064,11 @@ def run_monitor(
 
                                     is_seeding = state in SEEDING_ACTIVE_STATES
                                     stalled_download = is_download_stalled(torrent)
-                                    ratio_complete = is_seeding_ratio_met(
+                                    remove_reason = should_remove_torrent(
                                         torrent, min_ratio=seeding_ratio_limit
                                     )
+                                    if remove_reason == 'inactive' and not inactive_torrent_auto_remove:
+                                        remove_reason = None
 
                                     if torrent_hash not in tracked_torrents:
                                         tracked_torrents[torrent_hash] = {
@@ -2151,19 +2163,35 @@ def run_monitor(
                                                 tracked_torrents[torrent_hash]['stalled_since'] = None
                                                 tracked_torrents[torrent_hash]['unstalled_since'] = None
 
-                                    if ratio_complete:
+                                    if remove_reason:
                                         last_ratio_action = tracked_torrents[torrent_hash].get('last_ratio_action') or 0.0
                                         if (current_time - last_ratio_action) >= seeding_ratio_action_cooldown:
                                             torrent_name = torrent.get('name', 'Unknown')
                                             ratio_value = torrent.get('ratio', 0.0) or 0.0
+                                            delete_files = seeding_ratio_delete_files
                                             ratio_result = run_with_timeout(
-                                                lambda h=torrent_hash: qbittorrent_monitor.handle_ratio_complete_torrent(h),
+                                                lambda h=torrent_hash, d=delete_files: (
+                                                    qbittorrent_monitor.handle_ratio_complete_torrent(
+                                                        h, delete_files=d
+                                                    )
+                                                ),
                                                 timeout=15.0,
                                                 default_value={'success': False, 'actions': []},
-                                                operation_name="Handle ratio-complete torrent"
+                                                operation_name="Handle torrent cleanup"
                                             ) or {'success': False, 'actions': []}
                                             actions_taken = list(ratio_result.get('actions') or [])
-                                            if actions_taken:
+                                            if remove_reason == 'inactive':
+                                                if actions_taken:
+                                                    logger.info(
+                                                        f"[qBittorrent] Removing inactive torrent: {torrent_name} "
+                                                        f"(state={state}; actions: {', '.join(actions_taken)})"
+                                                    )
+                                                else:
+                                                    logger.warning(
+                                                        f"[qBittorrent] Failed to remove inactive torrent: {torrent_name} "
+                                                        f"(state={state})"
+                                                    )
+                                            elif actions_taken:
                                                 logger.info(
                                                     f"[qBittorrent] Ratio limit reached: {torrent_name} "
                                                     f"(ratio {ratio_value:.2f} >= {seeding_ratio_limit:.2f}; "
@@ -2171,25 +2199,36 @@ def run_monitor(
                                                 )
                                             else:
                                                 logger.warning(
-                                                    f"[qBittorrent] Failed to pause ratio-complete torrent: {torrent_name} "
+                                                    f"[qBittorrent] Failed to remove ratio-complete torrent: {torrent_name} "
                                                     f"(ratio {ratio_value:.2f} >= {seeding_ratio_limit:.2f})"
                                                 )
 
                                             if qbittorrent_webhook:
-                                                success = send_webhook(
-                                                    lambda t=torrent, lim=seeding_ratio_limit, a=actions_taken: (
-                                                        qbittorrent_webhook.send_ratio_limit_alert(
-                                                            t, lim, actions_taken=a or None
-                                                        )
-                                                    ),
-                                                    operation_name="Ratio limit alert webhook",
-                                                )
-                                                metrics_collector.record_alert('torrent_ratio_limit')
+                                                if remove_reason == 'inactive':
+                                                    success = send_webhook(
+                                                        lambda t=torrent, a=actions_taken: (
+                                                            qbittorrent_webhook.send_inactive_torrent_alert(
+                                                                t, actions_taken=a or None
+                                                            )
+                                                        ),
+                                                        operation_name="Inactive torrent alert webhook",
+                                                    )
+                                                    metrics_collector.record_alert('torrent_inactive')
+                                                else:
+                                                    success = send_webhook(
+                                                        lambda t=torrent, lim=seeding_ratio_limit, a=actions_taken: (
+                                                            qbittorrent_webhook.send_ratio_limit_alert(
+                                                                t, lim, actions_taken=a or None
+                                                            )
+                                                        ),
+                                                        operation_name="Ratio limit alert webhook",
+                                                    )
+                                                    metrics_collector.record_alert('torrent_ratio_limit')
                                                 metrics_collector.record_webhook_result(success)
                                                 if success:
-                                                    logger.info("    Discord ratio limit alert sent")
+                                                    logger.info("    Discord torrent cleanup alert sent")
                                                 else:
-                                                    logger.warning("    Discord ratio limit alert failed")
+                                                    logger.warning("    Discord torrent cleanup alert failed")
 
                                             if actions_taken:
                                                 tracked_torrents[torrent_hash]['last_ratio_action'] = current_time
