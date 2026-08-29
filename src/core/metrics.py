@@ -3,7 +3,7 @@ Aggregation of monitor readings into metric snapshots.
 """
 
 import time
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 from collections import defaultdict, deque
 from core.format import format_duration
 from core.observability import Component, get_logger
@@ -29,7 +29,7 @@ class MetricsCollector:
         self.error_counts: Dict[str, int] = defaultdict(int)
         self.webhook_stats = {'success': 0, 'failure': 0}
         self.last_execution_times: Dict[str, float] = {}
-        self.alert_timestamps: Dict[str, List[float]] = defaultdict(list)
+        self.alert_timestamps: Dict[str, deque] = defaultdict(deque)
 
     def record_alert(self, alert_type: str) -> None:
         """
@@ -38,12 +38,13 @@ class MetricsCollector:
         Args:
             alert_type: Type of alert (e.g., 'cpu', 'memory', 'disk', 'temperature')
         """
+        now = time.time()
         self.alert_counts[alert_type] += 1
-        self.alert_timestamps[alert_type].append(time.time())
-        cutoff = time.time() - 3600
-        self.alert_timestamps[alert_type] = [
-            ts for ts in self.alert_timestamps[alert_type] if ts > cutoff
-        ]
+        stamps = self.alert_timestamps[alert_type]
+        stamps.append(now)
+        cutoff = now - 3600
+        while stamps and stamps[0] <= cutoff:
+            stamps.popleft()
 
     def start_monitor_execution(self, monitor_name: str) -> None:
         """
@@ -129,7 +130,7 @@ class MetricsCollector:
         
         for mname in monitors_to_check:
             if mname in self.execution_times and len(self.execution_times[mname]) > 0:
-                durations = list(self.execution_times[mname])
+                durations = self.execution_times[mname]
                 averages[mname] = sum(durations) / len(durations)
             else:
                 averages[mname] = 0.0
@@ -168,9 +169,10 @@ class MetricsCollector:
         total_errors = sum(self.error_counts.values())
         total_webhook_calls = self.webhook_stats['success'] + self.webhook_stats['failure']
         
+        uptime_seconds = self.get_uptime_seconds()
         return {
-            'uptime_seconds': self.get_uptime_seconds(),
-            'uptime_formatted': format_duration(self.get_uptime_seconds()),
+            'uptime_seconds': uptime_seconds,
+            'uptime_formatted': format_duration(uptime_seconds),
             'total_alerts': total_alerts,
             'alert_counts': dict(self.alert_counts),
             'alert_frequency_per_hour': self.get_alert_frequency(),

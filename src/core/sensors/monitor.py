@@ -20,6 +20,7 @@ class SensorsMonitor:
         """Initialize the sensors monitor."""
         self.is_linux = platform.system() == 'Linux'
         self.thermal_zones = []
+        self._fan_scan_dirs = None
         self._discover_thermal_zones()
 
     def _discover_thermal_zones(self):
@@ -64,36 +65,27 @@ class SensorsMonitor:
         Returns:
             CPU temperature in Celsius, or None if not available
         """
-        if not self.is_available():
+        if not self.is_linux or not self.thermal_zones:
             return None
 
         cpu_temp = None
+        max_temp = None
         for zone in self.thermal_zones:
+            try:
+                with open(zone['temp_file'], 'r') as f:
+                    temp_celsius = int(f.read().strip()) / 1000.0
+            except (IOError, OSError, ValueError):
+                continue
+
+            if max_temp is None or temp_celsius > max_temp:
+                max_temp = temp_celsius
+
             zone_type = zone['type'].lower()
             if 'cpu' in zone_type or 'processor' in zone_type or 'core' in zone_type:
-                try:
-                    with open(zone['temp_file'], 'r') as f:
-                        temp_millidegrees = int(f.read().strip())
-                        temp_celsius = temp_millidegrees / 1000.0
-                        if cpu_temp is None or temp_celsius > cpu_temp:
-                            cpu_temp = temp_celsius
-                except (IOError, OSError, ValueError):
-                    continue
+                if cpu_temp is None or temp_celsius > cpu_temp:
+                    cpu_temp = temp_celsius
 
-        if cpu_temp is None:
-            max_temp = None
-            for zone in self.thermal_zones:
-                try:
-                    with open(zone['temp_file'], 'r') as f:
-                        temp_millidegrees = int(f.read().strip())
-                        temp_celsius = temp_millidegrees / 1000.0
-                        if max_temp is None or temp_celsius > max_temp:
-                            max_temp = temp_celsius
-                except (IOError, OSError, ValueError):
-                    continue
-            cpu_temp = max_temp
-
-        return cpu_temp
+        return cpu_temp if cpu_temp is not None else max_temp
 
     def get_all_temperatures(self) -> List[Dict]:
         """
@@ -169,25 +161,35 @@ class SensorsMonitor:
         if not self.is_linux:
             return fans
 
+        if self._fan_scan_dirs is None:
+            self._fan_scan_dirs = self._discover_fan_scan_dirs()
+
+        primary, fallback = self._fan_scan_dirs
+        for scan_dir in primary:
+            fans.extend(self._scan_fan_directory(scan_dir))
+        if not fans:
+            for scan_dir in fallback:
+                fans.extend(self._scan_fan_directory(scan_dir))
+
+        return fans
+
+    def _discover_fan_scan_dirs(self):
+        """Discover hwmon directories that are safe to read for fan speeds."""
         hwmon_base = '/sys/class/hwmon'
         if not os.path.exists(hwmon_base):
-            return fans
+            return [], []
 
+        primary = []
+        fallback = []
         hwmon_dirs = sorted(glob.glob(os.path.join(hwmon_base, 'hwmon*')))
         for hwmon_dir in hwmon_dirs:
             if not self._is_safe_fan_hwmon(hwmon_dir):
                 continue
-            fans.extend(self._scan_fan_directory(hwmon_dir))
-
-        if not fans:
-            for hwmon_dir in hwmon_dirs:
-                if not self._is_safe_fan_hwmon(hwmon_dir):
-                    continue
-                device_dir = os.path.join(hwmon_dir, 'device')
-                if os.path.exists(device_dir):
-                    fans.extend(self._scan_fan_directory(device_dir))
-
-        return fans
+            primary.append(hwmon_dir)
+            device_dir = os.path.join(hwmon_dir, 'device')
+            if os.path.exists(device_dir):
+                fallback.append(device_dir)
+        return primary, fallback
 
     def _scan_fan_directory(self, scan_dir: str) -> List[Dict]:
         """

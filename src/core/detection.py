@@ -44,10 +44,11 @@ def analyze_system_usage_patterns() -> Dict[str, Any]:
     }
 
     try:
-        import time
-
-        sample_count = 5
-        sample_interval = 0.5
+        sample_count = 2
+        if platform.system() == 'Windows':
+            root_path = os.path.splitdrive(sys.executable)[0] + '\\'
+        else:
+            root_path = '/'
 
         for i in range(sample_count):
             try:
@@ -57,10 +58,6 @@ def analyze_system_usage_patterns() -> Dict[str, Any]:
                 mem = psutil.virtual_memory()
                 analysis['memory_samples'].append(mem.percent)
 
-                if platform.system() == 'Windows':
-                    root_path = os.path.splitdrive(sys.executable)[0] + '\\'
-                else:
-                    root_path = '/'
                 disk = psutil.disk_usage(root_path)
                 analysis['disk_samples'].append(disk.percent)
 
@@ -69,9 +66,6 @@ def analyze_system_usage_patterns() -> Dict[str, Any]:
                     analysis['load_averages'].append(load_avg)
                 except (AttributeError, OSError):
                     pass
-
-                if i < sample_count - 1:
-                    time.sleep(sample_interval)
             except Exception as e:
                 logger.debug(f"System metrics sampling failed: {e}")
                 break

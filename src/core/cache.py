@@ -12,6 +12,13 @@ from core.observability import Component, get_logger
 
 logger = get_logger(Component.CACHE)
 
+_IGNORE_DIR_NAMES = frozenset({'venv', '.venv', 'env', 'node_modules', '.git'})
+
+
+def _prune_ignored_dirs(dirs: List[str]) -> None:
+    """Drop virtualenv and VCS directories from os.walk in-place."""
+    dirs[:] = [d for d in dirs if d not in _IGNORE_DIR_NAMES]
+
 
 def find_cache_directories(root_dir: str = None) -> List[str]:
     """
@@ -28,11 +35,10 @@ def find_cache_directories(root_dir: str = None) -> List[str]:
 
     cache_dirs = []
     for root, dirs, files in os.walk(root_dir):
-        if any(ignore in root for ignore in ['venv', '.venv', 'env', '.env', 'node_modules', '.git']):
-            continue
-
         if '__pycache__' in dirs:
             cache_dirs.append(str(Path(root) / '__pycache__'))
+            dirs.remove('__pycache__')
+        _prune_ignored_dirs(dirs)
 
     return cache_dirs
 
@@ -52,9 +58,7 @@ def find_pyc_files(root_dir: str = None) -> List[str]:
 
     pyc_files = []
     for root, dirs, files in os.walk(root_dir):
-        if any(ignore in root for ignore in ['venv', '.venv', 'env', '.env', 'node_modules', '.git']):
-            continue
-
+        _prune_ignored_dirs(dirs)
         for file in files:
             if file.endswith('.pyc'):
                 pyc_files.append(str(Path(root) / file))

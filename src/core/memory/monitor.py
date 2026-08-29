@@ -40,14 +40,18 @@ class MemoryMonitor:
             'shared': getattr(mem, 'shared', 0),
         }
 
-    def get_memory_info_human(self) -> Dict[str, str]:
+    def get_memory_info_human(self, mem_info: Optional[Dict] = None) -> Dict[str, str]:
         """
         Get memory information in human-readable format.
+
+        Args:
+            mem_info: Optional result of get_memory_info() to avoid a second syscall
 
         Returns:
             Dictionary with memory values formatted as strings (KB, MB, GB, TB)
         """
-        mem_info = self.get_memory_info()
+        if mem_info is None:
+            mem_info = self.get_memory_info()
 
         return {
             'total': format_bytes(mem_info['total']),
@@ -81,14 +85,18 @@ class MemoryMonitor:
             'sout': getattr(swap, 'sout', 0),
         }
 
-    def get_swap_info_human(self) -> Dict[str, str]:
+    def get_swap_info_human(self, swap_info: Optional[Dict] = None) -> Dict[str, str]:
         """
         Get swap memory information in human-readable format.
+
+        Args:
+            swap_info: Optional result of get_swap_info() to avoid a second syscall
 
         Returns:
             Dictionary with swap values formatted as strings (KB, MB, GB, TB)
         """
-        swap_info = self.get_swap_info()
+        if swap_info is None:
+            swap_info = self.get_swap_info()
 
         return {
             'total': format_bytes(swap_info['total']),
@@ -106,11 +114,13 @@ class MemoryMonitor:
         Returns:
             Dictionary containing all memory information including virtual and swap memory
         """
+        mem_info = self.get_memory_info()
+        swap_info = self.get_swap_info()
         return {
-            'virtual_memory': self.get_memory_info(),
-            'virtual_memory_human': self.get_memory_info_human(),
-            'swap_memory': self.get_swap_info(),
-            'swap_memory_human': self.get_swap_info_human(),
-            'memory_percent': self.get_memory_percent(),
+            'virtual_memory': mem_info,
+            'virtual_memory_human': self.get_memory_info_human(mem_info),
+            'swap_memory': swap_info,
+            'swap_memory_human': self.get_swap_info_human(swap_info),
+            'memory_percent': mem_info['percent'],
         }
 

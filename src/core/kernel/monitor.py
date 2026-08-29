@@ -80,6 +80,30 @@ class KernelMonitor:
                 pass
             return None
 
+    @staticmethod
+    def _tail_text_lines(path: str, max_bytes: int) -> List[str]:
+        """
+        Read the last max_bytes of a log without loading the whole file.
+
+        Args:
+            path: Log file path
+            max_bytes: Maximum number of bytes to read from the end
+
+        Returns:
+            Lines from the tailed region
+        """
+        with open(path, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            start = max(0, size - max_bytes)
+            f.seek(start)
+            data = f.read()
+        if start > 0:
+            newline = data.find(b'\n')
+            if newline != -1:
+                data = data[newline + 1:]
+        return data.decode('utf-8', errors='ignore').splitlines()
+
     def _load_tracking_data(self):
         """Load persisted tracking data from file."""
         if not os.path.exists(self.persistence_file):
@@ -337,20 +361,19 @@ class KernelMonitor:
             logger.debug(f"meminfo check failed: {e}")
 
         try:
-            with open('/var/log/kern.log', 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-                for line in reversed(lines[-500:]):
-                    if 'oom' in line.lower() and 'killer' in line.lower():
-                        error_id = f"oom_{line}"
-                        if error_id not in self.detected_crashes:
-                            errors.append({
-                                'type': 'oom_killer',
-                                'severity': 'critical',
-                                'message': line.strip(),
-                                'source': '/var/log/kern.log'
-                            })
-                            self.detected_crashes.add(error_id)
-                            break
+            lines = self._tail_text_lines('/var/log/kern.log', max_bytes=256 * 1024)
+            for line in reversed(lines[-500:]):
+                if 'oom' in line.lower() and 'killer' in line.lower():
+                    error_id = f"oom_{line}"
+                    if error_id not in self.detected_crashes:
+                        errors.append({
+                            'type': 'oom_killer',
+                            'severity': 'critical',
+                            'message': line.strip(),
+                            'source': '/var/log/kern.log'
+                        })
+                        self.detected_crashes.add(error_id)
+                        break
         except (OSError, PermissionError):
             pass
         except Exception as e:
@@ -726,51 +749,48 @@ class KernelMonitor:
         ]
 
         cutoff_time = time.time() - (since_minutes * 60)
+        critical_keywords = (
+            'kernel panic', 'kernel oops', 'kernel crash',
+            'bug:', 'panic:', 'oops:', 'crash:',
+            'general protection fault', 'segmentation fault', 'double fault', 'unhandled page fault',
+        )
 
         for log_path in kernel_log_paths:
             if not os.path.exists(log_path):
                 continue
 
             try:
-                with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
+                file_mtime = os.path.getmtime(log_path)
+                if file_mtime < cutoff_time:
+                    continue
 
-                    for line in reversed(lines[-1000:]):
-                        if not line.strip():
-                            continue
+                lines = self._tail_text_lines(log_path, max_bytes=512 * 1024)
 
-                        line_lower = line.lower()
-                        
-                        if 'servermonitor' in line_lower or 'server monitor' in line_lower:
-                            continue
-                        
-                        if 'python3' in line_lower and ('servermonitor' in line_lower or 'discord kernel crash alert' in line_lower):
-                            continue
-                        
-                        critical_keywords = ['kernel panic', 'kernel oops', 'kernel crash',
-                                           'bug:', 'panic:', 'oops:', 'crash:',
-                                           'general protection fault', 'segmentation fault', 'double fault', 'unhandled page fault']
+                for line in reversed(lines[-1000:]):
+                    if not line.strip():
+                        continue
 
-                        for keyword in critical_keywords:
-                            if keyword in line_lower:
-                                try:
-                                    parts = line.split()
-                                    if len(parts) >= 3:
-                                        file_mtime = os.path.getmtime(log_path)
-                                        if file_mtime >= cutoff_time:
-                                            crash_id = f"{log_path}_{line}"
-                                            if crash_id not in self.detected_crashes:
-                                                crashes.append({
-                                                    'type': 'kernel_error',
-                                                    'keyword': keyword,
-                                                    'message': line.strip(),
-                                                    'timestamp': file_mtime,
-                                                    'source': log_path
-                                                })
-                                                self.detected_crashes.add(crash_id)
-                                                break
-                                except Exception:
-                                    continue
+                    line_lower = line.lower()
+
+                    if 'servermonitor' in line_lower or 'server monitor' in line_lower:
+                        continue
+
+                    if 'python3' in line_lower and ('servermonitor' in line_lower or 'discord kernel crash alert' in line_lower):
+                        continue
+
+                    for keyword in critical_keywords:
+                        if keyword in line_lower:
+                            crash_id = f"{log_path}_{line}"
+                            if crash_id not in self.detected_crashes:
+                                crashes.append({
+                                    'type': 'kernel_error',
+                                    'keyword': keyword,
+                                    'message': line.strip(),
+                                    'timestamp': file_mtime,
+                                    'source': log_path
+                                })
+                                self.detected_crashes.add(crash_id)
+                            break
             except (OSError, PermissionError) as e:
                 logger.debug(f"Kernel log read failed: {e}")
                 continue

@@ -107,10 +107,8 @@ class LogMonitor:
                     if not log_info:
                         continue
 
-                    try:
-                        age_days = (now - Path(filepath).stat().st_mtime) / SECONDS_PER_DAY
-                    except (OSError, PermissionError):
-                        age_days = 0.0
+                    mtime = log_info.get('mtime')
+                    age_days = ((now - mtime) / SECONDS_PER_DAY) if mtime else 0.0
 
                     log_info['rotated'] = True
                     log_info['age_days'] = age_days
@@ -219,16 +217,12 @@ class LogMonitor:
             Dictionary containing log file information, or None if file doesn't exist or can't be accessed
         """
         try:
-            path = Path(log_path)
-            if not path.exists():
-                return None
-
-            size_bytes = path.stat().st_size
-
+            st = os.stat(log_path)
             return {
-                'path': str(path),
-                'size_bytes': size_bytes,
-                'size_formatted': format_bytes(size_bytes),
+                'path': log_path,
+                'size_bytes': st.st_size,
+                'size_formatted': format_bytes(st.st_size),
+                'mtime': st.st_mtime,
                 'exists': True
             }
         except (OSError, PermissionError):

@@ -39,7 +39,7 @@ from core.updates import run_system_update
 from core.watchdog import WatchdogMonitor
 from core.webhook import DiscordWebhook
 from core.format import format_bytes, format_bytes_per_second, BYTES_PER_GB
-from core.cache import clear_cache_on_startup, clear_cache_on_exit
+from core.cache import clear_cache_on_exit
 from core.observability import Component, get_logger
 from core.web import set_monitors, start_server, stop_server, set_crash_webhook
 from core.config import (
@@ -110,7 +110,7 @@ def run_monitor(
         qbittorrent_monitor: Optional qBittorrent monitor instance
         log_monitor: Optional log monitor instance
     """
-    clear_cache_on_startup(verbose=True)
+    logger.info("Preserving bytecode cache on startup")
 
     logger.info("Starting Server Monitor...")
 
@@ -313,6 +313,7 @@ def run_monitor(
     alert_cooldown = max(0.0, alert_cooldown)
     freeze_threshold = max(10.0, freeze_threshold)
     freeze_heartbeat_timeout = max(20.0, freeze_heartbeat_timeout)
+    is_windows = platform.system() == 'Windows'
 
     freeze_monitor = None
     if freeze_monitor_enabled:
@@ -339,11 +340,11 @@ def run_monitor(
         logger.info("Individual partition monitoring: Enabled")
 
     if gpu_monitor.nvidia_smi_available:
+        gpu_data_startup = gpu_monitor.get_gpu_comprehensive(0)
         gpu_count = gpu_monitor.get_gpu_count()
         gpu_name = ""
-        if gpu_count > 0:
-            gpu_info = gpu_monitor.get_gpu_info(0)
-            gpu_name = f" | {gpu_info.get('name', 'N/A')}"
+        if gpu_data_startup:
+            gpu_name = f" | {gpu_data_startup.get('info', {}).get('name', 'N/A')}"
         logger.info(f"GPU: {gpu_count} detected | Threshold: {gpu_threshold:.1f}%{gpu_name}")
 
     if sensors_monitor.is_available():
@@ -719,18 +720,8 @@ def run_monitor(
 
                 try:
                     metrics_collector.start_monitor_execution('cpu')
-                    cpu_percent = run_with_timeout(
-                        lambda: cpu_monitor.get_cpu_percent(interval=0.0),
-                        timeout=3.0,
-                        default_value=0.0,
-                        operation_name="CPU percent collection"
-                    )
-                    cpu_per_core = run_with_timeout(
-                        lambda: cpu_monitor.get_cpu_percent_per_core(interval=0.0),
-                        timeout=2.0,
-                        default_value=[],
-                        operation_name="CPU per-core collection"
-                    )
+                    cpu_per_core = cpu_monitor.get_cpu_percent_per_core(interval=0.0)
+                    cpu_percent = sum(cpu_per_core) / len(cpu_per_core) if cpu_per_core else 0.0
                     metrics_collector.end_monitor_execution('cpu')
                 except Exception as e:
                     metrics_collector.end_monitor_execution('cpu')
@@ -745,24 +736,9 @@ def run_monitor(
 
                 try:
                     metrics_collector.start_monitor_execution('memory')
-                    memory_percent = run_with_timeout(
-                        lambda: memory_monitor.get_memory_percent(),
-                        timeout=3.0,
-                        default_value=0.0,
-                        operation_name="Memory percent collection"
-                    )
-                    memory_info = run_with_timeout(
-                        lambda: memory_monitor.get_memory_info(),
-                        timeout=3.0,
-                        default_value={},
-                        operation_name="Memory info collection"
-                    )
-                    swap_info = run_with_timeout(
-                        lambda: memory_monitor.get_swap_info(),
-                        timeout=3.0,
-                        default_value={},
-                        operation_name="Swap info collection"
-                    )
+                    memory_info = memory_monitor.get_memory_info()
+                    memory_percent = memory_info.get('percent', 0.0) if memory_info else 0.0
+                    swap_info = memory_monitor.get_swap_info()
                     metrics_collector.end_monitor_execution('memory')
                 except Exception as e:
                     metrics_collector.end_monitor_execution('memory')
@@ -779,19 +755,15 @@ def run_monitor(
                 gpu_utilization = None
                 gpu_data = None
                 try:
-                    if gpu_monitor.nvidia_smi_available and gpu_monitor.get_gpu_count() > 0:
-                        gpu_utilization = run_with_timeout(
-                            lambda: gpu_monitor.get_gpu_utilization(0),
-                            timeout=15.0,
-                            default_value={'gpu': 0.0, 'memory': 0.0},
-                            operation_name="GPU utilization collection"
-                        )
+                    if gpu_monitor.nvidia_smi_available:
                         gpu_data = run_with_timeout(
                             lambda: gpu_monitor.get_gpu_comprehensive(0),
                             timeout=20.0,
                             default_value={},
                             operation_name="GPU comprehensive data collection"
                         )
+                        if gpu_data:
+                            gpu_utilization = gpu_data.get('utilization')
                 except Exception as e:
                     logger.debug(f"GPU metrics failed: {e}")
 
@@ -804,12 +776,7 @@ def run_monitor(
                         operation_name="Disk partitions collection"
                     )
 
-                    total_disk = run_with_timeout(
-                        lambda: disk_monitor.get_total_disk_usage(),
-                        timeout=10.0,
-                        default_value={},
-                        operation_name="Total disk usage collection"
-                    )
+                    total_disk = disk_monitor.get_total_disk_usage(partitions=all_partitions)
                     disk_percent = total_disk.get('percent', 0.0) if total_disk else 0.0
                     metrics_collector.end_monitor_execution('disk')
                 except Exception as e:
@@ -1046,12 +1013,7 @@ def run_monitor(
                 cpu_temp = None
                 try:
                     if sensors_monitor.is_available():
-                        cpu_temp = run_with_timeout(
-                            lambda: sensors_monitor.get_cpu_temperature(),
-                            timeout=3.0,
-                            default_value=None,
-                            operation_name="CPU temperature collection"
-                        )
+                        cpu_temp = sensors_monitor.get_cpu_temperature()
                 except Exception as e:
                     logger.debug(f"Temperature failed: {e}")
                     cpu_temp = None
@@ -1060,29 +1022,20 @@ def run_monitor(
                     watchdog_monitor.update_heartbeat()
 
                 network_bandwidth = None
+                bandwidth = None
                 network_check_counter += 1
                 disk_io_data = None
                 network_io_data = None
                 if network_check_counter >= NETWORK_CHECK_INTERVAL:
                     network_check_counter = 0
                     try:
-                        bandwidth = run_with_timeout(
-                            lambda: network_monitor.get_bandwidth_usage(interval=1.0),
-                            timeout=5.0,
-                            default_value=None,
-                            operation_name="Network bandwidth collection"
-                        )
+                        bandwidth = network_monitor.get_bandwidth_usage(interval=1.0)
                         if bandwidth:
                             total_bandwidth = bandwidth.get('bytes_sent_per_sec', 0) + bandwidth.get('bytes_recv_per_sec', 0)
                             mb_per_sec = 1024 * 1024
                             if mb_per_sec > 0:
                                 network_bandwidth = total_bandwidth / mb_per_sec
-                        network_io_data = run_with_timeout(
-                            lambda: network_monitor.get_total_network_io(),
-                            timeout=5.0,
-                            default_value=None,
-                            operation_name="Network I/O collection"
-                        )
+                        network_io_data = network_monitor.get_total_network_io()
                         if watchdog_monitor:
                             watchdog_monitor.update_heartbeat()
                     except (ValueError, ZeroDivisionError) as e:
@@ -1091,12 +1044,7 @@ def run_monitor(
                         logger.debug(f"Network bandwidth failed: {e}")
 
                 try:
-                    disk_io_data = run_with_timeout(
-                        lambda: system_monitor.get_disk_io(),
-                        timeout=5.0,
-                        default_value=None,
-                        operation_name="Disk I/O collection"
-                    )
+                    disk_io_data = system_monitor.get_disk_io()
                 except (OSError, psutil.Error) as e:
                     logger.debug(f"Disk I/O failed: {e}")
 
@@ -1119,7 +1067,7 @@ def run_monitor(
                         for partition in all_partitions:
                             mountpoint = partition.get('mountpoint', partition.get('device', 'unknown'))
                             percent = partition.get('percent', 0.0)
-                            if platform.system() == 'Windows':
+                            if is_windows:
                                 display_name = mountpoint.rstrip('\\').split('\\')[-1] or mountpoint[:2]
                                 if display_name.endswith(':'):
                                     display_name = display_name[:-1]
@@ -1402,7 +1350,7 @@ def run_monitor(
 
                 if monitor_individual_partitions:
                     try:
-                        nvme_partitions = disk_monitor.get_nvme_partitions()
+                        nvme_partitions = [p for p in all_partitions if p.get('is_nvme')]
 
                         for partition in all_partitions:
                             partition_key = partition.get('mountpoint', partition.get('device', 'unknown'))
@@ -1662,48 +1610,23 @@ def run_monitor(
                                 if top_cpu_processes is None:
                                     top_cpu_processes = process_monitor.get_top_processes(limit=5, sort_by='cpu')
                                 top_cpu_procs = top_cpu_processes
-                                fans = run_with_timeout(
-                                    lambda: sensors_monitor.get_fan_speeds(),
-                                    timeout=3.0,
-                                    default_value=[],
-                                    operation_name="Fan speed collection"
-                                ) or []
+                                fans = sensors_monitor.get_fan_speeds() or []
 
                                 gpu_temp = None
-                                if gpu_monitor.nvidia_smi_available and gpu_monitor.get_gpu_count() > 0:
-                                    try:
-                                        gpu_data_temp = run_with_timeout(
-                                            lambda: gpu_monitor.get_gpu_comprehensive(0),
-                                            timeout=5.0,
-                                            default_value=None,
-                                            operation_name="GPU temperature for temp alert"
-                                        )
-                                        if gpu_data_temp:
-                                            gpu_temp = gpu_data_temp.get('temperature')
-                                    except Exception:
-                                        gpu_temp = None
+                                if gpu_data:
+                                    gpu_temp = gpu_data.get('temperature')
 
                                 temp_disk_io = disk_io_data
                                 if temp_disk_io is None:
                                     try:
-                                        temp_disk_io = run_with_timeout(
-                                            lambda: system_monitor.get_disk_io(),
-                                            timeout=5.0,
-                                            default_value=None,
-                                            operation_name="Disk I/O for temp alert"
-                                        )
+                                        temp_disk_io = system_monitor.get_disk_io()
                                     except Exception:
                                         pass
 
                                 temp_network_io = network_io_data
                                 if temp_network_io is None:
                                     try:
-                                        temp_network_io = run_with_timeout(
-                                            lambda: network_monitor.get_total_network_io(),
-                                            timeout=5.0,
-                                            default_value=None,
-                                            operation_name="Network I/O for temp alert"
-                                        )
+                                        temp_network_io = network_monitor.get_total_network_io()
                                     except Exception:
                                         pass
 
@@ -1764,7 +1687,7 @@ def run_monitor(
                     if not network_alert_sent or time_since_last_alert >= alert_cooldown:
                         if webhook:
                             logger.warning(f"[ALERT] Network: {network_bandwidth:.1f} MB/s (threshold: {network_bandwidth_threshold:.1f} MB/s)")
-                            bandwidth_data = network_monitor.get_bandwidth_usage(interval=1.0)
+                            bandwidth_data = bandwidth
                             fields = [
                                 {'name': 'Total Bandwidth', 'value': f'{network_bandwidth:.1f} MB/s', 'inline': True},
                                 {'name': 'Threshold', 'value': f'{network_bandwidth_threshold:.1f} MB/s', 'inline': True},
@@ -1812,8 +1735,9 @@ def run_monitor(
                     process_check_counter = 0
 
                     try:
-                        top_cpu_processes = process_monitor.get_top_processes(limit=MAX_PROCESSES_DISPLAY, sort_by='cpu')
-                        top_memory_processes = process_monitor.get_top_processes(limit=MAX_PROCESSES_DISPLAY, sort_by='memory')
+                        top_cpu_processes, top_memory_processes = process_monitor.get_top_cpu_and_memory(
+                            limit=MAX_PROCESSES_DISPLAY
+                        )
 
                         for proc in top_cpu_processes:
                             cpu_usage = proc.get('cpu_percent', 0)
@@ -1947,15 +1871,11 @@ def run_monitor(
 
                                 subdirs_human = []
                                 for subdir in subdirs:
-                                    subdir_path = subdir['path']
-                                    subdir_human = run_with_timeout(
-                                        lambda p=subdir_path: disk_monitor.get_directory_size_human(p),
-                                        timeout=30.0,
-                                        default_value=None,
-                                        operation_name=f"Get subdirectory size for {subdir_path}"
+                                    subdir_human = disk_monitor.get_directory_size_human(
+                                        subdir.get('path', ''),
+                                        size_info=subdir,
                                     )
                                     if subdir_human:
-                                        subdir_human['size_bytes'] = subdir['size']
                                         subdirs_human.append(subdir_human)
 
                                 if disk_webhook:
@@ -2290,20 +2210,15 @@ def run_monitor(
                         watchdog_monitor.update_heartbeat()
                 
                 log_check_counter += 1
-                root_disk_usage = run_with_timeout(
-                    lambda: disk_monitor.get_disk_usage('/'),
-                    timeout=5.0,
-                    default_value=None,
-                    operation_name="Root disk usage check for log cleanup"
-                )
-                disk_percent = root_disk_usage.get('percent', 0) if root_disk_usage else 0
+                root_partition = next((p for p in all_partitions if p.get('mountpoint') == '/'), None)
+                root_disk_percent = root_partition['percent'] if root_partition else disk_percent
 
-                effective_log_interval = log_check_interval if disk_percent < disk_cleanup_threshold else 5
+                effective_log_interval = log_check_interval if root_disk_percent < disk_cleanup_threshold else 5
 
                 if log_check_counter >= effective_log_interval:
                     log_check_counter = 0
                     try:
-                        aggressive_log_cleanup = disk_percent >= disk_aggressive_cleanup_threshold
+                        aggressive_log_cleanup = root_disk_percent >= disk_aggressive_cleanup_threshold
 
                         rotated_cleanup_stats = run_with_timeout(
                             lambda: log_monitor.cleanup_rotated_logs(force=aggressive_log_cleanup),

@@ -23,6 +23,13 @@ PERMISSION_CHECK_TIMEOUT = 5
 ALLOWED_TEMP_CLEANUP_BASES = ['/tmp', '/var/tmp']
 ALLOWED_CACHE_CLEANUP_BASES = ['/var/cache']
 
+EXCLUDED_FSTYPES = frozenset([
+    'squashfs', 'tmpfs', 'devtmpfs', 'proc', 'sysfs', 'devpts',
+    'cgroup', 'cgroup2', 'pstore', 'bpf', 'tracefs', 'debugfs',
+    'securityfs', 'configfs', 'fusectl', 'hugetlbfs', 'mqueue',
+    'overlay', 'rpc_pipefs', 'systemd-1',
+])
+
 
 def _resolve_cleanup_dirs(candidates: List[str], allowed_bases: List[str]) -> List[str]:
     """
@@ -71,7 +78,7 @@ class DiskMonitor:
 
     def __init__(self):
         """Initialize the disk monitor."""
-        pass
+        self._platform = platform.system()
 
     def get_disk_usage(self, path: str = '/') -> Optional[Dict]:
         """
@@ -107,12 +114,9 @@ class DiskMonitor:
         Returns:
             True if device appears to be NVMe, False otherwise
         """
-        device_lower = device.lower()
-        if platform.system() == 'Linux':
-            return 'nvme' in device_lower
-        elif platform.system() == 'Windows':
+        if self._platform != 'Linux':
             return False
-        return False
+        return 'nvme' in device.lower()
 
     def _should_monitor_partition(self, partition: Dict) -> bool:
         """
@@ -144,11 +148,7 @@ class DiskMonitor:
         if 'ro' in opts_lower and 'rw' not in opts_lower:
             return False
 
-        excluded_fstypes = ['squashfs', 'tmpfs', 'devtmpfs', 'proc', 'sysfs', 'devpts',
-                           'cgroup', 'cgroup2', 'pstore', 'bpf', 'tracefs', 'debugfs',
-                           'securityfs', 'configfs', 'fusectl', 'hugetlbfs', 'mqueue',
-                           'overlay', 'rpc_pipefs', 'systemd-1']
-        if fstype_lower in excluded_fstypes:
+        if fstype_lower in EXCLUDED_FSTYPES:
             return False
 
         total = partition.get('total', 0)
@@ -224,14 +224,18 @@ class DiskMonitor:
             'percent': f"{usage['percent']:.1f}%",
         }
 
-    def get_total_disk_usage(self) -> Dict:
+    def get_total_disk_usage(self, partitions: Optional[List[Dict]] = None) -> Dict:
         """
         Get total disk usage across all partitions.
+
+        Args:
+            partitions: Optional pre-fetched partition list from get_all_partitions()
 
         Returns:
             Dictionary containing total disk usage
         """
-        partitions = self.get_all_partitions()
+        if partitions is None:
+            partitions = self.get_all_partitions()
 
         total = {
             'total': 0,
@@ -402,9 +406,9 @@ class DiskMonitor:
                 dir_count += len(dirnames)
 
                 for filename in filenames:
-                    filepath = Path(dirpath) / filename
+                    filepath = os.path.join(dirpath, filename)
                     try:
-                        total_size += filepath.stat().st_size
+                        total_size += os.lstat(filepath).st_size
                         file_count += 1
                     except (OSError, PermissionError):
                         continue
@@ -440,22 +444,24 @@ class DiskMonitor:
 
         return result
 
-    def get_directory_size_human(self, path: str) -> Optional[Dict]:
+    def get_directory_size_human(self, path: str, size_info: Optional[Dict] = None) -> Optional[Dict]:
         """
         Get directory size in human-readable format.
 
         Args:
             path: Directory path to check
+            size_info: Optional result of get_directory_size() to avoid a second walk
 
         Returns:
             Dictionary with formatted size values, or None if unavailable
         """
-        size_info = self.get_directory_size(path)
+        if size_info is None:
+            size_info = self.get_directory_size(path)
         if size_info is None:
             return None
 
         return {
-            'path': path,
+            'path': size_info.get('path', path),
             'size': format_bytes(size_info['size']),
             'size_bytes': size_info['size'],
             'is_file': size_info.get('is_file', False),

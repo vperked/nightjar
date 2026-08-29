@@ -126,7 +126,7 @@ class CpuMonitor:
             Dictionary containing all CPU information
         """
         per_core = self.get_cpu_percent_per_core(interval=interval)
-        overall = sum(per_core) / len(per_core) if per_core else self.get_cpu_percent(interval=0.0)
+        overall = sum(per_core) / len(per_core) if per_core else 0.0
 
         return {
             'cpu_count_logical': self.cpu_count,
@@ -135,7 +135,7 @@ class CpuMonitor:
             'cpu_percent_per_core': per_core,
             'cpu_stats': self.get_cpu_stats(),
             'cpu_freq': self.get_cpu_freq(),
-            'cpu_freq_per_core': self.get_cpu_freq_per_core(),
+            'cpu_freq_per_core': [],
             'load_average': self.get_cpu_load_average(),
         }
 

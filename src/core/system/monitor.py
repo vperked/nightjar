@@ -1,9 +1,10 @@
+import heapq
 import psutil
 import platform
 import socket
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from core.cpu import CpuMonitor
 from core.memory import MemoryMonitor
 from core.format import format_bytes
@@ -16,6 +17,7 @@ class SystemMonitor:
         """Initialize the system monitor."""
         self.cpu_monitor = CpuMonitor()
         self.memory_monitor = MemoryMonitor()
+        self._system_info = None
 
     def get_system_info(self) -> Dict:
         """
@@ -24,15 +26,17 @@ class SystemMonitor:
         Returns:
             Dictionary containing system information
         """
-        return {
-            'platform': platform.system(),
-            'platform_release': platform.release(),
-            'platform_version': platform.version(),
-            'architecture': platform.machine(),
-            'processor': platform.processor(),
-            'hostname': socket.gethostname(),
-            'python_version': platform.python_version(),
-        }
+        if self._system_info is None:
+            self._system_info = {
+                'platform': platform.system(),
+                'platform_release': platform.release(),
+                'platform_version': platform.version(),
+                'architecture': platform.machine(),
+                'processor': platform.processor(),
+                'hostname': socket.gethostname(),
+                'python_version': platform.python_version(),
+            }
+        return self._system_info
 
     def get_boot_time(self) -> float:
         """
@@ -214,18 +218,19 @@ class SystemMonitor:
         Returns:
             Dictionary containing process counts by status
         """
-        processes = psutil.process_iter(['status'])
         status_count = {}
+        total = 0
 
-        for proc in processes:
+        for proc in psutil.process_iter(['status']):
             try:
+                total += 1
                 status = proc.info['status']
                 status_count[status] = status_count.get(status, 0) + 1
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 
         return {
-            'total': len(psutil.pids()),
+            'total': total,
             'by_status': status_count,
         }
 
@@ -241,31 +246,91 @@ class SystemMonitor:
         Returns:
             List of process dictionaries sorted by the specified metric
         """
+        processes_data = self._collect_top_process_rows()
+        if not processes_data or limit <= 0:
+            return []
+
+        if sort_by == 'memory':
+            return heapq.nlargest(limit, processes_data, key=lambda x: x.get('memory_percent', 0) or 0)
+        return heapq.nlargest(limit, processes_data, key=lambda x: x.get('cpu_percent', 0) or 0)
+
+    def _collect_top_process_rows(self) -> List[Dict]:
+        """Collect pid/name/cpu/memory rows in one process_iter pass."""
         processes_data = []
+        cpu_count = self.cpu_monitor.cpu_count if self.cpu_monitor.cpu_count > 0 else 1
 
-        attrs = ['pid', 'name', 'cpu_percent', 'memory_percent']
-
-        for proc in psutil.process_iter(attrs=attrs):
+        for proc in psutil.process_iter(attrs=['pid', 'name', 'cpu_percent', 'memory_percent']):
             try:
-                cpu_percent_raw = proc.info.get('cpu_percent', 0.0)
-                cpu_count = self.cpu_monitor.cpu_count if self.cpu_monitor.cpu_count > 0 else 1
-                cpu_percent_normalized = min(cpu_percent_raw / cpu_count, 100.0)
-
+                cpu_percent_raw = proc.info.get('cpu_percent') or 0.0
                 processes_data.append({
                     'pid': proc.info['pid'],
                     'name': proc.info['name'],
-                    'cpu_percent': cpu_percent_normalized,
-                    'memory_percent': proc.info.get('memory_percent', 0.0),
+                    'cpu_percent': min(cpu_percent_raw / cpu_count, 100.0),
+                    'memory_percent': proc.info.get('memory_percent') or 0.0,
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, TypeError):
+                continue
+        return processes_data
+
+    def get_top_processes_by_cpu_and_memory(self, limit: int = 10) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Get top CPU and memory processes from one process table scan.
+
+        Args:
+            limit: Number of processes to return per list
+
+        Returns:
+            Tuple of (top_cpu_processes, top_memory_processes)
+        """
+        processes_data = self._collect_top_process_rows()
+        if not processes_data or limit <= 0:
+            return [], []
+        top_cpu = heapq.nlargest(limit, processes_data, key=lambda x: x.get('cpu_percent', 0) or 0)
+        top_memory = heapq.nlargest(limit, processes_data, key=lambda x: x.get('memory_percent', 0) or 0)
+        return top_cpu, top_memory
+
+    def get_process_overview(self, limit: int = 5) -> Dict:
+        """
+        Count processes by status and pick top CPU/memory rows in one scan.
+
+        Args:
+            limit: Number of top processes to keep per metric
+
+        Returns:
+            Dictionary with count, top_cpu, and top_memory
+        """
+        status_count = {}
+        rows = []
+        total = 0
+        cpu_count = self.cpu_monitor.cpu_count if self.cpu_monitor.cpu_count > 0 else 1
+
+        for proc in psutil.process_iter(attrs=['pid', 'name', 'cpu_percent', 'memory_percent', 'status']):
+            try:
+                total += 1
+                status = proc.info.get('status')
+                if status:
+                    status_count[status] = status_count.get(status, 0) + 1
+                cpu_percent_raw = proc.info.get('cpu_percent') or 0.0
+                rows.append({
+                    'pid': proc.info['pid'],
+                    'name': proc.info['name'],
+                    'cpu_percent': min(cpu_percent_raw / cpu_count, 100.0),
+                    'memory_percent': proc.info.get('memory_percent') or 0.0,
                 })
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, TypeError):
                 continue
 
-        if sort_by == 'cpu':
-            processes_data.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
-        elif sort_by == 'memory':
-            processes_data.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
+        if limit <= 0 or not rows:
+            top_cpu, top_memory = [], []
+        else:
+            top_cpu = heapq.nlargest(limit, rows, key=lambda x: x.get('cpu_percent', 0) or 0)
+            top_memory = heapq.nlargest(limit, rows, key=lambda x: x.get('memory_percent', 0) or 0)
 
-        return processes_data[:limit]
+        return {
+            'count': {'total': total, 'by_status': status_count},
+            'top_cpu': top_cpu,
+            'top_memory': top_memory,
+        }
 
     def get_all_info(self, include_top_processes: bool = False) -> Dict:
         """
@@ -291,8 +356,9 @@ class SystemMonitor:
         }
 
         if include_top_processes:
-            info['top_processes_cpu'] = self.get_top_processes(limit=5, sort_by='cpu')
-            info['top_processes_memory'] = self.get_top_processes(limit=5, sort_by='memory')
+            top_cpu, top_memory = self.get_top_processes_by_cpu_and_memory(limit=5)
+            info['top_processes_cpu'] = top_cpu
+            info['top_processes_memory'] = top_memory
         else:
             info['top_processes_cpu'] = []
             info['top_processes_memory'] = []

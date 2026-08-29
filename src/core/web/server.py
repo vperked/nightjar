@@ -29,6 +29,22 @@ if TYPE_CHECKING:
 
 logger = get_logger(Component.WEB)
 
+_SITE_DIR = Path(__file__).parent / 'site'
+_STATIC_BYTES = {}
+
+
+def _cached_site_bytes(relative_path: str) -> Optional[bytes]:
+    """Read a site file once and reuse the bytes for later requests."""
+    if relative_path not in _STATIC_BYTES:
+        path = _SITE_DIR / relative_path
+        if not path.is_file():
+            _STATIC_BYTES[relative_path] = None
+        else:
+            _STATIC_BYTES[relative_path] = path.read_bytes()
+    return _STATIC_BYTES[relative_path]
+
+_HEALTH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix='web-health')
+
 
 class WebServerState:
     """Web server state to avoid global variables."""
@@ -49,6 +65,7 @@ class WebServerState:
 _state = WebServerState()
 
 _process_cache = {
+    'count': {'total': 0},
     'top_cpu': [],
     'top_memory': [],
     'last_update': 0.0,
@@ -431,13 +448,10 @@ def create_request_handler(monitors: Optional[Dict] = None):
             Returns the index.html file from the site directory.
             """
             try:
-                html_path = Path(__file__).parent / 'site' / 'index.html'
-                if not html_path.exists():
+                content = _cached_site_bytes('index.html')
+                if content is None:
                     self.send_error_safe(404, "HTML file not found")
                     return
-
-                with open(html_path, 'rb') as f:
-                    content = f.read()
 
                 self.send_response(200)
                 self.send_header('Content-type', 'text/html')
@@ -485,8 +499,11 @@ def create_request_handler(monitors: Optional[Dict] = None):
                     self.send_error_safe(404, "File not found")
                     return
 
-                with open(resolved_path, 'rb') as f:
-                    content = f.read()
+                relative = str(resolved_path_obj.relative_to(site_dir)).replace('\\', '/')
+                content = _cached_site_bytes(relative)
+                if content is None:
+                    self.send_error_safe(404, "File not found")
+                    return
 
                 content_type = 'application/javascript'
                 if path.endswith('.css'):
@@ -532,8 +549,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                     logger.error("get_system_stats returned invalid type, using empty dict")
                     stats = {}
 
-                import os
-                debug_mode = os.getenv('DEBUG', 'false').lower() == 'true'
+                debug_mode = get_cached_env('DEBUG', 'false').lower() == 'true'
                 indent = 2 if debug_mode else None
                 response = json.dumps(stats, indent=indent).encode('utf-8')
 
@@ -551,8 +567,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
             except Exception as e:
                 logger.error(f"Error serving stats: {e}", exc_info=True)
                 try:
-                    import os
-                    debug_mode = os.getenv('DEBUG', 'false').lower() == 'true'
+                    debug_mode = get_cached_env('DEBUG', 'false').lower() == 'true'
                     indent = 2 if debug_mode else None
                     error_response = json.dumps({'error': str(e), 'timestamp': time.time()}, indent=indent).encode('utf-8')
                     self.send_response(500)
@@ -582,9 +597,8 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 Function result or default_value if timeout
             """
             try:
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(func)
-                    return future.result(timeout=timeout)
+                future = _HEALTH_EXECUTOR.submit(func)
+                return future.result(timeout=timeout)
             except FutureTimeoutError:
                 logger.warning(f"Health check operation timed out after {timeout}s")
                 return default_value
@@ -615,11 +629,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
 
                 if self.monitors.get('cpu'):
                     try:
-                        cpu_percent = self._run_with_timeout(
-                            lambda: self.monitors['cpu'].get_cpu_percent(interval=0.1),
-                            timeout=5.0,
-                            default_value=None
-                        )
+                        cpu_percent = self.monitors['cpu'].get_cpu_percent(interval=0.0)
                         if cpu_percent is None:
                             checks['cpu'] = {'status': 'error', 'error': 'Health check timed out'}
                             issues.append('CPU monitor timed out')
@@ -639,17 +649,14 @@ def create_request_handler(monitors: Optional[Dict] = None):
 
                 if self.monitors.get('memory'):
                     try:
-                        memory_result = self._run_with_timeout(
-                            lambda: (self.monitors['memory'].get_memory_percent(), self.monitors['memory'].get_memory_info()),
-                            timeout=5.0,
-                            default_value=None
-                        )
+                        memory_result = self.monitors['memory'].get_memory_info()
                         if memory_result is None:
                             checks['memory'] = {'status': 'error', 'error': 'Health check timed out'}
                             issues.append('Memory monitor timed out')
                             health_status = 'error'
                         else:
-                            memory_percent, memory_info = memory_result
+                            memory_info = memory_result
+                            memory_percent = memory_info.get('percent', 0.0)
                             checks['memory'] = {
                                 'status': 'ok',
                                 'usage_percent': round(memory_percent, 1),
@@ -697,11 +704,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                         health_status = 'error'
 
                 try:
-                    system_result = self._run_with_timeout(
-                        lambda: psutil.boot_time(),
-                        timeout=2.0,
-                        default_value=None
-                    )
+                    system_result = psutil.boot_time()
                     if system_result is None:
                         checks['system'] = {'status': 'error', 'error': 'Health check timed out'}
                         issues.append('System info check timed out')
@@ -725,11 +728,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 if self.monitors.get('sensors'):
                     try:
                         sensors = self.monitors['sensors']
-                        temp_result = self._run_with_timeout(
-                            lambda: sensors.get_cpu_temperature() if sensors.is_available() else None,
-                            timeout=3.0,
-                            default_value=None
-                        )
+                        temp_result = sensors.get_cpu_temperature() if sensors.is_available() else None
                         if sensors.is_available():
                             cpu_temp = temp_result
                             checks['temperature'] = {
@@ -754,7 +753,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 if issues:
                     health_data['issues'] = issues
 
-                response = json.dumps(health_data, indent=2).encode('utf-8')
+                response = json.dumps(health_data, separators=(',', ':')).encode('utf-8')
 
                 status_code = 200 if health_status == 'ok' else (503 if health_status == 'degraded' else 500)
                 self.send_response(status_code)
@@ -816,7 +815,6 @@ def create_request_handler(monitors: Optional[Dict] = None):
                             time_since_cpu_update = current_time - _cpu_cache['last_update']
                             if time_since_cpu_update >= _cpu_cache['cache_interval']:
                                 stats['cpu'] = cpu_mon.get_cpu_info()
-                                stats['cpu']['cpu_percent'] = cpu_mon.get_cpu_percent(interval=0)
                                 _cpu_cache['data'] = stats['cpu']
                                 _cpu_cache['last_update'] = current_time
                             else:
@@ -851,7 +849,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 if self.monitors.get('gpu'):
                     try:
                         gpu_mon = self.monitors['gpu']
-                        if gpu_mon.nvidia_smi_available and gpu_mon.get_gpu_count() > 0:
+                        if gpu_mon.nvidia_smi_available:
                             with _gpu_cache_lock:
                                 time_since_gpu_update = current_time - _gpu_cache['last_update']
                                 if time_since_gpu_update >= _gpu_cache['cache_interval']:
@@ -923,18 +921,19 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 if self.monitors.get('system'):
                     try:
                         system_mon = self.monitors['system']
-                        stats['processes'] = system_mon.get_process_count()
-
                         with _process_cache_lock:
                             time_since_process_update = current_time - _process_cache['last_update']
                             if time_since_process_update >= _process_cache['cache_interval']:
                                 try:
-                                    _process_cache['top_cpu'] = system_mon.get_top_processes(limit=5, sort_by='cpu')
-                                    _process_cache['top_memory'] = system_mon.get_top_processes(limit=5, sort_by='memory')
+                                    overview = system_mon.get_process_overview(limit=5)
+                                    _process_cache['count'] = overview['count']
+                                    _process_cache['top_cpu'] = overview['top_cpu']
+                                    _process_cache['top_memory'] = overview['top_memory']
                                     _process_cache['last_update'] = current_time
                                 except Exception as e:
                                     logger.debug(f"Process cache update failed: {e}")
 
+                            stats['processes'] = _process_cache.get('count', {'total': 0})
                             stats['top_processes_cpu'] = _process_cache['top_cpu']
                             stats['top_processes_memory'] = _process_cache['top_memory']
                     except Exception as e:

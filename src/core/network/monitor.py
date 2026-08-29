@@ -174,8 +174,6 @@ class NetworkMonitor:
         Returns:
             Dictionary containing bandwidth usage
         """
-        import time
-
         current_time = time.time()
 
         if interface:

@@ -103,22 +103,18 @@ class FreezeMonitor:
 
         try:
             test_start = time.time()
-            psutil.cpu_percent(interval=0.1)
+            psutil.cpu_percent(interval=0.0)
             cpu_time = time.time() - test_start
 
             mem_start = time.time()
             psutil.virtual_memory()
             mem_time = time.time() - mem_start
 
-            proc_start = time.time()
-            len(psutil.pids())
-            proc_time = time.time() - proc_start
-
             total_time = time.time() - start_time
 
-            if cpu_time > timeout or mem_time > timeout or proc_time > timeout or total_time > timeout * 2:
+            if cpu_time > timeout or mem_time > timeout or total_time > timeout * 2:
                 responsive = False
-                error_message = f"System calls taking too long (CPU: {cpu_time:.2f}s, Mem: {mem_time:.2f}s, Proc: {proc_time:.2f}s)"
+                error_message = f"System calls taking too long (CPU: {cpu_time:.2f}s, Mem: {mem_time:.2f}s)"
 
         except (OSError, psutil.Error, AttributeError) as e:
             responsive = False

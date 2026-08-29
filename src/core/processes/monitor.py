@@ -1,3 +1,4 @@
+import heapq
 import psutil
 import time
 from typing import Dict, List, Optional, Callable
@@ -7,13 +8,82 @@ from core.observability import Component, get_logger
 
 logger = get_logger(Component.PROCESSES)
 
+PROCESS_RANK_ATTRS = [
+    'pid',
+    'name',
+    'cpu_percent',
+    'memory_percent',
+    'username',
+    'memory_info',
+]
+
 
 class ProcessMonitor:
     """Monitor system processes and their resource usage."""
 
     def __init__(self):
         """Initialize the process monitor."""
-        pass
+        self._cpu_count = CPU_COUNT if CPU_COUNT and CPU_COUNT > 0 else 1
+
+    def _normalize_cpu(self, cpu_percent_raw) -> float:
+        """Scale process CPU percent to 0-100 relative to logical core count."""
+        if cpu_percent_raw is None:
+            return 0.0
+        return min(cpu_percent_raw / self._cpu_count, 100.0)
+
+    def _snapshot_from_info(self, info: Dict) -> Optional[Dict]:
+        """
+        Build a process info dict from psutil process_iter fields.
+
+        Args:
+            info: Attribute dict from process_iter
+
+        Returns:
+            Process snapshot, or None if required fields are missing
+        """
+        pid = info.get('pid')
+        if pid is None:
+            return None
+
+        mem = info.get('memory_info')
+
+        return {
+            'pid': pid,
+            'name': info.get('name') or 'Unknown',
+            'status': info.get('status'),
+            'cpu_percent': self._normalize_cpu(info.get('cpu_percent')),
+            'memory_percent': info.get('memory_percent') or 0.0,
+            'memory_info': {
+                'rss': getattr(mem, 'rss', 0) if mem is not None else 0,
+                'vms': getattr(mem, 'vms', 0) if mem is not None else 0,
+                'shared': getattr(mem, 'shared', 0) if mem is not None else 0,
+            },
+            'num_threads': info.get('num_threads') or 0,
+            'create_time': None,
+            'username': info.get('username'),
+            'cmdline': info.get('cmdline') or [],
+            'exe': None,
+            'cwd': None,
+        }
+
+    def _collect_snapshots(self) -> List[Dict]:
+        """Collect process snapshots in a single process_iter pass."""
+        snapshots = []
+        try:
+            for proc in psutil.process_iter(PROCESS_RANK_ATTRS):
+                try:
+                    snapshot = self._snapshot_from_info(proc.info)
+                    if snapshot:
+                        snapshots.append(snapshot)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Process iteration failed: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Failed to iterate processes: {e}", exc_info=True)
+            return []
+        return snapshots
 
     def get_process_count(self) -> Dict:
         """
@@ -22,18 +92,22 @@ class ProcessMonitor:
         Returns:
             Dictionary containing process counts by status
         """
-        processes = psutil.process_iter(['status'])
         status_count = {}
+        total = 0
 
-        for proc in processes:
-            try:
-                status = proc.info['status']
-                status_count[status] = status_count.get(status, 0) + 1
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
+        try:
+            for proc in psutil.process_iter(['status']):
+                try:
+                    total += 1
+                    status = proc.info['status']
+                    status_count[status] = status_count.get(status, 0) + 1
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except (PermissionError, OSError):
+            return {'total': 0, 'by_status': {}}
 
         return {
-            'total': len(psutil.pids()),
+            'total': total,
             'by_status': status_count,
         }
 
@@ -50,8 +124,20 @@ class ProcessMonitor:
         try:
             proc = psutil.Process(pid)
             with proc.oneshot():
-                cpu_percent = proc.cpu_percent(interval=0.1)
-                cpu_percent = min(cpu_percent / CPU_COUNT, 100.0) if CPU_COUNT > 0 else min(cpu_percent, 100.0)
+                mem_info = proc.memory_info()
+                cpu_percent = self._normalize_cpu(proc.cpu_percent(interval=None))
+                try:
+                    exe = proc.exe() or None
+                except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                    exe = None
+                try:
+                    cwd = proc.cwd() or None
+                except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                    cwd = None
+                try:
+                    cmdline = proc.cmdline()
+                except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                    cmdline = []
 
                 return {
                     'pid': pid,
@@ -60,16 +146,16 @@ class ProcessMonitor:
                     'cpu_percent': cpu_percent,
                     'memory_percent': proc.memory_percent(),
                     'memory_info': {
-                        'rss': proc.memory_info().rss,
-                        'vms': proc.memory_info().vms,
-                        'shared': getattr(proc.memory_info(), 'shared', 0),
+                        'rss': mem_info.rss,
+                        'vms': mem_info.vms,
+                        'shared': getattr(mem_info, 'shared', 0),
                     },
                     'num_threads': proc.num_threads(),
                     'create_time': datetime.fromtimestamp(proc.create_time()).isoformat(),
                     'username': proc.username(),
-                    'cmdline': proc.cmdline(),
-                    'exe': proc.exe() if proc.exe() else None,
-                    'cwd': proc.cwd() if proc.cwd() else None,
+                    'cmdline': cmdline,
+                    'exe': exe,
+                    'cwd': cwd,
                 }
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             return None
@@ -86,25 +172,25 @@ class ProcessMonitor:
             List of process dictionaries matching the name
         """
         matching_processes = []
+        name_lower = name.lower()
 
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                proc_name = proc.info['name']
-                if exact_match:
-                    if proc_name == name:
-                        matching_processes.append(self.get_process_info(proc.info['pid']))
-                else:
-                    if name.lower() in proc_name.lower():
-                        matching_processes.append(self.get_process_info(proc.info['pid']))
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
+        for snapshot in self._collect_snapshots():
+            proc_name = snapshot.get('name') or ''
+            if exact_match:
+                if proc_name == name:
+                    matching_processes.append(snapshot)
+            elif name_lower in proc_name.lower():
+                matching_processes.append(snapshot)
 
         return matching_processes
 
     def get_top_processes(self, limit: int = 10, sort_by: str = 'cpu') -> List[Dict]:
         """
         Get top processes by CPU or memory usage.
-        Optimized to minimize expensive calls by filtering candidates first.
+
+        Uses a single process_iter pass and non-blocking CPU samples (percent
+        since the previous collection). First call after process start may
+        report 0% CPU until counters are primed.
 
         Args:
             limit: Number of processes to return
@@ -113,73 +199,34 @@ class ProcessMonitor:
         Returns:
             List of process dictionaries sorted by the specified metric
         """
-        processes = []
+        snapshots = self._collect_snapshots()
+        if not snapshots or limit <= 0:
+            return []
 
-        if sort_by == 'cpu':
-            try:
-                for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
-                    try:
-                        proc_info = proc.info.copy()
-                        if proc_info.get('memory_percent') is None:
-                            proc_info['memory_percent'] = proc.memory_percent()
-                        proc_info['cpu_percent'] = 0.0
-                        processes.append(proc_info)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError):
-                        continue
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Process iteration failed: {e}")
-                return []
-            except Exception as e:
-                logger.error(f"Failed to iterate processes: {e}", exc_info=True)
-                return []
-
-            processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
-            candidates = processes[:min(limit * 5, 50, len(processes))]
-
-            for proc_info in candidates:
-                try:
-                    proc = psutil.Process(proc_info['pid'])
-                    cpu_percent = proc.cpu_percent(interval=None)
-                    cpu_count = psutil.cpu_count(logical=True) or 1
-                    proc_info['cpu_percent'] = min(cpu_percent / cpu_count, 100.0)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError):
-                    proc_info['cpu_percent'] = 0.0
-                    continue
-
-            processes.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
+        if sort_by == 'memory':
+            key = lambda x: x.get('memory_percent', 0)
         else:
-            try:
-                for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
-                    try:
-                        proc_info = proc.info.copy()
-                        if proc_info.get('memory_percent') is None:
-                            proc_info['memory_percent'] = proc.memory_percent()
-                        proc_info['cpu_percent'] = 0.0
-                        processes.append(proc_info)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, PermissionError, OSError):
-                        continue
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Process iteration failed: {e}")
-                return []
-            except Exception as e:
-                logger.error(f"Failed to iterate processes: {e}", exc_info=True)
-                return []
+            key = lambda x: x.get('cpu_percent', 0)
 
-            processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
+        return heapq.nlargest(limit, snapshots, key=key)
 
-        top_pids = [p['pid'] for p in processes[:limit]]
-        result = []
-        for pid in top_pids:
-            proc_info = self.get_process_info(pid)
-            if proc_info:
-                result.append(proc_info)
+    def get_top_cpu_and_memory(self, limit: int = 10) -> tuple:
+        """
+        Get top CPU and memory processes from one process table scan.
 
-        if sort_by == 'cpu':
-            result.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
-        elif sort_by == 'memory':
-            result.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
+        Args:
+            limit: Number of processes to return per list
 
-        return result[:limit]
+        Returns:
+            Tuple of (top_cpu_processes, top_memory_processes)
+        """
+        snapshots = self._collect_snapshots()
+        if not snapshots or limit <= 0:
+            return [], []
+
+        top_cpu = heapq.nlargest(limit, snapshots, key=lambda x: x.get('cpu_percent', 0))
+        top_memory = heapq.nlargest(limit, snapshots, key=lambda x: x.get('memory_percent', 0))
+        return top_cpu, top_memory
 
     def get_process_tree(self, pid: int) -> Dict:
         """
@@ -194,11 +241,12 @@ class ProcessMonitor:
         try:
             proc = psutil.Process(pid)
             parent = None
-            if proc.parent():
+            parent_proc = proc.parent()
+            if parent_proc:
                 try:
                     parent = {
-                        'pid': proc.parent().pid,
-                        'name': proc.parent().name(),
+                        'pid': parent_proc.pid,
+                        'name': parent_proc.name(),
                     }
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
@@ -276,17 +324,10 @@ class ProcessMonitor:
             List of process dictionaries
         """
         processes = []
-
-        for proc in psutil.process_iter(['pid', 'name', 'username']):
-            try:
-                proc_username = proc.info.get('username')
-                if username is None or proc_username == username:
-                    proc_info = self.get_process_info(proc.info['pid'])
-                    if proc_info:
-                        processes.append(proc_info)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-
+        for snapshot in self._collect_snapshots():
+            proc_username = snapshot.get('username')
+            if username is None or proc_username == username:
+                processes.append(snapshot)
         return processes
 
     def get_process_summary(self) -> Dict:
@@ -297,8 +338,7 @@ class ProcessMonitor:
             Dictionary containing process summary statistics
         """
         process_count = self.get_process_count()
-        top_cpu = self.get_top_processes(limit=5, sort_by='cpu')
-        top_memory = self.get_top_processes(limit=5, sort_by='memory')
+        top_cpu, top_memory = self.get_top_cpu_and_memory(limit=5)
 
         return {
             'total_processes': process_count['total'],
@@ -318,4 +358,3 @@ class ProcessMonitor:
             Formatted string (e.g., "1.5 GB")
         """
         return format_bytes(bytes_value)
-
