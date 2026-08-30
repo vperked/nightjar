@@ -46,6 +46,7 @@ def running_server(monkeypatch, request):
     token = getattr(request, 'param', None)
     from core.config import settings as config
     config._env_cache.clear()
+    config._typed_env_cache.clear()
 
     if token:
         monkeypatch.setenv('WEB_AUTH_TOKEN', token)
@@ -66,6 +67,7 @@ def running_server(monkeypatch, request):
     httpd.server_close()
     thread.join(timeout=5)
     config._env_cache.clear()
+    config._typed_env_cache.clear()
 
 
 def _get(url, token=None):
@@ -167,6 +169,7 @@ def test_cors_is_not_wildcard_by_default(running_server):
 def test_start_server_refuses_public_bind_without_token(monkeypatch, caplog):
     from core.config import settings as config
     config._env_cache.clear()
+    config._typed_env_cache.clear()
     monkeypatch.delenv('WEB_AUTH_TOKEN', raising=False)
     web_server._state.server_thread = None
 

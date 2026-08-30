@@ -32,6 +32,7 @@ from core.qbittorrent import (
     SEEDING_ACTIVE_STATES,
     is_download_stalled,
     should_remove_torrent,
+    stalled_action_plan,
 )
 from core.logs import LogMonitor
 from core.kernel import KernelMonitor
@@ -58,6 +59,7 @@ from core.config import (
     DEFAULT_STALLED_TORRENT_RECOVERY_GRACE,
     DEFAULT_STALLED_TORRENT_AUTO_HANDLE,
     DEFAULT_STALLED_TORRENT_RETRY_BACKOFF,
+    DEFAULT_STALLED_TORRENT_MAX_RECOVERY_ATTEMPTS,
     DEFAULT_SEEDING_RATIO_LIMIT,
     DEFAULT_SEEDING_RATIO_ACTION_COOLDOWN,
     DEFAULT_SEEDING_RATIO_RETRY_BACKOFF,
@@ -420,6 +422,67 @@ def run_monitor(
     else:
         logger.info("qBittorrent: Monitoring disabled")
 
+    stalled_threshold = get_env_float(
+        'STALLED_TORRENT_THRESHOLD',
+        DEFAULT_STALLED_TORRENT_THRESHOLD,
+        min_val=30.0,
+        max_val=86400.0,
+    )
+    stalled_action_cooldown = get_env_float(
+        'STALLED_TORRENT_ACTION_COOLDOWN',
+        DEFAULT_STALLED_TORRENT_ACTION_COOLDOWN,
+        min_val=60.0,
+        max_val=86400.0,
+    )
+    stalled_recovery_grace = get_env_float(
+        'STALLED_TORRENT_RECOVERY_GRACE',
+        DEFAULT_STALLED_TORRENT_RECOVERY_GRACE,
+        min_val=0.0,
+        max_val=3600.0,
+    )
+    stalled_auto_handle = get_env_bool(
+        'STALLED_TORRENT_AUTO_HANDLE',
+        DEFAULT_STALLED_TORRENT_AUTO_HANDLE,
+    )
+    stalled_retry_backoff = get_env_float(
+        'STALLED_TORRENT_RETRY_BACKOFF',
+        DEFAULT_STALLED_TORRENT_RETRY_BACKOFF,
+        min_val=5.0,
+        max_val=3600.0,
+    )
+    stalled_max_recovery_attempts = get_env_int(
+        'STALLED_TORRENT_MAX_RECOVERY_ATTEMPTS',
+        DEFAULT_STALLED_TORRENT_MAX_RECOVERY_ATTEMPTS,
+        min_val=1,
+        max_val=20,
+    )
+    seeding_ratio_limit = get_env_float(
+        'SEEDING_RATIO_LIMIT',
+        DEFAULT_SEEDING_RATIO_LIMIT,
+        min_val=0.0,
+        max_val=100.0,
+    )
+    seeding_ratio_action_cooldown = get_env_float(
+        'SEEDING_RATIO_ACTION_COOLDOWN',
+        DEFAULT_SEEDING_RATIO_ACTION_COOLDOWN,
+        min_val=60.0,
+        max_val=86400.0,
+    )
+    seeding_ratio_retry_backoff = get_env_float(
+        'SEEDING_RATIO_RETRY_BACKOFF',
+        DEFAULT_SEEDING_RATIO_RETRY_BACKOFF,
+        min_val=5.0,
+        max_val=3600.0,
+    )
+    seeding_ratio_delete_files = get_env_bool(
+        'SEEDING_RATIO_DELETE_FILES',
+        DEFAULT_SEEDING_RATIO_DELETE_FILES,
+    )
+    inactive_torrent_auto_remove = get_env_bool(
+        'INACTIVE_TORRENT_AUTO_REMOVE',
+        DEFAULT_INACTIVE_TORRENT_AUTO_REMOVE,
+    )
+
     logger.info(f"Settings: Check every {check_interval:.1f}s | Cooldown {alert_cooldown:.1f}s")
 
     web_server_started = False
@@ -461,8 +524,9 @@ def run_monitor(
 
         if qbittorrent_connected and qbittorrent_webhook:
             try:
-                downloading = qbittorrent_monitor.get_downloading_torrents()
-                seeding = qbittorrent_monitor.get_seeding_torrents()
+                all_startup_torrents = qbittorrent_monitor.get_all_torrents()
+                downloading = qbittorrent_monitor.get_downloading_torrents(all_startup_torrents)
+                seeding = qbittorrent_monitor.get_seeding_torrents(all_startup_torrents)
 
                 if downloading or seeding:
                     logger.info(f"Sending qBittorrent status to Discord ({len(downloading)} downloading, {len(seeding)} seeding)...")
@@ -1921,65 +1985,14 @@ def run_monitor(
                                     default_value=[],
                                     operation_name="qBittorrent get all torrents"
                                 )
-                                current_torrents = {torrent['hash']: torrent for torrent in all_torrents}
+                                current_hashes = set()
 
-                                stalled_threshold = get_env_float(
-                                    'STALLED_TORRENT_THRESHOLD',
-                                    DEFAULT_STALLED_TORRENT_THRESHOLD,
-                                    min_val=30.0,
-                                    max_val=86400.0,
-                                )
-                                stalled_action_cooldown = get_env_float(
-                                    'STALLED_TORRENT_ACTION_COOLDOWN',
-                                    DEFAULT_STALLED_TORRENT_ACTION_COOLDOWN,
-                                    min_val=60.0,
-                                    max_val=86400.0,
-                                )
-                                stalled_recovery_grace = get_env_float(
-                                    'STALLED_TORRENT_RECOVERY_GRACE',
-                                    DEFAULT_STALLED_TORRENT_RECOVERY_GRACE,
-                                    min_val=0.0,
-                                    max_val=3600.0,
-                                )
-                                stalled_auto_handle = get_env_bool(
-                                    'STALLED_TORRENT_AUTO_HANDLE',
-                                    DEFAULT_STALLED_TORRENT_AUTO_HANDLE,
-                                )
-                                stalled_retry_backoff = get_env_float(
-                                    'STALLED_TORRENT_RETRY_BACKOFF',
-                                    DEFAULT_STALLED_TORRENT_RETRY_BACKOFF,
-                                    min_val=5.0,
-                                    max_val=3600.0,
-                                )
-                                seeding_ratio_limit = get_env_float(
-                                    'SEEDING_RATIO_LIMIT',
-                                    DEFAULT_SEEDING_RATIO_LIMIT,
-                                    min_val=0.0,
-                                    max_val=100.0,
-                                )
-                                seeding_ratio_action_cooldown = get_env_float(
-                                    'SEEDING_RATIO_ACTION_COOLDOWN',
-                                    DEFAULT_SEEDING_RATIO_ACTION_COOLDOWN,
-                                    min_val=60.0,
-                                    max_val=86400.0,
-                                )
-                                seeding_ratio_retry_backoff = get_env_float(
-                                    'SEEDING_RATIO_RETRY_BACKOFF',
-                                    DEFAULT_SEEDING_RATIO_RETRY_BACKOFF,
-                                    min_val=5.0,
-                                    max_val=3600.0,
-                                )
-                                seeding_ratio_delete_files = get_env_bool(
-                                    'SEEDING_RATIO_DELETE_FILES',
-                                    DEFAULT_SEEDING_RATIO_DELETE_FILES,
-                                )
-                                inactive_torrent_auto_remove = get_env_bool(
-                                    'INACTIVE_TORRENT_AUTO_REMOVE',
-                                    DEFAULT_INACTIVE_TORRENT_AUTO_REMOVE,
-                                )
-
-                                for torrent_hash, torrent in current_torrents.items():
-                                    state = torrent.get('state', '').lower()
+                                for torrent in all_torrents:
+                                    torrent_hash = torrent.get('hash')
+                                    if not torrent_hash:
+                                        continue
+                                    current_hashes.add(torrent_hash)
+                                    state = str(torrent.get('state', '')).lower()
                                     progress = torrent.get('progress', 0.0)
 
                                     is_seeding = state in SEEDING_ACTIVE_STATES
@@ -1990,8 +2003,9 @@ def run_monitor(
                                     if remove_reason == 'inactive' and not inactive_torrent_auto_remove:
                                         remove_reason = None
 
-                                    if torrent_hash not in tracked_torrents:
-                                        tracked_torrents[torrent_hash] = {
+                                    tracked = tracked_torrents.get(torrent_hash)
+                                    if tracked is None:
+                                        tracked = {
                                             'state': state,
                                             'progress': progress,
                                             'name': torrent.get('name', 'Unknown'),
@@ -2000,34 +2014,39 @@ def run_monitor(
                                             'stalled_since': current_time if stalled_download else None,
                                             'unstalled_since': None,
                                             'last_stalled_action': None,
+                                            'stalled_recovery_attempts': 0,
+                                            'notified_stalled': False,
                                             'last_ratio_action': None,
                                             'seen_at': current_time,
                                         }
+                                        tracked_torrents[torrent_hash] = tracked
                                         prev_state = state
                                     else:
-                                        prev_state = tracked_torrents[torrent_hash]['state']
+                                        prev_state = tracked['state']
 
                                     prev_was_seeding = prev_state in SEEDING_ACTIVE_STATES
                                     prev_was_downloading = prev_state in DOWNLOADING_STATES
 
                                     if stalled_download:
-                                        tracked_torrents[torrent_hash]['unstalled_since'] = None
-                                        if tracked_torrents[torrent_hash].get('stalled_since') is None:
-                                            tracked_torrents[torrent_hash]['stalled_since'] = current_time
+                                        tracked['unstalled_since'] = None
+                                        if tracked.get('stalled_since') is None:
+                                            tracked['stalled_since'] = current_time
 
-                                        stalled_since = tracked_torrents[torrent_hash]['stalled_since']
+                                        stalled_since = tracked['stalled_since']
                                         stalled_duration = current_time - stalled_since
-                                        last_action = tracked_torrents[torrent_hash].get('last_stalled_action') or 0.0
-                                        action_due = (
-                                            stalled_duration >= stalled_threshold
-                                            and (current_time - last_action) >= stalled_action_cooldown
+                                        plan = stalled_action_plan(
+                                            tracked,
+                                            current_time,
+                                            stalled_threshold,
+                                            stalled_action_cooldown,
+                                            stalled_max_recovery_attempts,
                                         )
 
-                                        if action_due:
+                                        if plan['recover'] or plan['alert'] or plan['abandon']:
                                             actions_taken = []
                                             torrent_name = torrent.get('name', 'Unknown')
-                                            recovery_ok = not stalled_auto_handle
-                                            if stalled_auto_handle:
+                                            recovery_ok = True
+                                            if plan['recover'] and stalled_auto_handle:
                                                 recovery = run_with_timeout(
                                                     lambda h=torrent_hash: qbittorrent_monitor.recover_stalled_torrent(h),
                                                     timeout=15.0,
@@ -2036,6 +2055,9 @@ def run_monitor(
                                                 ) or {'success': False, 'actions': []}
                                                 actions_taken = list(recovery.get('actions') or [])
                                                 recovery_ok = bool(actions_taken)
+                                                tracked['stalled_recovery_attempts'] = (
+                                                    int(tracked.get('stalled_recovery_attempts') or 0) + 1
+                                                )
                                                 if recovery_ok:
                                                     logger.warning(
                                                         f"[qBittorrent] Recovering stalled torrent: {torrent_name} "
@@ -2046,13 +2068,29 @@ def run_monitor(
                                                         f"[qBittorrent] Failed to recover stalled torrent: {torrent_name} "
                                                         f"(stalled for {stalled_duration:.0f}s)"
                                                     )
-                                            else:
+                                            elif plan['recover']:
+                                                tracked['stalled_recovery_attempts'] = (
+                                                    stalled_max_recovery_attempts
+                                                )
                                                 logger.warning(
                                                     f"[qBittorrent] Torrent stalled: {torrent_name} "
                                                     f"(stalled for {stalled_duration:.0f}s)"
                                                 )
 
-                                            if qbittorrent_webhook:
+                                            attempts_after = int(
+                                                tracked.get('stalled_recovery_attempts') or 0
+                                            )
+                                            if (
+                                                plan['recover']
+                                                and stalled_auto_handle
+                                                and attempts_after >= stalled_max_recovery_attempts
+                                            ):
+                                                logger.info(
+                                                    f"[qBittorrent] Stopping stalled recovery for {torrent_name} "
+                                                    f"after {attempts_after} attempt(s); torrent is still stalled"
+                                                )
+
+                                            if plan['alert'] and qbittorrent_webhook:
                                                 success = send_webhook(
                                                     lambda t=torrent, d=stalled_duration, a=actions_taken: (
                                                         qbittorrent_webhook.send_stalled_torrent_alert(
@@ -2064,27 +2102,33 @@ def run_monitor(
                                                 metrics_collector.record_alert('torrent_stalled')
                                                 metrics_collector.record_webhook_result(success)
                                                 if success:
+                                                    tracked['notified_stalled'] = True
                                                     logger.info("    Discord stalled torrent alert sent")
                                                 else:
                                                     logger.warning("    Discord stalled torrent alert failed")
+                                            elif plan['alert']:
+                                                tracked['notified_stalled'] = True
 
                                             if recovery_ok:
-                                                tracked_torrents[torrent_hash]['last_stalled_action'] = current_time
+                                                tracked['last_stalled_action'] = current_time
                                             else:
-                                                tracked_torrents[torrent_hash]['last_stalled_action'] = (
+                                                tracked['last_stalled_action'] = (
                                                     current_time - stalled_action_cooldown + stalled_retry_backoff
                                                 )
                                     else:
-                                        if tracked_torrents[torrent_hash].get('stalled_since') is not None:
-                                            unstalled_since = tracked_torrents[torrent_hash].get('unstalled_since')
+                                        if tracked.get('stalled_since') is not None:
+                                            unstalled_since = tracked.get('unstalled_since')
                                             if unstalled_since is None:
-                                                tracked_torrents[torrent_hash]['unstalled_since'] = current_time
+                                                tracked['unstalled_since'] = current_time
                                             elif (current_time - unstalled_since) >= stalled_recovery_grace:
-                                                tracked_torrents[torrent_hash]['stalled_since'] = None
-                                                tracked_torrents[torrent_hash]['unstalled_since'] = None
+                                                tracked['stalled_since'] = None
+                                                tracked['unstalled_since'] = None
+                                                tracked['stalled_recovery_attempts'] = 0
+                                                tracked['notified_stalled'] = False
+                                                tracked['last_stalled_action'] = None
 
                                     if remove_reason:
-                                        last_ratio_action = tracked_torrents[torrent_hash].get('last_ratio_action') or 0.0
+                                        last_ratio_action = tracked.get('last_ratio_action') or 0.0
                                         if (current_time - last_ratio_action) >= seeding_ratio_action_cooldown:
                                             torrent_name = torrent.get('name', 'Unknown')
                                             ratio_value = torrent.get('ratio', 0.0) or 0.0
@@ -2151,14 +2195,14 @@ def run_monitor(
                                                     logger.warning("    Discord torrent cleanup alert failed")
 
                                             if actions_taken:
-                                                tracked_torrents[torrent_hash]['last_ratio_action'] = current_time
+                                                tracked['last_ratio_action'] = current_time
                                             else:
-                                                tracked_torrents[torrent_hash]['last_ratio_action'] = (
+                                                tracked['last_ratio_action'] = (
                                                     current_time - seeding_ratio_action_cooldown + seeding_ratio_retry_backoff
                                                 )
 
                                     if is_seeding and progress >= 1.0:
-                                        if not tracked_torrents[torrent_hash]['notified_download'] and prev_was_downloading:
+                                        if not tracked['notified_download'] and prev_was_downloading:
                                             if qbittorrent_webhook:
                                                 logger.info(f"[qBittorrent] Download complete: {torrent.get('name', 'Unknown')}")
                                                 success = send_webhook(
@@ -2169,10 +2213,10 @@ def run_monitor(
                                                     logger.info("    Discord download complete notification sent")
                                                 else:
                                                     logger.warning("    Discord download complete notification failed")
-                                            tracked_torrents[torrent_hash]['notified_download'] = True
+                                            tracked['notified_download'] = True
 
                                     if is_seeding and not prev_was_seeding:
-                                        if not tracked_torrents[torrent_hash]['notified_seeding']:
+                                        if not tracked['notified_seeding']:
                                             if qbittorrent_webhook:
                                                 logger.info(f"[qBittorrent] Torrent seeding: {torrent.get('name', 'Unknown')}")
                                                 success = send_webhook(
@@ -2183,13 +2227,13 @@ def run_monitor(
                                                     logger.info("    Discord seeding notification sent")
                                                 else:
                                                     logger.warning("    Discord seeding notification failed")
-                                            tracked_torrents[torrent_hash]['notified_seeding'] = True
+                                            tracked['notified_seeding'] = True
 
-                                    tracked_torrents[torrent_hash]['state'] = state
-                                    tracked_torrents[torrent_hash]['progress'] = progress
+                                    tracked['state'] = state
+                                    tracked['progress'] = progress
 
                                 for torrent_hash in list(tracked_torrents.keys()):
-                                    if torrent_hash not in current_torrents:
+                                    if torrent_hash not in current_hashes:
                                         del tracked_torrents[torrent_hash]
 
                                 if len(tracked_torrents) > MAX_TRACKED_TORRENTS:

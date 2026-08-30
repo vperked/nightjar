@@ -53,6 +53,14 @@ def test_get_env_float_out_of_range_uses_default(monkeypatch):
     assert get_env_float('CPU_THRESHOLD', 80.0, min_val=0.0, max_val=100.0) == 80.0
 
 
+def test_get_env_float_typed_cache_hits(monkeypatch):
+    monkeypatch.setenv('CPU_THRESHOLD', '42.5')
+
+    assert get_env_float('CPU_THRESHOLD', 80.0, min_val=0.0, max_val=100.0) == 42.5
+    monkeypatch.setenv('CPU_THRESHOLD', '99.0')
+    assert get_env_float('CPU_THRESHOLD', 80.0, min_val=0.0, max_val=100.0) == 42.5
+
+
 def test_get_env_float_in_range(monkeypatch):
     monkeypatch.setenv('CPU_THRESHOLD', '42.5')
 

@@ -6,16 +6,103 @@ Monitors kernel logs, dmesg, and systemd journal for kernel crashes, panics, and
 import json
 import os
 import platform
+import re
 import subprocess
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from core.observability import Component, get_logger
-from core.security import safe_subprocess_path
 
 logger = get_logger(Component.KERNEL)
 
 DEFAULT_PERSISTENCE_FILE = os.path.join(os.path.expanduser('~'), '.servermonitor_kernel_tracking.json')
+
+_EARLY_WARNING_KEYWORDS = (
+    'mce:', 'machine check', 'edac error', 'corrected error', 'uncorrected error',
+    'memory error', 'ecc error', 'hardware error', 'mcelog',
+    'oom killer', 'out of memory', 'memory allocation failure', 'slab allocation',
+    'page allocation failure', 'swap', 'memory pressure',
+    'i/o error', 'disk error', 'sector', 'bad block', 'smart error',
+    'filesystem error', 'ext4 error', 'xfs error', 'btrfs error',
+    'driver error', 'device error', 'hardware failure', 'pci error',
+    'usb error', 'sata error', 'nvme error', 'ahci error',
+    'soft lockup', 'hard lockup', 'watchdog', 'hung task', 'stuck',
+    'rcu stall', 'rcu self-detected stall', 'rcu detected stall',
+    'thermal', 'overheating', 'temperature', 'power', 'voltage',
+    'throttling', 'thermal shutdown',
+    'filesystem corruption', 'superblock', 'journal', 'metadata',
+    'network error', 'ethernet error', 'link down', 'phy error',
+    'call trace', 'stack trace', 'backtrace', 'warn:', 'error:',
+    'failed', 'failure', 'timeout', 'deadlock',
+)
+_EARLY_WARNING_KEYWORD_PAIRS = tuple((keyword, keyword.lower()) for keyword in _EARLY_WARNING_KEYWORDS)
+_EARLY_WARNING_GREP = '|'.join(re.escape(keyword) for keyword in _EARLY_WARNING_KEYWORDS)
+
+_JOURNALCTL_CRASH_KEYWORDS = (
+    'kernel panic', 'kernel oops', 'kernel crash', 'BUG:', 'WARNING:',
+    'general protection fault', 'segmentation fault', 'double fault',
+    'unhandled page fault', 'kernel BUG', 'Unable to handle',
+)
+_JOURNALCTL_CRASH_KEYWORD_PAIRS = tuple(
+    (keyword, keyword.lower()) for keyword in _JOURNALCTL_CRASH_KEYWORDS
+)
+_JOURNALCTL_CRASH_GREP = '|'.join(re.escape(keyword) for keyword in _JOURNALCTL_CRASH_KEYWORDS)
+
+_KERNEL_LOG_CRITICAL_KEYWORDS = (
+    'kernel panic', 'kernel oops', 'kernel crash',
+    'bug:', 'panic:', 'oops:', 'crash:',
+    'general protection fault', 'segmentation fault', 'double fault', 'unhandled page fault',
+)
+_DMESG_CRITICAL_KEYWORDS = (
+    'panic', 'oops', 'bug:', 'crash',
+    'segmentation fault', 'general protection fault', 'double fault', 'unhandled page fault',
+)
+_DMESG_IGNORE_FRAGMENTS = ('failed:', 'failed (', 'error -', 'warn:', 'warning:')
+
+
+def _journalctl_json_entries(since_str: str, priority: str, grep_pattern: str) -> List[Dict]:
+    """
+    Run a single journalctl JSON query.
+
+    Args:
+        since_str: journalctl --since timestamp
+        priority: journalctl --priority filter
+        grep_pattern: Combined regex passed to --grep
+
+    Returns:
+        Parsed journal objects; empty list on failure
+    """
+    result = subprocess.run(
+        [
+            'journalctl',
+            '--since', since_str,
+            '--priority', priority,
+            '--grep', grep_pattern,
+            '--no-pager',
+            '--format', 'json',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout or not result.stdout.strip():
+        return []
+
+    entries = []
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return entries
+
+
+def _matching_keywords(message_lower: str, keyword_pairs: Tuple[Tuple[str, str], ...]) -> List[str]:
+    """Return original keywords whose lowercase form appears in message_lower."""
+    return [original for original, lowered in keyword_pairs if lowered in message_lower]
 
 
 class KernelMonitor:
@@ -182,73 +269,34 @@ class KernelMonitor:
 
         warnings = []
         try:
-            warning_keywords = [
-                'mce:', 'machine check', 'edac error', 'corrected error', 'uncorrected error',
-                'memory error', 'ecc error', 'hardware error', 'mcelog',
-                'oom killer', 'out of memory', 'memory allocation failure', 'slab allocation',
-                'page allocation failure', 'swap', 'memory pressure',
-                'i/o error', 'disk error', 'sector', 'bad block', 'smart error',
-                'filesystem error', 'ext4 error', 'xfs error', 'btrfs error',
-                'driver error', 'device error', 'hardware failure', 'pci error',
-                'usb error', 'sata error', 'nvme error', 'ahci error',
-                'soft lockup', 'hard lockup', 'watchdog', 'hung task', 'stuck',
-                'rcu stall', 'rcu self-detected stall', 'rcu detected stall',
-                'thermal', 'overheating', 'temperature', 'power', 'voltage',
-                'throttling', 'thermal shutdown',
-                'filesystem corruption', 'superblock', 'journal', 'metadata',
-                'network error', 'ethernet error', 'link down', 'phy error',
-                'call trace', 'stack trace', 'backtrace', 'warn:', 'error:',
-                'failed', 'failure', 'timeout', 'deadlock'
-            ]
-
             since_time = datetime.now() - timedelta(minutes=since_minutes)
             since_str = since_time.strftime('%Y-%m-%d %H:%M:%S')
-
-            for keyword in warning_keywords:
-                try:
-                    cmd = [
-                        'journalctl',
-                        '--since', since_str,
-                        '--priority', '0..4',
-                        '--grep', keyword,
-                        '--no-pager',
-                        '--format', 'json'
-                    ]
-
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        check=False
-                    )
-
-                    if result.returncode == 0 and result.stdout.strip():
-                        lines = result.stdout.strip().split('\n')
-                        for line in lines:
-                            if line.strip():
-                                try:
-                                    entry = json.loads(line)
-                                    warning_id = f"warning_{entry.get('__REALTIME_TIMESTAMP', '')}_{keyword}"
-                                    if warning_id not in self.detected_crashes:
-                                        priority = entry.get('PRIORITY', '6')
-                                        severity = 'critical' if priority in ['0', '1', '2', '3'] else 'warning'
-
-                                        warnings.append({
-                                            'type': 'early_warning',
-                                            'severity': severity,
-                                            'keyword': keyword,
-                                            'message': entry.get('MESSAGE', ''),
-                                            'timestamp': entry.get('__REALTIME_TIMESTAMP', ''),
-                                            'priority': priority,
-                                            'source': 'journalctl'
-                                        })
-                                        self.detected_crashes.add(warning_id)
-                                except (json.JSONDecodeError, KeyError):
-                                    continue
-                except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-                    logger.debug(f"journalctl warning check failed for {keyword}: {e}")
-                    continue
+            try:
+                for entry in _journalctl_json_entries(since_str, '0..4', _EARLY_WARNING_GREP):
+                    message = entry.get('MESSAGE', '')
+                    message_lower = message.lower() if isinstance(message, str) else str(message).lower()
+                    matched = _matching_keywords(message_lower, _EARLY_WARNING_KEYWORD_PAIRS)
+                    if not matched:
+                        continue
+                    timestamp = entry.get('__REALTIME_TIMESTAMP', '')
+                    priority = entry.get('PRIORITY', '6')
+                    severity = 'critical' if priority in ['0', '1', '2', '3'] else 'warning'
+                    for keyword in matched:
+                        warning_id = f"warning_{timestamp}_{keyword}"
+                        if warning_id in self.detected_crashes:
+                            continue
+                        warnings.append({
+                            'type': 'early_warning',
+                            'severity': severity,
+                            'keyword': keyword,
+                            'message': message,
+                            'timestamp': timestamp,
+                            'priority': priority,
+                            'source': 'journalctl'
+                        })
+                        self.detected_crashes.add(warning_id)
+            except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+                logger.debug(f"journalctl warning check failed: {e}")
         except Exception as e:
             logger.debug(f"Early warning check failed: {e}")
 
@@ -582,66 +630,35 @@ class KernelMonitor:
 
         crashes = []
         try:
-            keywords = ['kernel panic', 'kernel oops', 'kernel crash', 'BUG:', 'WARNING:',
-                       'general protection fault', 'segmentation fault', 'double fault',
-                       'unhandled page fault', 'kernel BUG', 'Unable to handle']
-
             since_time = datetime.now() - timedelta(minutes=since_minutes)
             since_str = since_time.strftime('%Y-%m-%d %H:%M:%S')
+            try:
+                for entry in _journalctl_json_entries(since_str, 'err', _JOURNALCTL_CRASH_GREP):
+                    message = entry.get('MESSAGE', '')
+                    message_lower = message.lower() if isinstance(message, str) else str(message).lower()
 
-            for keyword in keywords:
-                try:
-                    safe_keyword = safe_subprocess_path(keyword)
-                    if not safe_keyword:
+                    if 'servermonitor' in message_lower or 'server monitor' in message_lower:
+                        continue
+                    if 'python3' in message_lower and (
+                        'discord kernel crash alert' in message_lower or 'servermonitor' in message_lower
+                    ):
                         continue
 
-                    cmd = [
-                        'journalctl',
-                        '--since', since_str,
-                        '--priority', 'err',
-                        '--grep', keyword,
-                        '--no-pager',
-                        '--format', 'json'
-                    ]
-
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        check=False
-                    )
-
-                    if result.returncode == 0 and result.stdout.strip():
-                        lines = result.stdout.strip().split('\n')
-                        for line in lines:
-                            if line.strip():
-                                try:
-                                    entry = json.loads(line)
-                                    message = entry.get('MESSAGE', '')
-                                    message_lower = message.lower()
-                                    
-                                    if 'servermonitor' in message_lower or 'server monitor' in message_lower:
-                                        continue
-                                    
-                                    if 'python3' in message_lower and ('discord kernel crash alert' in message_lower or 'servermonitor' in message_lower):
-                                        continue
-                                    
-                                    crash_id = f"{entry.get('__REALTIME_TIMESTAMP', '')}_{keyword}"
-                                    if crash_id not in self.detected_crashes:
-                                        crashes.append({
-                                            'type': 'kernel_error',
-                                            'keyword': keyword,
-                                            'message': message,
-                                            'timestamp': entry.get('__REALTIME_TIMESTAMP', ''),
-                                            'source': 'journalctl'
-                                        })
-                                        self.detected_crashes.add(crash_id)
-                                except (json.JSONDecodeError, KeyError):
-                                    continue
-                except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-                    logger.debug(f"journalctl check failed for {keyword}: {e}")
-                    continue
+                    timestamp = entry.get('__REALTIME_TIMESTAMP', '')
+                    for keyword in _matching_keywords(message_lower, _JOURNALCTL_CRASH_KEYWORD_PAIRS):
+                        crash_id = f"{timestamp}_{keyword}"
+                        if crash_id in self.detected_crashes:
+                            continue
+                        crashes.append({
+                            'type': 'kernel_error',
+                            'keyword': keyword,
+                            'message': message,
+                            'timestamp': timestamp,
+                            'source': 'journalctl'
+                        })
+                        self.detected_crashes.add(crash_id)
+            except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+                logger.debug(f"journalctl check failed: {e}")
         except Exception as e:
             logger.debug(f"journalctl check failed: {e}")
 
@@ -698,14 +715,11 @@ class KernelMonitor:
                         if 'servermonitor' in line_lower or 'python3' in line_lower:
                             continue
                         
-                        if any(ignore in line_lower for ignore in ['failed:', 'failed (', 'error -', 'warn:', 'warning:']):
-                            if not any(critical in line_lower for critical in ['panic', 'oops', 'bug:', 'crash', 'segmentation fault', 'general protection fault', 'double fault', 'unhandled page fault']):
+                        if any(ignore in line_lower for ignore in _DMESG_IGNORE_FRAGMENTS):
+                            if not any(critical in line_lower for critical in _DMESG_CRITICAL_KEYWORDS):
                                 continue
-                        
-                        critical_keywords = ['panic', 'oops', 'bug:', 'crash',
-                                           'segmentation fault', 'general protection fault', 'double fault', 'unhandled page fault']
 
-                        for keyword in critical_keywords:
+                        for keyword in _DMESG_CRITICAL_KEYWORDS:
                             if keyword in line_lower:
                                 crash_id = f"dmesg_{line}"
                                 if crash_id not in self.detected_crashes:
@@ -749,11 +763,6 @@ class KernelMonitor:
         ]
 
         cutoff_time = time.time() - (since_minutes * 60)
-        critical_keywords = (
-            'kernel panic', 'kernel oops', 'kernel crash',
-            'bug:', 'panic:', 'oops:', 'crash:',
-            'general protection fault', 'segmentation fault', 'double fault', 'unhandled page fault',
-        )
 
         for log_path in kernel_log_paths:
             if not os.path.exists(log_path):
@@ -778,7 +787,7 @@ class KernelMonitor:
                     if 'python3' in line_lower and ('servermonitor' in line_lower or 'discord kernel crash alert' in line_lower):
                         continue
 
-                    for keyword in critical_keywords:
+                    for keyword in _KERNEL_LOG_CRITICAL_KEYWORDS:
                         if keyword in line_lower:
                             crash_id = f"{log_path}_{line}"
                             if crash_id not in self.detected_crashes:

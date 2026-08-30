@@ -11,6 +11,7 @@ from core.observability import Component, get_logger
 logger = get_logger(Component.CONFIG)
 
 _env_cache = {}
+_typed_env_cache = {}
 
 DEFAULT_CPU_THRESHOLD = 80.0
 DEFAULT_MEMORY_THRESHOLD = 80.0
@@ -42,6 +43,7 @@ DEFAULT_STALLED_TORRENT_ACTION_COOLDOWN = 1800.0
 DEFAULT_STALLED_TORRENT_RECOVERY_GRACE = 120.0
 DEFAULT_STALLED_TORRENT_AUTO_HANDLE = True
 DEFAULT_STALLED_TORRENT_RETRY_BACKOFF = 60.0
+DEFAULT_STALLED_TORRENT_MAX_RECOVERY_ATTEMPTS = 2
 DEFAULT_SEEDING_RATIO_LIMIT = 1.0
 DEFAULT_SEEDING_RATIO_ACTION_COOLDOWN = 1800.0
 DEFAULT_SEEDING_RATIO_RETRY_BACKOFF = 60.0
@@ -121,21 +123,30 @@ def get_env_float(key: str, default: float, min_val: Optional[float] = None, max
     Returns:
         Float value from environment variable or default
     """
+    cache_key = ('f', key, default, min_val, max_val)
+    if cache_key in _typed_env_cache:
+        return _typed_env_cache[cache_key]
+
     value = get_cached_env(key, str(default))
     if not value or value.strip() == '':
+        _typed_env_cache[cache_key] = default
         return default
     try:
         float_value = float(value)
 
         if min_val is not None and float_value < min_val:
             logger.warning(f"{key}={float_value} is below minimum {min_val}, using default {default}")
+            _typed_env_cache[cache_key] = default
             return default
         if max_val is not None and float_value > max_val:
             logger.warning(f"{key}={float_value} is above maximum {max_val}, using default {default}")
+            _typed_env_cache[cache_key] = default
             return default
 
+        _typed_env_cache[cache_key] = float_value
         return float_value
     except (ValueError, TypeError):
+        _typed_env_cache[cache_key] = default
         return default
 
 
@@ -155,21 +166,30 @@ def get_env_int(key: str, default: int, min_val: Optional[int] = None, max_val: 
     Returns:
         Integer value from environment variable or default
     """
+    cache_key = ('i', key, default, min_val, max_val)
+    if cache_key in _typed_env_cache:
+        return _typed_env_cache[cache_key]
+
     value = get_cached_env(key, str(default))
     if not value or value.strip() == '':
+        _typed_env_cache[cache_key] = default
         return default
     try:
         int_value = int(value)
 
         if min_val is not None and int_value < min_val:
             logger.warning(f"{key}={int_value} is below minimum {min_val}, using default {default}")
+            _typed_env_cache[cache_key] = default
             return default
         if max_val is not None and int_value > max_val:
             logger.warning(f"{key}={int_value} is above maximum {max_val}, using default {default}")
+            _typed_env_cache[cache_key] = default
             return default
 
+        _typed_env_cache[cache_key] = int_value
         return int_value
     except (ValueError, TypeError):
+        _typed_env_cache[cache_key] = default
         return default
 
 
@@ -202,17 +222,24 @@ def get_env_bool(key: str, default: bool = False) -> bool:
     Returns:
         Boolean value from environment variable or default
     """
+    cache_key = ('b', key, default)
+    if cache_key in _typed_env_cache:
+        return _typed_env_cache[cache_key]
+
     value = get_cached_env(key, str(default).lower())
     if not value or value.strip() == '':
+        _typed_env_cache[cache_key] = default
         return default
     value_lower = value.strip().lower()
     if value_lower in ('true', '1', 'yes', 'on'):
+        _typed_env_cache[cache_key] = True
         return True
-    elif value_lower in ('false', '0', 'no', 'off', ''):
+    if value_lower in ('false', '0', 'no', 'off', ''):
+        _typed_env_cache[cache_key] = False
         return False
-    else:
-        logger.warning(f"Invalid boolean value '{value}' for {key}, defaulting to {default}")
-        return default
+    logger.warning(f"Invalid boolean value '{value}' for {key}, defaulting to {default}")
+    _typed_env_cache[cache_key] = default
+    return default
 
 
 def validate_config() -> None:

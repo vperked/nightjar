@@ -16,5 +16,7 @@ def clear_env_cache():
     from core.config import settings as config
 
     config._env_cache.clear()
+    config._typed_env_cache.clear()
     yield
     config._env_cache.clear()
+    config._typed_env_cache.clear()

@@ -183,6 +183,7 @@ def test_retention_days_are_configurable(monkeypatch, tmp_path):
     monkeypatch.setenv('ROTATED_LOG_RETENTION_DAYS', '1')
     from core.config import settings as config
     config._env_cache.clear()
+    config._typed_env_cache.clear()
 
     monitor = LogMonitor(log_file=str(tmp_path / 'app.log'), threshold_mb=100.0)
     rotated = tmp_path / 'syslog.1'

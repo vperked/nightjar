@@ -10,6 +10,7 @@ from core.qbittorrent import (
     is_inactive_torrent,
     is_seeding_ratio_met,
     should_remove_torrent,
+    stalled_action_plan,
 )
 
 
@@ -248,3 +249,89 @@ def test_delete_torrent_calls_api(monkeypatch):
         torrent_hashes='deadbeef',
         delete_files=True,
     )
+
+
+def test_stalled_action_plan_waits_for_threshold():
+    plan = stalled_action_plan(
+        {'stalled_since': 100.0, 'stalled_recovery_attempts': 0, 'notified_stalled': False},
+        now=200.0,
+        threshold=300.0,
+        cooldown=1800.0,
+        max_recovery_attempts=2,
+    )
+    assert plan == {'recover': False, 'alert': False, 'abandon': False}
+
+
+def test_stalled_action_plan_alerts_and_recovers_once():
+    tracked = {
+        'stalled_since': 0.0,
+        'stalled_recovery_attempts': 0,
+        'notified_stalled': False,
+        'last_stalled_action': None,
+    }
+    first = stalled_action_plan(
+        tracked, now=400.0, threshold=300.0, cooldown=1800.0, max_recovery_attempts=2,
+    )
+    assert first == {'recover': True, 'alert': True, 'abandon': False}
+
+    tracked['stalled_recovery_attempts'] = 1
+    tracked['notified_stalled'] = True
+    tracked['last_stalled_action'] = 400.0
+
+    during_cooldown = stalled_action_plan(
+        tracked, now=500.0, threshold=300.0, cooldown=1800.0, max_recovery_attempts=2,
+    )
+    assert during_cooldown == {'recover': False, 'alert': False, 'abandon': False}
+
+    second = stalled_action_plan(
+        tracked, now=2300.0, threshold=300.0, cooldown=1800.0, max_recovery_attempts=2,
+    )
+    assert second == {'recover': True, 'alert': False, 'abandon': False}
+
+    tracked['stalled_recovery_attempts'] = 2
+    done = stalled_action_plan(
+        tracked, now=4200.0, threshold=300.0, cooldown=1800.0, max_recovery_attempts=2,
+    )
+    assert done == {'recover': False, 'alert': False, 'abandon': False}
+
+
+def test_get_torrent_summary_fetches_once(monkeypatch):
+    monitor = QBittorrentMonitor.__new__(QBittorrentMonitor)
+    monitor._connected = True
+    monitor._last_error = None
+    calls = {'count': 0}
+    torrents = [
+        {'state': 'downloading', 'dlspeed': 100, 'upspeed': 0, 'downloaded': 10, 'uploaded': 1},
+        {'state': 'uploading', 'dlspeed': 0, 'upspeed': 50, 'downloaded': 20, 'uploaded': 5},
+    ]
+
+    def fake_all():
+        calls['count'] += 1
+        return torrents
+
+    monkeypatch.setattr(monitor, 'get_all_torrents', fake_all)
+
+    summary = monitor.get_torrent_summary()
+
+    assert calls['count'] == 1
+    assert summary['total'] == 2
+    assert summary['downloading'] == 1
+    assert summary['seeding'] == 1
+    assert summary['total_download_speed'] == 100
+    assert summary['total_upload_speed'] == 50
+
+
+def test_stalled_action_plan_retries_alert_after_recovery_exhausted():
+    plan = stalled_action_plan(
+        {
+            'stalled_since': 0.0,
+            'stalled_recovery_attempts': 2,
+            'notified_stalled': False,
+            'last_stalled_action': 100.0,
+        },
+        now=2000.0,
+        threshold=300.0,
+        cooldown=1800.0,
+        max_recovery_attempts=2,
+    )
+    assert plan == {'recover': False, 'alert': True, 'abandon': True}
