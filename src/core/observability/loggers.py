@@ -15,6 +15,7 @@ from typing import Callable, Optional
 
 from core.observability.components import ROOT
 from core.observability.handlers import DiskAwareRotatingFileHandler
+from core.observability.redaction import RedactingFormatter
 from core.observability.settings import (
     LOG_BACKUP_COUNT,
     LOG_DATE_FORMAT,
@@ -65,7 +66,7 @@ def configure_logging(level: Optional[str] = None, force: bool = False) -> loggi
         root.setLevel(numeric_level)
         root.propagate = False
 
-        formatter = logging.Formatter(fmt=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+        formatter = RedactingFormatter(fmt=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
 
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(numeric_level)

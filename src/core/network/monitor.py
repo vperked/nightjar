@@ -1,7 +1,7 @@
 import psutil
 import time
 import threading
-from typing import Dict, List, Optional, Callable
+from typing import Optional
 from core.format import format_bytes, format_bytes_per_second
 from core.observability import Component, get_logger
 
@@ -19,7 +19,7 @@ class NetworkMonitor:
         self._last_io_timestamp = None
         self._last_io_per_nic = None
 
-    def get_network_interfaces(self) -> List[Dict]:
+    def get_network_interfaces(self) -> list[dict]:
         """
         Get information about all network interfaces.
 
@@ -69,7 +69,7 @@ class NetworkMonitor:
 
         return interface_list
 
-    def get_interface_by_name(self, name: str) -> Optional[Dict]:
+    def get_interface_by_name(self, name: str) -> Optional[dict]:
         """
         Get information about a specific network interface.
 
@@ -85,7 +85,7 @@ class NetworkMonitor:
                 return interface
         return None
 
-    def get_active_interfaces(self) -> List[Dict]:
+    def get_active_interfaces(self) -> list[dict]:
         """
         Get only active (up) network interfaces.
 
@@ -95,7 +95,7 @@ class NetworkMonitor:
         all_interfaces = self.get_network_interfaces()
         return [iface for iface in all_interfaces if iface['isup']]
 
-    def get_total_network_io(self) -> Dict:
+    def get_total_network_io(self) -> dict:
         """
         Get system-wide network I/O statistics.
 
@@ -117,7 +117,7 @@ class NetworkMonitor:
             'dropout': io.dropout,
         }
 
-    def get_network_io_human(self) -> Dict:
+    def get_network_io_human(self) -> dict:
         """
         Get network I/O statistics in human-readable format.
 
@@ -140,7 +140,7 @@ class NetworkMonitor:
         }
 
     def get_bandwidth_usage(self, interface: Optional[str] = None,
-                           interval: float = 1.0, use_cache: bool = True) -> Dict:
+                           interval: float = 1.0, use_cache: bool = True) -> dict:
         """
         Get current bandwidth usage (bytes per second).
 
@@ -160,10 +160,9 @@ class NetworkMonitor:
 
         if use_cache:
             return self._get_bandwidth_from_cache(interface, safe_interval)
-        else:
-            return self._get_bandwidth_blocking(interface, safe_interval)
+        return self._get_bandwidth_blocking(interface, safe_interval)
 
-    def _get_bandwidth_from_cache(self, interface: Optional[str], interval: float) -> Dict:
+    def _get_bandwidth_from_cache(self, interface: Optional[str], interval: float) -> dict:
         """
         Calculate bandwidth from cached counters (non-blocking).
 
@@ -210,38 +209,37 @@ class NetworkMonitor:
                 'packets_sent_per_sec': 0.0,
                 'packets_recv_per_sec': 0.0,
             }
-        else:
-            current_io = psutil.net_io_counters()
-            if current_io is None:
-                return {}
+        current_io = psutil.net_io_counters()
+        if current_io is None:
+            return {}
 
-            if self._last_io_counters and self._last_io_timestamp:
-                time_delta = current_time - self._last_io_timestamp
-                if time_delta > 0:
-                    result = {
-                        'interface': 'system-wide',
-                        'bytes_sent_per_sec': (current_io.bytes_sent - self._last_io_counters.bytes_sent) / time_delta,
-                        'bytes_recv_per_sec': (current_io.bytes_recv - self._last_io_counters.bytes_recv) / time_delta,
-                        'packets_sent_per_sec': (current_io.packets_sent - self._last_io_counters.packets_sent) / time_delta,
-                        'packets_recv_per_sec': (current_io.packets_recv - self._last_io_counters.packets_recv) / time_delta,
-                    }
+        if self._last_io_counters and self._last_io_timestamp:
+            time_delta = current_time - self._last_io_timestamp
+            if time_delta > 0:
+                result = {
+                    'interface': 'system-wide',
+                    'bytes_sent_per_sec': (current_io.bytes_sent - self._last_io_counters.bytes_sent) / time_delta,
+                    'bytes_recv_per_sec': (current_io.bytes_recv - self._last_io_counters.bytes_recv) / time_delta,
+                    'packets_sent_per_sec': (current_io.packets_sent - self._last_io_counters.packets_sent) / time_delta,
+                    'packets_recv_per_sec': (current_io.packets_recv - self._last_io_counters.packets_recv) / time_delta,
+                }
 
-                    self._last_io_counters = current_io
-                    self._last_io_timestamp = current_time
+                self._last_io_counters = current_io
+                self._last_io_timestamp = current_time
 
-                    return result
+                return result
 
-            self._last_io_counters = current_io
-            self._last_io_timestamp = current_time
-            return {
-                'interface': 'system-wide',
-                'bytes_sent_per_sec': 0.0,
-                'bytes_recv_per_sec': 0.0,
-                'packets_sent_per_sec': 0.0,
-                'packets_recv_per_sec': 0.0,
-            }
+        self._last_io_counters = current_io
+        self._last_io_timestamp = current_time
+        return {
+            'interface': 'system-wide',
+            'bytes_sent_per_sec': 0.0,
+            'bytes_recv_per_sec': 0.0,
+            'packets_sent_per_sec': 0.0,
+            'packets_recv_per_sec': 0.0,
+        }
 
-    def _get_bandwidth_blocking(self, interface: Optional[str], interval: float) -> Dict:
+    def _get_bandwidth_blocking(self, interface: Optional[str], interval: float) -> dict:
         """
         Calculate bandwidth using blocking time.sleep() approach.
 
@@ -274,28 +272,27 @@ class NetworkMonitor:
                 'packets_sent_per_sec': (after.packets_sent - before.packets_sent) / interval,
                 'packets_recv_per_sec': (after.packets_recv - before.packets_recv) / interval,
             }
-        else:
-            io_before = psutil.net_io_counters()
-            if io_before is None:
-                return {}
+        io_before = psutil.net_io_counters()
+        if io_before is None:
+            return {}
 
-            if _shutdown_event.wait(timeout=interval):
-                return {}
+        if _shutdown_event.wait(timeout=interval):
+            return {}
 
-            io_after = psutil.net_io_counters()
-            if io_after is None:
-                return {}
+        io_after = psutil.net_io_counters()
+        if io_after is None:
+            return {}
 
-            return {
-                'interface': 'system-wide',
-                'bytes_sent_per_sec': (io_after.bytes_sent - io_before.bytes_sent) / interval,
-                'bytes_recv_per_sec': (io_after.bytes_recv - io_before.bytes_recv) / interval,
-                'packets_sent_per_sec': (io_after.packets_sent - io_before.packets_sent) / interval,
-                'packets_recv_per_sec': (io_after.packets_recv - io_before.packets_recv) / interval,
-            }
+        return {
+            'interface': 'system-wide',
+            'bytes_sent_per_sec': (io_after.bytes_sent - io_before.bytes_sent) / interval,
+            'bytes_recv_per_sec': (io_after.bytes_recv - io_before.bytes_recv) / interval,
+            'packets_sent_per_sec': (io_after.packets_sent - io_before.packets_sent) / interval,
+            'packets_recv_per_sec': (io_after.packets_recv - io_before.packets_recv) / interval,
+        }
 
     def get_bandwidth_usage_human(self, interface: Optional[str] = None,
-                                 interval: float = 1.0) -> Dict:
+                                 interval: float = 1.0) -> dict:
         """
         Get current bandwidth usage in human-readable format.
 
@@ -318,7 +315,7 @@ class NetworkMonitor:
             'packets_recv_per_sec': f"{bandwidth['packets_recv_per_sec']:.2f}",
         }
 
-    def get_network_connections(self, kind: str = 'inet') -> List[Dict]:
+    def get_network_connections(self, kind: str = 'inet') -> list[dict]:
         """
         Get network connections.
 
@@ -348,7 +345,7 @@ class NetworkMonitor:
 
         return connection_list
 
-    def get_network_stats(self) -> Dict:
+    def get_network_stats(self) -> dict:
         """
         Get comprehensive network statistics.
 
@@ -366,7 +363,7 @@ class NetworkMonitor:
             },
         }
 
-    def find_interface_by_ip(self, ip_address: str) -> Optional[Dict]:
+    def find_interface_by_ip(self, ip_address: str) -> Optional[dict]:
         """
         Find network interface by IP address.
 

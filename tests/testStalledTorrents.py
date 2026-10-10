@@ -32,8 +32,8 @@ def test_is_download_stalled(torrent, expected):
     ({'state': 'stoppedup'}, True),
     ({'state': 'pauseddl'}, True),
     ({'state': 'stoppeddl'}, True),
-    ({'state': 'error'}, True),
-    ({'state': 'missingFiles'}, True),
+    ({'state': 'error'}, False),
+    ({'state': 'missingFiles'}, False),
     ({'state': 'uploading'}, False),
     ({'state': 'stalledup'}, False),
     ({'state': 'downloading'}, False),
@@ -66,7 +66,8 @@ def test_is_seeding_ratio_met(torrent, min_ratio, expected):
 
 @pytest.mark.parametrize('torrent,min_ratio,expected', [
     ({'state': 'pausedup', 'progress': 1.0, 'ratio': 0.1}, 1.0, 'inactive'),
-    ({'state': 'error', 'progress': 0.5, 'ratio': 0.0}, 1.0, 'inactive'),
+    ({'state': 'pauseddl', 'progress': 0.5, 'ratio': 0.0}, 1.0, 'inactive'),
+    ({'state': 'error', 'progress': 0.5, 'ratio': 0.0}, 1.0, None),
     ({'state': 'uploading', 'progress': 1.0, 'ratio': 1.0}, 1.0, 'ratio'),
     ({'state': 'uploading', 'progress': 1.0, 'ratio': 0.5}, 1.0, None),
     ({'state': 'downloading', 'progress': 0.4, 'ratio': 0.0}, 1.0, None),
@@ -101,7 +102,7 @@ def test_get_inactive_torrents(monkeypatch):
 
     inactive = monitor.get_inactive_torrents()
 
-    assert [t['hash'] for t in inactive] == ['a', 'c']
+    assert [t['hash'] for t in inactive] == ['a']
 
 
 def test_get_ratio_complete_torrents(monkeypatch):

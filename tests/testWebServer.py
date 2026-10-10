@@ -176,3 +176,45 @@ def test_start_server_refuses_public_bind_without_token(monkeypatch, caplog):
     web_server.start_server(port=_free_port(), host='0.0.0.0')
 
     assert web_server._state.server_thread is None
+
+
+@pytest.mark.parametrize('running_server', ['s3cret'], indirect=True)
+def test_health_without_token_returns_status_only(running_server):
+    base, _ = running_server
+
+    payload = json.loads(_get(f'{base}/health').read())
+
+    assert set(payload) == {'status'}
+
+
+@pytest.mark.parametrize('running_server', ['s3cret'], indirect=True)
+def test_health_with_token_returns_details(running_server):
+    base, token = running_server
+
+    payload = json.loads(_get(f'{base}/health', token=token).read())
+
+    assert 'checks' in payload
+
+
+@pytest.mark.parametrize('running_server', [None], indirect=True)
+def test_query_string_does_not_break_routing(running_server):
+    base, _ = running_server
+
+    assert _get(f'{base}/api/stats?cache=1').status == 200
+    assert _get(f'{base}/?v=2').status == 200
+
+
+@pytest.mark.parametrize('running_server', ['s3cret'], indirect=True)
+def test_repeated_auth_failures_are_throttled(running_server):
+    base, token = running_server
+    web_server._auth_failures.clear()
+
+    codes = []
+    for _ in range(web_server._AUTH_FAIL_LIMIT + 2):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(f'{base}/api/stats', token='wrong')
+        codes.append(exc.value.code)
+
+    assert codes[0] == 401
+    assert codes[-1] == 429
+    web_server._auth_failures.clear()

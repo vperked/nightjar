@@ -19,7 +19,17 @@ from core.observability import Component, get_logger
 src/
 ├── main.py                    # CLI entrypoint (--test, --install-systemd)
 └── core/
-    ├── runtime/app.py         # Monitoring startup, loop and shutdown
+    ├── runtime/               # The monitoring application
+    │   ├── app.py             #   run_monitor(): wires startup, loop and shutdown
+    │   ├── settings.py        #   All runtime settings, loaded and clamped once
+    │   ├── context.py         #   Shared monitors, webhooks, metrics and alert gates
+    │   ├── startup.py         #   Detection, monitor/webhook setup, startup banner
+    │   ├── collect.py         #   Per-cycle readings into a Snapshot
+    │   ├── loop.py            #   Runs every handler once per cycle, in order
+    │   ├── handlers/          #   One module per concern: resources, disk, processes,
+    │   │                      #   freeze, media, torrents, logs, kernel, updates
+    │   └── shutdown.py        #   Signals, graceful stop and crash reporting
+    ├── alerts.py              # Alert throttling (escalating repeats, flap suppression)
     ├── selfTest/runner.py     # Monitor and webhook self-test
     ├── cpu/monitor.py         # CPU usage, frequency and load average
     ├── memory/monitor.py      # Memory and swap
@@ -497,18 +507,25 @@ This will:
 - Send sample Discord embeds (if webhook configured)
 - Report any failures
 
+### Unit and golden tests
+```bash
+venv/bin/python -m pytest
+```
+
+`tests/testRunMonitorGolden.py` runs the real monitoring loop against scripted fake
+monitors, a fake clock and recording webhooks, and compares every log line, webhook call
+and cleanup action with the files in `tests/golden/`. Any change to alert behaviour shows
+up there. After an intentional change, review the diff and regenerate:
+```bash
+UPDATE_GOLDEN=1 venv/bin/python -m pytest tests/testRunMonitorGolden.py
+```
+
 ### Dependency Injection for Testing
-The `main()` function supports dependency injection for easier testing:
+`run_monitor()` accepts any monitor as an argument; omitted ones are constructed:
 ```python
-from monitor.cpu import CpuMonitor
-from monitor.memory import MemoryMonitor
+from core.runtime import run_monitor
 
-# Create mock monitors
-mock_cpu = MockCpuMonitor()
-mock_memory = MockMemoryMonitor()
-
-# Pass to main() for testing
-main(cpu_monitor=mock_cpu, memory_monitor=mock_memory)
+run_monitor(cpu_monitor=FakeCpuMonitor(), memory_monitor=FakeMemoryMonitor())
 ```
 
 ## 🐛 Troubleshooting

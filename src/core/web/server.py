@@ -4,9 +4,10 @@ import threading
 import socket
 import time
 import psutil
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
 from pathlib import Path
-from typing import Dict, Optional, Callable, Any, TYPE_CHECKING
+from typing import Optional, Callable, Any, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from core.observability import Component, get_logger
 from core.security import validate_path
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from core.disk import DiskMonitor
     from core.network import NetworkMonitor
     from core.sensors import SensorsMonitor
+    from core.processes import ProcessMonitor
     from core.webhook import DiscordWebhook
 
 logger = get_logger(Component.WEB)
@@ -43,6 +45,32 @@ def _cached_site_bytes(relative_path: str) -> Optional[bytes]:
             _STATIC_BYTES[relative_path] = path.read_bytes()
     return _STATIC_BYTES[relative_path]
 
+_AUTH_FAIL_LIMIT = 10
+_AUTH_FAIL_WINDOW = 60.0
+_auth_failures: dict[str, list] = {}
+_auth_failures_lock = threading.Lock()
+
+
+def _auth_is_throttled(client_ip: str) -> bool:
+    """Return True when a client exceeded the failed-auth limit in the current window."""
+    now = time.time()
+    with _auth_failures_lock:
+        recent = [t for t in _auth_failures.get(client_ip, []) if now - t < _AUTH_FAIL_WINDOW]
+        if recent:
+            _auth_failures[client_ip] = recent
+        else:
+            _auth_failures.pop(client_ip, None)
+        return len(recent) >= _AUTH_FAIL_LIMIT
+
+
+def _record_auth_failure(client_ip: str) -> None:
+    """Remember a failed authentication attempt for throttling."""
+    with _auth_failures_lock:
+        _auth_failures.setdefault(client_ip, []).append(time.time())
+        if len(_auth_failures) > 1024:
+            _auth_failures.pop(next(iter(_auth_failures)))
+
+
 _HEALTH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix='web-health')
 
 
@@ -57,20 +85,33 @@ class WebServerState:
         self.disk_monitor = None
         self.network_monitor = None
         self.sensors_monitor = None
+        self.process_monitor = None
         self.httpd = None
         self.server_thread = None
         self.crash_webhook = None
 
+    def monitors(self) -> dict[str, Any]:
+        """Monitors keyed the way request handlers look them up."""
+        return {
+            'cpu': self.cpu_monitor,
+            'memory': self.memory_monitor,
+            'system': self.system_monitor,
+            'gpu': self.gpu_monitor,
+            'disk': self.disk_monitor,
+            'network': self.network_monitor,
+            'sensors': self.sensors_monitor,
+            'processes': self.process_monitor,
+        }
+
 
 _state = WebServerState()
 
-_process_cache = {
-    'count': {'total': 0},
-    'top_cpu': [],
-    'top_memory': [],
-    'last_update': 0.0,
-    'cache_interval': 5.0
-}
+PROCESS_CACHE_SECONDS = 5.0
+
+
+def _process_row(process: dict) -> dict:
+    """The fields the dashboard shows for a process."""
+    return {key: process.get(key) for key in ('pid', 'name', 'cpu_percent', 'memory_percent')}
 
 _network_cache = {
     'data': {},
@@ -119,7 +160,6 @@ def _get_allowed_origin() -> str:
     return get_cached_env('WEB_ALLOWED_ORIGIN', DEFAULT_WEB_ALLOWED_ORIGIN) or DEFAULT_WEB_ALLOWED_ORIGIN
 
 
-_process_cache_lock = threading.Lock()
 _network_cache_lock = threading.Lock()
 _gpu_cache_lock = threading.Lock()
 _disk_cache_lock = threading.Lock()
@@ -133,7 +173,8 @@ def set_monitors(
     gpu: 'GpuMonitor',
     disk: 'DiskMonitor',
     network: 'NetworkMonitor',
-    sensors: 'SensorsMonitor'
+    sensors: 'SensorsMonitor',
+    processes: Optional['ProcessMonitor'] = None,
 ) -> None:
     """
     Set monitor instances to use for stats collection in the web server.
@@ -146,6 +187,7 @@ def set_monitors(
         disk (DiskMonitor): Disk monitor instance
         network (NetworkMonitor): Network monitor instance
         sensors (SensorsMonitor): Sensors monitor instance
+        processes (ProcessMonitor): Process monitor whose scan is shared with the alert loop
     """
     _state.cpu_monitor = cpu
     _state.memory_monitor = memory
@@ -154,6 +196,7 @@ def set_monitors(
     _state.disk_monitor = disk
     _state.network_monitor = network
     _state.sensors_monitor = sensors
+    _state.process_monitor = processes
 
 
 def set_crash_webhook(webhook: 'DiscordWebhook') -> None:
@@ -166,7 +209,7 @@ def set_crash_webhook(webhook: 'DiscordWebhook') -> None:
     _state.crash_webhook = webhook
 
 
-def create_request_handler(monitors: Optional[Dict] = None):
+def create_request_handler(monitors: Optional[dict] = None):
     """
     Factory function to create WebRequestHandler with dependency injection.
 
@@ -179,20 +222,15 @@ def create_request_handler(monitors: Optional[Dict] = None):
     class WebRequestHandler(BaseHTTPRequestHandler):
         """HTTP request handler for serving the web UI and API."""
 
+        # Socket timeout so an idle or slow client cannot hold a worker thread forever.
+        timeout = 15
+
         def __init__(self, *args, **kwargs):
             """Initialize handler with injected monitors."""
             if monitors:
                 self.monitors = monitors
             else:
-                self.monitors = {
-                    'cpu': _state.cpu_monitor,
-                    'memory': _state.memory_monitor,
-                    'system': _state.system_monitor,
-                    'gpu': _state.gpu_monitor,
-                    'disk': _state.disk_monitor,
-                    'network': _state.network_monitor,
-                    'sensors': _state.sensors_monitor,
-                }
+                self.monitors = _state.monitors()
             try:
                 super().__init__(*args, **kwargs)
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
@@ -203,7 +241,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
         def handle(self):
             """
             Override handle to catch connection errors during request processing.
-            
+
             This catches errors that occur during the entire request lifecycle,
             including reading the request line and headers.
             """
@@ -217,7 +255,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
         def handle_one_request(self):
             """
             Override handle_one_request to catch connection errors during request parsing.
-            
+
             This catches errors that occur when reading the request line specifically.
             """
             try:
@@ -306,9 +344,15 @@ def create_request_handler(monitors: Optional[Dict] = None):
             Returns:
                 True when the request is authorized
             """
+            client_ip = self.client_address[0]
+            if _auth_is_throttled(client_ip):
+                self.send_error_safe(429, "Too Many Requests")
+                return False
+
             if self._is_authorized():
                 return True
 
+            _record_auth_failure(client_ip)
             logger.warning(f"Unauthorized request to {self.path} from {self.client_address[0]}")
             self.send_error_safe(401, "Unauthorized")
             return False
@@ -373,21 +417,25 @@ def create_request_handler(monitors: Optional[Dict] = None):
                     self.send_error_safe(400, f"Bad Request: {error_msg}")
                     return
 
-                if self.path == '/favicon.ico':
+                route = urlparse(self.path).path
+
+                if route == '/favicon.ico':
                     self.send_no_content()
                     return
 
-                if not self.require_auth():
+                # /health stays reachable for uptime probes; without credentials it
+                # returns the overall status only (see serve_health).
+                if route != '/health' and not self.require_auth():
                     return
 
-                if self.path == '/' or self.path == '/index.html':
+                if route == '/' or route == '/index.html':
                     self.serve_html()
-                elif self.path == '/api/stats':
+                elif route == '/api/stats':
                     self.serve_stats()
-                elif self.path == '/health':
+                elif route == '/health':
                     self.serve_health()
-                elif self.path.startswith('/js/'):
-                    self.serve_static_file(self.path)
+                elif route.startswith('/js/'):
+                    self.serve_static_file(route)
                 else:
                     self.send_error_safe(404, "Not Found")
             except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
@@ -464,7 +512,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
             except Exception as e:
                 logger.error(f"Error serving HTML: {e}", exc_info=True)
                 try:
-                    self.send_error_safe(500, f"Internal Server Error: {str(e)}")
+                    self.send_error_safe(500, "Internal Server Error")
                 except Exception:
                     pass
 
@@ -510,7 +558,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                     content_type = 'text/css'
                 elif path.endswith('.png'):
                     content_type = 'image/png'
-                elif path.endswith('.jpg') or path.endswith('.jpeg'):
+                elif path.endswith(('.jpg', '.jpeg')):
                     content_type = 'image/jpeg'
                 elif path.endswith('.svg'):
                     content_type = 'image/svg+xml'
@@ -526,7 +574,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
             except Exception as e:
                 logger.error(f"Error serving static file {path}: {e}", exc_info=True)
                 try:
-                    self.send_error_safe(500, f"Internal Server Error: {str(e)}")
+                    self.send_error_safe(500, "Internal Server Error")
                 except Exception:
                     pass
 
@@ -569,7 +617,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 try:
                     debug_mode = get_cached_env('DEBUG', 'false').lower() == 'true'
                     indent = 2 if debug_mode else None
-                    error_response = json.dumps({'error': str(e), 'timestamp': time.time()}, indent=indent).encode('utf-8')
+                    error_response = json.dumps({'error': 'Internal Server Error', 'timestamp': time.time()}, indent=indent).encode('utf-8')
                     self.send_response(500)
                     self.send_header('Content-type', 'application/json')
                     self.send_header('Content-length', str(len(error_response)))
@@ -642,8 +690,8 @@ def create_request_handler(monitors: Optional[Dict] = None):
                             if cpu_percent > 95:
                                 issues.append('CPU usage very high')
                                 health_status = 'degraded'
-                    except Exception as e:
-                        checks['cpu'] = {'status': 'error', 'error': str(e)}
+                    except Exception:
+                        checks['cpu'] = {'status': 'error', 'error': 'check failed'}
                         issues.append('CPU monitor failed')
                         health_status = 'error'
 
@@ -668,15 +716,15 @@ def create_request_handler(monitors: Optional[Dict] = None):
                             if memory_info.get('available', 0) < 100 * 1024 * 1024:
                                 issues.append('Low memory available (<100MB)')
                                 health_status = 'degraded'
-                    except Exception as e:
-                        checks['memory'] = {'status': 'error', 'error': str(e)}
+                    except Exception:
+                        checks['memory'] = {'status': 'error', 'error': 'check failed'}
                         issues.append('Memory monitor failed')
                         health_status = 'error'
 
                 if self.monitors.get('disk'):
                     try:
                         disk_usage = self._run_with_timeout(
-                            lambda: self.monitors['disk'].get_total_disk_usage(),
+                            self.monitors['disk'].get_total_disk_usage,
                             timeout=5.0,
                             default_value=None
                         )
@@ -698,8 +746,8 @@ def create_request_handler(monitors: Optional[Dict] = None):
                             if free_gb < 1.0:
                                 issues.append('Low disk space (<1GB free)')
                                 health_status = 'degraded'
-                    except Exception as e:
-                        checks['disk'] = {'status': 'error', 'error': str(e)}
+                    except Exception:
+                        checks['disk'] = {'status': 'error', 'error': 'check failed'}
                         issues.append('Disk monitor failed')
                         health_status = 'error'
 
@@ -719,8 +767,8 @@ def create_request_handler(monitors: Optional[Dict] = None):
                             'uptime_hours': round(uptime_hours, 1),
                             'boot_time': datetime.fromtimestamp(boot_time).isoformat()
                         }
-                except Exception as e:
-                    checks['system'] = {'status': 'error', 'error': str(e)}
+                except Exception:
+                    checks['system'] = {'status': 'error', 'error': 'check failed'}
                     issues.append('System info check failed')
                     if health_status == 'ok':
                         health_status = 'degraded'
@@ -740,8 +788,8 @@ def create_request_handler(monitors: Optional[Dict] = None):
                                 health_status = 'degraded'
                         else:
                             checks['temperature'] = {'status': 'unavailable'}
-                    except Exception as e:
-                        checks['temperature'] = {'status': 'error', 'error': str(e)}
+                    except Exception:
+                        checks['temperature'] = {'status': 'error', 'error': 'check failed'}
 
                 health_data = {
                     'status': health_status,
@@ -752,6 +800,9 @@ def create_request_handler(monitors: Optional[Dict] = None):
 
                 if issues:
                     health_data['issues'] = issues
+
+                if not self._is_authorized():
+                    health_data = {'status': health_status}
 
                 response = json.dumps(health_data, separators=(',', ':')).encode('utf-8')
 
@@ -770,7 +821,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 try:
                     error_response = json.dumps({
                         'status': 'error',
-                        'error': str(e),
+                        'error': 'Internal Server Error',
                         'timestamp': time.time()
                     }).encode('utf-8')
                     self.send_response(500)
@@ -783,7 +834,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 except (ConnectionAbortedError, BrokenPipeError, OSError) as e:
                     logger.debug(f"Client disconnected during health error: {e}")
 
-        def get_system_stats(self) -> Dict:
+        def get_system_stats(self) -> dict:
             """
             Collect current system statistics with caching for performance.
 
@@ -794,9 +845,6 @@ def create_request_handler(monitors: Optional[Dict] = None):
                 Dictionary containing system statistics from all monitors
                 Always returns a valid dict, even if some monitors fail.
             """
-            global _process_cache, _network_cache, _gpu_cache, _disk_cache, _cpu_cache
-            global _process_cache_lock, _network_cache_lock, _gpu_cache_lock, _disk_cache_lock, _cpu_cache_lock
-
             stats = {}
             current_time = time.time()
 
@@ -907,6 +955,7 @@ def create_request_handler(monitors: Optional[Dict] = None):
                                             'packets_recv_per_sec': 0,
                                         }
                                         _network_cache['data'] = bandwidth
+                                        _network_cache['last_update'] = current_time
                                         stats['network'] = bandwidth
 
                                     _network_cache['last_io'] = current_io
@@ -918,34 +967,20 @@ def create_request_handler(monitors: Optional[Dict] = None):
                         with _network_cache_lock:
                             stats['network'] = _network_cache.get('data', {})
 
-                if self.monitors.get('system'):
+                stats['processes'] = {'total': 0}
+                stats['top_processes_cpu'] = []
+                stats['top_processes_memory'] = []
+                if self.monitors.get('processes'):
                     try:
-                        system_mon = self.monitors['system']
-                        with _process_cache_lock:
-                            time_since_process_update = current_time - _process_cache['last_update']
-                            if time_since_process_update >= _process_cache['cache_interval']:
-                                try:
-                                    overview = system_mon.get_process_overview(limit=5)
-                                    _process_cache['count'] = overview['count']
-                                    _process_cache['top_cpu'] = overview['top_cpu']
-                                    _process_cache['top_memory'] = overview['top_memory']
-                                    _process_cache['last_update'] = current_time
-                                except Exception as e:
-                                    logger.debug(f"Process cache update failed: {e}")
-
-                            stats['processes'] = _process_cache.get('count', {'total': 0})
-                            stats['top_processes_cpu'] = _process_cache['top_cpu']
-                            stats['top_processes_memory'] = _process_cache['top_memory']
+                        # Shared with the alert loop's scan, so both see the same CPU sample.
+                        overview = self.monitors['processes'].get_process_overview(
+                            limit=5, max_age=PROCESS_CACHE_SECONDS
+                        )
+                        stats['processes'] = overview['count']
+                        stats['top_processes_cpu'] = [_process_row(p) for p in overview['top_cpu']]
+                        stats['top_processes_memory'] = [_process_row(p) for p in overview['top_memory']]
                     except Exception as e:
                         logger.warning(f"Error getting process info: {e}")
-                        stats['processes'] = {'total': 0}
-                        with _process_cache_lock:
-                            stats['top_processes_cpu'] = _process_cache.get('top_cpu', [])
-                            stats['top_processes_memory'] = _process_cache.get('top_memory', [])
-                else:
-                    stats['processes'] = {'total': 0}
-                    stats['top_processes_cpu'] = []
-                    stats['top_processes_memory'] = []
 
             except Exception as e:
                 logger.error(f"Critical error in get_system_stats: {e}", exc_info=True)
@@ -1020,8 +1055,8 @@ def _run_server(port: int, host: str) -> None:
     server_address = (host, port)
 
     try:
-        _state.httpd = HTTPServer(server_address, WebRequestHandler)
-    except (OSError, socket.error) as e:
+        _state.httpd = ThreadingHTTPServer(server_address, WebRequestHandler)
+    except OSError as e:
         error_str = str(e).lower()
         is_port_in_use = (
             port == 8080 and (
@@ -1037,18 +1072,10 @@ def _run_server(port: int, host: str) -> None:
             port = 8081
             server_address = (host, port)
             try:
-                handler_class = create_request_handler({
-                    'cpu': _state.cpu_monitor,
-                    'memory': _state.memory_monitor,
-                    'system': _state.system_monitor,
-                    'gpu': _state.gpu_monitor,
-                    'disk': _state.disk_monitor,
-                    'network': _state.network_monitor,
-                    'sensors': _state.sensors_monitor,
-                })
-                _state.httpd = HTTPServer(server_address, handler_class)
+                handler_class = create_request_handler(_state.monitors())
+                _state.httpd = ThreadingHTTPServer(server_address, handler_class)
                 logger.info(f"Successfully bound to port {port}")
-            except (OSError, socket.error) as e2:
+            except OSError as e2:
                 logger.error(f"Failed to bind to port {port}: {e2}")
                 if _state.crash_webhook:
                     try:

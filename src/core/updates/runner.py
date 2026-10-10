@@ -7,14 +7,19 @@ import platform
 import re
 import shutil
 import subprocess
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from core.observability import Component, get_logger
 
 logger = get_logger(Component.UPDATES)
 
 
-def _privilege_prefix() -> Optional[List[str]]:
+# Package managers get a minimal environment so secrets from .env (webhooks, tokens)
+# are not handed to maintainer scripts run during upgrades.
+_PASSTHROUGH_ENV = ('PATH', 'HOME', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR')
+
+
+def _privilege_prefix() -> Optional[list[str]]:
     """Return [] to run commands directly, ['sudo','-n'] if passwordless sudo works, or None if not elevated."""
     if platform.system() != 'Linux':
         return None
@@ -38,8 +43,9 @@ def _which(name: str) -> Optional[str]:
     return shutil.which(name)
 
 
-def _run(cmd: List[str], timeout: int, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
-    e = {**os.environ}
+def _run(cmd: list[str], timeout: int, env: Optional[dict[str, str]] = None) -> subprocess.CompletedProcess:
+    e = {k: os.environ[k] for k in _PASSTHROUGH_ENV if k in os.environ}
+    e.setdefault('PATH', '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
     if env:
         e.update(env)
     return subprocess.run(
@@ -71,7 +77,7 @@ def _detect_manager() -> Optional[str]:
     return None
 
 
-def run_system_update(apply: bool, command_timeout: int) -> Dict[str, Any]:
+def run_system_update(apply: bool, command_timeout: int) -> dict[str, Any]:
     """
     Refresh package indexes, count pending upgrades, and optionally apply non-interactive upgrades.
 
@@ -82,7 +88,7 @@ def run_system_update(apply: bool, command_timeout: int) -> Dict[str, Any]:
     Returns:
         Dict with ok, manager, upgradable, applied, message keys.
     """
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         'ok': False,
         'manager': 'none',
         'upgradable': 0,

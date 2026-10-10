@@ -5,7 +5,7 @@ Path, environment and subprocess input validation.
 import os
 import re
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional
 from core.observability import Component, get_logger
 
 logger = get_logger(Component.SECURITY)
@@ -13,11 +13,10 @@ logger = get_logger(Component.SECURITY)
 
 class SecurityError(Exception):
     """Raised when a security validation fails."""
-    pass
 
 
-def validate_path(path: str, allowed_base_paths: Optional[List[str]] = None,
-                 allow_symlinks: bool = False) -> Tuple[bool, Optional[str], Optional[str]]:
+def validate_path(path: str, allowed_base_paths: Optional[list[str]] = None,
+                 allow_symlinks: bool = False) -> tuple[bool, Optional[str], Optional[str]]:
     """
     Validate a file path to prevent path traversal attacks.
 
@@ -109,8 +108,8 @@ def sanitize_path(path: str, base_path: Optional[str] = None) -> Optional[str]:
 
 def validate_environment_variable(key: str, value: str,
                                  max_length: int = 10000,
-                                 allowed_patterns: Optional[List[str]] = None,
-                                 blocked_patterns: Optional[List[str]] = None) -> Tuple[bool, Optional[str]]:
+                                 allowed_patterns: Optional[list[str]] = None,
+                                 blocked_patterns: Optional[list[str]] = None) -> tuple[bool, Optional[str]]:
     """
     Validate an environment variable value for security.
 

@@ -86,12 +86,16 @@ def test_get_env_int_invalid_uses_default(monkeypatch):
     assert get_env_int('WEB_PORT', 8080) == 8080
 
 
-def test_invalid_env_value_is_not_cached(monkeypatch):
-    monkeypatch.setenv('LOG_FILE', '/var/log/app.log; rm -rf /')
+def test_shell_metacharacters_are_preserved(monkeypatch):
+    monkeypatch.setenv('WEB_AUTH_TOKEN', 'abc$def&1;(x)|<y>')
 
-    value = get_cached_env('LOG_FILE', '/var/log/default.log')
+    assert get_cached_env('WEB_AUTH_TOKEN', '') == 'abc$def&1;(x)|<y>'
 
-    assert value == '/var/log/default.log'
+
+def test_oversized_env_value_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv('LOG_FILE', 'x' * (config.MAX_ENV_VALUE_LENGTH + 1))
+
+    assert get_cached_env('LOG_FILE', '/var/log/default.log') == '/var/log/default.log'
     assert config._env_cache['LOG_FILE'] == '/var/log/default.log'
 
 

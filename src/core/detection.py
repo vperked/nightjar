@@ -8,7 +8,7 @@ import platform
 import subprocess
 import socket
 import psutil
-from typing import Dict, Optional, Any
+from typing import Optional, Any
 from pathlib import Path
 from core.observability import Component, get_logger
 from core.format import BYTES_PER_GB
@@ -20,7 +20,7 @@ from core.config import (
 logger = get_logger(Component.SYSTEM_INFO)
 
 
-def analyze_system_usage_patterns() -> Dict[str, Any]:
+def analyze_system_usage_patterns() -> dict[str, Any]:
     """
     Analyze current system usage patterns to determine optimal thresholds.
 
@@ -45,12 +45,9 @@ def analyze_system_usage_patterns() -> Dict[str, Any]:
 
     try:
         sample_count = 2
-        if platform.system() == 'Windows':
-            root_path = os.path.splitdrive(sys.executable)[0] + '\\'
-        else:
-            root_path = '/'
+        root_path = os.path.splitdrive(sys.executable)[0] + '\\' if platform.system() == 'Windows' else '/'
 
-        for i in range(sample_count):
+        for _i in range(sample_count):
             try:
                 cpu_percent = psutil.cpu_percent(interval=0.1)
                 analysis['cpu_samples'].append(cpu_percent)
@@ -100,7 +97,7 @@ def analyze_system_usage_patterns() -> Dict[str, Any]:
     return analysis
 
 
-def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
+def detect_system_config(skip_usage_analysis: bool = False) -> dict[str, Any]:
     """
     Auto-detect system capabilities and adapt configuration.
 
@@ -147,6 +144,7 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
             result = subprocess.run(
                 ['nvidia-smi', '--version'],
                 capture_output=True,
+                check=False,
                 text=True,
                 timeout=3
             )
@@ -189,10 +187,7 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
         logger.debug(f"qBittorrent detection failed: {e}")
 
     try:
-        if platform.system() == 'Windows':
-            root_path = os.path.splitdrive(sys.executable)[0] + '\\'
-        else:
-            root_path = '/'
+        root_path = os.path.splitdrive(sys.executable)[0] + '\\' if platform.system() == 'Windows' else '/'
 
         disk = psutil.disk_usage(root_path)
         detected['total_disk_gb'] = disk.total / BYTES_PER_GB
@@ -212,7 +207,7 @@ def detect_system_config(skip_usage_analysis: bool = False) -> Dict[str, Any]:
     return detected
 
 
-def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
+def apply_system_adaptations(detected: dict[str, Any]) -> dict[str, str]:
     """
     Apply auto-detected system adaptations to environment variables if not already set.
 
@@ -375,11 +370,10 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
     if detected['platform'] == 'Windows':
         if not os.getenv('FREEZE_MONITOR_ENABLED'):
             pass
-    elif detected['platform'] == 'Linux':
-        if not os.getenv('MONITOR_INDIVIDUAL_PARTITIONS'):
-            os.environ['MONITOR_INDIVIDUAL_PARTITIONS'] = 'true'
-            auto_detected_values['MONITOR_INDIVIDUAL_PARTITIONS'] = 'true'
-            adaptations_applied.append("MONITOR_INDIVIDUAL_PARTITIONS enabled (Linux detected)")
+    elif detected['platform'] == 'Linux' and not os.getenv('MONITOR_INDIVIDUAL_PARTITIONS'):
+        os.environ['MONITOR_INDIVIDUAL_PARTITIONS'] = 'true'
+        auto_detected_values['MONITOR_INDIVIDUAL_PARTITIONS'] = 'true'
+        adaptations_applied.append("MONITOR_INDIVIDUAL_PARTITIONS enabled (Linux detected)")
 
     if adaptations_applied:
         logger.info("System auto-detection applied the following adaptations:")
@@ -391,7 +385,7 @@ def apply_system_adaptations(detected: Dict[str, Any]) -> Dict[str, str]:
     return auto_detected_values
 
 
-def prompt_save_config(auto_detected_values: Dict[str, str]) -> bool:
+def prompt_save_config(auto_detected_values: dict[str, str]) -> bool:
     """
     Prompt user interactively if they want to save auto-detected configuration.
 
@@ -419,10 +413,9 @@ def prompt_save_config(auto_detected_values: Dict[str, str]) -> bool:
             response = input("Save these settings to .env file? (y/n): ").strip().lower()
             if response in ('y', 'yes'):
                 return True
-            elif response in ('n', 'no'):
+            if response in ('n', 'no'):
                 return False
-            else:
-                print("Please enter 'y' for yes or 'n' for no.")
+            print("Please enter 'y' for yes or 'n' for no.")
     except (EOFError, KeyboardInterrupt):
         logger.info("Save prompt cancelled by user")
         return False
@@ -431,7 +424,7 @@ def prompt_save_config(auto_detected_values: Dict[str, str]) -> bool:
         return False
 
 
-def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root: Optional[Path] = None) -> bool:
+def save_auto_detected_config(auto_detected_values: dict[str, str], project_root: Optional[Path] = None) -> bool:
     """
     Save auto-detected configuration values to .env file.
 
@@ -460,14 +453,13 @@ def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root
 
     if env_file.exists():
         try:
-            with open(env_file, 'r', encoding='utf-8') as f:
+            with open(env_file, encoding='utf-8') as f:
                 for line in f:
                     existing_lines.append(line)
                     stripped = line.strip()
-                    if stripped and not stripped.startswith('#'):
-                        if '=' in stripped:
-                            key = stripped.split('=')[0].strip()
-                            existing_keys.add(key)
+                    if stripped and not stripped.startswith('#') and '=' in stripped:
+                        key = stripped.split('=')[0].strip()
+                        existing_keys.add(key)
                     if '# Auto-detected' in line or '# Auto-detected configuration' in line:
                         has_auto_detected_section = True
         except Exception as e:
@@ -485,7 +477,7 @@ def save_auto_detected_config(auto_detected_values: Dict[str, str], project_root
 
     for key, value in auto_detected_values.items():
         if key not in existing_keys and key not in added_keys:
-            new_lines.append(f"{key}={value}  # Auto-detected\n")
+            new_lines.append(f"# Auto-detected\n{key}={value}\n")
             added_keys.add(key)
 
     if added_keys:

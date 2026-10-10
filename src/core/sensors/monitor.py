@@ -1,11 +1,11 @@
 import os
 import platform
 import glob
-from typing import Dict, List, Optional, Set
+from typing import Optional
 from core.format import format_temperature, format_fan_speed
 
 
-HWMON_FAN_BLACKLIST: Set[str] = {
+HWMON_FAN_BLACKLIST: set[str] = {
     'nouveau',
     'amdgpu',
     'radeon',
@@ -38,7 +38,7 @@ class SensorsMonitor:
 
                 if os.path.exists(type_file) and os.path.exists(temp_file):
                     try:
-                        with open(type_file, 'r') as f:
+                        with open(type_file) as f:
                             zone_type = f.read().strip()
                         self.thermal_zones.append({
                             'id': zone_id,
@@ -46,7 +46,7 @@ class SensorsMonitor:
                             'type': zone_type,
                             'temp_file': temp_file,
                         })
-                    except (IOError, OSError):
+                    except OSError:
                         continue
 
     def is_available(self) -> bool:
@@ -72,9 +72,9 @@ class SensorsMonitor:
         max_temp = None
         for zone in self.thermal_zones:
             try:
-                with open(zone['temp_file'], 'r') as f:
+                with open(zone['temp_file']) as f:
                     temp_celsius = int(f.read().strip()) / 1000.0
-            except (IOError, OSError, ValueError):
+            except (OSError, ValueError):
                 continue
 
             if max_temp is None or temp_celsius > max_temp:
@@ -87,7 +87,7 @@ class SensorsMonitor:
 
         return cpu_temp if cpu_temp is not None else max_temp
 
-    def get_all_temperatures(self) -> List[Dict]:
+    def get_all_temperatures(self) -> list[dict]:
         """
         Get temperatures from all thermal zones.
 
@@ -101,7 +101,7 @@ class SensorsMonitor:
 
         for zone in self.thermal_zones:
             try:
-                with open(zone['temp_file'], 'r') as f:
+                with open(zone['temp_file']) as f:
                     temp_millidegrees = int(f.read().strip())
                     temp_celsius = temp_millidegrees / 1000.0
 
@@ -110,7 +110,7 @@ class SensorsMonitor:
                     'type': zone['type'],
                     'temperature': temp_celsius,
                 })
-            except (IOError, OSError, ValueError):
+            except (OSError, ValueError):
                 continue
 
         return temperatures
@@ -127,9 +127,9 @@ class SensorsMonitor:
         """
         name_file = os.path.join(hwmon_dir, 'name')
         try:
-            with open(name_file, 'r') as f:
+            with open(name_file) as f:
                 return f.read().strip().lower()
-        except (IOError, OSError):
+        except OSError:
             return None
 
     def _is_safe_fan_hwmon(self, hwmon_dir: str) -> bool:
@@ -145,7 +145,7 @@ class SensorsMonitor:
             return False
         return driver_name not in HWMON_FAN_BLACKLIST
 
-    def get_fan_speeds(self) -> List[Dict]:
+    def get_fan_speeds(self) -> list[dict]:
         """
         Get fan speeds from hardware monitoring.
 
@@ -191,7 +191,7 @@ class SensorsMonitor:
                 fallback.append(device_dir)
         return primary, fallback
 
-    def _scan_fan_directory(self, scan_dir: str) -> List[Dict]:
+    def _scan_fan_directory(self, scan_dir: str) -> list[dict]:
         """
         Scan a directory for fan speed files and extract fan information.
 
@@ -206,7 +206,7 @@ class SensorsMonitor:
 
         for fan_file in fan_files:
             try:
-                with open(fan_file, 'r') as f:
+                with open(fan_file) as f:
                     speed = int(f.read().strip())
 
                 fan_name = os.path.basename(fan_file).replace('_input', '')
@@ -215,9 +215,9 @@ class SensorsMonitor:
                 fan_label = fan_name
                 if os.path.exists(label_file):
                     try:
-                        with open(label_file, 'r') as lf:
+                        with open(label_file) as lf:
                             fan_label = lf.read().strip()
-                    except (IOError, OSError):
+                    except OSError:
                         pass
 
                 fans.append({
@@ -225,12 +225,12 @@ class SensorsMonitor:
                     'label': fan_label,
                     'speed_rpm': speed,
                 })
-            except (IOError, OSError, ValueError):
+            except (OSError, ValueError):
                 continue
 
         return fans
 
-    def get_sensor_summary(self) -> Dict:
+    def get_sensor_summary(self) -> dict:
         """
         Get a summary of all sensor readings.
 
@@ -250,7 +250,7 @@ class SensorsMonitor:
             'fans_count': len(fans),
         }
 
-    def get_sensor_info(self) -> Dict:
+    def get_sensor_info(self) -> dict:
         """
         Get comprehensive sensor information.
 

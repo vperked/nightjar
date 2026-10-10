@@ -1,6 +1,5 @@
 import psutil
-import time
-from typing import Dict, Optional, List, Callable
+from typing import Optional
 from core.format import format_bytes
 
 
@@ -16,7 +15,7 @@ class MemoryMonitor:
         """
         return psutil.virtual_memory().percent
 
-    def get_memory_info(self) -> Dict[str, int]:
+    def get_memory_info(self) -> dict[str, int]:
         """
         Get detailed memory information.
 
@@ -40,7 +39,7 @@ class MemoryMonitor:
             'shared': getattr(mem, 'shared', 0),
         }
 
-    def get_memory_info_human(self, mem_info: Optional[Dict] = None) -> Dict[str, str]:
+    def get_memory_info_human(self, mem_info: Optional[dict] = None) -> dict[str, str]:
         """
         Get memory information in human-readable format.
 
@@ -64,7 +63,7 @@ class MemoryMonitor:
             'shared': format_bytes(mem_info['shared']),
         }
 
-    def get_swap_info(self) -> Dict[str, int]:
+    def get_swap_info(self) -> dict[str, int]:
         """
         Get swap memory information.
 
@@ -85,7 +84,7 @@ class MemoryMonitor:
             'sout': getattr(swap, 'sout', 0),
         }
 
-    def get_swap_info_human(self, swap_info: Optional[Dict] = None) -> Dict[str, str]:
+    def get_swap_info_human(self, swap_info: Optional[dict] = None) -> dict[str, str]:
         """
         Get swap memory information in human-readable format.
 
@@ -107,7 +106,7 @@ class MemoryMonitor:
             'sout': format_bytes(swap_info['sout']),
         }
 
-    def get_memory_stats(self) -> Dict:
+    def get_memory_stats(self) -> dict:
         """
         Get comprehensive memory statistics.
 

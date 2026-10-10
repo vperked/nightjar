@@ -10,6 +10,8 @@ from core.observability import Component, get_logger
 
 logger = get_logger(Component.CONFIG)
 
+MAX_ENV_VALUE_LENGTH = 10000
+
 _env_cache = {}
 _typed_env_cache = {}
 
@@ -28,6 +30,9 @@ DEFAULT_PROCESS_CPU_THRESHOLD = 50.0
 DEFAULT_PROCESS_MEMORY_THRESHOLD = 10.0
 DEFAULT_CHECK_INTERVAL = 5.0
 DEFAULT_ALERT_COOLDOWN = 300.0
+DEFAULT_ALERT_MAX_COOLDOWN = 3600.0
+DEFAULT_ALERT_BACKOFF = 2.0
+DEFAULT_ALERT_RECOVERY_SECONDS = 300.0
 DEFAULT_FREEZE_THRESHOLD = 30.0
 DEFAULT_FREEZE_HEARTBEAT_TIMEOUT = 60.0
 DEFAULT_MEDIA_DIRECTORY_THRESHOLD_GB = 500.0
@@ -44,11 +49,11 @@ DEFAULT_STALLED_TORRENT_RECOVERY_GRACE = 120.0
 DEFAULT_STALLED_TORRENT_AUTO_HANDLE = True
 DEFAULT_STALLED_TORRENT_RETRY_BACKOFF = 60.0
 DEFAULT_STALLED_TORRENT_MAX_RECOVERY_ATTEMPTS = 2
-DEFAULT_SEEDING_RATIO_LIMIT = 1.0
+DEFAULT_SEEDING_RATIO_LIMIT = 0.0
 DEFAULT_SEEDING_RATIO_ACTION_COOLDOWN = 1800.0
 DEFAULT_SEEDING_RATIO_RETRY_BACKOFF = 60.0
 DEFAULT_SEEDING_RATIO_DELETE_FILES = False
-DEFAULT_INACTIVE_TORRENT_AUTO_REMOVE = True
+DEFAULT_INACTIVE_TORRENT_AUTO_REMOVE = False
 DEFAULT_SYSTEM_UPDATE_INTERVAL_SECONDS = 86400.0
 DEFAULT_SYSTEM_UPDATE_TIMEOUT = 3600
 DEFAULT_SYSTEM_UPDATE_ENABLED = False
@@ -84,7 +89,7 @@ def get_cached_env(key: str, default: Optional[str] = None) -> Optional[str]:
     Get environment variable with caching to avoid repeated lookups.
 
     Environment variables are cached after first access to improve performance.
-    Values are validated for security before caching.
+    Oversized values are rejected before caching.
 
     Args:
         key: Environment variable name
@@ -95,14 +100,13 @@ def get_cached_env(key: str, default: Optional[str] = None) -> Optional[str]:
     """
     if key not in _env_cache:
         value = os.getenv(key, default)
-        if value:
-            from core.security import validate_environment_variable
-            is_valid, error_msg = validate_environment_variable(key, value, max_length=10000)
-            if not is_valid:
-                logger.warning(
-                    f"Environment variable {key} validation failed: {error_msg}. Falling back to default."
-                )
-                value = default
+        if value and len(value) > MAX_ENV_VALUE_LENGTH:
+            # Values are never passed through a shell, so shell metacharacters are legal
+            # (tokens and passwords routinely contain them). Only bound the size.
+            logger.warning(
+                f"Environment variable {key} exceeds {MAX_ENV_VALUE_LENGTH} characters. Falling back to default."
+            )
+            value = default
         _env_cache[key] = value
     return _env_cache[key]
 

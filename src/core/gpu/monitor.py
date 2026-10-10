@@ -1,7 +1,7 @@
 import csv
 import io
 import subprocess
-from typing import Dict, List, Optional
+from typing import Optional
 from core.observability import Component, get_logger
 
 logger = get_logger(Component.GPU)
@@ -32,6 +32,7 @@ class GpuMonitor:
             result = subprocess.run(
                 ['nvidia-smi', '--version'],
                 capture_output=True,
+                check=False,
                 text=True,
                 timeout=5
             )
@@ -57,6 +58,7 @@ class GpuMonitor:
             result = subprocess.run(
                 ['nvidia-smi', f'--query-gpu={query}', f'--format={format}'],
                 capture_output=True,
+                check=False,
                 text=True,
                 timeout=10
             )
@@ -67,7 +69,7 @@ class GpuMonitor:
             logger.warning(f"GPU query failed: {e}")
             return None
 
-    def _query_rows(self, query: str) -> List[List[str]]:
+    def _query_rows(self, query: str) -> list[list[str]]:
         """
         Run nvidia-smi and parse CSV rows for each GPU.
 
@@ -127,7 +129,7 @@ class GpuMonitor:
             return False
         return gpu_index < self.get_gpu_count()
 
-    def get_gpu_info(self, gpu_index: int = 0) -> Dict:
+    def get_gpu_info(self, gpu_index: int = 0) -> dict:
         """
         Get information about a specific GPU.
 
@@ -155,7 +157,7 @@ class GpuMonitor:
             'uuid': row[2] or 'N/A',
         }
 
-    def get_gpu_utilization(self, gpu_index: int = 0) -> Dict:
+    def get_gpu_utilization(self, gpu_index: int = 0) -> dict:
         """
         Get GPU utilization (GPU and memory).
 
@@ -181,7 +183,7 @@ class GpuMonitor:
             'memory': self._to_float(row[1]),
         }
 
-    def get_gpu_memory(self, gpu_index: int = 0) -> Dict:
+    def get_gpu_memory(self, gpu_index: int = 0) -> dict:
         """
         Get GPU memory information.
 
@@ -232,7 +234,7 @@ class GpuMonitor:
             return 0.0
         return self._to_float(rows[gpu_index][0])
 
-    def get_gpu_power(self, gpu_index: int = 0) -> Dict:
+    def get_gpu_power(self, gpu_index: int = 0) -> dict:
         """
         Get GPU power consumption information.
 
@@ -258,7 +260,7 @@ class GpuMonitor:
             'limit': self._to_float(row[1]),
         }
 
-    def get_gpu_clocks(self, gpu_index: int = 0) -> Dict:
+    def get_gpu_clocks(self, gpu_index: int = 0) -> dict:
         """
         Get GPU clock speeds.
 
@@ -284,7 +286,7 @@ class GpuMonitor:
             'memory': self._to_int(row[1]),
         }
 
-    def get_gpu_comprehensive(self, gpu_index: int = 0) -> Dict:
+    def get_gpu_comprehensive(self, gpu_index: int = 0) -> dict:
         """
         Get comprehensive information for a specific GPU in a single nvidia-smi call.
 

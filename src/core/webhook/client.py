@@ -3,7 +3,7 @@ import requests
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional, List, Any
+from typing import Optional, Any
 from datetime import datetime, timezone
 from collections import deque
 from dotenv import load_dotenv
@@ -106,7 +106,7 @@ class DiscordWebhook:
             logger.error(f"Unexpected Discord webhook error: {error}")
         return False
 
-    def _post_payload(self, payload: Dict[str, Any], fallback_message: str) -> bool:
+    def _post_payload(self, payload: dict[str, Any], fallback_message: str) -> bool:
         """
         Send a payload to Discord behind the circuit breaker and local rate limiter.
 
@@ -177,8 +177,8 @@ class DiscordWebhook:
             logger.debug(f"Alert log write failed: {e}")
 
     def build_embed_payload(self, title: str, description: str = "", color: Optional[int] = None,
-                            fields: Optional[List[Dict[str, Any]]] = None,
-                            footer: Optional[str] = None, timestamp: bool = True) -> Dict[str, Any]:
+                            fields: Optional[list[dict[str, Any]]] = None,
+                            footer: Optional[str] = None, timestamp: bool = True) -> dict[str, Any]:
         resolved_color = self.DEFAULT_EMBED_COLOR if color is None else color
         embed = {
             'title': title[:256],
@@ -281,7 +281,7 @@ class DiscordWebhook:
         return self._post_payload(payload, fallback_message=str(payload)[:2000])
 
     def send_embed(self, title: str, description: str = "", color: Optional[int] = None,
-                  fields: Optional[List[Dict[str, str]]] = None,
+                  fields: Optional[list[dict[str, str]]] = None,
                   footer: Optional[str] = None, timestamp: bool = True) -> bool:
         """
         Send an embedded message to Discord.
@@ -310,7 +310,7 @@ class DiscordWebhook:
         return self._post_payload(payload, fallback_message=fallback_message)
 
     def send_cpu_alert(self, cpu_percent: float, threshold: float = 80.0,
-                      per_core: Optional[List[float]] = None) -> bool:
+                      per_core: Optional[list[float]] = None) -> bool:
         """
         Send a CPU usage alert to Discord.
 
@@ -354,8 +354,8 @@ class DiscordWebhook:
         )
 
     def send_memory_alert(self, memory_percent: float, threshold: float = 80.0,
-                         memory_info: Optional[Dict] = None,
-                         swap_info: Optional[Dict] = None) -> bool:
+                         memory_info: Optional[dict] = None,
+                         swap_info: Optional[dict] = None) -> bool:
         """
         Send a memory usage alert to Discord.
 
@@ -409,7 +409,7 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_system_info_comprehensive(self, system_info: Dict) -> bool:
+    def send_system_info_comprehensive(self, system_info: dict) -> bool:
         """
         Send comprehensive system information to Discord.
 
@@ -495,9 +495,9 @@ class DiscordWebhook:
                                duration: Optional[float] = None,
                                reason: Optional[str] = None,
                                cpu_percent: Optional[float] = None,
-                               cpu_freq: Optional[Dict] = None,
-                               top_processes: Optional[List[Dict]] = None,
-                               fan_speeds: Optional[List[Dict]] = None) -> bool:
+                               cpu_freq: Optional[dict] = None,
+                               top_processes: Optional[list[dict]] = None,
+                               fan_speeds: Optional[list[dict]] = None) -> bool:
         """
         Send a CPU temperature alert to Discord.
 
@@ -599,10 +599,10 @@ class DiscordWebhook:
         )
 
     def send_gpu_alert(self, gpu_utilization: float, threshold: float = 80.0,
-                      gpu_info: Optional[Dict] = None,
-                      memory_info: Optional[Dict] = None,
+                      gpu_info: Optional[dict] = None,
+                      memory_info: Optional[dict] = None,
                       temperature: Optional[float] = None,
-                      power: Optional[Dict] = None) -> bool:
+                      power: Optional[dict] = None) -> bool:
         """
         Send a GPU usage alert to Discord.
 
@@ -675,7 +675,7 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_process_alert(self, process_info: Dict, resource_type: str = 'cpu',
+    def send_process_alert(self, process_info: dict, resource_type: str = 'cpu',
                           threshold: float = 80.0) -> bool:
         """
         Send a process resource usage alert to Discord.
@@ -752,7 +752,7 @@ class DiscordWebhook:
         )
 
     def send_directory_size_alert(self, directory_path: str, size_bytes: int,
-                                  threshold_bytes: int, subdirectories: Optional[List[Dict]] = None) -> bool:
+                                  threshold_bytes: int, subdirectories: Optional[list[dict]] = None) -> bool:
         """
         Send a directory size alert to Discord.
 
@@ -821,7 +821,7 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_partition_alert(self, partition: Dict, threshold: float, is_early_warning: bool = False) -> bool:
+    def send_partition_alert(self, partition: dict, threshold: float, is_early_warning: bool = False) -> bool:
         """
         Send an alert when a partition/drive exceeds usage threshold.
 
@@ -909,7 +909,7 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_batched_log_cleanup_alert(self, cleaned_logs: List[Dict], threshold_formatted: str) -> bool:
+    def send_batched_log_cleanup_alert(self, cleaned_logs: list[dict], threshold_formatted: str) -> bool:
         """
         Send a batched alert for multiple log files that were cleaned.
 
@@ -980,7 +980,7 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_freeze_alert(self, freeze_status: Dict, system_info: Optional[Dict] = None) -> bool:
+    def send_freeze_alert(self, freeze_status: dict, system_info: Optional[dict] = None) -> bool:
         """
         Send a system freeze detection alert to Discord.
 
@@ -1056,7 +1056,7 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def _format_memory_info(self, mem_dict: Dict) -> Dict[str, str]:
+    def _format_memory_info(self, mem_dict: dict) -> dict[str, str]:
         """
         Helper method to format memory information for display.
 
@@ -1073,7 +1073,7 @@ class DiscordWebhook:
             'available': format_bytes(mem_dict.get('available', 0)),
         }
 
-    def send_download_complete_alert(self, torrent_info: Dict) -> bool:
+    def send_download_complete_alert(self, torrent_info: dict) -> bool:
         """
         Send a notification when a torrent download completes.
 
@@ -1132,9 +1132,9 @@ class DiscordWebhook:
 
     def send_stalled_torrent_alert(
         self,
-        torrent_info: Dict,
+        torrent_info: dict,
         stalled_duration_seconds: float = 0.0,
-        actions_taken: Optional[List[str]] = None,
+        actions_taken: Optional[list[str]] = None,
     ) -> bool:
         """
         Send a notification when a torrent is stalled.
@@ -1257,9 +1257,9 @@ class DiscordWebhook:
 
     def send_ratio_limit_alert(
         self,
-        torrent_info: Dict,
+        torrent_info: dict,
         ratio_limit: float = 1.0,
-        actions_taken: Optional[List[str]] = None,
+        actions_taken: Optional[list[str]] = None,
     ) -> bool:
         """
         Send a notification when a seeding torrent reaches its ratio limit.
@@ -1366,8 +1366,8 @@ class DiscordWebhook:
 
     def send_inactive_torrent_alert(
         self,
-        torrent_info: Dict,
-        actions_taken: Optional[List[str]] = None,
+        torrent_info: dict,
+        actions_taken: Optional[list[str]] = None,
     ) -> bool:
         """
         Send a notification when an inactive torrent is removed.
@@ -1447,7 +1447,7 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_seeding_notification(self, torrent_info: Dict) -> bool:
+    def send_seeding_notification(self, torrent_info: dict) -> bool:
         """
         Send a notification when a torrent starts seeding.
 
@@ -1507,7 +1507,7 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_torrent_list(self, downloading_torrents: List[Dict], seeding_torrents: List[Dict]) -> bool:
+    def send_torrent_list(self, downloading_torrents: list[dict], seeding_torrents: list[dict]) -> bool:
         """
         Send a list of currently downloading and seeding torrents to Discord.
         Only shows torrents with active speeds (> 0).
@@ -1578,7 +1578,7 @@ class DiscordWebhook:
             timestamp=True
         )
 
-    def send_metrics_report(self, metrics: Dict[str, Any]) -> bool:
+    def send_metrics_report(self, metrics: dict[str, Any]) -> bool:
         """
         Send a metrics report to Discord.
 

@@ -1,6 +1,5 @@
 """Tests for systemd unit generation and its interpreter selection."""
 
-import os
 from pathlib import Path
 
 import pytest
@@ -86,12 +85,12 @@ def test_unit_keeps_basic_hardening():
     content = get_systemd_service_content()
 
     assert 'NoNewPrivileges=true' in content
-    assert 'PrivateTmp=true' in content
+    assert 'PrivateTmp' not in content
 
 
 def test_unit_working_directory_exists():
     content = get_systemd_service_content()
-    line = next(l for l in content.splitlines() if l.startswith('WorkingDirectory='))
+    line = next(ln for ln in content.splitlines() if ln.startswith('WorkingDirectory='))
     working_dir = line.split('=', 1)[1]
 
     assert Path(working_dir).is_dir()

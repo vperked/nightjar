@@ -3,7 +3,7 @@ Aggregation of monitor readings into metric snapshots.
 """
 
 import time
-from typing import Dict, Optional, Any
+from typing import Optional, Any
 from collections import defaultdict, deque
 from core.format import format_duration
 from core.observability import Component, get_logger
@@ -23,13 +23,13 @@ class MetricsCollector:
         """
         self.max_history_size = max_history_size
         self.start_time = time.time()
-        
-        self.alert_counts: Dict[str, int] = defaultdict(int)
-        self.execution_times: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_history_size))
-        self.error_counts: Dict[str, int] = defaultdict(int)
+
+        self.alert_counts: dict[str, int] = defaultdict(int)
+        self.execution_times: dict[str, deque] = defaultdict(lambda: deque(maxlen=max_history_size))
+        self.error_counts: dict[str, int] = defaultdict(int)
         self.webhook_stats = {'success': 0, 'failure': 0}
-        self.last_execution_times: Dict[str, float] = {}
-        self.alert_timestamps: Dict[str, deque] = defaultdict(deque)
+        self.last_execution_times: dict[str, float] = {}
+        self.alert_timestamps: dict[str, deque] = defaultdict(deque)
 
     def record_alert(self, alert_type: str) -> None:
         """
@@ -88,7 +88,7 @@ class MetricsCollector:
         else:
             self.webhook_stats['failure'] += 1
 
-    def get_alert_frequency(self, alert_type: Optional[str] = None, window_seconds: int = 3600) -> Dict[str, float]:
+    def get_alert_frequency(self, alert_type: Optional[str] = None, window_seconds: int = 3600) -> dict[str, float]:
         """
         Get alert frequency (alerts per hour) for the specified window.
 
@@ -101,9 +101,9 @@ class MetricsCollector:
         """
         cutoff = time.time() - window_seconds
         frequencies = {}
-        
+
         types_to_check = [alert_type] if alert_type else self.alert_timestamps.keys()
-        
+
         for atype in types_to_check:
             if atype in self.alert_timestamps:
                 recent_alerts = [ts for ts in self.alert_timestamps[atype] if ts > cutoff]
@@ -112,10 +112,10 @@ class MetricsCollector:
                 frequencies[atype] = count / hours if hours > 0 else 0.0
             else:
                 frequencies[atype] = 0.0
-        
+
         return frequencies
 
-    def get_average_execution_time(self, monitor_name: Optional[str] = None) -> Dict[str, float]:
+    def get_average_execution_time(self, monitor_name: Optional[str] = None) -> dict[str, float]:
         """
         Get average execution time for monitors.
 
@@ -127,14 +127,14 @@ class MetricsCollector:
         """
         averages = {}
         monitors_to_check = [monitor_name] if monitor_name else self.execution_times.keys()
-        
+
         for mname in monitors_to_check:
             if mname in self.execution_times and len(self.execution_times[mname]) > 0:
                 durations = self.execution_times[mname]
                 averages[mname] = sum(durations) / len(durations)
             else:
                 averages[mname] = 0.0
-        
+
         return averages
 
     def get_webhook_success_rate(self) -> float:
@@ -158,7 +158,7 @@ class MetricsCollector:
         """
         return time.time() - self.start_time
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """
         Get a summary of all metrics.
 
@@ -168,7 +168,7 @@ class MetricsCollector:
         total_alerts = sum(self.alert_counts.values())
         total_errors = sum(self.error_counts.values())
         total_webhook_calls = self.webhook_stats['success'] + self.webhook_stats['failure']
-        
+
         uptime_seconds = self.get_uptime_seconds()
         return {
             'uptime_seconds': uptime_seconds,

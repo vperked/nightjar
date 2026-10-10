@@ -19,7 +19,7 @@ class FakeResponse:
 class FakeSession:
     def __init__(self, behaviour=None):
         self.calls = []
-        self._behaviour = behaviour or (lambda: FakeResponse())
+        self._behaviour = behaviour or (FakeResponse)
 
     def post(self, url, json=None, timeout=None):
         self.calls.append({'url': url, 'json': json, 'timeout': timeout})

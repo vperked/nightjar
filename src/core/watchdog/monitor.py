@@ -53,6 +53,7 @@ class WatchdogMonitor:
 
 
         self.running = {'value': True, 'lock': threading.Lock()}
+        self._stop_event = threading.Event()
         self.alert_state = {'alert_sent': False, 'last_alert_time': 0, 'lock': threading.Lock()}
         self.restart_state = {'last_restart_attempt': 0, 'restart_count': 0, 'lock': threading.Lock()}
 
@@ -109,9 +110,8 @@ class WatchdogMonitor:
             if result.returncode == 0:
                 logger.info("[WATCHDOG] Service restart command executed successfully")
                 return True
-            else:
-                logger.error(f"[WATCHDOG] Failed to restart service: {result.stderr}")
-                return False
+            logger.error(f"[WATCHDOG] Failed to restart service: {result.stderr}")
+            return False
         except subprocess.TimeoutExpired:
             logger.error("[WATCHDOG] Service restart command timed out")
             return False
@@ -126,7 +126,9 @@ class WatchdogMonitor:
                 if not self.running['value']:
                     break
 
-            time.sleep(self.timeout)
+            # Wait on an event rather than sleeping so stop() returns immediately.
+            if self._stop_event.wait(self.timeout):
+                break
 
             with self.heartbeat['lock']:
                 time_since_heartbeat = time.time() - self.heartbeat['last_update']
@@ -230,6 +232,7 @@ class WatchdogMonitor:
 
         with self.running['lock']:
             self.running['value'] = True
+        self._stop_event.clear()
 
         self.watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
         self.watchdog_thread.start()
@@ -242,6 +245,7 @@ class WatchdogMonitor:
 
     def stop(self) -> None:
         """Stop the watchdog thread."""
+        self._stop_event.set()
         with self.running['lock']:
             self.running['value'] = False
 

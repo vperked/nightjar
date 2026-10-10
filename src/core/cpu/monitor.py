@@ -1,6 +1,5 @@
 import psutil
-import time
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Optional
 
 
 class CpuMonitor:
@@ -23,7 +22,7 @@ class CpuMonitor:
         """
         return psutil.cpu_percent(interval=interval)
 
-    def get_cpu_percent_per_core(self, interval: float = 1.0) -> List[float]:
+    def get_cpu_percent_per_core(self, interval: float = 1.0) -> list[float]:
         """
         Get CPU usage percentage for each core.
 
@@ -35,7 +34,7 @@ class CpuMonitor:
         """
         return psutil.cpu_percent(interval=interval, percpu=True)
 
-    def get_cpu_stats(self) -> Dict[str, float]:
+    def get_cpu_stats(self) -> dict[str, float]:
         """
         Get detailed CPU statistics.
 
@@ -66,7 +65,7 @@ class CpuMonitor:
             'guest_nice': getattr(stats, 'guest_nice', 0.0),
         }
 
-    def get_cpu_freq(self) -> Dict[str, float]:
+    def get_cpu_freq(self) -> dict[str, float]:
         """
         Get CPU frequency information.
 
@@ -86,7 +85,7 @@ class CpuMonitor:
             'max': freq.max,
         }
 
-    def get_cpu_freq_per_core(self) -> List[Dict[str, float]]:
+    def get_cpu_freq_per_core(self) -> list[dict[str, float]]:
         """
         Get CPU frequency information for each core.
 
@@ -106,7 +105,7 @@ class CpuMonitor:
             for freq in freqs
         ]
 
-    def get_cpu_load_average(self) -> Optional[Tuple[float, float, float]]:
+    def get_cpu_load_average(self) -> Optional[tuple[float, float, float]]:
         """
         Get system load average.
 
@@ -115,7 +114,7 @@ class CpuMonitor:
         """
         return psutil.getloadavg()
 
-    def get_cpu_info(self, interval: float = 0.0) -> Dict:
+    def get_cpu_info(self, interval: float = 0.0) -> dict:
         """
         Get comprehensive CPU information.
 

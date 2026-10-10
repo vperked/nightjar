@@ -1,12 +1,11 @@
 import psutil
 import time
 import os
-import sys
 import platform
-import glob
+import stat
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Optional
 from core.format import format_bytes
 from core.security import validate_path
 from core.config import (
@@ -14,7 +13,7 @@ from core.config import (
     get_env_bool,
     get_env_float,
 )
-from core.observability import Component, get_logger
+from core.observability import Component, get_logger, safe_log
 
 logger = get_logger(Component.DISK)
 
@@ -22,6 +21,15 @@ PERMISSION_CHECK_TIMEOUT = 5
 
 ALLOWED_TEMP_CLEANUP_BASES = ['/tmp', '/var/tmp']
 ALLOWED_CACHE_CLEANUP_BASES = ['/var/cache']
+
+# Emergency mode targets regenerable caches only, not all of /var/cache.
+EMERGENCY_CACHE_DIRS_DEFAULT = [
+    '/var/cache/apt/archives',
+    '/var/cache/pacman/pkg',
+    '/var/cache/dnf',
+    '/tmp',
+    '/var/tmp',
+]
 
 EXCLUDED_FSTYPES = frozenset([
     'squashfs', 'tmpfs', 'devtmpfs', 'proc', 'sysfs', 'devpts',
@@ -31,7 +39,7 @@ EXCLUDED_FSTYPES = frozenset([
 ])
 
 
-def _resolve_cleanup_dirs(candidates: List[str], allowed_bases: List[str]) -> List[str]:
+def _resolve_cleanup_dirs(candidates: list[str], allowed_bases: list[str]) -> list[str]:
     """
     Resolve candidate cleanup directories, rejecting anything outside the allowlist.
 
@@ -48,8 +56,8 @@ def _resolve_cleanup_dirs(candidates: List[str], allowed_bases: List[str]) -> Li
     allow_unsafe = get_env_bool('ALLOW_UNSAFE_CLEANUP_PATHS', False)
     resolved_dirs = []
 
-    for candidate in candidates:
-        candidate = candidate.strip()
+    for raw_candidate in candidates:
+        candidate = raw_candidate.strip()
         if not candidate:
             continue
 
@@ -73,6 +81,91 @@ def _resolve_cleanup_dirs(candidates: List[str], allowed_bases: List[str]) -> Li
     return resolved_dirs
 
 
+# Names under the cleanup roots that hold live state (sockets, per-service private dirs,
+# package-manager databases). They are never descended into or removed.
+CLEANUP_PROTECTED_NAMES = frozenset({
+    '.X11-unix', '.ICE-unix', '.font-unix', '.XIM-unix', '.Test-unix',
+    'debconf', 'ldconfig', 'private', 'snap-private-tmp',
+})
+CLEANUP_PROTECTED_PREFIXES = ('systemd-private-', 'tmux-', 'ssh-', 'snap.')
+
+
+def _is_cleanup_protected(name: str) -> bool:
+    """Return True for entries that must never be cleaned."""
+    return name in CLEANUP_PROTECTED_NAMES or name.startswith(CLEANUP_PROTECTED_PREFIXES)
+
+
+def _clean_directory_tree(root: str, max_age_seconds: float, stats: dict,
+                          now: Optional[float] = None) -> None:
+    """
+    Remove stale regular files and symlinks under root without following links.
+
+    Every operation is relative to an open directory descriptor opened with
+    O_NOFOLLOW, so a directory swapped for a symlink mid-walk cannot redirect
+    deletion elsewhere. Sockets, FIFOs and device nodes are left alone, other
+    filesystems are not crossed, and a directory is only removed once it is both
+    empty and older than the age limit (so a just-created work directory survives).
+
+    Args:
+        root: Directory to clean (never removed itself)
+        max_age_seconds: Minimum mtime age before removal
+        stats: Cleanup statistics dict updated in place
+        now: Current time, for tests
+    """
+    now = time.time() if now is None else now
+
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as e:
+        stats['errors'].append(f"Could not open {root}: {e}")
+        return
+
+    def walk(dir_fd: int, dir_path: str, dev: int) -> None:
+        try:
+            entries = [entry.name for entry in os.scandir(dir_fd)]
+        except OSError as e:
+            stats['errors'].append(f"Could not list {dir_path}: {e}")
+            return
+
+        for name in entries:
+            if _is_cleanup_protected(name):
+                continue
+            full_path = os.path.join(dir_path, name)
+            try:
+                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                age = now - st.st_mtime
+
+                if stat.S_ISDIR(st.st_mode):
+                    if st.st_dev != dev:
+                        continue
+                    child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+                    try:
+                        walk(child_fd, full_path, dev)
+                    finally:
+                        os.close(child_fd)
+                    if age > max_age_seconds:
+                        try:
+                            os.rmdir(name, dir_fd=dir_fd)
+                            stats['dirs_removed'] += 1
+                        except OSError:
+                            pass
+                elif stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                    if age > max_age_seconds:
+                        os.unlink(name, dir_fd=dir_fd)
+                        stats['files_removed'] += 1
+                        stats['total_size_cleared'] += st.st_size
+                        logger.debug(f"Removed stale file: {full_path} ({format_bytes(st.st_size)})")
+            except OSError as e:
+                if e.errno == 28:
+                    stats['errors'].append(f"Disk full while removing {full_path}: {e}")
+                continue
+
+    try:
+        walk(root_fd, root, os.fstat(root_fd).st_dev)
+    finally:
+        os.close(root_fd)
+
+
 class DiskMonitor:
     """Monitor disk usage and I/O statistics."""
 
@@ -80,7 +173,7 @@ class DiskMonitor:
         """Initialize the disk monitor."""
         self._platform = platform.system()
 
-    def get_disk_usage(self, path: str = '/') -> Optional[Dict]:
+    def get_disk_usage(self, path: str = '/') -> Optional[dict]:
         """
         Get disk usage for a specific path.
 
@@ -118,7 +211,7 @@ class DiskMonitor:
             return False
         return 'nvme' in device.lower()
 
-    def _should_monitor_partition(self, partition: Dict) -> bool:
+    def _should_monitor_partition(self, partition: dict) -> bool:
         """
         Check if a partition should be monitored.
         Filters out snap mounts, loop devices, and other special filesystems.
@@ -152,12 +245,9 @@ class DiskMonitor:
             return False
 
         total = partition.get('total', 0)
-        if total > 0 and total < 100 * 1024 * 1024:
-            return False
+        return not (total > 0 and total < 100 * 1024 * 1024)
 
-        return True
-
-    def get_all_partitions(self, filter_monitorable: bool = True) -> List[Dict]:
+    def get_all_partitions(self, filter_monitorable: bool = True) -> list[dict]:
         """
         Get information about all disk partitions.
 
@@ -192,7 +282,7 @@ class DiskMonitor:
                 continue
         return partitions
 
-    def get_nvme_partitions(self) -> List[Dict]:
+    def get_nvme_partitions(self) -> list[dict]:
         """
         Get all NVMe partitions.
 
@@ -202,7 +292,7 @@ class DiskMonitor:
         all_partitions = self.get_all_partitions()
         return [p for p in all_partitions if p.get('is_nvme', False)]
 
-    def get_disk_usage_human(self, path: str = '/') -> Optional[Dict[str, str]]:
+    def get_disk_usage_human(self, path: str = '/') -> Optional[dict[str, str]]:
         """
         Get disk usage in human-readable format.
 
@@ -224,7 +314,7 @@ class DiskMonitor:
             'percent': f"{usage['percent']:.1f}%",
         }
 
-    def get_total_disk_usage(self, partitions: Optional[List[Dict]] = None) -> Dict:
+    def get_total_disk_usage(self, partitions: Optional[list[dict]] = None) -> dict:
         """
         Get total disk usage across all partitions.
 
@@ -256,7 +346,7 @@ class DiskMonitor:
 
         return total
 
-    def get_disk_io_counters(self, perdisk: bool = False) -> Dict:
+    def get_disk_io_counters(self, perdisk: bool = False) -> dict:
         """
         Get disk I/O statistics.
 
@@ -282,21 +372,20 @@ class DiskMonitor:
                     'write_time': io.write_time,
                 }
             return result
-        else:
-            io = psutil.disk_io_counters()
-            if io is None:
-                return {}
+        io = psutil.disk_io_counters()
+        if io is None:
+            return {}
 
-            return {
-                'read_count': io.read_count,
-                'write_count': io.write_count,
-                'read_bytes': io.read_bytes,
-                'write_bytes': io.write_bytes,
-                'read_time': io.read_time,
-                'write_time': io.write_time,
-            }
+        return {
+            'read_count': io.read_count,
+            'write_count': io.write_count,
+            'read_bytes': io.read_bytes,
+            'write_bytes': io.write_bytes,
+            'read_time': io.read_time,
+            'write_time': io.write_time,
+        }
 
-    def get_disk_io_human(self, perdisk: bool = False) -> Dict:
+    def get_disk_io_human(self, perdisk: bool = False) -> dict:
         """
         Get disk I/O statistics in human-readable format.
 
@@ -320,18 +409,17 @@ class DiskMonitor:
                     'write_time': f"{io['write_time']} ms",
                 }
             return result
-        else:
-            return {
-                'read_count': io_data['read_count'],
-                'write_count': io_data['write_count'],
-                'read_bytes': format_bytes(io_data['read_bytes']),
-                'write_bytes': format_bytes(io_data['write_bytes']),
-                'read_time': f"{io_data['read_time']} ms",
-                'write_time': f"{io_data['write_time']} ms",
-            }
+        return {
+            'read_count': io_data['read_count'],
+            'write_count': io_data['write_count'],
+            'read_bytes': format_bytes(io_data['read_bytes']),
+            'write_bytes': format_bytes(io_data['write_bytes']),
+            'read_time': f"{io_data['read_time']} ms",
+            'write_time': f"{io_data['write_time']} ms",
+        }
 
-    def get_directory_size(self, path: str, allowed_base_paths: Optional[List[str]] = None,
-                          timeout: Optional[float] = None, max_depth: Optional[int] = None) -> Optional[Dict]:
+    def get_directory_size(self, path: str, allowed_base_paths: Optional[list[str]] = None,
+                          timeout: Optional[float] = None, max_depth: Optional[int] = None) -> Optional[dict]:
         """
         Get the total size of a directory and all its contents recursively.
 
@@ -413,11 +501,10 @@ class DiskMonitor:
                     except (OSError, PermissionError):
                         continue
 
-                    if timeout and file_count % 100 == 0:
-                        if (time.time() - start_time) > timeout:
-                            logger.warning(f"Directory size calculation timed out after {timeout}s for {path}")
-                            timed_out = True
-                            break
+                    if timeout and file_count % 100 == 0 and (time.time() - start_time) > timeout:
+                        logger.warning(f"Directory size calculation timed out after {timeout}s for {path}")
+                        timed_out = True
+                        break
 
                 if timed_out:
                     break
@@ -444,7 +531,7 @@ class DiskMonitor:
 
         return result
 
-    def get_directory_size_human(self, path: str, size_info: Optional[Dict] = None) -> Optional[Dict]:
+    def get_directory_size_human(self, path: str, size_info: Optional[dict] = None) -> Optional[dict]:
         """
         Get directory size in human-readable format.
 
@@ -470,7 +557,7 @@ class DiskMonitor:
             'dir_count': size_info.get('dir_count', 0),
         }
 
-    def get_subdirectories_sizes(self, parent_path: str) -> List[Dict]:
+    def get_subdirectories_sizes(self, parent_path: str) -> list[dict]:
         """
         Get sizes of all immediate subdirectories within a parent directory.
 
@@ -498,7 +585,7 @@ class DiskMonitor:
         subdirs.sort(key=lambda x: x['size'], reverse=True)
         return subdirs
 
-    def get_subdirectories_sizes_human(self, parent_path: str) -> List[Dict]:
+    def get_subdirectories_sizes_human(self, parent_path: str) -> list[dict]:
         """
         Get sizes of all immediate subdirectories in human-readable format.
 
@@ -511,7 +598,7 @@ class DiskMonitor:
         subdirs = self.get_subdirectories_sizes(parent_path)
         return [self.get_directory_size_human(subdir['path']) for subdir in subdirs if subdir]
 
-    def get_largest_directories(self, path: str = '/', limit: int = 10) -> List[Dict]:
+    def get_largest_directories(self, path: str = '/', limit: int = 10) -> list[dict]:
         """
         Get the largest directories on a given path (typically root of a partition).
 
@@ -530,7 +617,7 @@ class DiskMonitor:
         subdirs.sort(key=lambda x: x['size'], reverse=True)
         return subdirs[:limit]
 
-    def get_largest_directories_human(self, path: str = '/', limit: int = 10) -> List[Dict]:
+    def get_largest_directories_human(self, path: str = '/', limit: int = 10) -> list[dict]:
         """
         Get the largest directories in human-readable format.
 
@@ -549,7 +636,7 @@ class DiskMonitor:
                 result.append(human)
         return result
 
-    def cleanup_temporary_files(self, mountpoint: str = '/', max_age_days: float = 7) -> Dict:
+    def cleanup_temporary_files(self, mountpoint: str = '/', max_age_days: float = 7) -> dict:
         """
         Clean up temporary files to free disk space.
         Cleans /tmp, /var/tmp, and other temporary directories.
@@ -582,94 +669,13 @@ class DiskMonitor:
         temp_dirs = _resolve_cleanup_dirs(temp_dirs_to_check, ALLOWED_TEMP_CLEANUP_BASES)
 
         for temp_dir in temp_dirs:
-            temp_dir_obj = Path(temp_dir)
-            if not temp_dir_obj.exists() or not temp_dir_obj.is_dir():
+            if not Path(temp_dir).is_dir():
                 continue
-
-            try:
-                for root, dirs, files in os.walk(temp_dir, topdown=False):
-                    for filename in files:
-                        filepath = Path(root) / filename
-                        try:
-                            file_stat = filepath.stat()
-                            file_age = current_time - file_stat.st_mtime
-
-                            if file_age > max_age_seconds:
-                                file_size = file_stat.st_size
-                                filepath.unlink()
-                                stats['files_removed'] += 1
-                                stats['total_size_cleared'] += file_size
-                                try:
-                                    logger.debug(f"Removed temp file: {filepath} ({format_bytes(file_size)})")
-                                except (OSError, Exception):
-                                    pass
-                        except (OSError, PermissionError) as e:
-                            if isinstance(e, OSError) and e.errno == 28:
-                                stats['errors'].append(f"Disk full while removing {filepath}: {e}")
-                            continue
-                        except Exception as e:
-                            try:
-                                logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
-                            except (OSError, Exception):
-                                pass
-                            stats['errors'].append(f"Error removing {filepath}: {e}")
-
-                    for dirname in dirs:
-                        dirpath = Path(root) / dirname
-                        try:
-                            if str(dirpath) != temp_dir:
-                                if not any(dirpath.iterdir()):
-                                    dirpath.rmdir()
-                                    stats['dirs_removed'] += 1
-                                    logger.debug(f"Removed empty directory: {dirpath}")
-                        except (OSError, PermissionError):
-                            continue
-                        except Exception as e:
-                            logger.error(f"Unexpected error removing directory {dirpath}: {e}", exc_info=True)
-                            stats['errors'].append(f"Error removing directory {dirpath}: {e}")
-
-                temp_patterns = [
-                    str(Path(temp_dir) / 'tmp*'),
-                    str(Path(temp_dir) / '*.tmp'),
-                    str(Path(temp_dir) / '*.log'),
-                ]
-
-                for pattern in temp_patterns:
-                    try:
-                        for filepath in glob.glob(pattern):
-                            filepath_obj = Path(filepath)
-                            try:
-                                file_stat = filepath_obj.stat()
-                                file_age = current_time - file_stat.st_mtime
-
-                                if file_age > max_age_seconds:
-                                    file_size = file_stat.st_size
-                                    filepath_obj.unlink()
-                                    stats['files_removed'] += 1
-                                    stats['total_size_cleared'] += file_size
-                            except (OSError, PermissionError) as e:
-                                if isinstance(e, OSError) and e.errno == 28:
-                                    stats['errors'].append(f"Disk full while removing {filepath}: {e}")
-                                continue
-                            except Exception as e:
-                                try:
-                                    logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
-                                except (OSError, Exception):
-                                    pass
-                                stats['errors'].append(f"Error removing {filepath}: {e}")
-                    except Exception as e:
-                        logger.error(f"Unexpected error processing pattern {pattern}: {e}", exc_info=True)
-                        stats['errors'].append(f"Error with pattern {pattern}: {e}")
-
-            except PermissionError as e:
-                stats['errors'].append(f"Permission denied cleaning {temp_dir}: {e}")
-            except Exception as e:
-                logger.error(f"Unexpected error cleaning {temp_dir}: {e}", exc_info=True)
-                stats['errors'].append(f"Error cleaning {temp_dir}: {e}")
+            _clean_directory_tree(temp_dir, max_age_seconds, stats, now=current_time)
 
         return stats
 
-    def _perform_log_cleanup(self, log_monitor, aggressive: bool = False, mountpoint: str = '/') -> Dict:
+    def _perform_log_cleanup(self, log_monitor, aggressive: bool = False, mountpoint: str = '/') -> dict:
         """
         Perform log cleanup with optional aggressive mode.
 
@@ -753,7 +759,7 @@ class DiskMonitor:
 
         return stats
 
-    def cleanup_disk_space(self, mountpoint: str = '/', target_free_percent: float = 20.0, log_monitor=None) -> Dict:
+    def cleanup_disk_space(self, mountpoint: str = '/', target_free_percent: float = 20.0, log_monitor=None) -> dict:
         """
         Clean up disk space to reach target free percentage.
         Performs aggressive cleanup of temporary files, caches, and logs.
@@ -789,10 +795,7 @@ class DiskMonitor:
             stats['final_usage'] = initial_usage['percent']
             return stats
 
-        try:
-            logger.info(f"[CLEANUP] Starting disk cleanup: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free (target: {target_free_percent:.1f}% free)")
-        except (OSError, Exception):
-            print(f"[CLEANUP] Starting disk cleanup: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free (target: {target_free_percent:.1f}% free)", file=sys.stderr)
+        safe_log(logger.info, f"[CLEANUP] Starting disk cleanup: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free (target: {target_free_percent:.1f}% free)")
 
         aggressive_threshold = get_env_float(
             'DISK_AGGRESSIVE_CLEANUP_THRESHOLD',
@@ -809,15 +812,9 @@ class DiskMonitor:
                     f"[CLEANUP] Step 1: Aggressive log cleanup "
                     f"(disk >= {aggressive_threshold:.1f}%, emptying logs in /var/log)..."
                 )
-                try:
-                    logger.warning(message)
-                except (OSError, Exception):
-                    print(message, file=sys.stderr)
+                safe_log(logger.warning, message)
             else:
-                try:
-                    logger.info("[CLEANUP] Step 1: Cleaning log files (all logs in /var/log exceeding threshold)...")
-                except (OSError, Exception):
-                    print("[CLEANUP] Step 1: Cleaning log files (all logs in /var/log exceeding threshold)...", file=sys.stderr)
+                safe_log(logger.info, "[CLEANUP] Step 1: Cleaning log files (all logs in /var/log exceeding threshold)...")
 
             log_cleanup_stats = self._perform_log_cleanup(log_monitor, aggressive=aggressive_cleanup, mountpoint=mountpoint)
             stats['logs_cleaned'] = log_cleanup_stats['logs_cleaned']
@@ -834,11 +831,8 @@ class DiskMonitor:
                         stats['final_usage'] = final_usage['percent']
                     return stats
 
-        try:
-            logger.info("[CLEANUP] Step 2: Cleaning temporary files...")
-        except (OSError, Exception):
-            print("[CLEANUP] Step 2: Cleaning temporary files...", file=sys.stderr)
-        
+        safe_log(logger.info, "[CLEANUP] Step 2: Cleaning temporary files...")
+
         max_attempts = 4
         for attempt, max_age_days in enumerate([7, 3, 1, 0]):
             if attempt >= max_attempts:
@@ -859,10 +853,7 @@ class DiskMonitor:
                     break
 
         if initial_usage['percent'] >= aggressive_threshold:
-            try:
-                logger.info("[CLEANUP] Step 3: Cleaning package caches and other space consumers...")
-            except (OSError, Exception):
-                print("[CLEANUP] Step 3: Cleaning package caches and other space consumers...", file=sys.stderr)
+            safe_log(logger.info, "[CLEANUP] Step 3: Cleaning package caches and other space consumers...")
             cache_cleanup_stats = self._cleanup_package_caches()
             stats['files_removed'] += cache_cleanup_stats.get('files_removed', 0)
             stats['dirs_removed'] += cache_cleanup_stats.get('dirs_removed', 0)
@@ -882,18 +873,13 @@ class DiskMonitor:
         if final_usage:
             stats['final_usage'] = final_usage['percent']
             final_free_percent = 100.0 - final_usage['percent']
-            try:
-                logger.info(f"[CLEANUP] Disk cleanup complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
+            safe_log(logger.info, f"[CLEANUP] Disk cleanup complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
                            f"Cleared {format_bytes(stats['total_size_cleared'])} "
                            f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)")
-            except (OSError, Exception):
-                print(f"[CLEANUP] Disk cleanup complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
-                      f"Cleared {format_bytes(stats['total_size_cleared'])} "
-                      f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)", file=sys.stderr)
 
         return stats
 
-    def _cleanup_package_caches(self) -> Dict:
+    def _cleanup_package_caches(self) -> dict:
         """
         Clean package caches and other common space-consuming directories.
 
@@ -907,7 +893,7 @@ class DiskMonitor:
             'errors': []
         }
 
-        if not platform.system() == 'Linux':
+        if platform.system() != 'Linux':
             return stats
 
         cache_dirs_env = os.getenv('CACHE_DIRS', None)
@@ -962,7 +948,7 @@ class DiskMonitor:
 
         return stats
 
-    def emergency_cleanup_disk_space(self, mountpoint: str = '/', log_monitor=None) -> Dict:
+    def emergency_cleanup_disk_space(self, mountpoint: str = '/', log_monitor=None) -> dict:
         """
         Emergency cleanup when disk is critically full (near 100%).
         Performs aggressive cleanup including logs and all temporary files.
@@ -993,16 +979,10 @@ class DiskMonitor:
         stats['initial_usage'] = initial_usage['percent']
         current_free_percent = 100.0 - initial_usage['percent']
 
-        try:
-            logger.warning(f"[EMERGENCY] Disk critically full: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free")
-        except (OSError, Exception):
-            print(f"[EMERGENCY] Disk critically full: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free", file=sys.stderr)
+        safe_log(logger.warning, f"[EMERGENCY] Disk critically full: {initial_usage['percent']:.1f}% used, {current_free_percent:.1f}% free")
 
-        try:
-            logger.info("[EMERGENCY] Step 1: Cleaning all temporary files...")
-        except (OSError, Exception):
-            print("[EMERGENCY] Step 1: Cleaning all temporary files...", file=sys.stderr)
-        
+        safe_log(logger.info, "[EMERGENCY] Step 1: Cleaning all temporary files...")
+
         cleanup_stats = self.cleanup_temporary_files(mountpoint, max_age_days=1.0 / 24.0)
         stats['files_removed'] += cleanup_stats['files_removed']
         stats['dirs_removed'] += cleanup_stats['dirs_removed']
@@ -1010,77 +990,26 @@ class DiskMonitor:
         stats['errors'].extend(cleanup_stats['errors'])
 
         if log_monitor:
-            try:
-                logger.info("[EMERGENCY] Step 2: Cleaning log files (aggressive - ALL logs in /var/log)...")
-            except (OSError, Exception):
-                print("[EMERGENCY] Step 2: Cleaning log files (aggressive - ALL logs in /var/log)...", file=sys.stderr)
-            
+            safe_log(logger.info, "[EMERGENCY] Step 2: Cleaning log files (aggressive - ALL logs in /var/log)...")
+
             log_cleanup_stats = self._perform_log_cleanup(log_monitor, aggressive=True, mountpoint=mountpoint)
             stats['logs_cleaned'] = log_cleanup_stats['logs_cleaned']
             stats['total_size_cleared'] += log_cleanup_stats['total_size_cleared']
             stats['errors'].extend(log_cleanup_stats['errors'])
 
-        try:
-            logger.info("[EMERGENCY] Step 3: Cleaning additional cache directories...")
-        except (OSError, Exception):
-            print("[EMERGENCY] Step 3: Cleaning additional cache directories...", file=sys.stderr)
+        safe_log(logger.info, "[EMERGENCY] Step 3: Cleaning additional cache directories...")
         emergency_cache_dirs_env = os.getenv('EMERGENCY_CACHE_DIRS', None)
         if emergency_cache_dirs_env:
-            cache_dirs = emergency_cache_dirs_env.split(':')
+            candidate_dirs = emergency_cache_dirs_env.split(':')
         elif platform.system() == 'Linux':
-            cache_dirs = ['/var/cache', '/tmp', '/var/tmp']
+            candidate_dirs = list(EMERGENCY_CACHE_DIRS_DEFAULT)
         else:
-            cache_dirs = []
+            candidate_dirs = []
+
+        cache_dirs = _resolve_cleanup_dirs(candidate_dirs, ALLOWED_TEMP_CLEANUP_BASES + ALLOWED_CACHE_CLEANUP_BASES)
         for cache_dir in cache_dirs:
-            cache_dir_obj = Path(cache_dir)
-            if not cache_dir_obj.exists() or not cache_dir_obj.is_dir():
-                continue
-
-            try:
-                is_valid, resolved_path, error = validate_path(cache_dir, allow_symlinks=False)
-                if not is_valid:
-                    continue
-
-                current_time = time.time()
-                max_age_seconds = 24 * 60 * 60
-
-                for root, dirs, files in os.walk(resolved_path, topdown=False):
-                    for filename in files:
-                        filepath = Path(root) / filename
-                        try:
-                            file_stat = filepath.stat()
-                            file_age = current_time - file_stat.st_mtime
-
-                            if file_age > max_age_seconds:
-                                file_size = file_stat.st_size
-                                filepath.unlink()
-                                stats['files_removed'] += 1
-                                stats['total_size_cleared'] += file_size
-                        except (OSError, PermissionError) as e:
-                            if isinstance(e, OSError) and e.errno == 28:
-                                stats['errors'].append(f"Disk full while removing {filepath}: {e}")
-                            continue
-                        except Exception as e:
-                            try:
-                                logger.error(f"Unexpected error removing file {filepath}: {e}", exc_info=True)
-                            except (OSError, Exception):
-                                pass
-                            stats['errors'].append(f"Error removing {filepath}: {e}")
-
-                    for dirname in dirs:
-                        dirpath = Path(root) / dirname
-                        try:
-                            if str(dirpath) != resolved_path and not any(dirpath.iterdir()):
-                                dirpath.rmdir()
-                                stats['dirs_removed'] += 1
-                        except (OSError, PermissionError):
-                            continue
-            except Exception as e:
-                try:
-                    logger.error(f"Unexpected error cleaning cache directory {cache_dir}: {e}", exc_info=True)
-                except (OSError, Exception):
-                    pass
-                stats['errors'].append(f"Error cleaning cache directory {cache_dir}: {e}")
+            if Path(cache_dir).is_dir():
+                _clean_directory_tree(cache_dir, 24 * 60 * 60, stats)
 
         if stats['logs_cleaned'] > 0:
             self.restart_log_services()
@@ -1089,18 +1018,13 @@ class DiskMonitor:
         if final_usage:
             stats['final_usage'] = final_usage['percent']
             final_free_percent = 100.0 - final_usage['percent']
-            try:
-                logger.warning(f"[EMERGENCY] Complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
+            safe_log(logger.warning, f"[EMERGENCY] Complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
                               f"Cleared {format_bytes(stats['total_size_cleared'])} "
                               f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)")
-            except (OSError, Exception):
-                print(f"[EMERGENCY] Complete: {final_usage['percent']:.1f}% used, {final_free_percent:.1f}% free. "
-                      f"Cleared {format_bytes(stats['total_size_cleared'])} "
-                      f"({stats['files_removed']} files, {stats['dirs_removed']} dirs, {stats['logs_cleaned']} logs)", file=sys.stderr)
 
         return stats
 
-    def cleanup_logs_and_restart_services(self, log_monitor=None) -> Dict:
+    def cleanup_logs_and_restart_services(self, log_monitor=None) -> dict:
         """
         Public method to clean all logs in /var/log and restart services.
         Consolidates log cleanup logic from main loop.
@@ -1186,7 +1110,12 @@ class DiskMonitor:
         Restart log services (rsyslog and systemd-journald) after log cleanup.
         This ensures services properly manage log files after cleanup.
         """
-        if not platform.system() == 'Linux':
+        if platform.system() != 'Linux':
+            return
+
+        if not get_env_bool('RESTART_LOG_SERVICES', False):
+            logger.debug("Log service restart skipped (RESTART_LOG_SERVICES=false); "
+                         "logs are trimmed in place so open file handles stay valid")
             return
 
         services_to_restart = ['rsyslog', 'systemd-journald']
@@ -1219,7 +1148,10 @@ class DiskMonitor:
         Args:
             max_retries: Maximum number of retry attempts for nginx restart
         """
-        if not platform.system() == 'Linux':
+        if platform.system() != 'Linux':
+            return
+
+        if not get_env_bool('MANAGE_NGINX_LOGS', False):
             return
 
         nginx_log_dir = os.getenv('NGINX_LOG_DIR', '/var/log/nginx')
@@ -1292,10 +1224,9 @@ class DiskMonitor:
                     if result.returncode == 0:
                         logger.info(f"    {nginx_service_name} restarted successfully")
                         break
-                    else:
-                        logger.warning(f"    Failed to restart {nginx_service_name}: {result.stderr}")
-                        if attempt < max_retries - 1:
-                            time.sleep(2 ** attempt)
+                    logger.warning(f"    Failed to restart {nginx_service_name}: {result.stderr}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
                 except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
                     logger.warning(f"    Could not restart {nginx_service_name}: {e}")
                     if attempt < max_retries - 1:

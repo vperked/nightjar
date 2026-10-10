@@ -2,3 +2,7 @@
 src/.env.prod
 tests/__pycache__/
 server_monitor.log
+*.log
+*.log.*
+.env
+.env.*

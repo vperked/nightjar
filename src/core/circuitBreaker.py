@@ -20,7 +20,6 @@ class CircuitState(Enum):
 
 class CircuitBreakerOpenError(Exception):
     """Raised when circuit breaker is open and call is rejected."""
-    pass
 
 
 class CircuitBreaker:

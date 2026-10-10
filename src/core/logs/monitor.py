@@ -1,12 +1,12 @@
 import os
 import platform
 import re
+import stat
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 from core.format import format_bytes
-from core.security import safe_subprocess_path
 from core.config import DEFAULT_ROTATED_LOG_RETENTION_DAYS, get_env_float
 from core.observability import Component, LOG_FILE, get_logger
 
@@ -25,12 +25,51 @@ ROTATED_LOG_PATTERN = re.compile(
 )
 
 
+# Database binary logs look like rotated logs (mysql-bin.000123) but are tracked by
+# an index file the database owns; deleting them out from under it corrupts replication.
+DATABASE_LOG_PATTERN = re.compile(r'(?:-bin|-relay-bin|binlog)\.\d+$', re.IGNORECASE)
+
+# Security and audit trails are trimmed to the threshold, never emptied, even in emergency mode.
+PROTECTED_LOG_NAMES = frozenset({
+    'auth.log', 'secure', 'audit.log', 'btmp', 'wtmp', 'lastlog', 'faillog',
+})
+
+
+def _is_protected_log(log_path: str) -> bool:
+    """Return True for audit/authentication logs that must never be emptied."""
+    path = Path(log_path)
+    return path.name in PROTECTED_LOG_NAMES or 'audit' in path.parts
+
+
+def _open_regular_file(log_path: Path):
+    """
+    Open an existing regular file for in-place modification without following symlinks.
+
+    Args:
+        log_path: Path to open
+
+    Returns:
+        Binary read/write file object
+
+    Raises:
+        OSError: If the path is a symlink or not a regular file
+    """
+    fd = os.open(log_path, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{log_path} is not a regular file")
+        return os.fdopen(fd, 'r+b')
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 class LogMonitor:
     """Monitor log file sizes to ensure logs don't grow unbounded."""
 
     def __init__(self, log_file: Optional[str] = None,
                  threshold_mb: Optional[float] = None,
-                 system_log_paths: Optional[List[str]] = None):
+                 system_log_paths: Optional[list[str]] = None):
         """
         Initialize the log monitor.
 
@@ -76,9 +115,12 @@ class LogMonitor:
         Returns:
             True if the filename matches a known rotation suffix
         """
-        return bool(ROTATED_LOG_PATTERN.search(Path(log_path).name))
+        name = Path(log_path).name
+        if DATABASE_LOG_PATTERN.search(name):
+            return False
+        return bool(ROTATED_LOG_PATTERN.search(name))
 
-    def get_rotated_log_files(self, log_dir: str = '/var/log') -> List[Dict]:
+    def get_rotated_log_files(self, log_dir: str = '/var/log') -> list[dict]:
         """
         Discover rotated log archives under a directory.
 
@@ -118,7 +160,7 @@ class LogMonitor:
 
         return rotated_logs
 
-    def should_delete_rotated_log(self, log_info: Dict, force: bool = False) -> bool:
+    def should_delete_rotated_log(self, log_info: dict, force: bool = False) -> bool:
         """
         Decide whether a rotated log archive should be deleted.
 
@@ -166,7 +208,7 @@ class LogMonitor:
             logger.error(f"Could not remove rotated log {log_path}: {e}")
             return False
 
-    def cleanup_rotated_logs(self, force: bool = False, log_dir: str = '/var/log') -> Dict:
+    def cleanup_rotated_logs(self, force: bool = False, log_dir: str = '/var/log') -> dict:
         """
         Delete rotated log archives that are oversized, aged out, or force-selected.
 
@@ -206,7 +248,7 @@ class LogMonitor:
 
         return stats
 
-    def get_log_size(self, log_path: str) -> Optional[Dict]:
+    def get_log_size(self, log_path: str) -> Optional[dict]:
         """
         Get size information for a specific log file.
 
@@ -228,7 +270,7 @@ class LogMonitor:
         except (OSError, PermissionError):
             return None
 
-    def get_application_log_size(self) -> Optional[Dict]:
+    def get_application_log_size(self) -> Optional[dict]:
         """
         Get size information for the application log file.
 
@@ -237,7 +279,7 @@ class LogMonitor:
         """
         return self.get_log_size(self.log_file)
 
-    def get_system_log_sizes(self) -> List[Dict]:
+    def get_system_log_sizes(self) -> list[dict]:
         """
         Get size information for system log files.
 
@@ -253,7 +295,7 @@ class LogMonitor:
 
         return log_sizes
 
-    def get_journal_log_size(self) -> Optional[Dict]:
+    def get_journal_log_size(self) -> Optional[dict]:
         """
         Get total size of journald logs directory.
 
@@ -271,10 +313,11 @@ class LogMonitor:
             total_size = 0
             file_count = 0
 
-            for file_path in journal_path.rglob('*'):
-                if file_path.is_file():
+            # One lstat per file instead of rglob's is_file() plus stat(), and symlinks are not followed.
+            for dirpath, _dirnames, filenames in os.walk(journal_path):
+                for filename in filenames:
                     try:
-                        total_size += file_path.stat().st_size
+                        total_size += os.lstat(os.path.join(dirpath, filename)).st_size
                         file_count += 1
                     except (OSError, PermissionError):
                         continue
@@ -289,7 +332,7 @@ class LogMonitor:
         except (OSError, PermissionError):
             return None
 
-    def check_log_threshold(self, log_info: Dict) -> bool:
+    def check_log_threshold(self, log_info: dict) -> bool:
         """
         Check if a log file exceeds the threshold.
 
@@ -305,7 +348,7 @@ class LogMonitor:
         size_bytes = log_info.get('size_bytes', 0)
         return size_bytes > self.threshold_bytes
 
-    def get_all_log_files_in_directory(self, log_dir: str = '/var/log') -> List[Dict]:
+    def get_all_log_files_in_directory(self, log_dir: str = '/var/log') -> list[dict]:
         """
         Get all log files in a directory (e.g., /var/log).
         Discovers all .log files and other common log file patterns.
@@ -335,6 +378,9 @@ class LogMonitor:
                     filepath = os.path.join(root, filename)
                     filename_lower = filename.lower()
 
+                    if DATABASE_LOG_PATTERN.search(filename):
+                        continue
+
                     is_log_file = (
                         any(filename_lower.endswith(ext) for ext in log_extensions) or
                         any(keyword in filename_lower for keyword in log_keywords) or
@@ -350,7 +396,7 @@ class LogMonitor:
 
         return log_files
 
-    def get_all_log_sizes(self) -> Dict:
+    def get_all_log_sizes(self) -> dict:
         """
         Get size information for all monitored logs.
 
@@ -398,7 +444,7 @@ class LogMonitor:
         """
         self.threshold_bytes = threshold_mb * 1024 * 1024
 
-    def cleanup_log(self, log_info: Dict, force: bool = False) -> bool:
+    def cleanup_log(self, log_info: dict, force: bool = False) -> bool:
         """
         Clean up a log file that exceeds the threshold.
         For regular files, truncates to threshold size keeping the most recent data.
@@ -426,11 +472,10 @@ class LogMonitor:
             return True
 
         try:
-            if log_path == self.journal_log_path or (self.journal_log_path and log_path.startswith(self.journal_log_path)):
+            if log_path == self.journal_log_path or (self.journal_log_path and log_path.startswith(self.journal_log_path + '/')):
                 return self._cleanup_journal_log(force=force)
-            else:
-                path = Path(log_path)
-                return self._cleanup_regular_log(path, force=force)
+            path = Path(log_path)
+            return self._cleanup_regular_log(path, force=force)
         except PermissionError as e:
             logger.error(f"Permission denied cleaning log {log_path}: {e}. Try running with sudo/root permissions.")
             return False
@@ -465,7 +510,7 @@ class LogMonitor:
             if current_size == 0:
                 return True
 
-            if force:
+            if force and not _is_protected_log(str(log_path)):
                 return self._empty_log(log_path, current_size)
 
             if current_size <= self.threshold_bytes:
@@ -491,30 +536,8 @@ class LogMonitor:
         Returns:
             True if successful, False otherwise
         """
-        log_path_str = str(log_path)
-
-        if self.is_linux:
-            safe_path = safe_subprocess_path(log_path_str)
-            if safe_path:
-                try:
-                    result = subprocess.run(
-                        ['truncate', '-s', '0', safe_path],
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                        check=False
-                    )
-                    if result.returncode == 0:
-                        logger.info(f"Emergency: Cleared log {log_path} ({format_bytes(current_size)})")
-                        return True
-                    logger.debug(f"truncate failed: {result.stderr}")
-                except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-                    logger.debug(f"truncate unavailable, using file operations: {e}")
-            else:
-                logger.warning(f"Unsafe path rejected for truncate command: {log_path_str}")
-
         try:
-            with open(log_path, 'r+b') as f:
+            with _open_regular_file(log_path) as f:
                 f.truncate(0)
             logger.info(f"Emergency: Cleared log {log_path} ({format_bytes(current_size)})")
             return True
@@ -541,7 +564,7 @@ class LogMonitor:
         chunk_size = 1024 * 1024
 
         try:
-            with open(log_path, 'r+b') as f:
+            with _open_regular_file(log_path) as f:
                 read_pos = excess_bytes
                 write_pos = 0
 
@@ -599,9 +622,8 @@ class LogMonitor:
                 if force:
                     logger.info(f"Emergency: Aggressively cleaned journal logs to {vacuum_size}")
                 return True
-            else:
-                logger.debug(f"journalctl vacuum failed: {result.stderr}")
-                return False
+            logger.debug(f"journalctl vacuum failed: {result.stderr}")
+            return False
         except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
             logger.debug(f"journalctl vacuum failed: {e}")
             return False

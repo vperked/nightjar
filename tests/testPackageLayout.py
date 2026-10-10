@@ -25,6 +25,7 @@ def test_src_contains_only_main_and_core():
         path.name for path in SRC_DIR.iterdir()
         if path.name not in {'__pycache__', '.env', '.gitignore'}
         and not path.name.endswith('.log')
+            and not path.name.endswith('.egg-info')
     }
 
     assert entries == {'main.py', 'core'}

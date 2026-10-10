@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import platform
 from pathlib import Path
-from typing import List
 from core.observability import Component, get_logger
 
 logger = get_logger(Component.CACHE)
@@ -15,12 +14,12 @@ logger = get_logger(Component.CACHE)
 _IGNORE_DIR_NAMES = frozenset({'venv', '.venv', 'env', 'node_modules', '.git'})
 
 
-def _prune_ignored_dirs(dirs: List[str]) -> None:
+def _prune_ignored_dirs(dirs: list[str]) -> None:
     """Drop virtualenv and VCS directories from os.walk in-place."""
     dirs[:] = [d for d in dirs if d not in _IGNORE_DIR_NAMES]
 
 
-def find_cache_directories(root_dir: str = None) -> List[str]:
+def find_cache_directories(root_dir: str = None) -> list[str]:
     """
     Find all __pycache__ directories in the project.
 
@@ -34,7 +33,7 @@ def find_cache_directories(root_dir: str = None) -> List[str]:
         root_dir = str(Path(__file__).resolve().parent.parent)
 
     cache_dirs = []
-    for root, dirs, files in os.walk(root_dir):
+    for root, dirs, _files in os.walk(root_dir):
         if '__pycache__' in dirs:
             cache_dirs.append(str(Path(root) / '__pycache__'))
             dirs.remove('__pycache__')
@@ -43,7 +42,7 @@ def find_cache_directories(root_dir: str = None) -> List[str]:
     return cache_dirs
 
 
-def find_pyc_files(root_dir: str = None) -> List[str]:
+def find_pyc_files(root_dir: str = None) -> list[str]:
     """
     Find all .pyc files in the project.
 
@@ -64,6 +63,15 @@ def find_pyc_files(root_dir: str = None) -> List[str]:
                 pyc_files.append(str(Path(root) / file))
 
     return pyc_files
+
+
+def _in_ignored_dir(path: str, root_dir: str) -> bool:
+    """Return True when a component of path (relative to root_dir) is an ignored directory."""
+    try:
+        parts = Path(path).relative_to(root_dir).parts
+    except ValueError:
+        parts = Path(path).parts
+    return any(part in _IGNORE_DIR_NAMES for part in parts)
 
 
 def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
@@ -91,18 +99,19 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
             result = subprocess.run(
                 ['find', root_dir, '-name', '__pycache__', '-type', 'd'],
                 capture_output=True,
+                check=False,
                 text=True,
                 timeout=30
             )
             if result.returncode == 0 and result.stdout.strip():
                 cache_dirs = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
                 for cache_dir in cache_dirs:
-                    if any(ignore in cache_dir for ignore in ['venv', '.venv', 'env', '.env', 'node_modules', '.git']):
+                    if _in_ignored_dir(cache_dir, root_dir):
                         continue
 
                     try:
                         total_size = 0
-                        for dirpath, dirnames, filenames in os.walk(cache_dir):
+                        for dirpath, _dirnames, filenames in os.walk(cache_dir):
                             for filename in filenames:
                                 filepath = Path(dirpath) / filename
                                 try:
@@ -113,6 +122,7 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
                         subprocess.run(
                             ['find', cache_dir, '-depth', '-delete'],
                             capture_output=True,
+                            check=False,
                             text=True,
                             timeout=10
                         )
@@ -136,13 +146,14 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
             result = subprocess.run(
                 ['find', root_dir, '-name', '*.pyc', '-type', 'f'],
                 capture_output=True,
+                check=False,
                 text=True,
                 timeout=30
             )
             if result.returncode == 0 and result.stdout.strip():
                 pyc_files = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
                 for pyc_file in pyc_files:
-                    if any(ignore in pyc_file for ignore in ['venv', '.venv', 'env', '.env', 'node_modules', '.git']):
+                    if _in_ignored_dir(pyc_file, root_dir):
                         continue
 
                     try:
@@ -172,7 +183,7 @@ def clear_cache(verbose: bool = True, use_find: bool = True) -> dict:
         for cache_dir in cache_dirs:
             try:
                 total_size = 0
-                for dirpath, dirnames, filenames in os.walk(cache_dir):
+                for dirpath, _dirnames, filenames in os.walk(cache_dir):
                     for filename in filenames:
                         filepath = Path(dirpath) / filename
                         try:

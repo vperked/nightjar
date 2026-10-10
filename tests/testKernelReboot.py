@@ -1,7 +1,6 @@
 """Tests for kernel reboot detection across monitor restarts."""
 
 import json
-from pathlib import Path
 
 from core.kernel.monitor import KernelMonitor
 

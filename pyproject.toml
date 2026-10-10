@@ -36,3 +36,17 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 python_files = ["test*.py"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+extend-exclude = ["venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "SIM", "RET", "PIE", "PLW", "UP"]
+ignore = [
+    "E501",    # long lines: f-string log messages are kept readable on one line
+    "PLW0603", # module-level caches are intentionally rebound
+    "SIM102",  # nested ifs keep separate branches readable
+    "SIM105",  # try/except/pass is used deliberately around logging during disk-full incidents
+]

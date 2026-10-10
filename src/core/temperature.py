@@ -2,20 +2,20 @@
 Temperature reading analysis and cause attribution.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 from core.format import BYTES_PER_MB, BYTES_PER_GB
 from core.config import MAX_REASONS_DISPLAY, MAX_PROCESSES_DISPLAY
 
 
 def analyze_temperature_reason(
     cpu_percent: float,
-    cpu_freq: Dict[str, float],
-    cpu_per_core: List[float],
-    top_processes: List[Dict],
-    load_avg: Optional[Tuple[float, float, float]],
-    fan_speeds: Optional[List[Dict]] = None,
-    disk_io: Optional[Dict] = None,
-    network_io: Optional[Dict] = None,
+    cpu_freq: dict[str, float],
+    cpu_per_core: list[float],
+    top_processes: list[dict],
+    load_avg: Optional[tuple[float, float, float]],
+    fan_speeds: Optional[list[dict]] = None,
+    disk_io: Optional[dict] = None,
+    network_io: Optional[dict] = None,
     gpu_temp: Optional[float] = None
 ) -> str:
     """
@@ -150,9 +150,8 @@ def analyze_temperature_reason(
         if total_net > 100 * BYTES_PER_MB and not download_processes:
             reasons.append("High network activity detected")
 
-    if gpu_temp is not None and gpu_temp > 0:
-        if gpu_temp > 70:
-            reasons.append(f"GPU also hot ({gpu_temp:.1f}°C) - possible ambient temperature or case airflow issue")
+    if gpu_temp is not None and gpu_temp > 0 and gpu_temp > 70:
+        reasons.append(f"GPU also hot ({gpu_temp:.1f}°C) - possible ambient temperature or case airflow issue")
 
     if not reasons:
         if cpu_percent > 30:

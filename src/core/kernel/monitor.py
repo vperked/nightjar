@@ -10,7 +10,7 @@ import re
 import subprocess
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 from core.observability import Component, get_logger
 
 logger = get_logger(Component.KERNEL)
@@ -60,7 +60,7 @@ _DMESG_CRITICAL_KEYWORDS = (
 _DMESG_IGNORE_FRAGMENTS = ('failed:', 'failed (', 'error -', 'warn:', 'warning:')
 
 
-def _journalctl_json_entries(since_str: str, priority: str, grep_pattern: str) -> List[Dict]:
+def _journalctl_json_entries(since_str: str, priority: str, grep_pattern: str) -> list[dict]:
     """
     Run a single journalctl JSON query.
 
@@ -100,7 +100,7 @@ def _journalctl_json_entries(since_str: str, priority: str, grep_pattern: str) -
     return entries
 
 
-def _matching_keywords(message_lower: str, keyword_pairs: Tuple[Tuple[str, str], ...]) -> List[str]:
+def _matching_keywords(message_lower: str, keyword_pairs: tuple[tuple[str, str], ...]) -> list[str]:
     """Return original keywords whose lowercase form appears in message_lower."""
     return [original for original, lowered in keyword_pairs if lowered in message_lower]
 
@@ -108,7 +108,7 @@ def _matching_keywords(message_lower: str, keyword_pairs: Tuple[Tuple[str, str],
 class KernelMonitor:
     """Monitor kernel for crashes, panics, and oops."""
 
-    def __init__(self, persistence_file: Optional[str] = None, ignored_devices: Optional[List[str]] = None):
+    def __init__(self, persistence_file: Optional[str] = None, ignored_devices: Optional[list[str]] = None):
         """
         Initialize the kernel monitor.
 
@@ -157,7 +157,7 @@ class KernelMonitor:
             return psutil.boot_time()
         except Exception:
             try:
-                with open('/proc/stat', 'r') as f:
+                with open('/proc/stat') as f:
                     for line in f:
                         if line.startswith('btime'):
                             parts = line.split()
@@ -168,7 +168,7 @@ class KernelMonitor:
             return None
 
     @staticmethod
-    def _tail_text_lines(path: str, max_bytes: int) -> List[str]:
+    def _tail_text_lines(path: str, max_bytes: int) -> list[str]:
         """
         Read the last max_bytes of a log without loading the whole file.
 
@@ -198,7 +198,7 @@ class KernelMonitor:
             return
 
         try:
-            with open(self.persistence_file, 'r') as f:
+            with open(self.persistence_file) as f:
                 data = json.load(f)
 
             saved_boot_time = data.get('boot_time')
@@ -224,7 +224,7 @@ class KernelMonitor:
             self.last_alert_time = {k: float(v) for k, v in self.last_alert_time.items()}
 
             logger.debug(f"Loaded tracking data for {len(self.last_reported_errors)} devices")
-        except (json.JSONDecodeError, IOError, ValueError) as e:
+        except (OSError, json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Error loading tracking data from {self.persistence_file}: {e}, starting fresh")
             self.last_reported_errors = {}
             self.last_alert_time = {}
@@ -251,10 +251,10 @@ class KernelMonitor:
 
             os.replace(temp_file, self.persistence_file)
             logger.debug(f"Saved tracking data to {self.persistence_file}")
-        except (IOError, OSError) as e:
+        except OSError as e:
             logger.warning(f"Error saving tracking data to {self.persistence_file}: {e}")
 
-    def _check_early_warning_signs(self, since_minutes: int = 60) -> List[Dict]:
+    def _check_early_warning_signs(self, since_minutes: int = 60) -> list[dict]:
         """
         Check for early warning signs that may indicate an impending kernel crash.
 
@@ -302,7 +302,7 @@ class KernelMonitor:
 
         return warnings
 
-    def _check_hardware_errors(self) -> List[Dict]:
+    def _check_hardware_errors(self) -> list[dict]:
         """
         Check for hardware errors that could lead to crashes.
 
@@ -325,11 +325,11 @@ class KernelMonitor:
 
             for edac_path in edac_paths:
                 if os.path.exists(edac_path):
-                    for root, dirs, files in os.walk(edac_path):
+                    for root, _dirs, files in os.walk(edac_path):
                         path_parts = root.split('/')
                         mc_name = 'unknown'
                         for part in path_parts:
-                            if part.startswith('mc') or part.startswith('edac'):
+                            if part.startswith(('mc', 'edac')):
                                 mc_name = part
                                 break
 
@@ -337,7 +337,7 @@ class KernelMonitor:
                             if 'ce_count' in file or 'ue_count' in file:
                                 filepath = os.path.join(root, file)
                                 try:
-                                    with open(filepath, 'r') as f:
+                                    with open(filepath) as f:
                                         count = int(f.read().strip())
 
                                         edac_key = f"{mc_name}_{file}"
@@ -385,7 +385,7 @@ class KernelMonitor:
             logger.debug(f"EDAC check failed: {e}")
 
         try:
-            with open('/proc/meminfo', 'r') as f:
+            with open('/proc/meminfo') as f:
                 meminfo = f.read()
                 if 'MemAvailable' in meminfo:
                     for line in meminfo.split('\n'):
@@ -429,7 +429,7 @@ class KernelMonitor:
 
         return errors
 
-    def check_system_stability(self) -> Dict:
+    def check_system_stability(self) -> dict:
         """
         Check overall system stability indicators that may predict crashes.
         Combines multiple signals to assess crash risk.
@@ -463,7 +463,7 @@ class KernelMonitor:
         indicators = []
 
         try:
-            with open('/proc/meminfo', 'r') as f:
+            with open('/proc/meminfo') as f:
                 meminfo = f.read()
                 for line in meminfo.split('\n'):
                     if 'MemAvailable' in line:
@@ -487,7 +487,7 @@ class KernelMonitor:
             pass
 
         try:
-            with open('/proc/vmstat', 'r') as f:
+            with open('/proc/vmstat') as f:
                 vmstat = f.read()
                 for line in vmstat.split('\n'):
                     if 'oom_kill' in line:
@@ -506,7 +506,7 @@ class KernelMonitor:
             pass
 
         try:
-            with open('/proc/stat', 'r') as f:
+            with open('/proc/stat') as f:
                 stat = f.read()
                 if 'softlockup' in stat.lower() or 'hardlockup' in stat.lower():
                     risk_score += 20
@@ -515,7 +515,7 @@ class KernelMonitor:
             pass
 
         try:
-            with open('/proc/diskstats', 'r') as f:
+            with open('/proc/diskstats') as f:
                 diskstats = f.read()
                 for line in diskstats.split('\n'):
                     parts = line.split()
@@ -527,10 +527,7 @@ class KernelMonitor:
                             if read_errors > 0 or write_errors > 0:
                                 device = parts[2]
 
-                                is_virtual = (device.startswith('loop') or
-                                             device.startswith('ram') or
-                                             device.startswith('zram') or
-                                             device.startswith('dm-'))
+                                is_virtual = (device.startswith(('loop', 'ram', 'zram', 'dm-')))
                                 is_partition = False
                                 if 'p' in device:
                                     p_index = device.rfind('p')
@@ -615,7 +612,7 @@ class KernelMonitor:
 
         return stability
 
-    def _check_journalctl(self, since_minutes: int = 60) -> List[Dict]:
+    def _check_journalctl(self, since_minutes: int = 60) -> list[dict]:
         """
         Check systemd journal for kernel crashes/panics.
 
@@ -664,7 +661,7 @@ class KernelMonitor:
 
         return crashes
 
-    def _check_dmesg(self, since_minutes: int = 60) -> List[Dict]:
+    def _check_dmesg(self, since_minutes: int = 60) -> list[dict]:
         """
         Check dmesg for kernel errors and warnings.
 
@@ -711,10 +708,10 @@ class KernelMonitor:
                                 pass
 
                         line_lower = line.lower()
-                        
+
                         if 'servermonitor' in line_lower or 'python3' in line_lower:
                             continue
-                        
+
                         if any(ignore in line_lower for ignore in _DMESG_IGNORE_FRAGMENTS):
                             if not any(critical in line_lower for critical in _DMESG_CRITICAL_KEYWORDS):
                                 continue
@@ -742,7 +739,7 @@ class KernelMonitor:
 
         return crashes
 
-    def _check_kernel_logs(self, since_minutes: int = 60) -> List[Dict]:
+    def _check_kernel_logs(self, since_minutes: int = 60) -> list[dict]:
         """
         Check kernel log files directly.
 
@@ -809,7 +806,7 @@ class KernelMonitor:
 
         return crashes
 
-    def _check_unexpected_reboot(self) -> Optional[Dict]:
+    def _check_unexpected_reboot(self) -> Optional[dict]:
         """
         Check for unexpected reboots by monitoring boot time changes.
         Requires at least 10 seconds difference to avoid false positives from timing issues.
@@ -852,7 +849,7 @@ class KernelMonitor:
             logger.debug(f"Unexpected reboot check failed: {e}")
             return None
 
-    def check_kernel_crashes(self, since_minutes: int = 60) -> Dict:
+    def check_kernel_crashes(self, since_minutes: int = 60) -> dict:
         """
         Check for kernel crashes, panics, and oops.
         Also checks for early warning signs that may indicate impending crashes.
@@ -901,7 +898,7 @@ class KernelMonitor:
 
         return result
 
-    def get_kernel_status(self) -> Dict:
+    def get_kernel_status(self) -> dict:
         """
         Get current kernel status summary.
 
@@ -916,13 +913,13 @@ class KernelMonitor:
 
         if self.is_linux:
             try:
-                with open('/proc/version', 'r') as f:
+                with open('/proc/version') as f:
                     status['kernel_version'] = f.read().strip()
             except Exception:
                 status['kernel_version'] = 'Unknown'
 
             try:
-                with open('/proc/uptime', 'r') as f:
+                with open('/proc/uptime') as f:
                     parts = f.read().split()
                     if len(parts) >= 1:
                         uptime_seconds = float(parts[0])
@@ -952,7 +949,6 @@ class KernelMonitor:
 
         if days > 0:
             return f"{days}d {hours}h {minutes}m"
-        elif hours > 0:
+        if hours > 0:
             return f"{hours}h {minutes}m"
-        else:
-            return f"{minutes}m"
+        return f"{minutes}m"

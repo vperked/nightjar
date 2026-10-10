@@ -1,7 +1,10 @@
 import heapq
-import psutil
+import threading
 import time
-from typing import Dict, List, Optional, Callable
+from operator import itemgetter
+
+import psutil
+from typing import Optional, Callable
 from datetime import datetime
 from core.format import format_bytes, CPU_COUNT
 from core.observability import Component, get_logger
@@ -17,6 +20,16 @@ PROCESS_RANK_ATTRS = [
     'memory_info',
 ]
 
+# Ranking only needs these; the expensive fields (username lookup, memory_info) are
+# fetched afterwards for the handful of processes that are actually returned.
+PROCESS_LEAN_ATTRS = ['pid', 'name', 'cpu_percent', 'memory_percent', 'status']
+PROCESS_DETAIL_ATTRS = ['username', 'memory_info']
+
+# psutil reports a process's CPU as usage since the previous read of that same process, so
+# independent scans (dashboard and alert loop) would each measure over arbitrary short windows.
+# Every caller shares one scan instead, reused for this many seconds.
+SHARED_SCAN_MAX_AGE = 2.0
+
 
 class ProcessMonitor:
     """Monitor system processes and their resource usage."""
@@ -24,6 +37,8 @@ class ProcessMonitor:
     def __init__(self):
         """Initialize the process monitor."""
         self._cpu_count = CPU_COUNT if CPU_COUNT and CPU_COUNT > 0 else 1
+        self._scan_lock = threading.Lock()
+        self._scan_cache = None
 
     def _normalize_cpu(self, cpu_percent_raw) -> float:
         """Scale process CPU percent to 0-100 relative to logical core count."""
@@ -31,7 +46,7 @@ class ProcessMonitor:
             return 0.0
         return min(cpu_percent_raw / self._cpu_count, 100.0)
 
-    def _snapshot_from_info(self, info: Dict) -> Optional[Dict]:
+    def _snapshot_from_info(self, info: dict) -> Optional[dict]:
         """
         Build a process info dict from psutil process_iter fields.
 
@@ -66,11 +81,35 @@ class ProcessMonitor:
             'cwd': None,
         }
 
-    def _collect_snapshots(self) -> List[Dict]:
-        """Collect process snapshots in a single process_iter pass."""
+    def _enrich_snapshots(self, snapshots: list[dict]) -> None:
+        """Fill username and memory details in place for already-ranked snapshots."""
+        for snapshot in snapshots:
+            if snapshot.get('username') is not None:
+                continue
+            try:
+                info = psutil.Process(snapshot['pid']).as_dict(attrs=PROCESS_DETAIL_ATTRS)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                continue
+            snapshot['username'] = info.get('username')
+            mem = info.get('memory_info')
+            if mem is not None:
+                snapshot['memory_info'] = {
+                    'rss': getattr(mem, 'rss', 0),
+                    'vms': getattr(mem, 'vms', 0),
+                    'shared': getattr(mem, 'shared', 0),
+                }
+
+    def _collect_snapshots(self, lean: bool = False) -> list[dict]:
+        """
+        Collect process snapshots in a single process_iter pass.
+
+        Args:
+            lean: Fetch only the fields needed to rank processes; callers must
+                pass the survivors to _enrich_snapshots
+        """
         snapshots = []
         try:
-            for proc in psutil.process_iter(PROCESS_RANK_ATTRS):
+            for proc in psutil.process_iter(PROCESS_LEAN_ATTRS if lean else PROCESS_RANK_ATTRS):
                 try:
                     snapshot = self._snapshot_from_info(proc.info)
                     if snapshot:
@@ -85,7 +124,7 @@ class ProcessMonitor:
             return []
         return snapshots
 
-    def get_process_count(self) -> Dict:
+    def get_process_count(self) -> dict:
         """
         Get process count by status.
 
@@ -111,7 +150,7 @@ class ProcessMonitor:
             'by_status': status_count,
         }
 
-    def get_process_info(self, pid: int) -> Optional[Dict]:
+    def get_process_info(self, pid: int) -> Optional[dict]:
         """
         Get detailed information about a specific process.
 
@@ -160,7 +199,7 @@ class ProcessMonitor:
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             return None
 
-    def find_processes_by_name(self, name: str, exact_match: bool = False) -> List[Dict]:
+    def find_processes_by_name(self, name: str, exact_match: bool = False) -> list[dict]:
         """
         Find processes by name.
 
@@ -184,13 +223,60 @@ class ProcessMonitor:
 
         return matching_processes
 
-    def get_top_processes(self, limit: int = 10, sort_by: str = 'cpu') -> List[Dict]:
+    def get_process_overview(self, limit: int = 5, max_age: float = SHARED_SCAN_MAX_AGE) -> dict:
         """
-        Get top processes by CPU or memory usage.
+        Count processes by status and rank the top CPU and memory users, from one shared scan.
 
-        Uses a single process_iter pass and non-blocking CPU samples (percent
-        since the previous collection). First call after process start may
-        report 0% CPU until counters are primed.
+        Thread-safe. A scan younger than `max_age` seconds that ranked at least `limit`
+        processes is reused, so the dashboard and the alert loop see the same CPU sample.
+
+        Args:
+            limit: Number of top processes to return per metric
+            max_age: Maximum age in seconds of a reusable scan
+
+        Returns:
+            Dictionary with 'count' ({'total', 'by_status'}), 'top_cpu' and 'top_memory'
+        """
+        with self._scan_lock:
+            now = time.monotonic()
+            cached = self._scan_cache
+            if cached is None or cached[1] < limit or now - cached[0] >= max_age:
+                cached = (now, limit, self._scan(limit))
+                self._scan_cache = cached
+            overview = cached[2]
+        return {
+            'count': overview['count'],
+            'top_cpu': overview['top_cpu'][:limit],
+            'top_memory': overview['top_memory'][:limit],
+        }
+
+    def _scan(self, limit: int) -> dict:
+        snapshots = self._collect_snapshots(lean=True)
+        by_status: dict[str, int] = {}
+        for snapshot in snapshots:
+            status = snapshot.get('status')
+            if status:
+                by_status[status] = by_status.get(status, 0) + 1
+
+        if limit <= 0 or not snapshots:
+            top_cpu, top_memory = [], []
+        else:
+            top_cpu = heapq.nlargest(limit, snapshots, key=itemgetter('cpu_percent'))
+            top_memory = heapq.nlargest(limit, snapshots, key=itemgetter('memory_percent'))
+            ranked = {id(p): p for p in top_cpu + top_memory}
+            self._enrich_snapshots(list(ranked.values()))
+        return {
+            'count': {'total': len(snapshots), 'by_status': by_status},
+            'top_cpu': top_cpu,
+            'top_memory': top_memory,
+        }
+
+    def get_top_processes(self, limit: int = 10, sort_by: str = 'cpu') -> list[dict]:
+        """
+        Get top processes by CPU or memory usage (from the shared scan).
+
+        CPU is the percentage since the previous scan; the first scan after start
+        may report 0% until counters are primed.
 
         Args:
             limit: Number of processes to return
@@ -199,20 +285,12 @@ class ProcessMonitor:
         Returns:
             List of process dictionaries sorted by the specified metric
         """
-        snapshots = self._collect_snapshots()
-        if not snapshots or limit <= 0:
-            return []
-
-        if sort_by == 'memory':
-            key = lambda x: x.get('memory_percent', 0)
-        else:
-            key = lambda x: x.get('cpu_percent', 0)
-
-        return heapq.nlargest(limit, snapshots, key=key)
+        overview = self.get_process_overview(limit=limit)
+        return overview['top_memory' if sort_by == 'memory' else 'top_cpu']
 
     def get_top_cpu_and_memory(self, limit: int = 10) -> tuple:
         """
-        Get top CPU and memory processes from one process table scan.
+        Get top CPU and memory processes (from the shared scan).
 
         Args:
             limit: Number of processes to return per list
@@ -220,15 +298,10 @@ class ProcessMonitor:
         Returns:
             Tuple of (top_cpu_processes, top_memory_processes)
         """
-        snapshots = self._collect_snapshots()
-        if not snapshots or limit <= 0:
-            return [], []
+        overview = self.get_process_overview(limit=limit)
+        return overview['top_cpu'], overview['top_memory']
 
-        top_cpu = heapq.nlargest(limit, snapshots, key=lambda x: x.get('cpu_percent', 0))
-        top_memory = heapq.nlargest(limit, snapshots, key=lambda x: x.get('memory_percent', 0))
-        return top_cpu, top_memory
-
-    def get_process_tree(self, pid: int) -> Dict:
+    def get_process_tree(self, pid: int) -> dict:
         """
         Get process tree (parent and children) for a process.
 
@@ -271,7 +344,7 @@ class ProcessMonitor:
             return {}
 
     def monitor_process(self, pid: int, interval: float = 1.0, duration: Optional[float] = None,
-                       callback: Optional[Callable[[Dict], None]] = None) -> List[Dict]:
+                       callback: Optional[Callable[[dict], None]] = None) -> list[dict]:
         """
         Continuously monitor a specific process.
 
@@ -313,7 +386,7 @@ class ProcessMonitor:
 
         return measurements
 
-    def get_processes_by_user(self, username: Optional[str] = None) -> List[Dict]:
+    def get_processes_by_user(self, username: Optional[str] = None) -> list[dict]:
         """
         Get all processes for a specific user, or all users if username is None.
 
@@ -330,7 +403,7 @@ class ProcessMonitor:
                 processes.append(snapshot)
         return processes
 
-    def get_process_summary(self) -> Dict:
+    def get_process_summary(self) -> dict:
         """
         Get a summary of all processes.
 

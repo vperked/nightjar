@@ -1,7 +1,7 @@
 import psutil
 import time
 import threading
-from typing import Dict, Optional, Callable
+from typing import Optional, Callable
 from core.observability import Component, get_logger
 
 logger = get_logger(Component.FREEZE)
@@ -36,7 +36,7 @@ class FreezeMonitor:
         self.last_heartbeat = time.time()
 
     def update_metrics(self, cpu_percent: float, memory_percent: float,
-                      disk_io: Optional[Dict] = None, network_io: Optional[Dict] = None):
+                      disk_io: Optional[dict] = None, network_io: Optional[dict] = None):
         """
         Update metric values and check if they're changing.
 
@@ -82,12 +82,10 @@ class FreezeMonitor:
                 'bytes_recv': current_net_recv
             }
 
-        if metrics_changed or self.last_metric_update is None:
-            self.last_metric_update = current_time
-        elif cpu_percent < 15.0:
+        if metrics_changed or self.last_metric_update is None or cpu_percent < 15.0:
             self.last_metric_update = current_time
 
-    def check_system_responsiveness(self, timeout: float = 2.0) -> Dict:
+    def check_system_responsiveness(self, timeout: float = 2.0) -> dict:
         """
         Check if the system is responsive by attempting quick system calls.
 
@@ -132,7 +130,7 @@ class FreezeMonitor:
             'timestamp': time.time()
         }
 
-    def check_freeze_status(self) -> Dict:
+    def check_freeze_status(self) -> dict:
         """
         Check if the system appears to be frozen.
 
@@ -193,7 +191,7 @@ class FreezeMonitor:
         """
         self.heartbeat_timeout = max(20.0, timeout)
 
-    def get_freeze_info(self) -> Dict:
+    def get_freeze_info(self) -> dict:
         """
         Get comprehensive freeze detection information.
 
@@ -216,7 +214,7 @@ class FreezeMonitor:
             }
         }
 
-    def start_watchdog(self, callback: Optional[Callable[[Dict], None]] = None):
+    def start_watchdog(self, callback: Optional[Callable[[dict], None]] = None):
         """
         Start a watchdog thread that monitors for freezes.
 

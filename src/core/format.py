@@ -88,8 +88,7 @@ def format_megabytes(mb_value: int, precision: int = 2) -> str:
     """
     if mb_value < BYTES_PER_KB:
         return f"{mb_value} MB"
-    else:
-        return f"{mb_value / BYTES_PER_KB:.{precision}f} GB"
+    return f"{mb_value / BYTES_PER_KB:.{precision}f} GB"
 
 
 def format_temperature(temp_celsius: float, precision: int = 1) -> str:

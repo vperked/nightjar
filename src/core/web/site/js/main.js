@@ -339,19 +339,26 @@ function createProcessItem(proc, type, rank) {
     item.innerHTML = `
         <div class="flex items-center justify-between w-full">
             <div class="flex items-center gap-3 flex-1 min-w-0">
-                <span class="text-gray-400 font-mono text-xs">#${rank}</span>
+                <span class="text-gray-400 font-mono text-xs">#${Number(rank)}</span>
                 <div class="flex-1 min-w-0">
-                    <div class="font-semibold text-sm truncate" title="${name}">${name}</div>
-                    <div class="text-xs text-gray-500 font-mono">PID: ${pid}</div>
+                    <div class="font-semibold text-sm truncate" data-field="name"></div>
+                    <div class="text-xs text-gray-500 font-mono" data-field="pid"></div>
                 </div>
             </div>
             <div class="text-right">
-                <div class="font-bold text-sm">${percent.toFixed(1)}%</div>
+                <div class="font-bold text-sm">${Number(percent).toFixed(1)}%</div>
                 <div class="text-xs text-gray-500">${type === 'cpu' ? 'CPU' : 'Mem'}</div>
             </div>
         </div>
     `;
-    
+
+    // Process names are attacker-controlled (any local user can name a process), so
+    // they are only ever written as text, never parsed as HTML.
+    const nameEl = item.querySelector('[data-field="name"]');
+    nameEl.textContent = String(name);
+    nameEl.title = String(name);
+    item.querySelector('[data-field="pid"]').textContent = `PID: ${pid}`;
+
     return item;
 }
 

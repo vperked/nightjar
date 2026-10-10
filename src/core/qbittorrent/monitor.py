@@ -1,6 +1,6 @@
 import os
 import qbittorrentapi
-from typing import Dict, List, Optional
+from typing import Optional
 from core.format import format_bytes, format_bytes_per_second
 from core.circuitBreaker import CircuitBreaker, CircuitBreakerOpenError
 from core.observability import Component, get_logger
@@ -32,12 +32,10 @@ INACTIVE_TORRENT_STATES = frozenset({
     'stoppedup',
     'pauseddl',
     'stoppeddl',
-    'error',
-    'missingfiles',
 })
 
 
-def is_download_stalled(torrent: Dict) -> bool:
+def is_download_stalled(torrent: dict) -> bool:
     """
     Return True when a torrent is stuck downloading with no progress.
 
@@ -53,12 +51,12 @@ _NO_STALL_ACTION = {'recover': False, 'alert': False, 'abandon': False}
 
 
 def stalled_action_plan(
-    tracked: Dict,
+    tracked: dict,
     now: float,
     threshold: float,
     cooldown: float,
     max_recovery_attempts: int,
-) -> Dict[str, bool]:
+) -> dict[str, bool]:
     """
     Decide recover/alert for a torrent that is currently stalled.
 
@@ -89,18 +87,19 @@ def stalled_action_plan(
     }
 
 
-def is_inactive_torrent(torrent: Dict) -> bool:
+def is_inactive_torrent(torrent: dict) -> bool:
     """
     Return True when a torrent is not actively downloading or seeding.
 
-    Covers paused/stopped downloads and seeds, plus error and missing-files
-    states. Transient states such as checking or moving are left alone.
+    Covers paused/stopped downloads and seeds. Error and missing-files states are
+    deliberately excluded: they are usually transient (an unmounted drive or an
+    unreachable NAS) and removing the torrent loses its progress and ratio.
     """
     state = str(torrent.get('state', '')).lower()
     return state in INACTIVE_TORRENT_STATES
 
 
-def is_seeding_ratio_met(torrent: Dict, min_ratio: float = 1.0) -> bool:
+def is_seeding_ratio_met(torrent: dict, min_ratio: float = 1.0) -> bool:
     """
     Return True when a completed torrent is actively seeding at or above min_ratio.
 
@@ -117,7 +116,7 @@ def is_seeding_ratio_met(torrent: Dict, min_ratio: float = 1.0) -> bool:
     return progress >= 1.0 and ratio >= min_ratio
 
 
-def should_remove_torrent(torrent: Dict, min_ratio: float = 1.0) -> Optional[str]:
+def should_remove_torrent(torrent: dict, min_ratio: float = 1.0) -> Optional[str]:
     """
     Return a removal reason when a torrent should be deleted, else None.
 
@@ -177,6 +176,7 @@ class QBittorrentMonitor:
         self._connected = False
         self._last_error = None
         self._connection_logged = False
+        self.last_fetch_ok = True
         self.circuit_breaker = CircuitBreaker(failure_threshold=5, timeout=60.0, success_threshold=2)
 
         logger.debug(f"qBittorrent monitor: {self.host}:{self.port} ({self.username})")
@@ -291,13 +291,14 @@ class QBittorrentMonitor:
             return False
         return self._ensure_connected()
 
-    def get_all_torrents(self) -> List[Dict]:
+    def get_all_torrents(self) -> list[dict]:
         """
         Get all torrents from qBittorrent.
 
         Returns:
             List of dictionaries containing torrent information
         """
+        self.last_fetch_ok = False
         if not self._ensure_connected():
             return []
 
@@ -338,6 +339,7 @@ class QBittorrentMonitor:
                     'uploaded': torrent.uploaded,
                 })
 
+            self.last_fetch_ok = True
             return result
         except (qbittorrentapi.exceptions.APIConnectionError,
                 qbittorrentapi.exceptions.LoginFailed,
@@ -354,13 +356,13 @@ class QBittorrentMonitor:
             self._last_error = str(e)
             return []
 
-    def _torrent_source(self, torrents: Optional[List[Dict]] = None) -> List[Dict]:
+    def _torrent_source(self, torrents: Optional[list[dict]] = None) -> list[dict]:
         """Return provided torrents or fetch the current list once."""
         if torrents is not None:
             return torrents
         return self.get_all_torrents()
 
-    def get_downloading_torrents(self, torrents: Optional[List[Dict]] = None) -> List[Dict]:
+    def get_downloading_torrents(self, torrents: Optional[list[dict]] = None) -> list[dict]:
         """
         Get all currently downloading torrents.
 
@@ -375,7 +377,7 @@ class QBittorrentMonitor:
             if str(torrent.get('state', '')).lower() in DOWNLOADING_STATES
         ]
 
-    def get_seeding_torrents(self, torrents: Optional[List[Dict]] = None) -> List[Dict]:
+    def get_seeding_torrents(self, torrents: Optional[list[dict]] = None) -> list[dict]:
         """
         Get all currently seeding torrents.
 
@@ -390,7 +392,7 @@ class QBittorrentMonitor:
             if str(torrent.get('state', '')).lower() in SEEDING_ACTIVE_STATES
         ]
 
-    def get_torrent_summary(self) -> Dict:
+    def get_torrent_summary(self) -> dict:
         """
         Get a summary of all torrents.
 
@@ -428,7 +430,7 @@ class QBittorrentMonitor:
             'last_error': self._last_error,
         }
 
-    def get_torrent_summary_human(self) -> Dict:
+    def get_torrent_summary_human(self) -> dict:
         """
         Get torrent summary in human-readable format.
 
@@ -449,7 +451,7 @@ class QBittorrentMonitor:
             'last_error': summary['last_error'],
         }
 
-    def get_downloading_torrents_human(self) -> List[Dict]:
+    def get_downloading_torrents_human(self) -> list[dict]:
         """
         Get downloading torrents with human-readable values.
 
@@ -474,7 +476,7 @@ class QBittorrentMonitor:
 
         return result
 
-    def get_seeding_torrents_human(self) -> List[Dict]:
+    def get_seeding_torrents_human(self) -> list[dict]:
         """
         Get seeding torrents with human-readable values.
 
@@ -499,7 +501,7 @@ class QBittorrentMonitor:
 
         return result
 
-    def get_stalled_torrents(self, torrents: Optional[List[Dict]] = None) -> List[Dict]:
+    def get_stalled_torrents(self, torrents: Optional[list[dict]] = None) -> list[dict]:
         """
         Get torrents that are stalled while downloading.
 
@@ -612,7 +614,7 @@ class QBittorrentMonitor:
             ),
         )
 
-    def recover_stalled_torrent(self, torrent_hash: str) -> Dict:
+    def recover_stalled_torrent(self, torrent_hash: str) -> dict:
         """
         Attempt to unstick a stalled download via reannounce and resume.
 
@@ -637,7 +639,7 @@ class QBittorrentMonitor:
         self,
         torrent_hash: str,
         delete_files: bool = False,
-    ) -> Dict:
+    ) -> dict:
         """
         Remove a torrent under cleanup policy (inactive or ratio-complete).
 
@@ -657,7 +659,7 @@ class QBittorrentMonitor:
             'actions': actions,
         }
 
-    def get_inactive_torrents(self, torrents: Optional[List[Dict]] = None) -> List[Dict]:
+    def get_inactive_torrents(self, torrents: Optional[list[dict]] = None) -> list[dict]:
         """
         Get torrents that are not actively downloading or seeding.
 
@@ -676,8 +678,8 @@ class QBittorrentMonitor:
     def get_ratio_complete_torrents(
         self,
         min_ratio: float = 1.0,
-        torrents: Optional[List[Dict]] = None,
-    ) -> List[Dict]:
+        torrents: Optional[list[dict]] = None,
+    ) -> list[dict]:
         """
         Get completed seeding torrents at or above the ratio target.
 

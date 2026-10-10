@@ -319,31 +319,31 @@ def check_directory_access(directory: str, username: str) -> bool:
 
             if dir_stat.st_uid == user_info.pw_uid:
                 return bool(dir_mode & stat.S_IRUSR and dir_mode & stat.S_IXUSR)
-            elif dir_stat.st_gid == user_info.pw_gid:
+            if dir_stat.st_gid == user_info.pw_gid:
                 return bool(dir_mode & stat.S_IRGRP and dir_mode & stat.S_IXGRP)
-            else:
-                return bool(dir_mode & stat.S_IROTH and dir_mode & stat.S_IXOTH)
+            return bool(dir_mode & stat.S_IROTH and dir_mode & stat.S_IXOTH)
         except (ImportError, KeyError, OSError):
             return False
 
 
 def fix_directory_permissions(directory: str, username: str) -> bool:
     """
-    Fix directory permissions so the specified user can access it.
-    Also fixes parent directories to ensure the path is accessible.
+    Give the service user ownership of the working directory itself.
+
+    Parent directories are never modified: changing ownership or modes up the tree
+    (for example /root or /home) widens access far beyond this service. Ancestors
+    the user cannot traverse are reported with the command to run if that is intended.
 
     Args:
         directory: Directory path to fix
         username: Username that needs access
 
     Returns:
-        True if permissions were fixed, False otherwise
+        True if the service user can access the directory afterwards
     """
     try:
         import pwd
         user_info = pwd.getpwnam(username)
-        uid = user_info.pw_uid
-        gid = user_info.pw_gid
     except (ImportError, KeyError):
         logger.error(f"Could not get user info for {username}")
         return False
@@ -351,31 +351,24 @@ def fix_directory_permissions(directory: str, username: str) -> bool:
     try:
         path = Path(directory).resolve()
 
-        parent_paths = []
-        current = path
-        while current != current.parent:
-            parent_paths.append(current)
-            current = current.parent
-        parent_paths.reverse()
+        if path.stat().st_uid != user_info.pw_uid:
+            os.chown(path, user_info.pw_uid, user_info.pw_gid)
+            logger.info(f"Changed ownership of {path} to {username}")
 
-        for p in parent_paths:
-            if not p.exists():
-                continue
+        blocked = [
+            parent for parent in path.parents
+            if parent.exists() and not check_directory_access(str(parent), username)
+        ]
+        for parent in blocked:
+            logger.warning(
+                f"{username} cannot traverse {parent}. This installer will not change it; "
+                f"if intended, run: sudo chmod o+x {parent}"
+            )
 
-            try:
-                current_stat = p.stat()
+        if blocked or not check_directory_access(str(path), username):
+            return False
 
-                if current_stat.st_uid != uid:
-                    os.chown(p, uid, gid)
-                    logger.info(f"Changed ownership of {p} to {username}")
-
-                os.chmod(p, 0o755)
-            except OSError as e:
-                logger.warning(f"Could not fix permissions on {p}: {e}")
-                if p == path:
-                    return False
-
-        logger.info(f"Fixed permissions on {directory} and parent directories")
+        logger.info(f"Fixed permissions on {directory}")
         return True
     except OSError as e:
         logger.error(f"Failed to fix permissions on {directory}: {e}")
@@ -396,10 +389,7 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
     python_exec = get_python_executable()
     main_script = get_main_script_path()
 
-    if is_root():
-        service_user = os.environ.get('SUDO_USER', 'root')
-    else:
-        service_user = os.environ.get('USER', 'root')
+    service_user = os.environ.get('SUDO_USER', 'root') if is_root() else os.environ.get('USER', 'root')
 
     if service_user != 'root':
         try:
@@ -470,6 +460,12 @@ def get_systemd_service_content(service_name: str = 'server-monitor') -> str:
                 logger.warning("Could not determine home directory, using /tmp as fallback")
 
     logger.info(f"Working directory: {working_dir_path} (service user: {service_user})")
+    if service_user != 'root':
+        logger.warning(
+            f"Service will run as '{service_user}': disk/log cleanup outside its own files and "
+            f"system package updates need root and will be skipped. PrivateTmp is not set so "
+            f"temp cleanup acts on the real /tmp where permissions allow."
+        )
 
     venv_bin = str(project_root / 'venv' / 'bin').replace('\\', '/')
     if Path(venv_bin).exists():
@@ -507,7 +503,11 @@ StandardOutput=journal
 StandardError=journal
 
 NoNewPrivileges=true
-PrivateTmp=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
 
 [Install]
 WantedBy=multi-user.target
@@ -558,14 +558,11 @@ def install_systemd_service(service_name: str = 'server-monitor',
         if missing:
             logger.error(f"{python_exec} cannot import: {', '.join(missing)}")
             logger.error("systemd would start this interpreter and the service would crash-loop.")
-            logger.error(f"Install the dependencies for it, or create the venv the service expects:")
+            logger.error("Install the dependencies for it, or create the venv the service expects:")
             logger.error(f"  {python_exec} -m pip install -r {project_root / 'requirements.txt'}")
             return False
 
-        if is_root():
-            service_user = os.environ.get('SUDO_USER', 'root')
-        else:
-            service_user = os.environ.get('USER', 'root')
+        service_user = os.environ.get('SUDO_USER', 'root') if is_root() else os.environ.get('USER', 'root')
 
         main_script = get_main_script_path()
         script_dir = str(main_script.parent.resolve()).replace('\\', '/')
@@ -590,7 +587,7 @@ def install_systemd_service(service_name: str = 'server-monitor',
                     else:
                         logger.error("Failed to fix permissions. You may need to fix them manually.")
                         logger.info(f"Try: sudo chown -R {service_user}:{service_user} {working_dir_path}")
-                        logger.info(f"      sudo chmod -R 755 {working_dir_path}")
+                        logger.info("      sudo chmod o+x <each parent directory the service user cannot traverse>")
                 else:
                     logger.warning("Skipping permission fix. Service may fail to start.")
             except (EOFError, KeyboardInterrupt):
