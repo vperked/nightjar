@@ -1,0 +1,8 @@
+{
+  "services": [
+    {"name": "Website", "type": "http", "target": "https://example.com", "interval": 60, "retries": 2, "keyword": "Example"},
+    {"name": "SSH", "type": "tcp", "target": "example.com:22", "interval": 30},
+    {"name": "Gateway", "type": "ping", "target": "192.168.1.1", "interval": 30},
+    {"name": "Website certificate", "type": "tls", "target": "example.com", "interval": 3600, "tls_warn_days": 14}
+  ]
+}

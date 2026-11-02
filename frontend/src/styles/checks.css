@@ -1,0 +1,46 @@
+/* Uptime checks: the form's test result and the list's edit button */
+
+.test-result {
+  --tone: var(--good);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  align-items: baseline;
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: color-mix(in srgb, var(--tone) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--tone) 25%, transparent);
+  overflow-wrap: anywhere;
+}
+.test-result strong {
+  color: var(--tone);
+  font-weight: 600;
+}
+.test-result strong::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 1px;
+}
+.test-result.fail {
+  --tone: var(--crit);
+}
+.btn.btn-warn {
+  background: var(--crit);
+  color: #fff;
+}
+.row-edit {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 6px;
+}
+.row-edit svg {
+  width: 15px;
+  height: 15px;
+}

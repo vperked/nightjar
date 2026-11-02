@@ -1,9 +1,0 @@
-certifi==2025.11.12
-charset-normalizer==3.4.4
-idna==3.11
-packaging==25.0
-psutil==7.2.1
-python-dotenv==1.2.1
-qbittorrent-api==2025.11.1
-requests==2.32.5
-urllib3==2.6.2

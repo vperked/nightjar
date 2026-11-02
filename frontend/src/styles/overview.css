@@ -1,0 +1,76 @@
+/* Overview */
+
+/* The overview's verdict and the chips beside it. */
+.health-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.health-verdict {
+  --tone: var(--good);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px 5px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tone) 12%, transparent);
+  color: var(--tone);
+  font-size: 13px;
+  font-weight: 600;
+}
+.health-verdict.warn {
+  --tone: var(--warn);
+}
+.health-verdict.crit {
+  --tone: var(--crit);
+}
+.health-dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.health-verdict.good .health-dot::after,
+.health-verdict.crit .health-dot::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  opacity: 0;
+  animation: live-ring 2.4s ease-out infinite;
+}
+.health-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  transition:
+    border-color 0.12s,
+    color 0.12s;
+}
+.health-chip:hover {
+  border-color: var(--rule-strong);
+  color: var(--ink);
+}
+.health-chip.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--rule));
+}
+.health-chip.crit {
+  color: var(--crit);
+  border-color: color-mix(in srgb, var(--crit) 35%, var(--rule));
+}
+@media (prefers-reduced-motion: reduce) {
+  .health-dot::after {
+    animation: none !important;
+  }
+}

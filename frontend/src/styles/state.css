@@ -1,0 +1,106 @@
+/* State */
+
+.state {
+  --tone: var(--ink-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--tone);
+  background: color-mix(in srgb, var(--tone) 12%, transparent);
+}
+.state::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.state.up {
+  --tone: var(--good);
+}
+.state.down {
+  --tone: var(--crit);
+}
+.state.down::before {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.state.paused::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .state.down::before {
+    animation: none;
+  }
+}
+.pct-good {
+  color: var(--good);
+}
+.pct-fair {
+  color: var(--warn);
+}
+.pct-poor {
+  color: var(--crit);
+}
+/* Check history: rounded ticks, oldest left. */
+.ticks {
+  display: flex;
+  gap: 2px;
+  height: 18px;
+  align-items: stretch;
+  min-width: 0;
+}
+.ticks.tall {
+  height: 30px;
+  gap: 3px;
+}
+.tick {
+  flex: 1 1 0;
+  min-width: 2px;
+  border-radius: 2px;
+  background: var(--good-mark);
+}
+.tick.down {
+  background: var(--crit-mark);
+}
+.tick.pad {
+  background: var(--track);
+}
+.tick:hover {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+.state.good {
+  --tone: var(--good);
+}
+.state.warn {
+  --tone: var(--warn);
+}
+.state.crit {
+  --tone: var(--crit);
+}
+.state.busy {
+  --tone: var(--series-1);
+}
+.state.busy::before {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.state.idle::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+@media (prefers-reduced-motion: reduce) {
+  .state.busy::before {
+    animation: none;
+  }
+}

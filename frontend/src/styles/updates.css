@@ -1,0 +1,200 @@
+/* Updates */
+
+.upd-list {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.upd + .upd {
+  border-top: 1px solid var(--rule);
+}
+.upd-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-right: 16px;
+}
+.upd-toggle {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr) minmax(0, auto) 16px;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 4px 13px 18px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.upd-toggle .state {
+  justify-self: start;
+}
+.upd-toggle:hover .upd-name strong {
+  text-decoration: underline;
+  text-decoration-color: var(--rule-strong);
+  text-underline-offset: 3px;
+}
+.upd-toggle:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: -2px;
+}
+.upd-name {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.upd-name strong {
+  font-weight: 600;
+  font-size: 14px;
+}
+.upd-change {
+  color: var(--ink-2);
+  font-size: 13px;
+  max-width: 260px;
+}
+.chev {
+  width: 16px;
+  height: 16px;
+  color: var(--ink-3);
+  transition: transform 0.15s;
+}
+.upd.open .chev {
+  transform: rotate(180deg);
+}
+.upd-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
+.small-btn {
+  padding: 6px 13px;
+  font-size: 13px;
+  min-width: 82px;
+}
+.small-btn-space {
+  width: 82px;
+}
+.upd-details {
+  display: grid;
+  gap: 16px;
+  padding: 4px 18px 16px;
+  background: color-mix(in srgb, var(--bg-sunk) 45%, var(--surface));
+  border-top: 1px solid var(--rule);
+  padding-top: 16px;
+}
+.upd-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+}
+.upd-details .label {
+  margin-bottom: 6px;
+}
+.upd-details .notice {
+  margin: 0;
+}
+.crit-notice {
+  background: color-mix(in srgb, var(--crit) 10%, var(--surface));
+  color: var(--crit);
+  overflow-wrap: anywhere;
+}
+.upd-runs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+}
+.upd-runs li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.upd-runs li:last-child {
+  border-bottom: 0;
+}
+.run-mark {
+  font-weight: 600;
+  font-size: 12px;
+}
+.run-mark.ok {
+  color: var(--good);
+}
+.run-mark.failed {
+  color: var(--crit);
+}
+.run-detail {
+  flex-basis: 100%;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.upd-pending {
+  list-style: none;
+  margin: 0;
+  padding: 8px 12px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.upd-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: -10px;
+}
+.upd-actions .confirm {
+  font-size: 13px;
+}
+@media (max-width: 760px) {
+  .upd-row {
+    flex-wrap: wrap;
+    padding: 0 16px 12px;
+    gap: 8px 12px;
+  }
+  .upd-toggle {
+    flex-basis: 100%;
+    grid-template-columns: minmax(0, 1fr) 16px;
+    gap: 6px 10px;
+    padding: 12px 0 0;
+  }
+  .upd-toggle .state {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .upd-name {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .upd-change {
+    grid-column: 1;
+    grid-row: 3;
+    max-width: none;
+  }
+  .chev {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .upd-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .upd-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

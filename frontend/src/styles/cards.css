@@ -1,0 +1,58 @@
+/* Cards */
+
+.section,
+.readout,
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px 20px;
+  min-width: 0;
+}
+main > .section,
+.col > .section,
+main > .panel,
+.settings-groups > .section {
+  margin-top: 16px;
+}
+.label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+  min-height: 24px;
+}
+.section-head .label {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+.section-head a {
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+.section-head a:hover {
+  color: var(--ink);
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
+  gap: 0 16px;
+  align-items: start;
+}
+.columns > .col {
+  min-width: 0;
+}
+@media (max-width: 960px) {
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

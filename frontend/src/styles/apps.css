@@ -1,0 +1,427 @@
+/* The app store: the torrent stack strip, app cards and the install sheet. */
+
+.app-tile {
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: linear-gradient(140deg, color-mix(in srgb, var(--app) 82%, white), var(--app) 55%, color-mix(in srgb, var(--app) 75%, black));
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    0 2px 6px color-mix(in srgb, var(--app) 30%, transparent);
+}
+/* A logo sits on a light tile in both themes, so dark marks (Lidarr, Jackett) stay readable. */
+.app-tile.has-logo {
+  background: linear-gradient(160deg, #fff, color-mix(in srgb, var(--app) 14%, #fff));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--app) 22%, rgba(0, 0, 0, 0.06)),
+    0 2px 6px color-mix(in srgb, var(--app) 22%, transparent);
+}
+.app-tile img {
+  width: 68%;
+  height: 68%;
+  object-fit: contain;
+  user-select: none;
+}
+
+/* ---------- the torrent stack ---------- */
+
+.stack {
+  margin-top: 18px;
+  padding: 16px 18px 18px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--series-1) 7%, transparent), transparent 55%), var(--surface);
+  box-shadow: var(--shadow);
+}
+.stack-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.stack-flow {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 22px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.stack-flow li {
+  position: relative;
+}
+/* Arrows between the steps. */
+.stack-flow li + li::before {
+  content: '';
+  position: absolute;
+  left: -17px;
+  top: 50%;
+  width: 12px;
+  height: 2px;
+  background: var(--rule-strong);
+}
+.stack-flow li + li::after {
+  content: '';
+  position: absolute;
+  left: -9px;
+  top: calc(50% - 3px);
+  border: 4px solid transparent;
+  border-left-color: var(--rule-strong);
+}
+.stack-flow button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px dashed var(--rule-strong);
+  border-radius: 12px;
+  background: none;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+.stack-flow button:disabled {
+  cursor: default;
+}
+.stack-flow li.on button,
+.stack-flow li.stopped button {
+  border-style: solid;
+  border-color: var(--rule);
+  background: var(--bg);
+}
+.stack-flow li.off button:hover {
+  border-color: var(--series-1);
+  background: color-mix(in srgb, var(--series-1) 6%, transparent);
+}
+.stack-flow li.off .app-tile {
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+.stack-flow strong {
+  display: block;
+  font-size: 13.5px;
+}
+.stack-flow span span {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.stack-flow li.on span span {
+  color: var(--good);
+}
+.stack-flow li.stopped span span {
+  color: var(--crit);
+}
+.stack-flow li.off span span {
+  color: var(--series-1);
+}
+@media (max-width: 900px) {
+  .stack-flow {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .stack-flow li::before,
+  .stack-flow li::after {
+    display: none;
+  }
+}
+
+/* ---------- filters and cards ---------- */
+
+.store-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 22px 0 14px;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  padding: 6px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s,
+    border-color 0.15s;
+}
+.chip:hover {
+  border-color: var(--rule-strong);
+  color: var(--ink);
+}
+.chip.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--bg);
+}
+.app-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 14px;
+}
+.app-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  transition:
+    transform 0.18s cubic-bezier(0.3, 0.8, 0.25, 1),
+    box-shadow 0.18s;
+}
+.app-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lift);
+}
+.app-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.app-card h3,
+.sheet h2 {
+  margin: 0;
+  font-size: 15.5px;
+  letter-spacing: -0.01em;
+}
+.sheet h2 {
+  font-size: 19px;
+}
+.app-category {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.app-summary {
+  flex: 1;
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+.app-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+.app-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.app-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.app-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--good-mark);
+}
+.app-state.stopped .app-dot {
+  background: var(--crit-mark);
+}
+
+/* ---------- install sheet ---------- */
+
+.install-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 16px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--series-1) 30%, var(--rule));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--series-1) 7%, var(--surface));
+  color: var(--ink);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.install-banner > span:nth-child(2) {
+  flex: 1;
+}
+.install-banner-link {
+  color: var(--series-1);
+  font-weight: 500;
+}
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  justify-content: flex-end;
+  background: color-mix(in srgb, var(--ink) 30%, transparent);
+  animation: finder-fade 0.15s ease-out;
+}
+.sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(540px, 100%);
+  height: 100%;
+  overflow-y: auto;
+  padding: 22px 24px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lift);
+  animation: sheet-in 0.24s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+@keyframes sheet-in {
+  from {
+    transform: translateX(40px);
+    opacity: 0;
+  }
+}
+.sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.sheet-head > .min0 {
+  flex: 1;
+}
+.sheet-head .icon-btn {
+  font-size: 22px;
+}
+.install-form {
+  display: grid;
+  gap: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.install-form .btn {
+  justify-self: start;
+}
+.install-field {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+}
+.install-field .field {
+  width: 140px;
+}
+.install-manage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.install-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunk);
+  font-size: 13.5px;
+}
+.install-status.ok {
+  background: color-mix(in srgb, var(--good-mark) 12%, transparent);
+  color: var(--good);
+}
+.install-status.failed {
+  background: color-mix(in srgb, var(--crit-mark) 10%, transparent);
+  color: var(--crit);
+}
+.install-status.failed span {
+  flex-basis: 100%;
+  font-size: 12.5px;
+}
+.install-console {
+  flex: 1;
+  min-height: 220px;
+  max-height: 46vh;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: #15151a;
+  color: #d6d4cd;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.install-step {
+  margin-top: 6px;
+  color: #7fb2ff;
+  font-weight: 600;
+}
+.install-step::before {
+  content: '▸ ';
+}
+.install-next {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+.install-next p {
+  margin: 0;
+}
+.ntfy-hookup {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+  padding: 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font-size: 13px;
+}
+.ntfy-hookup p {
+  margin: 0;
+  color: var(--ink-2);
+}
+@media (max-width: 760px) {
+  .sheet {
+    padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+  }
+  .store-filters .search {
+    flex-basis: 100%;
+    width: auto;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet,
+  .app-card {
+    animation: none;
+    transition: none;
+  }
+}
+.sheet .app-summary {
+  flex: none;
+}

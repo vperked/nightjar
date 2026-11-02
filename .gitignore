@@ -1,8 +1,13 @@
-/venv
-src/.env.prod
-tests/__pycache__/
 server_monitor.log
 *.log
 *.log.*
 .env
 .env.*
+*.db
+*.db-wal
+*.db-shm
+frontend/node_modules/
+bin/
+dist/
+backend/internal/web/dist/*
+!backend/internal/web/dist/.gitkeep

@@ -1,0 +1,58 @@
+import { useEffect } from 'react';
+import { useLocation } from 'react-router';
+import { api } from '../api/client';
+import { useServices } from '../api/ServicesContext';
+import { usePoll } from '../hooks/usePoll';
+import { isProblem } from './unitState';
+
+const PAGE: [string, string][] = [
+  ['/services', 'Services'],
+  ['/system', 'System services'],
+  ['/network', 'Network'],
+  ['/plex', 'Plex'],
+  ['/qbittorrent', 'qBittorrent'],
+  ['/updates', 'Updates'],
+  ['/apps', 'App store'],
+  ['/logs', 'Monitor log'],
+  ['/notifications', 'Notifications'],
+  ['/settings', 'Settings'],
+  ['/setup', 'Setup'],
+  ['/status-page', 'Status page'],
+];
+
+// Coloured like the dashboard's own status marks.
+const COLOR = { good: '#0ca30c', bad: '#d03b3b' };
+
+function favicon(color: string, count: number): string {
+  const badge = count ? `<text x='16' y='21.5' font-family='system-ui,sans-serif' font-size='15' font-weight='700' text-anchor='middle' fill='white'>${count > 9 ? '9+' : count}</text>` : '';
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='${count ? 15 : 11}' fill='${color}'/>${badge}</svg>`;
+  return 'data:image/svg+xml,' + encodeURIComponent(svg);
+}
+
+// useProblems counts what is wrong right now: uptime checks down, and system services failed or
+// restarting. The header's mark and the browser tab both show it.
+export function useProblems(enabled: boolean): number {
+  const { data: checks } = useServices();
+  const { data: units } = usePoll(api.units, 30000, enabled);
+  return (checks?.services ?? []).filter((s) => s.status === 'down').length + (units?.units ?? []).filter(isProblem).length;
+}
+
+// HealthInTab puts the server's health in the browser tab: a green dot, or a red one with the
+// number of problems, and "2 down" ahead of the page name, so another tab shows it at a glance.
+export function HealthInTab({ down }: { down: number }) {
+  const location = useLocation();
+  const page = PAGE.find(([p]) => location.pathname.startsWith(p))?.[1] ?? (location.pathname === '/' ? 'Overview' : '');
+
+  useEffect(() => {
+    if (location.pathname === '/status') return; // the public page sets its own
+    document.title = [down ? `${down} down` : '', page, 'servermonitor'].filter(Boolean).join(' · ');
+    let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (!link) {
+      link = document.createElement('link');
+      link.rel = 'icon';
+      document.head.appendChild(link);
+    }
+    link.href = favicon(down ? COLOR.bad : COLOR.good, down);
+  }, [down, page, location.pathname]);
+  return null;
+}

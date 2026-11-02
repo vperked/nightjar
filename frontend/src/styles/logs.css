@@ -1,0 +1,157 @@
+/* The monitor's own log: a calm, console-like list that follows new entries. */
+
+.log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 12px;
+}
+.log-filters .search {
+  flex: 1 1 220px;
+  max-width: 320px;
+}
+.seg-count {
+  display: inline-block;
+  min-width: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 17px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.seg-count.warn {
+  background: color-mix(in srgb, var(--warn-mark) 24%, transparent);
+  color: var(--warn);
+}
+.seg-count.crit {
+  background: color-mix(in srgb, var(--crit-mark) 18%, transparent);
+  color: var(--crit);
+}
+
+.log-panel {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.log-scroll {
+  height: min(68vh, 760px);
+  overflow: auto;
+  padding: 6px 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  overscroll-behavior: contain;
+}
+.log-line {
+  display: grid;
+  grid-template-columns: auto 46px 96px minmax(0, 1fr);
+  gap: 14px;
+  align-items: baseline;
+  padding: 2px 16px;
+  border-left: 2px solid transparent;
+}
+.log-line:hover {
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+.log-time {
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.log-date {
+  opacity: 0.7;
+}
+.log-level {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--series-1);
+}
+.log-component {
+  color: var(--ink-3);
+}
+.log-text {
+  overflow-wrap: anywhere;
+}
+.log-message {
+  color: var(--ink);
+  margin-right: 12px;
+}
+.log-attr {
+  display: inline-block;
+  margin-right: 10px;
+  color: var(--ink-2);
+}
+.log-key {
+  color: var(--ink-3);
+}
+.log-key::after {
+  content: '=';
+  opacity: 0.6;
+}
+.log-line.debug .log-level,
+.log-line.debug .log-message {
+  color: var(--ink-3);
+}
+.log-line.warn {
+  background: color-mix(in srgb, var(--warn-mark) 7%, transparent);
+  border-left-color: var(--warn-mark);
+}
+.log-line.warn .log-level {
+  color: var(--warn);
+}
+.log-line.error {
+  background: color-mix(in srgb, var(--crit-mark) 8%, transparent);
+  border-left-color: var(--crit-mark);
+}
+.log-line.error .log-level,
+.log-line.error .log-message {
+  color: var(--crit);
+  font-weight: 500;
+}
+.log-empty {
+  padding: 48px 16px;
+  text-align: center;
+  font-family: var(--sans);
+  font-size: 13.5px;
+  color: var(--ink-3);
+}
+.log-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  padding: 4px 8px 4px 16px;
+  border-top: 1px solid var(--rule);
+  background: var(--bg);
+  font-size: 12px;
+  color: var(--ink-3);
+}
+/* Phones: time, level and component share a line above the message. */
+@media (max-width: 760px) {
+  .log-scroll {
+    height: 64vh;
+    font-size: 12px;
+  }
+  .log-line {
+    grid-template-columns: auto auto minmax(0, 1fr);
+    gap: 2px 10px;
+    padding: 6px 14px;
+  }
+  .log-line + .log-line {
+    border-top: 1px solid color-mix(in srgb, var(--rule) 60%, transparent);
+  }
+  .log-text {
+    grid-column: 1 / -1;
+  }
+  .log-filters .search {
+    max-width: none;
+    flex-basis: 100%;
+  }
+}

@@ -1,0 +1,165 @@
+/* Finder */
+
+kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--rule-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink-3);
+  font: 500 10.5px/1.4 var(--sans);
+  text-align: center;
+}
+kbd + kbd {
+  margin-left: 3px;
+}
+.finder-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--rule);
+  background: var(--surface);
+}
+.finder-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.finder-btn-label {
+  color: var(--ink-3);
+  min-width: 70px;
+  text-align: left;
+}
+@media (max-width: 1100px) {
+  .finder-btn-label,
+  .finder-btn kbd {
+    display: none;
+  }
+  .finder-btn {
+    border-color: transparent;
+    background: none;
+    padding: 0 9px;
+  }
+}
+.finder-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh 16px 16px;
+  background: color-mix(in srgb, var(--ink) 28%, transparent);
+  animation: finder-fade 0.12s ease-out;
+}
+@keyframes finder-fade {
+  from {
+    opacity: 0;
+  }
+}
+.finder {
+  display: flex;
+  flex-direction: column;
+  width: min(620px, 100%);
+  max-height: min(560px, 76vh);
+  border-radius: var(--radius);
+  border: 1px solid var(--rule);
+  background: var(--surface);
+  box-shadow: var(--shadow-lift);
+  overflow: hidden;
+  animation: finder-rise 0.14s ease-out;
+}
+@keyframes finder-rise {
+  from {
+    transform: translateY(-6px) scale(0.99);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .finder,
+  .finder-backdrop {
+    animation: none;
+  }
+}
+.finder-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--rule);
+}
+.finder-input svg {
+  width: 18px;
+  height: 18px;
+  color: var(--ink-3);
+  flex: none;
+}
+.finder-input input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: none;
+  font-size: 15px;
+}
+.finder-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+}
+.finder-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13.5px;
+}
+.finder-list li.active {
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+.finder-kind {
+  flex: none;
+  width: 58px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+.finder-kind.action {
+  color: var(--series-1);
+}
+.finder-label {
+  flex: none;
+  max-width: 45%;
+  font-weight: 500;
+}
+.finder-hint {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+.finder-empty {
+  color: var(--ink-3);
+  cursor: default !important;
+}
+.finder-foot {
+  display: flex;
+  gap: 16px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--rule);
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+@media (max-width: 760px) {
+  .finder-foot {
+    display: none;
+  }
+  .finder-backdrop {
+    padding-top: 8vh;
+  }
+}

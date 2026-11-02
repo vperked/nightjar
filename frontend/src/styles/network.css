@@ -1,0 +1,186 @@
+/* Network */
+
+.readout-link:hover {
+  color: var(--ink);
+}
+.net-live {
+  display: grid;
+  grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+  gap: 28px;
+  margin-top: 16px;
+}
+.net-dirs {
+  display: grid;
+  gap: 22px;
+  align-content: start;
+}
+.net-dir + .net-dir {
+  padding-top: 20px;
+  border-top: 1px solid var(--rule);
+}
+.net-dir-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.net-rate {
+  margin-top: 4px;
+  font-size: 34px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+.net-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.net-link-bar,
+.net-bar {
+  position: relative;
+  display: block;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+.net-link-bar {
+  flex: 1;
+}
+.net-link-bar > span,
+.net-bar > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  transition: width 0.4s ease-out;
+}
+.net-stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 14px;
+  margin: 12px 0 0;
+  font-size: 12.5px;
+}
+.net-stats dt {
+  color: var(--ink-3);
+}
+.net-stats dd {
+  margin: 0;
+  text-align: right;
+}
+.net-chart .section-head {
+  margin-bottom: 8px;
+}
+.net-columns {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+.net-table .net-bar {
+  width: 90px;
+  height: 4px;
+  margin: 4px 0 0 auto;
+}
+/* Interface cards: one per interface, the watched one outlined. */
+.ifaces {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px;
+}
+.iface {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  padding: 14px 16px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.12s,
+    box-shadow 0.12s;
+}
+.iface:hover {
+  border-color: var(--rule-strong);
+}
+.iface.current {
+  border-color: var(--series-1);
+  box-shadow: 0 0 0 1px var(--series-1);
+}
+.iface.down {
+  opacity: 0.6;
+}
+.iface-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.iface-name {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+.iface-meta,
+.iface-totals {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.iface-rates {
+  display: flex;
+  gap: 14px;
+  font-size: 14px;
+  font-weight: 500;
+}
+.iface-rates .swatch {
+  display: inline-block;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+.iface-spark-empty {
+  height: 34px;
+  border-bottom: 1px dashed var(--rule);
+}
+.iface-issues {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.iface-issues.fresh {
+  color: var(--warn);
+}
+.net-warn {
+  color: var(--warn);
+}
+@media (prefers-reduced-motion: reduce) {
+  .net-link-bar > span,
+  .net-bar > span {
+    transition: none;
+  }
+}
+@media (max-width: 900px) {
+  .net-live,
+  .net-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .net-dirs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+  .net-dir + .net-dir {
+    padding-top: 0;
+    border-top: 0;
+  }
+  .net-rate {
+    font-size: 26px;
+  }
+}
+.title-with-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}

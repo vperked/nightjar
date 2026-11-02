@@ -1,0 +1,82 @@
+/* Public status page */
+
+.status-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 56px 24px;
+}
+.status-page h1 {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  margin: 0 0 20px;
+}
+.verdict {
+  --tone: var(--ink-3);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  background: color-mix(in srgb, var(--tone) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--tone) 25%, transparent);
+}
+.verdict strong {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--tone);
+}
+.verdict.operational {
+  --tone: var(--good);
+}
+.verdict.degraded {
+  --tone: var(--warn);
+}
+.verdict.outage {
+  --tone: var(--crit);
+}
+.status-list {
+  margin-top: 16px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 4px 20px;
+}
+.status-row {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.status-row:last-child {
+  border-bottom: 0;
+}
+.status-page .footer {
+  margin-top: 16px;
+}
+.status-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.status-scale {
+  display: flex;
+  justify-content: space-between;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  margin-top: 5px;
+}
+
+.proc-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px 32px;
+}
+@media (max-width: 960px) {
+  .proc-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

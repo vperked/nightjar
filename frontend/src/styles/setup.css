@@ -1,0 +1,171 @@
+/* Setup guide */
+
+.setup-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  max-width: 1280px;
+  margin: 16px auto 0;
+  padding: 12px 16px 12px 20px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--series-1) 9%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--series-1) 28%, var(--rule));
+  font-size: 13.5px;
+}
+.setup-banner > span {
+  flex: 1;
+  min-width: 220px;
+}
+@media (min-width: 761px) {
+  .setup-banner {
+    margin: 16px 24px 0;
+  }
+}
+@media (min-width: 1329px) {
+  .setup-banner {
+    margin: 16px auto 0;
+  }
+}
+@media (max-width: 760px) {
+  .setup-banner {
+    margin: 12px 16px 0;
+  }
+}
+.setup-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.setup-bar {
+  width: 140px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+.setup-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--good-mark);
+  transition: width 0.3s ease-out;
+}
+.setup-steps {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+.setup-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.setup-head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.setup-n {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--bg-sunk);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.setup-step.done .setup-n {
+  background: var(--good-mark);
+  color: #fff;
+}
+.setup-body {
+  margin-left: 38px;
+  margin-top: 6px;
+}
+.setup-why {
+  margin: 0 0 14px;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  line-height: 1.55;
+  max-width: 70ch;
+}
+.setup-row {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  max-width: 560px;
+}
+.setup-label {
+  display: grid;
+  gap: 2px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.setup-label .form-help {
+  font-weight: 400;
+}
+.setup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+  max-width: 560px;
+}
+/* Inputs line up across a row even when one label has a hint. */
+.setup-grid .setup-row {
+  align-content: end;
+}
+.setup-check {
+  margin-bottom: 12px;
+}
+.setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  max-width: 560px;
+  margin-top: 4px;
+}
+.setup-suggestions {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  max-width: 560px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.setup-suggestions li + li {
+  border-top: 1px solid var(--rule);
+}
+.setup-pick {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.setup-pick:hover {
+  background: var(--bg-sunk);
+}
+.setup-pick .mono {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .setup-body {
+    margin-left: 0;
+  }
+  .setup-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
