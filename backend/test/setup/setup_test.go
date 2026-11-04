@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"servermonitor/internal/setup"
+	"nightjar/internal/setup"
 )
 
 // fakeMachine has a Plex token, a qBittorrent.conf and a Sonarr config in a temporary home.

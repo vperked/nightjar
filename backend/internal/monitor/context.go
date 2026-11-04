@@ -9,24 +9,31 @@ import (
 	"sync"
 	"time"
 
-	"servermonitor/internal/alerts"
-	"servermonitor/internal/apps"
-	"servermonitor/internal/cleanup"
-	"servermonitor/internal/collect"
-	"servermonitor/internal/config"
-	"servermonitor/internal/discord"
-	"servermonitor/internal/kernel"
-	"servermonitor/internal/logx"
-	"servermonitor/internal/metrics"
-	"servermonitor/internal/netload"
-	"servermonitor/internal/notify"
-	"servermonitor/internal/plex"
-	"servermonitor/internal/qbittorrent"
-	"servermonitor/internal/services"
-	"servermonitor/internal/smart"
-	"servermonitor/internal/storage"
-	"servermonitor/internal/units"
-	"servermonitor/internal/updates"
+	"nightjar/internal/alerts"
+	"nightjar/internal/analytics"
+	"nightjar/internal/apps"
+	"nightjar/internal/cleanup"
+	"nightjar/internal/collect"
+	"nightjar/internal/config"
+	"nightjar/internal/discord"
+	"nightjar/internal/docker"
+	"nightjar/internal/kernel"
+	"nightjar/internal/logx"
+	"nightjar/internal/maintenance"
+	"nightjar/internal/mediacleanup"
+	"nightjar/internal/metrics"
+	"nightjar/internal/netload"
+	"nightjar/internal/notify"
+	"nightjar/internal/plex"
+	"nightjar/internal/plugins"
+	"nightjar/internal/qbittorrent"
+	"nightjar/internal/remote"
+	"nightjar/internal/repair"
+	"nightjar/internal/services"
+	"nightjar/internal/smart"
+	"nightjar/internal/storage"
+	"nightjar/internal/units"
+	"nightjar/internal/updates"
 )
 
 var log = logx.Component("Core")
@@ -49,11 +56,22 @@ type Context struct {
 	Updates          *updates.Manager
 	Units            *units.Monitor
 	Drives           *smart.Reader
-	Network          *netload.Meter // the dashboard's live network meter
-	Store            *storage.Store // the database, for state kept across restarts (nil-safe)
-	Apps             *apps.Manager  // the app store
-	Freeze           *FreezeMonitor
-	Watchdog         *Watchdog
+	Network          *netload.Meter        // the dashboard's live network meter
+	Store            *storage.Store        // the database, for state kept across restarts (nil-safe)
+	Apps             *apps.Manager         // the app store
+	Plugins          *plugins.Manager      // the owner's own checks, cards and alert channels
+	Repairs          *repair.Runner        // repairs checks that go down, when they say how
+	Maintenance      *maintenance.Manager  // planned downtime
+	MediaCleanup     *mediacleanup.Manager // removes what nobody watches
+	DiscordBot       *discord.Bot          // when alerts go through a bot, for its button clicks
+	// Activity records something done, by whom (for the activity log); nil records nothing.
+	Activity func(who, kind, target, detail string)
+	Docker   *docker.Client  // containers, for container checks and repairs
+	Remote   *remote.Monitor // other servers, watched through their agents
+	// Analytics records every server's minutes for the analytics page; nil records nothing.
+	Analytics *analytics.Recorder
+	Freeze    *FreezeMonitor
+	Watchdog  *Watchdog
 
 	Webhook            discord.Sender
 	DiskWebhook        discord.Sender
@@ -189,12 +207,11 @@ func (c *Context) ReportError(err error, where string) {
 		stack = stack[:1000] + "... (truncated)"
 	}
 	fields := []discord.Field{
-		{Name: "Error Type", Value: fmt.Sprintf("%T", err), Inline: true},
-		{Name: "Error Message", Value: discord.Truncate(err.Error(), 500)},
-		{Name: "Context", Value: discord.Truncate(where, 500)},
-		{Name: "Traceback", Value: "```\n" + stack + "\n```"},
+		{Name: "Where", Value: discord.Truncate(where, 500), Inline: true},
+		{Name: "Kind", Value: fmt.Sprintf("`%T`", err), Inline: true},
+		{Name: "Stack", Value: "```\n" + stack + "\n```"},
 	}
-	if target.SendEmbed("Monitoring Error Detected", "An error occurred in the monitoring system", discord.Critical, fields, "Error Alert") {
+	if target.SendEmbed("Nightjar hit an error", discord.Truncate(err.Error(), 500), discord.Critical, fields, "Error Alert") {
 		c.lastErrorWebhook = time.Now()
 	}
 }

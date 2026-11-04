@@ -7,7 +7,7 @@
 }
 .sk {
   display: block;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: linear-gradient(90deg, var(--bg-sunk) 0%, color-mix(in srgb, var(--bg-sunk) 40%, var(--surface)) 45%, var(--bg-sunk) 90%);
   background-size: 300% 100%;
   animation: sk-shimmer 1.4s ease-in-out infinite;

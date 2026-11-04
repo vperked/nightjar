@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { ApiError, api } from '../api/client';
-import type { Unit, UnitAction, UnitsResponse } from '../api/types';
+import type { Finding, Unit, UnitAction, UnitsResponse } from '../api/types';
+import { CauseLine, Diagnosis } from '../components/Diagnosis';
 import { MuteButton, MutedTag } from '../components/MuteButton';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
@@ -30,11 +31,13 @@ export function ServicesTabs({ current }: { current: 'checks' | 'system' }) {
 
 function Logs({ name }: { name: string }) {
   const [lines, setLines] = useState<string[]>();
+  const [findings, setFindings] = useState<Finding[]>([]);
   const [error, setError] = useState('');
   const load = () =>
     api.unitLogs(name).then(
       (r) => {
         setLines(r.lines);
+        setFindings(r.findings ?? []);
         setError('');
       },
       (e: Error) => setError(e.message),
@@ -44,20 +47,19 @@ function Logs({ name }: { name: string }) {
   }, [name]); // load is recreated each render but only depends on name
   return (
     <div className="unit-logs">
+      <Diagnosis findings={findings} />
       <div className="unit-logs-head">
         <span className="label">Recent log</span>
         <button className="btn-quiet" onClick={load}>
-          refresh
+          Refresh
         </button>
       </div>
       {error ? (
         <p className="form-error">{error}</p>
       ) : !lines ? (
-        <p className="loading">loading…</p>
+        <p className="unit-log-empty">loading…</p>
       ) : lines.length === 0 ? (
-        <p className="note" style={{ padding: 0 }}>
-          Nothing in the journal for this service.
-        </p>
+        <p className="unit-log-empty">Nothing in the journal for this service.</p>
       ) : (
         <pre className="unit-log mono">{lines.join('\n')}</pre>
       )}
@@ -102,7 +104,13 @@ function UnitRow({ u, self, open, focus, onToggle, onChanged, now }: { u: Unit; 
           <span className={`state ${tone}`}>{word}</span>
           <span className="upd-name min0">
             <strong className="truncate">{short(u.name)}</strong>
-            <span className="svc-target truncate">{[u.description, why].filter(Boolean).join(' · ')}</span>
+            {u.cause ? (
+              <span className="unit-desc truncate">
+                <CauseLine cause={u.cause} />
+              </span>
+            ) : (
+              <span className="unit-desc truncate">{[u.description, why].filter(Boolean).join(' · ')}</span>
+            )}
           </span>
           <MutedTag subject={`unit:${u.name}`} label={short(u.name)} compact />
           <span className="upd-change num">{u.flapping ? `${u.flapping} restarts in 10 min` : u.since ? `${running ? 'up' : 'since'} ${formatAgo(u.since, now).replace(' ago', '')}` : ''}</span>
@@ -115,7 +123,7 @@ function UnitRow({ u, self, open, focus, onToggle, onChanged, now }: { u: Unit; 
           {u.sub === 'exited' ? (
             <span className="small-btn-space" />
           ) : (
-            <button className={tone === 'crit' || !running ? 'btn small-btn' : 'btn-quiet small-btn'} disabled={!!busy} onClick={() => act(running ? 'restart' : 'start')}>
+            <button className={tone === 'crit' || !running ? 'btn small-btn' : 'btn-ghost small-btn'} disabled={!!busy} onClick={() => act(running ? 'restart' : 'start')}>
               {busy === 'restart' ? 'Restarting…' : busy === 'start' ? 'Starting…' : running ? 'Restart' : 'Start'}
             </button>
           )}
@@ -123,43 +131,59 @@ function UnitRow({ u, self, open, focus, onToggle, onChanged, now }: { u: Unit; 
       </div>
       {open && (
         <div className="upd-details">
-          <dl className="kv unit-facts">
-            <dt>Unit</dt>
-            <dd className="mono">{u.name}</dd>
-            <dt>State</dt>
-            <dd>
-              {u.active} ({u.sub})
-            </dd>
-            <dt>Starts at boot</dt>
-            <dd>{u.enabled === 'enabled' ? 'yes' : u.enabled || 'no'}</dd>
-            <dt>Restarts</dt>
-            <dd className="num">{u.restarts}</dd>
+          <dl className="unit-facts">
+            <div>
+              <dt>Unit</dt>
+              <dd className="mono truncate" title={u.name}>
+                {u.name}
+              </dd>
+            </div>
+            <div>
+              <dt>State</dt>
+              {/* "failed (failed)" says it twice: the sub-state only shows when it adds something. */}
+              <dd className="truncate">{u.sub && u.sub !== u.active ? `${u.active} · ${u.sub}` : u.active}</dd>
+            </div>
+            <div>
+              <dt>Starts at boot</dt>
+              <dd>{u.enabled === 'enabled' ? 'yes' : u.enabled || 'no'}</dd>
+            </div>
+            <div>
+              <dt>Restarts</dt>
+              <dd className="num">{u.restarts}</dd>
+            </div>
           </dl>
           <Logs name={u.name} />
-          <div className="upd-actions">
-            <MuteButton subject={`unit:${u.name}`} label={short(u.name)} />
+          <div className="upd-actions unit-foot">
+            {/* An ignored service never alerts, so there is nothing to mute. */}
+            {!u.ignored && <MuteButton subject={`unit:${u.name}`} label={short(u.name)} />}
             {running && u.name !== self && (
               <>
                 {confirmStop ? (
                   <span className="confirm">
                     stop {short(u.name)}? it stays stopped until started{' '}
                     <button className="btn-quiet danger" disabled={!!busy} onClick={() => act('stop')}>
-                      stop
+                      Stop
                     </button>
                     <button className="btn-quiet" onClick={() => setConfirmStop(false)}>
-                      keep running
+                      Keep running
                     </button>
                   </span>
                 ) : (
                   <button className="btn-quiet" disabled={!!busy} onClick={() => setConfirmStop(true)}>
-                    stop…
+                    Stop…
                   </button>
                 )}
               </>
             )}
             {u.ignored && (
-              <span className="small ink-3">
-                Ignored in <Link to="/settings#system-services">Settings → System services</Link>, so it never alerts.
+              <span className="unit-note">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M12 11v5M12 8h.01" />
+                </svg>
+                <span>
+                  Ignored in <Link to="/settings#system-services">Settings → System services</Link>, so it never alerts.
+                </span>
               </span>
             )}
           </div>
@@ -201,13 +225,13 @@ export function SystemServicesPage() {
               value: f,
               label: (
                 <>
-                  {f}
+                  {f[0].toUpperCase() + f.slice(1)}
                   <span className="n">{counts[f]}</span>
                 </>
               ),
             }))}
           />
-          <input className="search" placeholder="filter…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search services" />
+          <input className="search" placeholder="Filter services…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search services" />
         </div>
       </div>
       {data && !data.enabled && (

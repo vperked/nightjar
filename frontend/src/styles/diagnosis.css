@@ -1,0 +1,186 @@
+/* What went wrong: findings read out of the logs */
+
+.dx-panel {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+}
+.unit-logs .dx-panel {
+  margin: 0 0 16px;
+}
+.dx-panel-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.dx-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.dx {
+  --tone: var(--warn-mark);
+  display: flex;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--tone) 7%, transparent), transparent 55%), var(--surface);
+  box-shadow: var(--shadow);
+}
+.dx.critical {
+  --tone: var(--crit-mark);
+}
+.dx.grouped {
+  --tone: var(--ink-3);
+}
+.dx-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  color: var(--tone);
+  background: color-mix(in srgb, var(--tone) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 26%, transparent);
+}
+.dx-mark svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+}
+.dx-body {
+  flex: 1;
+  display: grid;
+  gap: 4px;
+}
+.dx-likely {
+  justify-self: start;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dx-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.dx-title strong {
+  color: var(--ink);
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.dx-count {
+  flex: none;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--rule-strong);
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.dx-explain {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.dx-fix {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+.dx-fix-label {
+  margin-right: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.dx-fix code {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--card-rule);
+  background: var(--bg-sunk);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.dx-line {
+  margin-top: 4px;
+}
+.dx-line summary {
+  width: max-content;
+  font-size: 12px;
+  color: var(--ink-3);
+  cursor: pointer;
+  list-style: none;
+}
+.dx-line summary::-webkit-details-marker {
+  display: none;
+}
+.dx-line summary::before {
+  content: '›';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.15s;
+}
+.dx-line[open] summary::before {
+  transform: rotate(90deg);
+}
+.dx-line summary:hover {
+  color: var(--ink);
+}
+.dx-line pre {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+  border: 1px solid var(--card-rule);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* One line in a list row: the cause in its tone. */
+.dx-cause {
+  font-family: var(--sans);
+  font-weight: 500;
+  color: var(--warn);
+}
+.dx-cause.critical {
+  color: var(--crit);
+}
+.dx-cause::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 999px;
+  vertical-align: 1px;
+  background: currentColor;
+}
+@media (max-width: 760px) {
+  .dx {
+    padding: 12px;
+    gap: 11px;
+  }
+}

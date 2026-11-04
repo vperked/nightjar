@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/units"
+	"nightjar/internal/units"
 )
 
 func TestUnitRoutes(t *testing.T) {
@@ -24,7 +24,7 @@ func TestUnitRoutes(t *testing.T) {
 		case name == "journalctl":
 			return []byte("line one\nline two\n"), nil
 		case args[0] == "list-units":
-			return []byte(`[{"unit":"sonarr.service","load":"loaded","active":"active"},{"unit":"server-monitor.service","load":"loaded","active":"active"}]`), nil
+			return []byte(`[{"unit":"sonarr.service","load":"loaded","active":"active"},{"unit":"nightjar.service","load":"loaded","active":"active"}]`), nil
 		case args[0] == "show":
 			var out []string
 			for _, n := range args[3:] {
@@ -36,10 +36,10 @@ func TestUnitRoutes(t *testing.T) {
 	}
 	u.Poll(context.Background(), time.Now(), nil, 3)
 	m.ctx.Units = u
-	m.ctx.Cfg.SystemdServiceName, m.ctx.Cfg.ServiceWatchEnabled = "server-monitor", true
+	m.ctx.Cfg.SystemdServiceName, m.ctx.Cfg.ServiceWatchEnabled = "nightjar", true
 
 	code, body := m.send(t, http.MethodGet, "/api/units", "")
-	if code != http.StatusOK || len(body["units"].([]any)) != 2 || body["self"] != "server-monitor.service" {
+	if code != http.StatusOK || len(body["units"].([]any)) != 2 || body["self"] != "nightjar.service" {
 		t.Fatalf("list: %d %v", code, body)
 	}
 	if code, body = m.send(t, http.MethodGet, "/api/units/sonarr.service/logs?lines=5", ""); code != http.StatusOK || len(body["lines"].([]any)) != 2 {
@@ -51,7 +51,7 @@ func TestUnitRoutes(t *testing.T) {
 	if code, body = m.send(t, http.MethodPost, "/api/units/sonarr.service/restart", `{}`); code != http.StatusOK || body["unit"].(map[string]any)["active"] != "active" {
 		t.Fatalf("restart: %d %v", code, body)
 	}
-	if code, _ = m.send(t, http.MethodPost, "/api/units/server-monitor.service/stop", `{}`); code != http.StatusBadRequest {
+	if code, _ = m.send(t, http.MethodPost, "/api/units/nightjar.service/stop", `{}`); code != http.StatusBadRequest {
 		t.Fatalf("stopping the monitor from its own dashboard: %d", code)
 	}
 	if code, _ = m.send(t, http.MethodPost, "/api/units/sonarr.service/restart", `{}`, "Origin", "https://evil.example"); code != http.StatusForbidden {
@@ -59,7 +59,7 @@ func TestUnitRoutes(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if !strings.Contains(strings.Join(calls, "|"), "systemctl restart -- sonarr.service") || strings.Contains(strings.Join(calls, "|"), "stop -- server-monitor") {
+	if !strings.Contains(strings.Join(calls, "|"), "systemctl restart -- sonarr.service") || strings.Contains(strings.Join(calls, "|"), "stop -- nightjar") {
 		t.Fatalf("calls %v", calls)
 	}
 }

@@ -36,8 +36,23 @@ export function useActions(refresh: () => void) {
   return { run, busy };
 }
 
+const ICON: Record<string, string> = {
+  start: 'M8 5.5v13l10.5-6.5z',
+  stop: 'M8 6h3v12H8zM13 6h3v12h-3z',
+  reannounce: 'M12 12m-2 0a2 2 0 1 0 4 0a2 2 0 1 0-4 0M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14',
+  recheck: 'M20 11a8 8 0 0 0-14.6-4.5M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5M20 20v-4h-4',
+  delete: 'M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12',
+};
+
+const ActionIcon = ({ name }: { name: string }) => (
+  <svg className="qb-btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+    <path d={ICON[name]} />
+  </svg>
+);
+
 // Actions are the buttons for one torrent or a selection. Deleting asks first, and whether to keep the files.
-export function Actions({ torrents, run, busy, onDone }: { torrents: QBTorrent[]; run: ReturnType<typeof useActions>['run']; busy: boolean; onDone?: () => void }) {
+// In a torrent's details they are full buttons with icons; the selection bar keeps them plain.
+export function Actions({ torrents, run, busy, onDone, panel = false }: { torrents: QBTorrent[]; run: ReturnType<typeof useActions>['run']; busy: boolean; onDone?: () => void; panel?: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const stopped = torrents.every((t) => group(t.state) === 'paused');
   const act = async (action: QBAction, files = false) => {
@@ -46,50 +61,69 @@ export function Actions({ torrents, run, busy, onDone }: { torrents: QBTorrent[]
       onDone?.();
     }
   };
+  const cls = panel ? 'qb-btn' : 'btn-quiet';
+  const button = (action: QBAction | 'ask', label: string, danger = false) => (
+    <button type="button" className={`${cls} ${danger ? 'danger' : ''}`} disabled={busy && action !== 'ask'} onClick={() => (action === 'ask' ? setConfirming(true) : act(action))}>
+      {panel && <ActionIcon name={action === 'ask' ? 'delete' : action} />}
+      {label}
+    </button>
+  );
   if (confirming) {
     return (
-      <span className="confirm qb-confirm">
-        Delete {torrents.length === 1 ? 'this torrent' : plural(torrents.length, 'torrent')}?{' '}
-        <button className="btn-quiet" disabled={busy} onClick={() => act('delete')}>
-          keep files
+      <span className={`confirm qb-confirm ${panel ? 'in-panel' : ''}`}>
+        <span className="qb-confirm-text">Delete {torrents.length === 1 ? 'this torrent' : plural(torrents.length, 'torrent')}?</span>
+        <button type="button" className={cls} onClick={() => setConfirming(false)}>
+          Cancel
         </button>
-        <button className="btn-quiet danger" disabled={busy} onClick={() => act('delete', true)}>
-          delete files too
+        <button type="button" className={cls} disabled={busy} onClick={() => act('delete')}>
+          Keep files
         </button>
-        <button className="btn-quiet" onClick={() => setConfirming(false)}>
-          cancel
+        <button type="button" className={`${cls} danger ${panel ? 'solid' : ''}`} disabled={busy} onClick={() => act('delete', true)}>
+          Delete files too
         </button>
       </span>
     );
   }
   return (
-    <span className="qb-actions">
+    <span className={`qb-actions ${panel ? 'in-panel' : ''}`}>
       {stopped ? (
-        <button className="btn-quiet" disabled={busy} onClick={() => act('start')}>
-          start
-        </button>
+        button('start', 'Start')
       ) : (
         <>
-          <button className="btn-quiet" disabled={busy} onClick={() => act('stop')}>
-            stop
-          </button>
-          {torrents.some((t) => group(t.state) === 'paused') && (
-            <button className="btn-quiet" disabled={busy} onClick={() => act('start')}>
-              start
-            </button>
-          )}
+          {button('stop', 'Stop')}
+          {torrents.some((t) => group(t.state) === 'paused') && button('start', 'Start')}
         </>
       )}
-      <button className="btn-quiet" disabled={busy} onClick={() => act('reannounce')}>
-        reannounce
-      </button>
-      <button className="btn-quiet" disabled={busy} onClick={() => act('recheck')}>
-        recheck
-      </button>
-      <button className="btn-quiet danger" disabled={busy} onClick={() => setConfirming(true)}>
-        delete…
-      </button>
+      {button('reannounce', 'Reannounce')}
+      {button('recheck', 'Recheck')}
+      {panel && <span className="qb-actions-gap" />}
+      {button('ask', 'Delete…', true)}
     </span>
+  );
+}
+
+// CopyValue is a long value (a path, a hash) with a button that copies it.
+function CopyValue({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+  return (
+    <div className="qb-line">
+      <span className="qb-line-label">{label}</span>
+      <span className="qb-line-value mono truncate" title={value}>
+        {value}
+      </span>
+      <button type="button" className="qb-copy" onClick={copy} aria-label={`Copy ${label.toLowerCase()}`}>
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
   );
 }
 
@@ -163,25 +197,38 @@ export function TorrentRow({
       </tr>
       {open && (
         <tr className="qb-detail">
-          <td />
-          <td colSpan={5}>
-            <dl className="qb-facts">
-              <dt>Saved in</dt>
-              <dd className="mono" title={t.save_path}>
-                {t.save_path}
-              </dd>
-              <dt>Added</dt>
-              <dd>{formatAgo(t.added_on || null, now)}</dd>
-              <dt>Completed</dt>
-              <dd>{t.completion_on > 0 ? formatAgo(t.completion_on, now) : 'not yet'}</dd>
-              <dt>Transferred</dt>
-              <dd className="num">
-                ↓ {formatBytes(t.downloaded)} · ↑ {formatBytes(t.uploaded)}
-              </dd>
-              <dt>Hash</dt>
-              <dd className="mono">{t.hash}</dd>
-            </dl>
-            <Actions torrents={[t]} run={actions.run} busy={actions.busy} />
+          <td colSpan={6}>
+            <div className="qb-panel">
+              {t.stalled_for ? (
+                <div className="qb-panel-stall">
+                  Stalled for {formatDuration(t.stalled_for)}
+                  {t.recoveries ? ` · the monitor has tried to recover it ${t.recoveries === 1 ? 'once' : `${t.recoveries} times`}` : ''}
+                </div>
+              ) : null}
+              <dl className="qb-tiles">
+                <div>
+                  <dt>Added</dt>
+                  <dd>{formatAgo(t.added_on || null, now)}</dd>
+                </div>
+                <div>
+                  <dt>Completed</dt>
+                  <dd>{t.completion_on > 0 ? formatAgo(t.completion_on, now) : <span className="ink-3">Not yet</span>}</dd>
+                </div>
+                <div>
+                  <dt>Downloaded</dt>
+                  <dd className="num">{formatBytes(t.downloaded)}</dd>
+                </div>
+                <div>
+                  <dt>Uploaded</dt>
+                  <dd className="num">{formatBytes(t.uploaded)}</dd>
+                </div>
+              </dl>
+              <div className="qb-lines">
+                <CopyValue label="Saved in" value={t.save_path} />
+                <CopyValue label="Hash" value={t.hash} />
+              </div>
+              <Actions torrents={[t]} run={actions.run} busy={actions.busy} panel />
+            </div>
           </td>
         </tr>
       )}

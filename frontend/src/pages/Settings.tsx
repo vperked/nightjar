@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { ApiError, api, waitForRestart } from '../api/client';
 import type { SettingField, SettingsResponse, TestTarget } from '../api/types';
 import { AccountSection } from '../components/Account';
 import { SectionsPanel } from '../components/Sections';
+import { ActivityPanel } from '../components/ActivityPanel';
+import { AppearancePanel } from '../components/AppearancePanel';
+import { BackupPanel } from '../components/BackupPanel';
+import { GroupIcon, SettingsGroup } from '../components/SettingsGroup';
 import { Select } from '../components/Select';
 import { Skeleton, Working } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
@@ -11,7 +15,7 @@ import { noun } from '../format';
 
 const SOURCE: Record<SettingField['source'], string> = { dashboard: 'set here', environment: 'from .env', default: '' };
 
-const DRAFT_KEY = 'servermonitor.settings.draft';
+const DRAFT_KEY = 'nightjar.settings.draft';
 
 // Groups with a connection test: it uses the values on screen, saved or not.
 const TESTS: Record<string, { target: TestTarget; label: string; title: string }> = {
@@ -27,35 +31,34 @@ function Control({ field, value, onChange }: { field: SettingField; value: strin
   const current = value ?? field.value;
   const label = field.label;
   if (field.startup) {
-    return <span className="mono ink-2">{field.kind === 'secret' ? (field.set ? 'set' : 'not set') : current || '—'}</span>;
+    return <span className="set-fixed mono">{field.kind === 'secret' ? (field.set ? 'set' : 'not set') : current || '—'}</span>;
   }
   switch (field.kind) {
     case 'bool':
       return (
-        <label className="check">
-          <input type="checkbox" aria-label={label} checked={current === 'true'} onChange={(e) => onChange(String(e.target.checked))} /> {current === 'true' ? 'on' : 'off'}
+        <label className="check set-switch">
+          <input type="checkbox" aria-label={label} checked={current === 'true'} onChange={(e) => onChange(String(e.target.checked))} /> {current === 'true' ? 'On' : 'Off'}
         </label>
       );
     case 'secret':
       return (
-        <span className="with-unit">
-          <input
-            className="field"
-            type="password"
-            aria-label={label}
-            autoComplete="off"
-            placeholder={field.set ? '•••••• (set — type to replace)' : 'not set'}
-            value={value ?? ''}
-            onChange={(e) => onChange(e.target.value)}
-          />
-        </span>
+        <input
+          className="field set-input"
+          type="password"
+          aria-label={label}
+          autoComplete="off"
+          placeholder={field.set ? '•••••• (set — type to replace)' : 'not set'}
+          value={value ?? ''}
+          onChange={(e) => onChange(e.target.value)}
+        />
       );
     case 'int':
     case 'number':
+      // The unit sits inside the field, so every number lines up the same way.
       return (
-        <span className="with-unit">
+        <span className={`set-number ${field.unit ? 'has-unit' : ''}`}>
           <input
-            className="field short"
+            className="field"
             type="number"
             aria-label={label}
             step={field.kind === 'int' ? 1 : 'any'}
@@ -64,43 +67,123 @@ function Control({ field, value, onChange }: { field: SettingField; value: strin
             value={current}
             onChange={(e) => onChange(e.target.value)}
           />
-          {field.unit && <span className="unit">{field.unit}</span>}
+          {field.unit && <span className="set-unit">{field.unit}</span>}
         </span>
       );
     default:
       if (field.options) {
-        return <Select className="short" label={label} value={current} onChange={onChange} options={field.options.map((o) => ({ value: o, label: o }))} />;
+        return <Select className="set-select" label={label} value={current} onChange={onChange} options={field.options.map((o) => ({ value: o, label: o }))} />;
       }
-      return <input className="field" aria-label={label} value={current} placeholder={field.default} onChange={(e) => onChange(e.target.value)} />;
+      return <input className="field set-input" aria-label={label} value={current} placeholder={field.default} onChange={(e) => onChange(e.target.value)} />;
   }
 }
 
-function Field({ field, value, error, onChange, onReset }: { field: SettingField; value: string | undefined; error?: string; onChange: (v: string) => void; onReset: () => void }) {
+const RESTART_ICON = 'M20 11a8 8 0 0 0-14.6-4.5M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5M20 20v-4h-4';
+const LOCK_ICON = 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3';
+
+function Badge({ icon, children, title }: { icon?: string; children: ReactNode; title?: string }) {
+  return (
+    <span className="set-badge" title={title}>
+      {icon && (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d={icon} />
+        </svg>
+      )}
+      {children}
+    </span>
+  );
+}
+
+function Field({
+  field,
+  value,
+  error,
+  onChange,
+  onReset,
+  onUndo,
+}: {
+  field: SettingField;
+  value: string | undefined;
+  error?: string;
+  onChange: (v: string) => void;
+  onReset: () => void;
+  onUndo: () => void;
+}) {
   const changed = value !== undefined;
   return (
-    <div className={`form-row ${changed ? 'changed' : ''}`} id={field.key}>
-      <div className="form-label">
-        {field.label}
-        <div className="form-help">
-          {field.help && <span>{field.help} </span>}
-          <code>{field.key}</code>
-          {field.startup && <span> · set in .env</span>}
-          {!field.startup && !field.live && <span title="Saving this restarts the monitor"> · restarts</span>}
-          {!field.startup && SOURCE[field.source] && <span> · {SOURCE[field.source]}</span>}
+    <div className={`set-row ${changed ? 'changed' : ''} ${error ? 'invalid' : ''}`} id={field.key}>
+      <div className="set-text">
+        <span className="set-label">{field.label}</span>
+        {field.help && <p className="set-help">{field.help}</p>}
+        <div className="set-meta">
+          <code title="The setting's name in .env">{field.key}</code>
+          {field.startup && (
+            <Badge icon={LOCK_ICON} title="Change it in .env, then restart the monitor">
+              set in .env
+            </Badge>
+          )}
+          {!field.startup && !field.live && (
+            <Badge icon={RESTART_ICON} title="Saving this restarts the monitor">
+              restarts
+            </Badge>
+          )}
+          {!field.startup && SOURCE[field.source] && <Badge>{SOURCE[field.source]}</Badge>}
         </div>
       </div>
-      <div className="form-control">
-        <Control field={field} value={value} onChange={onChange} />
-        {!field.startup && field.source === 'dashboard' && !changed && (
-          <button type="button" className="btn-quiet" onClick={onReset} title="Use the .env value or the default again">
-            reset
-          </button>
-        )}
-        {changed && value === '' && <div className="form-help">back to the .env value or default</div>}
+      <div className="set-control">
+        <div className="set-control-line">
+          <Control field={field} value={value} onChange={onChange} />
+          {changed ? (
+            <button type="button" className="btn-quiet set-undo" onClick={onUndo} title="Put back the saved value">
+              Undo
+            </button>
+          ) : (
+            !field.startup &&
+            field.source === 'dashboard' && (
+              <button type="button" className="btn-quiet set-undo" onClick={onReset} title="Use the .env value or the default again">
+                Reset
+              </button>
+            )
+          )}
+        </div>
+        {changed && value === '' && <div className="set-note">Back to the .env value or the default.</div>}
         {error && <div className="form-error">{error}</div>}
       </div>
     </div>
   );
+}
+
+// useInView follows which group is on screen, for the sidebar: the last one whose top has passed under the header.
+// It measures on scroll rather than observing, since Account and Sections draw after their own requests.
+function useInView(ids: string[]): string {
+  const [current, setCurrent] = useState('');
+  const key = ids.join(',');
+  useEffect(() => {
+    if (!ids.length) return;
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      const atEnd = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
+      let found = ids[0];
+      for (const id of ids) {
+        const top = document.getElementById(id)?.getBoundingClientRect().top;
+        if (top !== undefined && top <= 200) found = id;
+      }
+      setCurrent(atEnd ? ids[ids.length - 1] : found);
+    };
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    measure();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onScroll);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [key]);
+  return current;
 }
 
 export function SettingsPage() {
@@ -123,7 +206,7 @@ export function SettingsPage() {
   const [testing, setTesting] = useState<TestTarget>();
   const [showAdvanced, setShowAdvanced] = useState(() => {
     try {
-      return localStorage.getItem('servermonitor.settings.advanced') === 'true';
+      return localStorage.getItem('nightjar.settings.advanced') === 'true';
     } catch {
       return false;
     }
@@ -132,7 +215,7 @@ export function SettingsPage() {
   const toggleAdvanced = (on: boolean) => {
     setShowAdvanced(on);
     try {
-      localStorage.setItem('servermonitor.settings.advanced', String(on));
+      localStorage.setItem('nightjar.settings.advanced', String(on));
     } catch {
       /* storage unavailable */
     }
@@ -146,6 +229,12 @@ export function SettingsPage() {
   useEffect(() => {
     load();
   }, []);
+  // A link to a part of the page (/settings#sections, from the docs) lands on it once it is drawn.
+  const loaded = !!data;
+  useEffect(() => {
+    const id = window.location.hash.slice(1);
+    if (loaded && id) document.getElementById(id)?.scrollIntoView?.({ block: 'start' });
+  }, [loaded]);
 
   // Advanced settings stay folded away unless asked for, searched for, or already changed from the default.
   // Sections have their own switches above, so their raw setting is not listed.
@@ -161,6 +250,7 @@ export function SettingsPage() {
   // Saving restarts the monitor only for settings it builds connections or timers from at startup.
   const needsRestart = Object.keys(draft).filter((k) => !fieldsByKey.get(k)?.live);
 
+  const restartNames = needsRestart.map((k) => fieldsByKey.get(k)?.label ?? k).join(', ');
   const changes = Object.keys(draft).length;
   useEffect(() => {
     try {
@@ -179,8 +269,10 @@ export function SettingsPage() {
     return () => window.removeEventListener('beforeunload', warn);
   }, [changes]);
   const edit = (key: string, value: string) => setDraft((d) => ({ ...d, [key]: value }));
-  // An emptied secret box means "no change"; "reset" is how a saved secret is removed.
-  const editField = (f: SettingField, value: string) => (f.kind === 'secret' && value === '' ? setDraft(({ [f.key]: _, ...rest }) => rest) : edit(f.key, value));
+  // An emptied secret box means "no change"; "reset" is how a saved secret is removed. A value put
+  // back to the saved one is no change either, so there is nothing to save.
+  const editField = (f: SettingField, value: string) =>
+    (f.kind === 'secret' && value === '') || (f.kind !== 'secret' && value === f.value) ? setDraft(({ [f.key]: _, ...rest }) => rest) : edit(f.key, value);
   const discard = () => {
     setDraft({});
     setErrors({});
@@ -252,8 +344,11 @@ export function SettingsPage() {
     );
   }
 
+  const navItems = [...(query ? [] : ['Account', 'Sections', 'Appearance', 'Activity', 'Backup']), ...groups.map((g) => g.name)];
+  const changedIn = (group: string) => (data?.groups.find((g) => g.name === group)?.fields ?? []).filter((f) => f.key in draft).length;
+
   return (
-    <main className={changes ? 'has-savebar' : ''}>
+    <main className={`settings-page ${changes ? 'has-savebar' : ''}`}>
       <div className="page-title">
         <div>
           <h1>Settings</h1>
@@ -261,75 +356,147 @@ export function SettingsPage() {
             New here? The <Link to="/setup">setup guide</Link> finds Plex, qBittorrent and your apps for you.
           </div>
         </div>
-        <div className="toolbar">
-          <label className="check" title="Tuning knobs most setups never change">
-            <input type="checkbox" checked={showAdvanced} onChange={(e) => toggleAdvanced(e.target.checked)} /> advanced{!showAdvanced && hidden > 0 ? ` (${hidden} more)` : ''}
+        <div className="toolbar set-toolbar">
+          <label className="set-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" />
+              <path d="M20 20l-4-4" />
+            </svg>
+            <input type="search" placeholder="Find a setting" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Find a setting" />
           </label>
-          <input className="search" placeholder="find a setting…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Find a setting" />
+          <label className="check set-advanced" title="Tuning knobs most setups never change">
+            <input type="checkbox" checked={showAdvanced} onChange={(e) => toggleAdvanced(e.target.checked)} />
+            {!showAdvanced && hidden > 0 ? `Show advanced (${hidden} more)` : 'Show advanced'}
+          </label>
         </div>
       </div>
       {loadError && <p className="alert">{loadError}</p>}
       {!data && !loadError && <Skeleton kind="form" />}
       {data && (
         <div className="settings-layout">
-          <nav className="settings-nav" aria-label="Setting groups">
-            <a href="#account">Account</a>
-            <a href="#sections">Sections</a>
-            {data.groups.map((g) => (
-              <a key={g.name} href={`#${slug(g.name)}`}>
-                {g.name}
-              </a>
-            ))}
-          </nav>
+          <SettingsNav items={navItems} changedIn={changedIn} />
           <div className="settings-groups">
             {!query && <AccountSection />}
             {!query && <SectionsPanel />}
+            {!query && <AppearancePanel />}
+            {!query && <ActivityPanel />}
+            {!query && <BackupPanel />}
             {groups.map((g) => (
-              <section className="section" key={g.name} id={slug(g.name)}>
-                <div className="section-head">
-                  <span className="label">{g.name}</span>
-                  {g.name === 'Storage and logging' && (
-                    <Link className="btn-quiet" to="/logs">
-                      Open the monitor log →
-                    </Link>
-                  )}
-                  {g.name === 'Dashboard' && (
-                    <Link className="btn-quiet" to="/status-page">
-                      Design the status page →
-                    </Link>
-                  )}
-                  {TESTS[g.name] && (
-                    <button className="btn-quiet" onClick={() => runTest(TESTS[g.name].target)} disabled={!!testing} title={TESTS[g.name].title}>
-                      {testing === TESTS[g.name].target ? 'testing…' : TESTS[g.name].label}
-                    </button>
-                  )}
-                </div>
+              <SettingsGroup
+                key={g.name}
+                id={slug(g.name)}
+                name={g.name}
+                aside={
+                  <>
+                    {g.name === 'Storage and logging' && (
+                      <>
+                        <Link className="btn-ghost" to="/plugins">
+                          Plugins →
+                        </Link>
+                        <Link className="btn-ghost" to="/logs">
+                          Open the monitor log →
+                        </Link>
+                      </>
+                    )}
+                    {g.name === 'Dashboard' && (
+                      <Link className="btn-ghost" to="/status-page">
+                        Design the status page →
+                      </Link>
+                    )}
+                    {TESTS[g.name] && (
+                      <button type="button" className="btn-ghost" onClick={() => runTest(TESTS[g.name].target)} disabled={!!testing} title={TESTS[g.name].title}>
+                        {testing === TESTS[g.name].target ? 'Testing…' : TESTS[g.name].label}
+                      </button>
+                    )}
+                  </>
+                }
+              >
                 {g.fields.map((f) => (
-                  <Field key={f.key} field={f} value={draft[f.key]} error={errors[f.key]} onChange={(v) => editField(f, v)} onReset={() => edit(f.key, '')} />
+                  <Field
+                    key={f.key}
+                    field={f}
+                    value={draft[f.key]}
+                    error={errors[f.key]}
+                    onChange={(v) => editField(f, v)}
+                    onReset={() => edit(f.key, '')}
+                    onUndo={() => {
+                      setDraft(({ [f.key]: _, ...rest }) => rest);
+                      setErrors(({ [f.key]: _, ...rest }) => rest);
+                    }}
+                  />
                 ))}
-              </section>
+              </SettingsGroup>
             ))}
-            {groups.length === 0 && <p className="note">No setting matches.</p>}
+            {groups.length === 0 && (
+              <div className="set-empty">
+                <strong>No setting matches “{query}”</strong>
+                <span>Try a shorter word, or the setting's name from .env.</span>
+              </div>
+            )}
           </div>
         </div>
       )}
       {changes > 0 && (
         <div className="savebar" role="region" aria-label="Unsaved changes">
-          <span>
-            <span className="num">{changes}</span> unsaved {noun(changes, 'change')} ·{' '}
-            {needsRestart.length ? `saving restarts the monitor (${needsRestart.map((k) => fieldsByKey.get(k)?.label ?? k).join(', ')})` : 'applies at once'}
-            {saveError && <span className="form-error"> · {saveError}</span>}
+          <span className="savebar-dot" aria-hidden="true" />
+          <span className="savebar-text">
+            <strong>
+              {changes} unsaved {noun(changes, 'change')}
+            </strong>
+            {saveError ? (
+              <span className="savebar-note error">{saveError}</span>
+            ) : needsRestart.length ? (
+              <span className="savebar-note" title={restartNames}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d={RESTART_ICON} />
+                </svg>
+                <span className="truncate">Restarts the monitor ({restartNames})</span>
+              </span>
+            ) : (
+              <span className="savebar-note">Applies at once</span>
+            )}
           </span>
           <span className="savebar-actions">
-            <button className="btn-quiet" onClick={discard}>
-              discard
+            <button type="button" className="btn-quiet" onClick={discard}>
+              Discard
             </button>
-            <button className="btn" onClick={save} disabled={state === 'saving'}>
-              {state === 'saving' ? 'saving…' : needsRestart.length ? 'Save and restart' : 'Save'}
+            <button type="button" className="btn" onClick={save} disabled={state === 'saving'}>
+              {state === 'saving' ? 'Saving…' : needsRestart.length ? 'Save and restart' : 'Save'}
             </button>
           </span>
         </div>
       )}
     </main>
+  );
+}
+
+// SettingsNav lists the groups with their icons, marks the one on screen, and counts unsaved changes in each.
+function SettingsNav({ items, changedIn }: { items: string[]; changedIn: (group: string) => number }) {
+  const ids = items.map(slug);
+  const current = useInView(ids);
+  const nav = useRef<HTMLElement>(null);
+  // On narrow screens the groups are a sideways row; keep the current one in view.
+  useEffect(() => {
+    const el = nav.current;
+    const link = el?.querySelector<HTMLElement>('a.active');
+    if (el && link && el.scrollWidth > el.clientWidth) el.scrollTo?.({ left: link.offsetLeft - 16, behavior: 'smooth' });
+  }, [current]);
+  return (
+    <nav className="settings-nav" aria-label="Setting groups" ref={nav}>
+      {items.map((name, i) => {
+        const n = changedIn(name);
+        return (
+          <a key={name} href={`#${ids[i]}`} className={current === ids[i] ? 'active' : ''} aria-current={current === ids[i] ? 'location' : undefined}>
+            <GroupIcon name={name} />
+            <span className="min0">{name}</span>
+            {n > 0 && (
+              <span className="set-nav-count" title={`${n} unsaved`}>
+                {n}
+              </span>
+            )}
+          </a>
+        );
+      })}
+    </nav>
   );
 }

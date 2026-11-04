@@ -1,4 +1,4 @@
-module servermonitor
+module nightjar
 
 go 1.26.0
 

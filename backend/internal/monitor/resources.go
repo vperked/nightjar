@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"servermonitor/internal/cleanup"
-	"servermonitor/internal/collect"
-	"servermonitor/internal/discord"
-	"servermonitor/internal/format"
+	"nightjar/internal/cleanup"
+	"nightjar/internal/collect"
+	"nightjar/internal/discord"
+	"nightjar/internal/format"
 )
 
 const (
@@ -243,16 +243,13 @@ func (h networkAlert) check(s *Snapshot) {
 		return
 	}
 	send := func() bool {
-		fields := []discord.Field{
-			{Name: "Total Bandwidth", Value: fmt.Sprintf("%.1f MB/s", *s.NetworkMBps), Inline: true},
-			{Name: "Threshold", Value: fmt.Sprintf("%.1f MB/s", threshold), Inline: true},
-		}
+		var fields []discord.Field
 		if s.Bandwidth != nil {
 			fields = append(fields,
-				discord.Field{Name: "Upload Speed", Value: format.BytesPerSecond(s.Bandwidth.SentPerSec), Inline: true},
-				discord.Field{Name: "Download Speed", Value: format.BytesPerSecond(s.Bandwidth.RecvPerSec), Inline: true})
+				discord.Field{Name: "Download", Value: format.BytesPerSecond(s.Bandwidth.RecvPerSec), Inline: true},
+				discord.Field{Name: "Upload", Value: format.BytesPerSecond(s.Bandwidth.SentPerSec), Inline: true})
 		}
-		return h.ctx.Webhook.SendEmbed("Network Bandwidth Alert", fmt.Sprintf("Network bandwidth has exceeded the threshold of %.1f MB/s", threshold),
+		return h.ctx.Webhook.SendEmbed(fmt.Sprintf("Network at %.1f MB/s", *s.NetworkMBps), fmt.Sprintf("Above the %.1f MB/s limit.", threshold),
 			discord.Warning, fields, "")
 	}
 	h.raiseAlert("network", s.Now, fmt.Sprintf("Network: %.1f MB/s (threshold: %.1f MB/s)", *s.NetworkMBps, threshold), h.ctx.Webhook, send, "", false)

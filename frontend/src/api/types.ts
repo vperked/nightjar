@@ -89,7 +89,7 @@ export interface Sample {
   tx_bps: number | null;
 }
 
-export type ServiceStatus = 'up' | 'down' | 'unknown' | 'paused';
+export type ServiceStatus = 'up' | 'down' | 'unknown' | 'paused' | 'maintenance';
 
 export interface Beat {
   ts: number;
@@ -110,13 +110,28 @@ export interface Service {
   uptime_7d: number | null;
   uptime_30d: number | null;
   recent: Beat[];
+  cause?: Finding; // a down check's detail, explained
+  schedule?: string; // a heartbeat's
+  pings?: Pings; // what a heartbeat has heard
+  repair?: Repair; // what Nightjar does when it goes down
+  server?: string; // the id of the watched server it runs on
+}
+
+// Pings is what a heartbeat check has heard, in unix seconds (0 for never).
+export interface Pings {
+  seen: number;
+  start: number;
+  ok: number;
+  fail: number;
+  exit: number;
+  output?: string;
 }
 
 export interface ServicesResponse {
   services: Service[];
 }
 
-export type CheckType = 'http' | 'tcp' | 'ping' | 'tls';
+export type CheckType = 'http' | 'tcp' | 'ping' | 'tls' | 'plugin' | 'heartbeat' | 'docker';
 
 // CheckSpec is one uptime check's definition, as stored and edited in the dashboard.
 export interface CheckSpec {
@@ -131,6 +146,236 @@ export interface CheckSpec {
   verify_tls: boolean;
   tls_warn_days: number;
   paused: boolean;
+  // How soon a failed check runs again while it is not yet down, in seconds.
+  retry_interval: number;
+  // A ping check sends ping_count echoes, ping_interval seconds apart.
+  ping_count: number;
+  ping_interval: number;
+  // A heartbeat's schedule (cron, @daily or "every 1h"), how late its ping may be and how long a
+  // run may take (0 for no limit), in seconds. Its target is the token in its ping URL.
+  schedule?: string;
+  grace?: number;
+  max_runtime?: number;
+  repair?: Repair;
+  // server is the id of the watched server the checked thing runs on.
+  server?: string;
+}
+
+// Repair is what Nightjar does when a check goes down: restart a systemd service or a Docker
+// container, or run a script from the repairs folder, at most `max` times an outage, `wait` seconds apart.
+export interface Repair {
+  action: 'restart' | 'container' | 'script';
+  unit?: string;
+  container?: string;
+  script?: string;
+  max: number;
+  wait: number;
+}
+
+// RepairAttempt is one repair Nightjar made, and whether the check came back after it.
+export interface RepairAttempt {
+  id: number;
+  ts: number;
+  check: string;
+  action: Repair['action'];
+  target: string;
+  ok: boolean;
+  detail: string;
+  output: string;
+  fixed: boolean;
+}
+
+export interface RepairsResponse {
+  repairs: RepairAttempt[];
+  dir: string;
+  scripts: { name: string; problem?: string }[];
+}
+
+export type IncidentRole = 'before' | 'problem' | 'recovery' | 'action' | 'note';
+
+export interface IncidentEvent {
+  id: number;
+  ts: number;
+  area: string;
+  severity: Notification['severity'];
+  title: string;
+  body?: string;
+  subject?: string;
+  role: IncidentRole;
+}
+
+export interface IncidentCause {
+  kind: 'memory' | 'disk' | 'hardware' | 'restart' | 'crash' | 'network' | 'change' | 'overload' | 'check' | 'first';
+  text: string;
+  confidence: 'likely' | 'possibly';
+  event?: number;
+  learned?: boolean; // shaped by feedback on earlier incidents
+}
+
+// IncidentFeedback is what the owner said about an incident's cause.
+export interface IncidentFeedback {
+  verdict: 'right' | 'wrong';
+  kind: string; // the cause Nightjar gave
+  actual?: IncidentCause['kind'] | '';
+  note?: string;
+  subjects: string[];
+  at: number;
+}
+
+// IncidentNotice is an incident as visitors to the status page read it.
+export interface IncidentNotice {
+  id: number;
+  title: string;
+  text: string;
+  started: number;
+  ended: number | null;
+  published: boolean;
+  updated?: number;
+}
+
+// MaintenanceWindow is planned downtime: one-off (start to end) or weekly (days, from to to).
+export interface MaintenanceWindow {
+  id: string;
+  title: string;
+  checks: string[]; // empty covers everything
+  start?: number;
+  end?: number;
+  days?: number[]; // 0 is Sunday
+  from?: string; // "02:00"
+  to?: string;
+  public: boolean;
+  note?: string;
+}
+
+export interface MaintenanceResponse {
+  windows: MaintenanceWindow[];
+  upcoming: { window: MaintenanceWindow; start: number; end: number; on: boolean }[];
+}
+
+export interface Container {
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  health?: string;
+}
+
+export interface ContainersResponse {
+  available: boolean;
+  error?: string;
+  containers: Container[];
+}
+
+// PlexStats is Plex over some days: what played and by whom, from Nightjar's record of every
+// finished stream, and what Plex's own history says was watched.
+export interface PlexStats {
+  days: number;
+  from: number;
+  to: number;
+  plays: number;
+  hours: number;
+  users: PlexCount[];
+  titles: PlexCount[];
+  players: PlexCount[];
+  peak: number;
+  peak_at: number;
+  transcoded: number | null; // percent of streams
+  remote: number | null;
+  reasons?: PlexCount[]; // why streams were converted
+  weekdays: number[]; // hours, Sunday first
+  watched: number;
+  viewers: PlexCount[];
+  finished: PlexCount[];
+  history?: string; // why Plex's history could not be read
+  added: { library: string; items: number; label: string }[];
+}
+
+export interface PlexCount {
+  name: string;
+  n: number;
+  hours?: number;
+}
+
+// CleanupItem is a movie or show the media cleanup listed: nobody has watched it since Plex added it.
+export interface CleanupItem {
+  key: string;
+  kind: 'movie' | 'show';
+  title: string;
+  year?: number;
+  library: string;
+  added: number;
+  size: number;
+  status: 'preview' | 'leaving' | 'waiting' | 'removed' | 'failed';
+  listed: number;
+  leaving_at: number;
+  reason?: string;
+  manager: 'radarr' | 'sonarr' | 'plex';
+  torrents: { hash: string; name: string; ratio: number; size: number }[];
+  removed_at?: number;
+}
+
+export interface CleanupView {
+  enabled: boolean;
+  items: CleanupItem[];
+  kept: { key: string; title: string; at: number }[];
+  scanned: number;
+  error?: string;
+  freed: number;
+  found?: string[]; // Sonarr and Radarr found on this machine rather than set
+  days: number;
+  notice_days: number;
+  ratio: number;
+  ratio_days: number;
+  managers: string[];
+}
+
+// WeeklyReport is the week as the Monday report sums it up.
+export interface WeeklyReport {
+  from: number;
+  to: number;
+  checks: { name: string; uptime: number | null }[];
+  overall: number | null;
+  incidents: number;
+  open: number;
+  down: number;
+  causes: { name: string; n: number }[];
+  top: { id: number; title: string; cause: string; started: number; length: number; open: boolean }[];
+  repairs: number;
+  fixed: number;
+  alerts: number;
+  noisiest: { name: string; n: number }[];
+  forecasts: string[];
+  plex?: PlexStats;
+}
+
+export interface ReportResponse {
+  report: WeeklyReport;
+  enabled: boolean;
+  at: string;
+  next?: number;
+}
+
+// Incident is one stretch of trouble: what went wrong, what happened around it, and why.
+export interface Incident {
+  id: number;
+  started: number;
+  ended: number | null; // null while something in it is still down
+  severity: Notification['severity'];
+  title: string;
+  cause: IncidentCause | null;
+  also: IncidentCause[];
+  affected: { subject: string; label: string; kind: 'check' | 'service' | 'drive' | 'other'; down: number; up?: number }[];
+  events: IncidentEvent[];
+  series: { t: number; cpu: number | null; mem: number | null; disk: number | null }[];
+  peaks: { cpu: number | null; mem: number | null; disk: number | null };
+  feedback: IncidentFeedback | null;
+  notice: IncidentNotice | null;
+  draft: IncidentNotice | null; // a notice worded from it, when something on the status page was affected
+}
+
+export interface IncidentsResponse {
+  incidents: Incident[];
+  days: number;
 }
 
 // CheckResult is one run of a check (POST /api/checks/test).
@@ -200,7 +445,17 @@ export interface PublicService {
   status: ServiceStatus;
   uptime_24h: number | null;
   uptime_30d: number | null;
+  uptime_90d?: number | null;
   recent: Beat[];
+  days?: PublicDay[]; // the last 90 days, oldest first; empty when the design hides history
+}
+
+// PublicDay is one day of a check on the status page: the share of checks it passed (null without
+// any) and about how long it was down.
+export interface PublicDay {
+  t: number; // local midnight
+  uptime: number | null;
+  down_s: number;
 }
 
 // PublicStatus is the public status page (GET /api/status): only what its design shows.
@@ -215,6 +470,11 @@ export interface PublicStatus {
   announcement?: { text: string; tone: 'info' | 'warning' | 'crit' };
   groups?: { name: string; services: PublicService[] }[];
   services: PublicService[];
+  css?: string; // the owner's own styles
+  header_html?: string; // the owner's HTML above the title, cleaned before it is shown
+  footer_html?: string; // and above the footer
+  maintenance?: { title: string; note?: string; start: number; end: number; on: boolean; covers: string[]; all: boolean }[];
+  incidents?: IncidentNotice[]; // the notices the owner published
 }
 
 // StatusDesign is how the public status page looks, edited in the dashboard.
@@ -227,6 +487,9 @@ export interface StatusDesign {
   show_history: boolean;
   footer: string;
   groups: { name: string; items: { check: string; label?: string }[] }[];
+  css?: string;
+  header_html?: string;
+  footer_html?: string;
 }
 
 export interface StatusDesignResponse {
@@ -234,19 +497,29 @@ export interface StatusDesignResponse {
   designed: boolean;
   design: StatusDesign;
   checks: string[];
+  days?: Record<string, PublicDay[]>; // each check's days, for the preview
 }
 
 export interface AppConfig {
   auth_required: boolean;
   authorized: boolean; // signed in
-  account?: { configured: boolean; username?: string; service?: string }; // the admin account; not configured on a fresh install
+  account?: { configured: boolean; username?: string; service?: string; two_factor?: boolean; recovery_left?: number }; // the admin account; not configured on a fresh install
   status_page_enabled: boolean;
   status_page_title: string;
   plex_enabled?: boolean;
   qbittorrent_enabled?: boolean;
   needs_setup?: boolean; // no alert channel or no uptime check yet
   hidden?: string[]; // dashboard sections turned off (DASHBOARD_HIDDEN)
+  appearance?: Appearance; // how the dashboard looks; without a sign-in, no CSS
   version?: string;
+}
+
+// Appearance is the dashboard's look, chosen under Settings → Appearance.
+export interface Appearance {
+  style: 'matrix' | 'cards';
+  charts: '' | 'dots' | 'lines'; // empty follows the style
+  density: 'comfortable' | 'compact';
+  css: string; // the owner's own, over the style
 }
 
 export type PlexDecision = 'direct play' | 'direct stream' | 'transcode';
@@ -267,6 +540,8 @@ export interface PlexStream {
   audio_decision?: string;
   hw_transcode: boolean;
   throttled: boolean;
+  reason?: string; // why Plex converts it
+  fix?: string; // what would let it play as it is
   speed?: number;
   quality: string;
   bitrate_kbps: number;
@@ -275,6 +550,7 @@ export interface PlexStream {
   offset_ms: number;
   progress: number;
   started_at: number;
+  address?: string;
 }
 
 export interface PlexLibrary {
@@ -484,6 +760,18 @@ export interface SetupStatus {
 }
 
 // Unit is one systemd service (GET /api/units).
+// Finding is one problem read out of the logs: what it is, what it means, and what to do.
+export interface Finding {
+  id: string;
+  title: string;
+  explain: string;
+  fix?: string;
+  severity: 'critical' | 'warning';
+  line?: string; // the latest log line that shows it
+  count: number;
+  known: boolean; // a recognised cause, or a repeated error grouped by its shape
+}
+
 export interface Unit {
   name: string;
   description: string;
@@ -496,6 +784,7 @@ export interface Unit {
   since?: number;
   flapping?: number;
   ignored?: boolean;
+  cause?: Finding;
 }
 
 export interface UnitsResponse {
@@ -604,7 +893,7 @@ export interface NetworkResponse {
 // ---------- notifications ----------
 
 export type Severity = 'critical' | 'warning' | 'ok' | 'info';
-export type NotificationStatus = 'sent' | 'failed' | 'held' | 'digest' | 'muted' | 'kept';
+export type NotificationStatus = 'sent' | 'failed' | 'held' | 'digest' | 'muted' | 'kept' | 'throttled' | 'maintenance';
 export type AlertLevel = 'all' | 'warning' | 'critical' | 'off';
 
 export interface Notification {
@@ -697,6 +986,7 @@ export interface LogsResponse {
   level: string; // LOG_LEVEL
   file: string;
   kept: number;
+  findings?: Finding[];
 }
 
 // ---------- app store ----------
@@ -734,4 +1024,246 @@ export interface AppsResponse {
   apps: StoreApp[];
   job: AppJob | null;
   user: string; // the account store apps run as
+}
+
+// RemoteReadings are what an agent on another server reports (backend/internal/agent).
+export interface RemoteReadings {
+  version: number;
+  agent: string;
+  time: number;
+  system: HostInfo & { boot_time: number };
+  cpu: { percent: number; cores: number[] | null; count: number; load: number[] | null; freq_mhz: number };
+  memory: Memory;
+  swap: Memory;
+  temperature: number | null;
+  fans: { name: string; label: string; speed_rpm: number }[];
+  gpu: Stats['gpu'];
+  disks: Partition[];
+  network: { bytes_sent_per_sec: number; bytes_recv_per_sec: number };
+  disk_io: { read_per_sec: number; write_per_sec: number };
+  drives: Drive[];
+  drives_error?: string;
+}
+
+// HostPoint is one poll; null while the server was offline. Agents fill cpu, mem and temp; checks fill latency.
+export interface HostPoint {
+  t: number;
+  cpu: number | null;
+  mem: number | null;
+  temp: number | null;
+}
+
+// HostBody adds or changes a server (POST /api/hosts, PUT /api/hosts/{id}): its agent's address and
+// token, or with kind "ssh", a server watched through its SSH login alone (renamed with just a name).
+export type HostBody = { kind: 'agent'; name: string; address: string; token: string } | { kind: 'ssh'; name: string; ssh?: HostSSH };
+
+// RemoteHost is another server the dashboard watches (GET /api/hosts).
+export interface RemoteHost {
+  id: string;
+  name: string;
+  address: string;
+  added: number;
+  // agent: readings from the agent on it; ssh: just its SSH login, whether its SSH port answers.
+  kind: 'agent' | 'ssh';
+  // ssh is how Nightjar logs in to it, when set up; ssh_command logs in the same way by hand.
+  ssh?: HostSSH;
+  ssh_command?: string;
+  // update is how keeping its agent on this dashboard's build is going.
+  update?: AgentUpdate;
+  status: 'waiting' | 'online' | 'offline';
+  last_seen?: number;
+  error?: string;
+  readings: RemoteReadings | null;
+  history: HostPoint[];
+  problems: string[];
+}
+
+// HostSSH is a server's SSH login: a key on the monitor's machine (by path), a user and a port. An
+// empty host connects to the server's own address.
+export interface HostSSH {
+  host?: string;
+  port: number;
+  user: string;
+  key: string;
+}
+
+// AgentUpdate: "current", "updating", "updated", "failed", or "manual" for an agent that needs one
+// reinstall before it can update itself.
+export interface AgentUpdate {
+  state: 'current' | 'updating' | 'updated' | 'failed' | 'manual';
+  detail?: string;
+  at?: number;
+}
+
+// SSHKey is a key pair Nightjar can log in with (GET /api/ssh/keys); only its public half is sent.
+export interface SSHKey {
+  path: string;
+  name: string;
+  type: string;
+  fingerprint: string;
+  comment?: string;
+  public: string;
+  // own is a key Nightjar made, in its own folder.
+  own: boolean;
+}
+
+export type SSHAction = 'test' | 'restart-agent' | 'reinstall-agent' | 'reboot';
+
+// LoginTest is how trying a server's SSH login went, right after it was saved.
+export interface LoginTest {
+  ok: boolean;
+  output?: string;
+  error?: string;
+}
+
+// AgentBuild is an agent built into this monitor, to download (GET /api/agent/download?arch=).
+export interface AgentBuild {
+  arch: 'amd64' | 'arm64';
+  file: string;
+  size: number;
+}
+
+export interface HostsResponse {
+  hosts: RemoteHost[];
+  port: number;
+  agents: AgentBuild[];
+}
+
+// AnalyticsPoint is one bucket of a server's stored minutes (GET /api/analytics): means, peaks, and
+// up, the share of checks it answered. null had no reading.
+export interface AnalyticsPoint {
+  t: number;
+  up: number;
+  cpu: number | null;
+  cpu_max: number | null;
+  mem: number | null;
+  temp: number | null;
+  temp_max: number | null;
+  disk: number | null;
+  rx: number | null;
+  tx: number | null;
+  latency: number | null;
+  minutes: number;
+}
+
+export interface AnalyticsSummary {
+  coverage: number;
+  uptime: number | null;
+  downtime_s: number;
+  incidents: number;
+  cpu_avg: number | null;
+  cpu_peak: number | null;
+  mem_avg: number | null;
+  mem_peak: number | null;
+  temp_avg: number | null;
+  temp_peak: number | null;
+  disk_now: number | null;
+  disk_change: number | null;
+  disk_full_days: number | null;
+  rx_bytes: number;
+  tx_bytes: number;
+  latency_avg: number | null;
+  latency_peak: number | null;
+}
+
+export interface Outage {
+  start: number;
+  end: number;
+  ongoing?: boolean;
+}
+
+export interface HostAnalytics {
+  id: string; // "local" for this machine
+  name: string;
+  kind: 'local' | 'agent';
+  status: string;
+  points: AnalyticsPoint[];
+  summary: AnalyticsSummary;
+  incidents: Outage[];
+}
+
+export type AnalyticsRangeName = '1h' | '24h' | '7d' | '30d';
+
+export interface AnalyticsResponse {
+  range: { name: AnalyticsRangeName; label: string };
+  ranges: { name: AnalyticsRangeName; label: string }[];
+  step: number;
+  hosts: HostAnalytics[];
+  kept: boolean;
+}
+
+// Plugins are the owner's own checks, cards and alert channels, each a folder with a plugin.json.
+export type PluginProvides = 'check' | 'card' | 'notify';
+
+export interface PluginSetting {
+  key: string;
+  label: string;
+  type?: 'text' | 'secret' | 'number' | 'bool' | 'select' | '';
+  default?: string;
+  help?: string;
+  placeholder?: string;
+  options?: string[];
+  required?: boolean;
+}
+
+export interface PluginRun {
+  mode: string;
+  at: number;
+  ok: boolean;
+  output?: string;
+  ms: number;
+}
+
+export interface Plugin {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author?: string;
+  homepage?: string;
+  provides: PluginProvides[];
+  run: string;
+  interval?: number;
+  timeout?: number;
+  settings?: PluginSetting[];
+  check?: { argument?: string; placeholder?: string };
+  dir: string;
+  problem?: string; // why it cannot run
+  enabled: boolean;
+  values: Record<string, string>; // settings, without secrets
+  secrets_set: string[];
+  missing?: string[]; // required settings still empty
+  last?: PluginRun;
+}
+
+export interface PluginsResponse {
+  dir: string;
+  plugins: Plugin[];
+}
+
+export interface PluginCard {
+  plugin: string;
+  title: string;
+  text?: string;
+  items?: { label: string; value: string; tone?: 'good' | 'warn' | 'crit'; hint?: string }[];
+  link?: string;
+  updated: number;
+  error?: string;
+}
+
+export interface PluginChange {
+  enabled?: boolean;
+  settings?: Record<string, string>;
+  clear?: string[];
+}
+
+// ActivityEntry is one thing done: on the dashboard, through a Discord button, or by Nightjar.
+export interface ActivityEntry {
+  id: number;
+  ts: number;
+  who: string;
+  kind: string;
+  action: string;
+  target?: string;
+  detail?: string;
 }

@@ -6,3 +6,11 @@ dist
 *.log.*
 *.db*
 .env
+# Build output and this machine's own files: the image builds its own.
+web
+ssh
+plugins
+**/*.tsbuildinfo
+backend/internal/web/dist/assets
+backend/internal/web/dist/index.html
+backend/internal/agentbin/dist/*.gz

@@ -7,13 +7,22 @@ import (
 	"os"
 	"slices"
 
-	"servermonitor/internal/storage"
+	"nightjar/internal/storage"
 )
 
 var (
 	ErrNotFound = errors.New("no check with that name")
 	ErrExists   = errors.New("a check with that name already exists")
 )
+
+// RunSoon has a check run again on the next cycle, after something was done about it.
+func (m *Monitor) RunSoon(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if st, ok := m.states[name]; ok {
+		st.runNow = true
+	}
+}
 
 // Specs returns every check's definition, in display order.
 func (m *Monitor) Specs() []Spec {

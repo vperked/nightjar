@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"servermonitor/internal/config"
+	"nightjar/internal/config"
 )
 
 func TestDotenvParsing(t *testing.T) {

@@ -10,15 +10,17 @@
 }
 .page-title h1 {
   margin: 0;
-  font-size: 26px;
-  font-weight: 600;
-  letter-spacing: -0.025em;
-  line-height: 1.2;
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+  line-height: 1.15;
 }
 .page-sub {
   color: var(--ink-3);
-  font-size: 13px;
-  margin-top: 3px;
+  font-family: var(--mono);
+  font-size: 12px;
+  margin-top: 5px;
 }
 .crumb {
   font-size: 12.5px;
@@ -32,28 +34,96 @@
   margin-top: 4px;
   font-size: 12.5px;
 }
+/* Under a check's name: its state, then what it checks. */
+.title-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 6px;
+}
+.title-meta .svc-target {
+  margin-top: 0;
+}
+/* A check's failures, one line per outage. */
+.outages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+}
+.outages li {
+  display: grid;
+  /* A fixed first column keeps the reasons lined up from row to row. */
+  grid-template-columns: 15.5em minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 16px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.outages li:last-child {
+  border-bottom: 0;
+}
+.outage-when {
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.outage-why {
+  overflow-wrap: anywhere;
+}
+.outage-count {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+@media (max-width: 760px) {
+  .outages li {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .outage-why {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
 
+/* Stat strips read like the overview's: one ruled band, divided by hairlines, a mono label and number in each. */
 .stats-row {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 16px;
+  margin-top: 20px;
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule);
 }
 .stats-row > div {
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 16px 18px;
+  padding: 12px 20px 14px;
+  border-left: 1px solid var(--rule);
   min-width: 0;
 }
+.stats-row > div:first-child {
+  border-left: 0;
+  padding-left: 0;
+}
+.stats-row .label {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
 .stats-row .readout-value {
-  font-size: 24px;
+  font-size: 28px;
+  margin-top: 8px;
 }
 @media (max-width: 760px) {
   .stats-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+  }
+  .stats-row > div:nth-child(odd) {
+    border-left: 0;
+    padding-left: 0;
+  }
+  .stats-row > div:nth-child(n + 3) {
+    border-top: 1px solid var(--rule);
   }
 }
 
@@ -70,7 +140,7 @@
   margin-top: 16px;
   padding: 44px 20px;
   text-align: center;
-  border: 1px dashed var(--rule-strong);
+  border: 1px dotted var(--rule-strong);
   border-radius: var(--radius);
   color: var(--ink-3);
 }

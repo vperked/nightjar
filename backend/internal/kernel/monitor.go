@@ -22,7 +22,7 @@ import (
 
 	"github.com/shirou/gopsutil/v4/host"
 
-	"servermonitor/internal/logx"
+	"nightjar/internal/logx"
 )
 
 var log = logx.Component("Kernel")
@@ -137,7 +137,7 @@ func bootTime() float64 {
 func New(persistence string, ignoredDevices []string) *Monitor {
 	if persistence == "" {
 		home, _ := os.UserHomeDir()
-		persistence = filepath.Join(home, ".servermonitor_kernel_tracking.json")
+		persistence = filepath.Join(home, ".nightjar_kernel_tracking.json")
 	}
 	m := &Monitor{
 		linux:          runtime.GOOS == "linux",
@@ -289,8 +289,14 @@ func (e journalEntry) message() string {
 	return fmt.Sprint(e.Message)
 }
 
+// isSelf spots the monitor's own lines, under its old names too, so it never reports itself.
 func isSelf(lower string) bool {
-	return strings.Contains(lower, "servermonitor") || strings.Contains(lower, "server monitor") || strings.Contains(lower, "server-monitor")
+	for _, name := range []string{"nightjar", "servermonitor", "server-monitor", "server monitor"} {
+		if strings.Contains(lower, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Monitor) earlyWarnings(sinceMinutes int) []Event {

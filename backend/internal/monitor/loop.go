@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"servermonitor/internal/discord"
+	"nightjar/internal/analytics"
+	"nightjar/internal/discord"
 )
 
 const metricsRetryDelay = 300
@@ -150,7 +151,24 @@ func (l *Loop) Evaluate(s *Snapshot) {
 	if ctx.Notifications != nil {
 		ctx.Notifications.Tick()
 	}
+	ctx.Analytics.Add(analytics.Local, localReading(s))
+	ctx.Analytics.Prune(time.Duration(ctx.Config().HistoryRetentionDays) * 24 * time.Hour)
 	ctx.setLatest(s)
+}
+
+// localReading is this machine's snapshot in analytics' terms; Disk is the fullest partition.
+func localReading(s *Snapshot) analytics.Reading {
+	r := analytics.Reading{Up: true, CPU: &s.CPUPercent, Mem: &s.Memory.Percent, Temp: s.CPUTemp}
+	for _, p := range s.Partitions {
+		if r.Disk == nil || p.Percent > *r.Disk {
+			v := p.Percent
+			r.Disk = &v
+		}
+	}
+	if s.Bandwidth != nil {
+		r.Rx, r.Tx = &s.Bandwidth.RecvPerSec, &s.Bandwidth.SentPerSec
+	}
+	return r
 }
 
 func (l *Loop) reportMetrics(now float64) {

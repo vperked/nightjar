@@ -1,0 +1,868 @@
+/* Docs: a sidebar of guides, the page in a comfortable reading measure, and an outline that follows
+   along. Code sits in dark blocks in both themes; notes, steps and tables each have their own look. */
+
+.docs {
+  display: grid;
+  grid-template-columns: 236px minmax(0, 720px) 196px;
+  justify-content: space-between;
+  gap: 48px;
+  align-items: start;
+  padding-top: 36px;
+}
+.docs.is-home .docs-main {
+  grid-column: 2 / -1;
+  max-width: none;
+}
+.docs-side,
+.docs-outline {
+  position: sticky;
+  top: 88px;
+  max-height: calc(100vh - 112px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+/* ---------- search ---------- */
+
+.docs-search {
+  position: relative;
+  display: block;
+  margin-bottom: 22px;
+}
+.docs-search svg {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  width: 16px;
+  height: 16px;
+  transform: translateY(-50%);
+  fill: none;
+  stroke: var(--ink-3);
+  stroke-width: 2;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+.docs-search input {
+  width: 100%;
+  height: 38px;
+  padding: 0 12px 0 36px;
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font-size: 13.5px;
+  outline: none;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+.docs-search input:focus {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.docs-search.big {
+  max-width: 560px;
+  margin: 26px 0 0;
+}
+.docs-search.big input {
+  height: 52px;
+  padding-left: 46px;
+  border-radius: var(--radius);
+  font-size: 15.5px;
+}
+.docs-search.big svg {
+  left: 17px;
+  width: 19px;
+  height: 19px;
+}
+
+/* ---------- sidebar and outline ---------- */
+
+.docs-menu-toggle {
+  display: none;
+}
+.docs-icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.docs-nav {
+  display: grid;
+  gap: 18px;
+  padding-bottom: 24px;
+}
+.docs-nav-group {
+  display: grid;
+  gap: 1px;
+}
+.docs-nav-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 10px 6px;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 620;
+  letter-spacing: 0.01em;
+}
+.docs-nav-label .docs-icon {
+  color: var(--accent);
+}
+.docs-nav a {
+  position: relative;
+  display: block;
+  padding: 5px 10px 5px 33px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-3);
+  font-size: 13.5px;
+  line-height: 1.45;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.docs-nav a:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+.docs-nav a.active {
+  color: var(--ink);
+  font-weight: 560;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.docs-nav a.active::before {
+  content: '';
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 17px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.docs-nav .docs-nav-home {
+  padding-left: 10px;
+  color: var(--ink-2);
+  font-weight: 560;
+}
+.docs-nav .docs-nav-home.active::before {
+  display: none;
+}
+.docs-outline {
+  display: grid;
+  gap: 2px;
+  padding-left: 2px;
+}
+.docs-outline .docs-nav-label {
+  margin: 0 0 8px 12px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.docs-outline a {
+  padding: 4px 12px;
+  border-left: 2px solid var(--rule);
+  color: var(--ink-3);
+  font-size: 12.5px;
+  line-height: 1.45;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+.docs-outline a:hover {
+  color: var(--ink);
+}
+.docs-outline a.active {
+  border-left-color: var(--accent);
+  color: var(--ink);
+  font-weight: 540;
+}
+
+/* ---------- a page ---------- */
+
+.docs-main {
+  min-width: 0;
+  padding-bottom: 56px;
+}
+.docs-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+.docs-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 620;
+}
+.docs-meta > span + span::before {
+  content: '·';
+  margin-right: 14px;
+  color: var(--rule-strong);
+}
+.doc-body {
+  color: color-mix(in srgb, var(--ink) 88%, var(--ink-2));
+  font-size: 16px;
+  line-height: 1.75;
+}
+.doc-body h1 {
+  margin: 0 0 14px;
+  color: var(--ink);
+  font-size: 36px;
+  font-weight: 680;
+  letter-spacing: -0.032em;
+  line-height: 1.12;
+}
+.doc-lead {
+  margin: 0 0 30px !important;
+  color: var(--ink-2);
+  font-size: 18.5px;
+  line-height: 1.6;
+}
+.doc-body h2 {
+  margin: 52px 0 12px;
+  color: var(--ink);
+  font-size: 23px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+.doc-body h3 {
+  margin: 34px 0 8px;
+  color: var(--ink);
+  font-size: 17.5px;
+  font-weight: 640;
+  letter-spacing: -0.01em;
+}
+.doc-body h2,
+.doc-body h3 {
+  scroll-margin-top: 96px;
+}
+.doc-anchor {
+  margin-left: 10px;
+  color: var(--ink-3);
+  font-weight: 400;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.doc-body h2:hover .doc-anchor,
+.doc-body h3:hover .doc-anchor,
+.doc-anchor:focus-visible {
+  opacity: 1;
+}
+.doc-body p {
+  margin: 0 0 18px;
+}
+.doc-body strong {
+  color: var(--ink);
+  font-weight: 620;
+}
+.doc-body a {
+  color: var(--accent);
+  font-weight: 520;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.15s;
+}
+.doc-body a:hover {
+  text-decoration-color: currentColor;
+}
+.doc-body h2 a.doc-anchor,
+.doc-body h3 a.doc-anchor {
+  text-decoration: none;
+}
+
+/* Lists: small accent dots; numbered steps get circles. */
+.doc-body ul {
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+}
+.doc-body ul > li {
+  position: relative;
+  margin: 7px 0;
+  padding-left: 22px;
+}
+.doc-body ul > li::before {
+  content: '';
+  position: absolute;
+  top: 0.72em;
+  left: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.doc-steps {
+  margin: 4px 0 24px;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+.doc-steps > li {
+  position: relative;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 0 18px 44px;
+  counter-increment: step;
+}
+.doc-steps > li::before {
+  content: counter(step);
+  position: absolute;
+  top: 0.1em;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1;
+}
+/* A thread joins the steps. */
+.doc-steps > li:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: calc(0.1em + 31px);
+  bottom: 4px;
+  left: 13px;
+  width: 1px;
+  background: var(--rule);
+}
+.doc-body li > p:last-child {
+  margin-bottom: 6px;
+}
+.doc-steps li .doc-code {
+  margin: 10px 0 4px;
+}
+
+/* Inline code and keys */
+.doc-body code {
+  padding: 0.12em 0.42em;
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.84em;
+  overflow-wrap: anywhere;
+}
+.doc-body kbd {
+  display: inline-block;
+  min-width: 1.7em;
+  padding: 0.05em 0.45em;
+  border: 1px solid var(--rule-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.78em;
+  line-height: 1.6;
+  text-align: center;
+}
+
+/* ---------- code blocks: dark in both themes ---------- */
+
+.doc-code {
+  --code-bg: #0a0a0a;
+  margin: 6px 0 24px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius);
+  background: var(--code-bg);
+  box-shadow: 0 12px 30px -18px rgba(2, 6, 20, 0.6);
+}
+:root[data-theme='light'] .doc-code {
+  --code-bg: #111111;
+  border-color: #111111;
+}
+.doc-code figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 8px 7px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.025);
+}
+.doc-code-lang {
+  color: #8c8c8c;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.doc-code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: #a3a3a3;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+.doc-code-copy:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
+}
+.doc-code-copy.done {
+  color: #6ee7a8;
+}
+.doc-code-copy svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.doc-code pre {
+  margin: 0;
+  padding: 14px 18px 16px;
+  overflow-x: auto;
+  color: #e5e5e5;
+  font-size: 13.5px;
+  line-height: 1.7;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+}
+.doc-code pre code {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+  overflow-wrap: normal;
+  white-space: pre;
+}
+/* Shades, not colours: the command bright and bold, flags and comments quieter. */
+.tok-cmd {
+  color: #ffffff;
+  font-weight: 650;
+}
+.tok-flag {
+  color: #a3a3a3;
+}
+.tok-string {
+  color: #d4d4d4;
+  font-style: italic;
+}
+.tok-var {
+  color: #ffffff;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 255, 255, 0.3);
+  text-underline-offset: 3px;
+}
+.tok-comment {
+  color: #8f8f8f;
+  font-style: italic;
+}
+
+/* ---------- tables ---------- */
+
+.doc-table {
+  margin: 6px 0 26px;
+  overflow-x: auto;
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.doc-table .table {
+  width: 100%;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+}
+.doc-table th {
+  padding: 10px 16px;
+  background: var(--surface-2);
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 620;
+  letter-spacing: 0.03em;
+  text-align: left;
+  text-transform: uppercase;
+}
+.doc-table td {
+  padding: 11px 16px;
+  vertical-align: top;
+  border-top: 1px solid var(--rule);
+}
+/* Code in a table stays whole; on a narrow screen the table scrolls inside its panel instead. */
+.doc-table code {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+/* The shared table trims its last row and outer edges; inside a panel they need their padding. */
+.doc-table tr:last-child td {
+  padding-bottom: 12px;
+}
+.doc-table th:last-child,
+.doc-table td:last-child {
+  padding-right: 16px;
+}
+.doc-table td:first-child {
+  color: var(--ink);
+  font-weight: 560;
+}
+/* On a phone the last column, usually a sentence, keeps room to read, and the table scrolls instead. */
+@media (max-width: 640px) {
+  .doc-table td:last-child {
+    min-width: 24ch;
+  }
+}
+
+/* ---------- notes ---------- */
+
+.doc-note {
+  --tone: var(--accent);
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 12px;
+  margin: 6px 0 24px;
+  padding: 14px 18px;
+  border: 1px solid color-mix(in srgb, var(--tone) 26%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--tone) 8%, var(--surface));
+  font-size: 15px;
+}
+.doc-note.tip {
+  --tone: var(--good);
+}
+.doc-note.warning {
+  --tone: var(--warn);
+}
+.doc-note > svg {
+  width: 20px;
+  height: 20px;
+  margin-top: 3px;
+  fill: none;
+  stroke: var(--tone);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.doc-note-label {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--tone) !important;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.doc-note p:last-child {
+  margin-bottom: 0;
+}
+
+/* ---------- previous and next ---------- */
+
+.docs-pager {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 56px;
+  padding-top: 28px;
+  border-top: 1px solid var(--rule);
+}
+.docs-pager a {
+  display: grid;
+  gap: 3px;
+  padding: 14px 18px;
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font-weight: 620;
+  transition:
+    border-color 0.15s,
+    transform 0.15s;
+}
+.docs-pager a:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  transform: translateY(-1px);
+}
+.docs-pager span {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  font-weight: 450;
+}
+.docs-pager-next {
+  grid-column: 2;
+  text-align: right;
+}
+
+/* ---------- home ---------- */
+
+.docs-hero {
+  padding: 18px 0 8px;
+}
+.docs-hero h1 {
+  max-width: 18ch;
+  margin: 10px 0 14px;
+  font-size: 44px;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.08;
+}
+.docs-hero .doc-lead {
+  max-width: 56ch;
+  margin: 0 !important;
+}
+.docs-start {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 40px 0 8px;
+}
+.docs-start-card,
+.docs-card {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding: 18px 20px;
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  background: var(--sheen), var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  transition:
+    border-color 0.18s,
+    transform 0.18s,
+    box-shadow 0.18s;
+}
+.docs-start-card:hover,
+.docs-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow:
+    var(--shadow),
+    0 10px 30px -14px color-mix(in srgb, var(--accent) 55%, transparent);
+  transform: translateY(-2px);
+}
+.docs-start-card {
+  background: radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%), var(--surface);
+}
+.docs-start-n {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-bottom: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+.docs-start-card strong,
+.docs-card strong {
+  font-size: 15px;
+  font-weight: 640;
+}
+.docs-start-card > span:last-child,
+.docs-card > span {
+  color: var(--ink-3);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.docs-home-group {
+  margin-top: 40px;
+}
+.docs-home-group h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 14px;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.docs-home-group h2 .docs-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+}
+.docs-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+/* ---------- search results ---------- */
+
+.docs-results h1 {
+  margin: 2px 0 4px;
+  font-size: 32px;
+  font-weight: 680;
+  letter-spacing: -0.03em;
+}
+.docs-results ul {
+  display: grid;
+  gap: 8px;
+  margin: 22px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.docs-results a {
+  display: grid;
+  gap: 3px;
+  padding: 14px 16px;
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  transition: border-color 0.15s;
+}
+.docs-results a:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.docs-result-where {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 560;
+}
+.docs-result-text {
+  color: var(--ink-2);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.docs-results mark {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  color: var(--ink);
+}
+
+.auth-help {
+  justify-self: center;
+  margin-top: 6px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+/* A first-time visitor's pointer to the docs, set off from the form under a rule. */
+.auth-note {
+  margin: 6px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: center;
+}
+.auth-note a {
+  color: var(--ink);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--rule-strong);
+}
+.auth-note a:hover {
+  text-decoration-color: currentColor;
+}
+
+/* ---------- narrower screens ---------- */
+
+@media (max-width: 1240px) {
+  .docs {
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 40px;
+  }
+  .docs.is-home .docs-main {
+    grid-column: 2;
+  }
+  .docs-outline {
+    display: none;
+  }
+  .docs-main {
+    max-width: 760px;
+  }
+}
+@media (max-width: 860px) {
+  .docs-start {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 760px) {
+  .docs {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+    padding-top: 20px;
+  }
+  .docs.is-home .docs-main {
+    grid-column: 1;
+  }
+  .docs-side {
+    position: static;
+    max-height: none;
+  }
+  .docs-search {
+    margin-bottom: 10px;
+  }
+  .docs-menu-toggle {
+    display: block;
+    width: 100%;
+    text-align: left;
+  }
+  .docs-side .docs-nav {
+    display: none;
+    margin-top: 14px;
+  }
+  .docs-side.open .docs-nav {
+    display: grid;
+  }
+  .doc-body {
+    font-size: 15.5px;
+  }
+  .doc-body h1 {
+    font-size: 29px;
+  }
+  .doc-lead {
+    font-size: 17px;
+  }
+  .docs-hero h1 {
+    font-size: 32px;
+  }
+  .docs-pager {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .docs-pager-next {
+    grid-column: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .docs-start-card,
+  .docs-card,
+  .docs-pager a {
+    transition: none;
+  }
+  .docs-start-card:hover,
+  .docs-card:hover,
+  .docs-pager a:hover {
+    transform: none;
+  }
+}

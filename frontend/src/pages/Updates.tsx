@@ -59,7 +59,7 @@ function Switch({ on, label, disabled, onChange }: { on: boolean; label: string;
     <label className={`switch ${disabled ? 'disabled' : ''}`} title={label}>
       <input type="checkbox" role="switch" aria-label={label} checked={on} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       <span className="switch-track" aria-hidden="true" />
-      <span className="switch-text">auto</span>
+      <span className="switch-text">Auto</span>
     </label>
   );
 }
@@ -135,24 +135,24 @@ function Details({ t, data, onEdit, now }: { t: UpdateTarget; data: UpdatesRespo
       )}
       <div className="upd-actions">
         <button className="btn-quiet" disabled={!!t.busy} onClick={() => act(() => api.checkUpdates(t.id), 'Could not check')}>
-          check now
+          Check now
         </button>
         <button className="btn-quiet" onClick={onEdit}>
-          edit
+          Edit
         </button>
         {confirmDelete ? (
           <span className="confirm">
             stop tracking {t.name}?{' '}
             <button className="btn-quiet danger" onClick={() => act(() => api.deleteUpdate(t.id), 'Could not remove it')}>
-              remove
+              Remove
             </button>{' '}
             <button className="btn-quiet" onClick={() => setConfirmDelete(false)}>
-              keep
+              Keep
             </button>
           </span>
         ) : (
           <button className="btn-quiet" onClick={() => setConfirmDelete(true)}>
-            remove
+            Remove
           </button>
         )}
       </div>
@@ -278,33 +278,33 @@ export function UpdatesPage() {
               value: f,
               label: (
                 <>
-                  {f}
+                  {f[0].toUpperCase() + f.slice(1)}
                   <span className="n">{counts[f]}</span>
                 </>
               ),
             }))}
           />
           <button className="btn-quiet" onClick={detect}>
-            detect apps
+            Detect apps
           </button>
           <button className="btn-quiet" onClick={() => setEditing('new')}>
-            add
+            Add
           </button>
           {ready.length > 1 &&
             (confirmAll ? (
               <span className="confirm">
-                update {ready.length}
+                Update {ready.length}
                 {ready.some((t) => t.self) ? ' (the monitor restarts last)' : ''}?{' '}
                 <button className="btn-quiet" onClick={updateAll}>
-                  yes, update all
+                  Yes, update all
                 </button>
                 <button className="btn-quiet" onClick={() => setConfirmAll(false)}>
-                  cancel
+                  Cancel
                 </button>
               </span>
             ) : (
               <button className="btn-quiet" onClick={() => setConfirmAll(true)}>
-                update all ({ready.length})
+                Update all ({ready.length})
               </button>
             ))}
           <button className="btn" onClick={checkAll} disabled={!data || data.checking}>

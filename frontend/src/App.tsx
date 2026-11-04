@@ -19,21 +19,32 @@ import { DemoBanner } from './components/ui';
 import { formatAgo } from './format';
 import { useNow } from './hooks/useNow';
 import { Overview } from './pages/Overview';
+import { revealTheme, useEdgeLight, useTitleDecode } from './motion';
+import { startingTheme, type Theme } from './theme';
+import { chartsOf, useAppearance } from './appearance';
 
 // Pages other than the overview load on demand, then all of them once the browser is idle, so the
 // first visit only waits for the overview and later tab switches are instant.
 const pages = {
+  analytics: () => import('./pages/Analytics'),
+  docs: () => import('./pages/Docs'),
   apps: () => import('./pages/Apps'),
   plex: () => import('./pages/Plex'),
   logs: () => import('./pages/Logs'),
   network: () => import('./pages/Network'),
   notifications: () => import('./pages/Notifications'),
   qbittorrent: () => import('./pages/QBittorrent'),
+  servers: () => import('./pages/Servers'),
   detail: () => import('./pages/ServiceDetail'),
   services: () => import('./pages/Services'),
   settings: () => import('./pages/Settings'),
   setup: () => import('./pages/Setup'),
   statusDesign: () => import('./pages/StatusDesigner'),
+  plugins: () => import('./pages/Plugins'),
+  incidents: () => import('./pages/Incidents'),
+  maintenance: () => import('./pages/Maintenance'),
+  report: () => import('./pages/WeeklyReport'),
+  cleanup: () => import('./pages/Cleanup'),
   status: () => import('./pages/StatusPage'),
   system: () => import('./pages/SystemServices'),
   updates: () => import('./pages/Updates'),
@@ -44,12 +55,21 @@ const AppsPage = lazy(() => pages.apps().then((m) => ({ default: m.AppsPage })))
 const LogsPage = lazy(() => pages.logs().then((m) => ({ default: m.LogsPage })));
 const NotificationsPage = lazy(() => pages.notifications().then((m) => ({ default: m.NotificationsPage })));
 const QBittorrentPage = lazy(() => pages.qbittorrent().then((m) => ({ default: m.QBittorrentPage })));
+const DocsPage = lazy(() => pages.docs().then((m) => ({ default: m.DocsPage })));
+const AnalyticsPage = lazy(() => pages.analytics().then((m) => ({ default: m.AnalyticsPage })));
+const ServersPage = lazy(() => pages.servers().then((m) => ({ default: m.ServersPage })));
+const ServerDetail = lazy(() => pages.servers().then((m) => ({ default: m.ServerDetail })));
 const ServiceDetail = lazy(() => pages.detail().then((m) => ({ default: m.ServiceDetail })));
 const ServicesPage = lazy(() => pages.services().then((m) => ({ default: m.ServicesPage })));
 const SettingsPage = lazy(() => pages.settings().then((m) => ({ default: m.SettingsPage })));
 const SetupPage = lazy(() => pages.setup().then((m) => ({ default: m.SetupPage })));
 const StatusDesignerPage = lazy(() => pages.statusDesign().then((m) => ({ default: m.StatusDesignerPage })));
 const StatusPage = lazy(() => pages.status().then((m) => ({ default: m.StatusPage })));
+const IncidentsPage = lazy(() => pages.incidents().then((m) => ({ default: m.IncidentsPage })));
+const MaintenancePage = lazy(() => pages.maintenance().then((m) => ({ default: m.MaintenancePage })));
+const CleanupPage = lazy(() => pages.cleanup().then((m) => ({ default: m.CleanupPage })));
+const WeeklyReportPage = lazy(() => pages.report().then((m) => ({ default: m.WeeklyReportPage })));
+const PluginsPage = lazy(() => pages.plugins().then((m) => ({ default: m.PluginsPage })));
 const SystemServicesPage = lazy(() => pages.system().then((m) => ({ default: m.SystemServicesPage })));
 const UpdatesPage = lazy(() => pages.updates().then((m) => ({ default: m.UpdatesPage })));
 
@@ -72,37 +92,29 @@ const Loading = () => (
   </main>
 );
 
-type Theme = 'light' | 'dark';
-
 function useTheme(): [Theme, () => void] {
-  const [theme, setTheme] = useState<Theme>(() => {
-    try {
-      const saved = localStorage.getItem('servermonitor.theme');
-      if (saved === 'light' || saved === 'dark') return saved;
-    } catch {
-      /* storage unavailable */
-    }
-    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  });
+  const [theme, setTheme] = useState<Theme>(startingTheme);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    try {
-      localStorage.setItem('servermonitor.theme', theme);
-    } catch {
-      /* storage unavailable */
-    }
   }, [theme]);
-  // Switching cross-fades the whole page where the browser can (View Transitions), instantly elsewhere.
+  // Switching reveals the new theme where the browser can (View Transitions), instantly elsewhere.
   const toggle = useCallback(() => {
     const next: Theme = theme === 'dark' ? 'light' : 'dark';
     const apply = () => {
       document.documentElement.dataset.theme = next;
       flushSync(() => setTheme(next));
     };
+    // Only a choice made here is remembered; until then the starting theme applies.
+    try {
+      localStorage.setItem('nightjar.theme', next);
+    } catch {
+      /* storage unavailable */
+    }
     const doc = document as Document & {
-      startViewTransition?: (cb: () => void) => unknown;
+      startViewTransition?: (cb: () => void) => { ready?: Promise<unknown> } | undefined;
     };
-    if (doc.startViewTransition && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) doc.startViewTransition(apply);
+    // The new theme spreads in a circle from where it was asked for.
+    if (doc.startViewTransition && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) revealTheme(doc.startViewTransition(apply)?.ready);
     else apply();
   }, [theme]);
   return [theme, toggle];
@@ -159,6 +171,17 @@ const TABS: { to: string; label: string; end?: boolean; also?: string[]; media?:
     Icon: icon('M3 12h4l3-8 4 16 3-8h4'),
   },
   {
+    to: '/incidents',
+    label: 'Incidents',
+    Icon: icon('M12 3l9.5 16.5h-19zM12 10v4M12 17h.01'),
+  },
+  {
+    to: '/servers',
+    label: 'Servers',
+    section: 'servers',
+    Icon: icon('M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01'),
+  },
+  {
     to: '/network',
     label: 'Network',
     section: 'network',
@@ -169,7 +192,7 @@ const TABS: { to: string; label: string; end?: boolean; also?: string[]; media?:
     label: 'Media',
     media: true,
     section: 'media',
-    also: ['/qbittorrent'],
+    also: ['/qbittorrent', '/plex/cleanup'],
     Icon: icon('M4 6h16v12H4zM10 9.5v5l4-2.5z'),
   },
   { to: '/apps', label: 'Apps', badge: true, section: 'apps', also: ['/updates'], Icon: icon('M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 17h6M17 14v6') },
@@ -189,14 +212,20 @@ function Brand({ enabled }: { enabled: boolean }) {
   const health = !enabled ? '' : down ? 'bad' : 'good';
   return (
     <>
-      <Link to="/" className="wordmark" aria-label={enabled ? `servermonitor: ${down ? `${down} down` : 'all good'}` : 'servermonitor'}>
+      <Link to="/" className="wordmark" aria-label={enabled ? `nightjar: ${down ? `${down} down` : 'all good'}` : 'nightjar'}>
         <span className={`brand-mark ${health}`} aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M3 12.5h3.5l2.5-6 4 12 3-8 1.5 2H21" />
+          {/* A shooting star crosses the tile on hover; it has its own clipped sky so the health dot can sit outside. */}
+          <span className="brand-sky">
+            <span className="brand-star" />
+          </span>
+          {/* Nightjar's mark: a crescent moon and the star it keeps watch by. */}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M19.6 14.4A8.2 8.2 0 1 1 9.6 4.4a6.5 6.5 0 0 0 10 10z" />
+            <circle cx="17.2" cy="5.6" r="1.35" fill="currentColor" stroke="none" />
           </svg>
         </span>
         <span>
-          server<span className="wordmark-dim">monitor</span>
+          night<span className="wordmark-dim">jar</span>
         </span>
       </Link>
       <HealthInTab down={down} />
@@ -219,7 +248,7 @@ function UpdatesBadge() {
 function SetupBanner() {
   const [hidden, setHidden] = useState(() => {
     try {
-      return localStorage.getItem('servermonitor.setup.dismissed') === '1';
+      return localStorage.getItem('nightjar.setup.dismissed') === '1';
     } catch {
       return false;
     }
@@ -228,7 +257,7 @@ function SetupBanner() {
   const dismiss = () => {
     setHidden(true);
     try {
-      localStorage.setItem('servermonitor.setup.dismissed', '1');
+      localStorage.setItem('nightjar.setup.dismissed', '1');
     } catch {
       /* storage unavailable */
     }
@@ -257,10 +286,27 @@ function Freshness({ version }: { version?: string }) {
   }, [data, error]);
   return (
     <footer className="footer">
-      <span>server monitor {version ?? ''}</span>
+      <span>Nightjar {version ?? ''}</span>
       <span className="num">{error ? 'connection lost, retrying' : lastOk ? `updated ${formatAgo(lastOk, now)}` : ''}</span>
     </footer>
   );
+}
+
+// ApplyAppearance puts the look on the page: the style, charts and density as attributes the
+// stylesheets key on, and the owner's CSS in a style element after every other stylesheet.
+function ApplyAppearance() {
+  const a = useAppearance();
+  const charts = chartsOf(a);
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    Object.assign(root.dataset, { style: a.style, charts, density: a.density });
+    return () => {
+      delete root.dataset.style;
+      delete root.dataset.charts;
+      delete root.dataset.density;
+    };
+  }, [a.style, charts, a.density]);
+  return a.css ? <style data-custom-css="">{a.css}</style> : null;
 }
 
 function Shell() {
@@ -271,6 +317,8 @@ function Shell() {
   const [configKey, setConfigKey] = useState(0);
   const location = useLocation();
   const navRef = useNavIndicator([location.pathname, signedOut, config]);
+  useEdgeLight();
+  useTitleDecode(location.pathname);
 
   useEffect(() => {
     api
@@ -317,9 +365,20 @@ function Shell() {
   const section = (id: SectionID, el: JSX.Element) => gated(shown(id) ? el : <SectionOff id={id} />);
   return (
     <ConfigContext.Provider value={config}>
+      <ApplyAppearance />
       <ServicesProvider enabled={!signedOut} key={authKey}>
         <UpdatesProvider enabled={!signedOut}>
           <NotificationsProvider enabled={!signedOut}>
+            <a
+              className="skip-link"
+              href="#content"
+              onClick={(e) => {
+                e.preventDefault();
+                document.getElementById('content')?.focus();
+              }}
+            >
+              Skip to content
+            </a>
             <header className="masthead">
               <div className="masthead-inner">
                 <Brand enabled={!signedOut} />
@@ -354,7 +413,7 @@ function Shell() {
                   {!signedOut && (
                     <NavLink
                       to="/settings"
-                      className={({ isActive }) => `icon-btn${isActive || location.pathname === '/setup' || location.pathname === '/status-page' ? ' active' : ''}`}
+                      className={({ isActive }) => `icon-btn${isActive || location.pathname === '/setup' || location.pathname === '/status-page' || location.pathname === '/plugins' ? ' active' : ''}`}
                       aria-label="Settings"
                       title="Settings"
                     >
@@ -368,24 +427,35 @@ function Shell() {
             {!signedOut && <Finder onToggleTheme={toggleTheme} />}
             <DemoBanner />
             {!signedOut && config?.needs_setup && location.pathname === '/' && <SetupBanner />}
-            <div className="app">
+            <div className="app" id="content" tabIndex={-1}>
               <Suspense fallback={<Loading />}>
                 {/* Keyed by page, so each page arrives with a short entrance. */}
                 <div className="page" key={location.pathname}>
                   <Routes>
                     <Route path="/services" element={gated(<ServicesPage />)} />
+                    <Route path="/incidents" element={gated(<IncidentsPage />)} />
+                    <Route path="/incidents/maintenance" element={gated(<MaintenancePage />)} />
+                    <Route path="/incidents/report" element={gated(<WeeklyReportPage />)} />
                     <Route path="/system" element={gated(<SystemServicesPage />)} />
                     <Route path="/plex" element={section('media', <PlexPage />)} />
+                    <Route path="/plex/cleanup" element={section('media', <CleanupPage />)} />
                     <Route path="/network" element={section('network', <NetworkPage />)} />
+                    <Route path="/servers" element={section('servers', <ServersPage />)} />
+                    <Route path="/servers/analytics" element={section('servers', <AnalyticsPage />)} />
+                    <Route path="/servers/:id" element={section('servers', <ServerDetail />)} />
                     <Route path="/qbittorrent" element={section('media', <QBittorrentPage />)} />
                     <Route path="/updates" element={section('apps', <UpdatesPage />)} />
                     <Route path="/apps" element={section('apps', <AppsPage />)} />
                     <Route path="/logs" element={gated(<LogsPage />)} />
+                    {/* The docs hold nothing private, so they open before signing in too: they explain how to. */}
+                    <Route path="/docs" element={<DocsPage />} />
+                    <Route path="/docs/:slug" element={<DocsPage />} />
                     <Route path="/notifications" element={gated(<NotificationsPage />)} />
                     <Route path="/notifications/rules" element={gated(<NotificationsPage />)} />
                     <Route path="/settings" element={gated(<SettingsPage />)} />
                     <Route path="/setup" element={gated(<SetupPage />)} />
                     <Route path="/status-page" element={gated(<StatusDesignerPage />)} />
+                    <Route path="/plugins" element={gated(<PluginsPage />)} />
                     <Route path="/services/:name" element={gated(<ServiceDetail />)} />
                     <Route path="*" element={gated(<Overview />)} />
                   </Routes>

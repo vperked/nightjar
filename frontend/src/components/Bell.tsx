@@ -37,11 +37,14 @@ function NotificationLine({ n, now, onOpen }: { n: Notification; now: number; on
       <button type="button" className={`bell-item ${n.read ? '' : 'unread'}`} onClick={onOpen}>
         <SeverityIcon severity={n.severity} />
         <span className="min0">
-          <span className="bell-title truncate">{n.title}</span>
+          <span className="bell-top">
+            <span className="bell-title truncate">{n.title}</span>
+            <span className="bell-time">{formatAgo(n.ts, now)}</span>
+          </span>
           {n.body && <span className="bell-body">{plain(n.body)}</span>}
           <span className="bell-meta">
-            {AREA_SHORT[n.area] ?? n.area} · {formatAgo(n.ts, now)}
-            {n.status !== 'sent' && <> · {delivery(n)}</>}
+            <span className="area-chip">{AREA_SHORT[n.area] ?? n.area}</span>
+            {n.status !== 'sent' && <span className={`bell-delivery truncate ${n.status}`}>{delivery(n)}</span>}
           </span>
         </span>
       </button>
@@ -127,10 +130,13 @@ export function Bell() {
       {open && (
         <div className="bell-panel" role="dialog" aria-label="Latest notifications">
           <div className="bell-head">
-            <strong>Notifications</strong>
+            <strong>
+              Notifications
+              {unread > 0 && <span className="bell-count">{unread > 99 ? '99+' : unread} new</span>}
+            </strong>
             {unread > 0 && (
               <button type="button" className="btn-quiet" onClick={readAll}>
-                mark all read
+                Mark all read
               </button>
             )}
           </div>

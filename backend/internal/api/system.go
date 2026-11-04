@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"servermonitor/internal/units"
+	"nightjar/internal/units"
 )
 
 // systemd services and drive health.
@@ -32,12 +32,13 @@ func (s *Server) unitLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	out, err := s.ctx.Units.Logs(ctx, r.PathValue("name"), lines)
+	name := r.PathValue("name")
+	out, err := s.ctx.Units.Logs(ctx, name, lines)
 	if err != nil {
 		writeJSON(w, unitErrorStatus(err), errBody(err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"lines": out})
+	writeJSON(w, http.StatusOK, map[string]any{"lines": out, "findings": s.ctx.Units.Diagnose(name, out)})
 }
 
 // controlUnit starts, stops or restarts a service the monitor knows. Stopping the monitor itself
@@ -71,7 +72,7 @@ func unitErrorStatus(err error) int {
 	if errors.Is(err, units.ErrUnknown) {
 		return http.StatusNotFound
 	}
-	return http.StatusBadGateway
+	return statusRefused
 }
 
 func (s *Server) drives(w http.ResponseWriter, r *http.Request) {

@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"servermonitor/internal/logx"
+	"nightjar/internal/logx"
 )
 
 var log = logx.Component("Apps")
@@ -449,7 +449,7 @@ func safeVersion(match []string) string {
 // when the monitor's own service is locked down, and outside the monitor's process tree. Without
 // systemd it runs bash directly.
 func runScript(ctx context.Context, dir, name, script string, line func(string)) error {
-	f, err := os.CreateTemp(dir, "servermonitor-"+name+"-*.sh")
+	f, err := os.CreateTemp(dir, "nightjar-"+name+"-*.sh")
 	if err != nil {
 		return err
 	}
@@ -461,10 +461,10 @@ func runScript(ctx context.Context, dir, name, script string, line func(string))
 	f.Close()
 
 	var cmd *exec.Cmd
-	if _, err := exec.LookPath("systemd-run"); err == nil && os.Getenv("SERVERMONITOR_APPS_NO_SYSTEMD") == "" {
+	if _, err := exec.LookPath("systemd-run"); err == nil && os.Getenv("NIGHTJAR_APPS_NO_SYSTEMD") == "" {
 		cmd = exec.CommandContext(ctx, "systemd-run", "--quiet", "--collect", "--wait", "--pipe",
-			"--unit=servermonitor-app-"+name+"-"+strconv.FormatInt(time.Now().Unix(), 10),
-			"--description=Server monitor app store: "+name, "/bin/bash", f.Name())
+			"--unit=nightjar-app-"+name+"-"+strconv.FormatInt(time.Now().Unix(), 10),
+			"--description=Nightjar app store: "+name, "/bin/bash", f.Name())
 	} else {
 		cmd = exec.CommandContext(ctx, "/bin/bash", f.Name())
 	}

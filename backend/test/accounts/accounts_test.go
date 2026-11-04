@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"servermonitor/internal/accounts"
-	"servermonitor/internal/storage"
+	"nightjar/internal/accounts"
+	"nightjar/internal/storage"
 )
 
 func TestAdminAccountLifecycle(t *testing.T) {

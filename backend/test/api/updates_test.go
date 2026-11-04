@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/api"
-	"servermonitor/internal/config"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/storage"
-	"servermonitor/internal/updates"
+	"nightjar/internal/api"
+	"nightjar/internal/config"
+	"nightjar/internal/monitor"
+	"nightjar/internal/storage"
+	"nightjar/internal/updates"
 )
 
 // updatesServer is an API whose update manager runs no real commands.

@@ -1,6 +1,8 @@
 package plex
 
 import (
+	"errors"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,7 @@ type Source interface {
 	AvailableUpdate(current string) string
 	Sessions() ([]Stream, error)
 	Libraries() ([]Library, error)
+	Terminate(sessionID, reason string) error
 }
 
 const (
@@ -24,6 +27,7 @@ const (
 	EventDown        = "down"
 	EventUp          = "up"
 	EventStreamStart = "stream_start"
+	EventStreamEnd   = "stream_end"
 
 	infoInterval    = 300.0
 	libraryInterval = 900.0
@@ -44,6 +48,7 @@ type Sample struct {
 // Play is a finished stream, as last seen before it disappeared.
 type Play struct {
 	User     string  `json:"user"`
+	Kind     string  `json:"kind"`
 	Title    string  `json:"title"`
 	Subtitle string  `json:"subtitle"`
 	Player   string  `json:"player"`
@@ -51,6 +56,11 @@ type Play struct {
 	Started  float64 `json:"started"`
 	Ended    float64 `json:"ended"`
 	Progress float64 `json:"progress"`
+	Local    bool    `json:"local"`
+	// DurationMS is the length of what was played.
+	DurationMS int64 `json:"duration_ms"`
+	// Reason is why it was converted, if it was.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Event is a state change the caller may want to notify about.
@@ -59,6 +69,7 @@ type Event struct {
 	Detail   string
 	Downtime float64
 	Stream   Stream
+	Play     Play // a finished stream, with EventStreamEnd
 }
 
 // Snapshot is the monitor's state for the API.
@@ -174,8 +185,10 @@ func (m *Monitor) Poll(now float64) []Event {
 	for id, s := range m.active {
 		if !seen[id] {
 			delete(m.active, id)
-			m.recent = append([]Play{{User: s.User, Title: s.Title, Subtitle: s.Subtitle, Player: s.Player,
-				Decision: s.Decision, Started: s.StartedAt, Ended: now, Progress: s.Progress}}, m.recent...)
+			play := Play{User: s.User, Kind: s.Kind, Title: s.Title, Subtitle: s.Subtitle, Player: s.Player,
+				Decision: s.Decision, Started: s.StartedAt, Ended: now, Progress: s.Progress, Local: s.Local, DurationMS: s.DurationMS, Reason: s.Reason}
+			m.recent = append([]Play{play}, m.recent...)
+			events = append(events, Event{Kind: EventStreamEnd, Play: play})
 		}
 	}
 	if len(m.recent) > maxRecent {
@@ -215,6 +228,34 @@ func (m *Monitor) refreshLibraries() {
 	m.mu.Lock()
 	m.libraries, m.libsAt = libs, float64(time.Now().UnixNano())/1e9
 	m.mu.Unlock()
+}
+
+// Stop ends the stream with the given ID, showing reason on its player. It leaves the list at once;
+// the next poll records it among the finished plays.
+func (m *Monitor) Stop(id, reason string) (Stream, error) {
+	m.mu.RLock()
+	var target Stream
+	found := false
+	for _, s := range m.streams {
+		if s.ID == id {
+			target, found = s, true
+			break
+		}
+	}
+	m.mu.RUnlock()
+	if !found {
+		return Stream{}, ErrNoStream
+	}
+	if target.SessionID == "" {
+		return Stream{}, errors.New("Plex gave this stream no session id, so it cannot be stopped from here")
+	}
+	if err := m.src.Terminate(target.SessionID, reason); err != nil {
+		return Stream{}, err
+	}
+	m.mu.Lock()
+	m.streams = slices.DeleteFunc(m.streams, func(s Stream) bool { return s.ID == id })
+	m.mu.Unlock()
+	return target, nil
 }
 
 // Transcodes is how many active streams are being transcoded.
@@ -293,4 +334,41 @@ func downsample(samples []Sample, n int) []Sample {
 		out[k] = b
 	}
 	return out
+}
+
+// Viewed is one entry of Plex's own watch history: something watched to the end, or marked watched.
+type Viewed struct {
+	At    float64 `json:"at"`
+	User  string  `json:"user"`
+	Kind  string  `json:"kind"` // movie, episode, track
+	Title string  `json:"title"`
+	Show  string  `json:"show,omitempty"` // an episode's show, a track's artist
+}
+
+// historySource is a Plex server that can say what was watched, as the HTTP Client can.
+type historySource interface {
+	History(since float64) ([]Viewed, error)
+}
+
+// History is Plex's own watch history since a time, newest first: what was watched even while
+// Nightjar was not running. It is nil when the source keeps none.
+func (m *Monitor) History(since float64) ([]Viewed, error) {
+	if h, ok := m.src.(historySource); ok {
+		return h.History(since)
+	}
+	return nil, nil
+}
+
+// Active is the streams playing now.
+func (m *Monitor) Active() []Stream {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return slices.Clone(m.streams)
+}
+
+// Libraries is the libraries as last counted.
+func (m *Monitor) Libraries() []Library {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return slices.Clone(m.libraries)
 }

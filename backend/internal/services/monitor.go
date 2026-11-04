@@ -1,9 +1,11 @@
 package services
 
 import (
+	"cmp"
 	"sync"
 
-	"servermonitor/internal/storage"
+	"nightjar/internal/diagnose"
+	"nightjar/internal/storage"
 )
 
 const (
@@ -17,6 +19,8 @@ const (
 	StatusUp      = "up"
 	StatusDown    = "down"
 	StatusPaused  = "paused"
+	// StatusMaintenance is a check resting in planned maintenance; it is only ever shown.
+	StatusMaintenance = "maintenance"
 )
 
 type beat struct {
@@ -46,6 +50,11 @@ type Monitor struct {
 	order  []string
 	states map[string]*State
 	store  *storage.Store
+	// heartbeats are what each heartbeat check has heard, by token.
+	heartbeats map[string]*Pings
+	// Resting, when set, says whether a check is in planned maintenance at now: it does not run,
+	// so it neither alerts nor counts against uptime, and shows as "maintenance".
+	Resting func(name string, now float64) bool
 }
 
 // NewMonitor builds a monitor; with an available store it resumes each service's last
@@ -103,6 +112,20 @@ func (m *Monitor) State(name string) State {
 	return cp
 }
 
+// defaultRetryInterval is how soon a failed check runs again while it is not yet down, unless
+// the check sets its own, so an outage is confirmed after Retries quick re-checks rather than
+// Retries whole intervals.
+const defaultRetryInterval = 20.0
+
+// due reports whether the check should run at now.
+func (st *State) due(now float64) bool {
+	wait := st.Spec.Interval
+	if st.ConsecutiveFailures > 0 && st.Status != StatusDown {
+		wait = min(wait, cmp.Or(st.Spec.RetryInterval, defaultRetryInterval))
+	}
+	return st.runNow || now-st.LastCheck >= wait
+}
+
 // Claim returns the active checks that are due and not already running, and marks them running
 // until their result is recorded, so a slow check is never started twice.
 func (m *Monitor) Claim(now float64) []Spec {
@@ -111,7 +134,7 @@ func (m *Monitor) Claim(now float64) []Spec {
 	var due []Spec
 	for _, name := range m.order {
 		st := m.states[name]
-		if !st.Spec.Paused && !st.running && (st.runNow || now-st.LastCheck >= st.Spec.Interval) {
+		if !st.Spec.Paused && !st.running && st.due(now) && (m.Resting == nil || !m.Resting(name, now)) {
 			st.running = true
 			due = append(due, st.Spec)
 		}
@@ -235,6 +258,15 @@ type Summary struct {
 	Uptime7d   *float64 `json:"uptime_7d"`
 	Uptime30d  *float64 `json:"uptime_30d"`
 	Recent     []Beat   `json:"recent"`
+	// Cause explains a down check's detail in plain words, when it is a known kind of failure.
+	Cause *diagnose.Finding `json:"cause,omitempty"`
+	// A heartbeat's schedule and what it has heard.
+	Schedule string `json:"schedule,omitempty"`
+	Pings    *Pings `json:"pings,omitempty"`
+	// Repair is what Nightjar does when the check goes down.
+	Repair *Repair `json:"repair,omitempty"`
+	// Server is the id of the watched server it runs on, if any.
+	Server string `json:"server,omitempty"`
 }
 
 // Summaries returns every service's status, in configuration order.
@@ -244,12 +276,24 @@ func (m *Monitor) Summaries(now float64) []Summary {
 	rows := make([]Summary, 0, len(m.order))
 	for _, name := range m.order {
 		st := m.states[name]
-		row := Summary{Name: name, Type: st.Spec.Type, Target: st.Spec.Target, Status: st.Status, LastChange: st.LastChange, Recent: []Beat{}}
+		row := Summary{Name: name, Type: st.Spec.Type, Target: st.Spec.Target, Status: st.Status, LastChange: st.LastChange, Recent: []Beat{}, Repair: st.Spec.Repair, Server: st.Spec.Server}
+		if st.Spec.Type == "heartbeat" {
+			row.Schedule = st.Spec.Schedule
+			if p, ok := m.heartbeats[st.Spec.Target]; ok {
+				cp := *p
+				row.Pings = &cp
+			}
+		}
 		if st.Spec.Paused {
 			row.Status = StatusPaused
+		} else if m.Resting != nil && m.Resting(name, now) {
+			row.Status = StatusMaintenance
 		}
 		if st.LastResult != nil {
 			row.LatencyMS, row.Detail = st.LastResult.LatencyMS, st.LastResult.Detail
+			if f, ok := diagnose.Text(row.Detail); ok && !st.LastResult.Up {
+				row.Cause = &f
+			}
 		}
 		if st.LastCheck > 0 {
 			lc := st.LastCheck

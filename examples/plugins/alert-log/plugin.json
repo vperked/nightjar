@@ -1,0 +1,13 @@
+{
+  "id": "alert-log",
+  "name": "Alert log",
+  "version": "1.0.0",
+  "description": "An alert channel that writes every alert as a line of JSON to a file, for scripts to pick up.",
+  "author": "Nightjar examples",
+  "provides": ["notify"],
+  "run": "run.sh",
+  "settings": [
+    { "key": "FILE", "label": "File", "default": "alerts.jsonl", "help": "Relative to the plugin's folder.", "required": true },
+    { "key": "MIN_SEVERITY", "label": "Only from", "type": "select", "options": ["info", "warning", "critical"], "default": "info" }
+  ]
+}

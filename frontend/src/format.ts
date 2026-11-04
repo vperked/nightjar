@@ -68,6 +68,12 @@ export function formatDuration(seconds: number): string {
   return `${s}s`;
 }
 
+// formatResponse is a check's last response time, or for a heartbeat how long its job ran.
+export function formatResponse(s: { type: string; latency_ms: number | null }): string {
+  if (s.latency_ms === null) return '—';
+  return s.type === 'heartbeat' ? formatDuration(s.latency_ms / 1000) : `${Math.round(s.latency_ms)}ms`;
+}
+
 // plural writes a count with its noun: plural(1, 'check') is "1 check", plural(3, 'check') "3 checks".
 export const plural = (n: number, word: string) => `${n} ${noun(n, word)}`;
 

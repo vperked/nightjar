@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/units"
+	"nightjar/internal/units"
 )
 
 // fakeSystemd serves list-units, show and journalctl from a table of services the test edits.
@@ -201,5 +201,35 @@ func TestLogsAndControlOnlyForKnownServices(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(f.calls, "|"), "systemctl restart -- sonarr.service") {
 		t.Fatalf("calls %v", f.calls)
+	}
+}
+
+func TestCauseShowsUntilRecovery(t *testing.T) {
+	f := newFake()
+	m := units.New()
+	m.Run = f.run
+	t0 := time.Unix(1_800_000_000, 0)
+	poll(t, m, t0)
+	f.set("sonarr.service", "failed", "failed", 0, "Result", "exit-code", "ExecMainStatus", "1")
+	poll(t, m, t0.Add(30*time.Second))
+	lines, err := m.Logs(context.Background(), "sonarr.service", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := m.Diagnose("sonarr.service", lines)
+	if len(found) == 0 || found[0].ID != "oom" {
+		t.Fatalf("the journal says out of memory: %+v", found)
+	}
+	m.SetCause("sonarr.service", found[0])
+	if u, _ := m.Get("sonarr.service"); u.Cause == nil || u.Cause.ID != "oom" {
+		t.Fatalf("a failed service carries its cause: %+v", u.Cause)
+	}
+	if u := m.Units()[0]; u.Cause == nil {
+		t.Fatal("the list shows the cause too")
+	}
+	f.set("sonarr.service", "active", "running", 0)
+	poll(t, m, t0.Add(90*time.Second))
+	if u, _ := m.Get("sonarr.service"); u.Cause != nil {
+		t.Fatalf("a running service has no cause: %+v", u.Cause)
 	}
 }

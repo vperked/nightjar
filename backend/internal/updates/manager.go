@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/logx"
-	"servermonitor/internal/storage"
+	"nightjar/internal/discord"
+	"nightjar/internal/logx"
+	"nightjar/internal/storage"
 )
 
 var log = logx.Component("Updates")
@@ -232,6 +232,10 @@ func (m *Manager) add(spec Spec) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, taken := m.targets[spec.ID]; taken {
+		return ErrExists
+	}
+	// The monitor has one checkout: one kept under an older name (servermonitor) is the same one.
+	if spec.Self && slices.ContainsFunc(m.order, func(id string) bool { return m.targets[id].spec.Self }) {
 		return ErrExists
 	}
 	data, _ := json.Marshal(spec)

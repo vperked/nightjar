@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/notify"
+	"nightjar/internal/discord"
+	"nightjar/internal/notify"
 )
 
 var origin = discord.Origin{Host: "nas", DashboardURL: "https://monitor.example.com"}
@@ -86,7 +86,7 @@ func TestSlackAndWebhook(t *testing.T) {
 	ch, _ := notify.NewSlack(slack.URL, origin)
 	send(ch, discord.Warning)
 	att := slack.body["attachments"].([]any)[0].(map[string]any)
-	if att["color"] != "#FAB219" || att["text"] != "Request *failed* with `502`" || att["footer"] != "servermonitor · nas · Uptime" {
+	if att["color"] != "#FAB219" || att["text"] != "Request *failed* with `502`" || att["footer"] != "nas · Uptime" {
 		t.Fatalf("slack attachment %v", att)
 	}
 

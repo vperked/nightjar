@@ -7,10 +7,10 @@ import (
 	"sync"
 	"testing"
 
-	"servermonitor/internal/api"
-	"servermonitor/internal/config"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/qbittorrent"
+	"nightjar/internal/api"
+	"nightjar/internal/config"
+	"nightjar/internal/monitor"
+	"nightjar/internal/qbittorrent"
 )
 
 const hashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

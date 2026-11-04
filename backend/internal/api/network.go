@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/netload"
+	"nightjar/internal/monitor"
+	"nightjar/internal/netload"
 )
 
 // The live network meter.

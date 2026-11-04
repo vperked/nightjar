@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/kernel"
+	"nightjar/internal/discord"
+	"nightjar/internal/kernel"
 )
 
 // kernelChecks runs the stability and crash checks on their own cycle counts.
@@ -80,18 +80,18 @@ func (h *kernelChecks) checkStability(s *Snapshot) {
 	if h.ctx.CrashWebhook == nil {
 		return
 	}
-	fields := []discord.Field{
-		field("Risk Level", level, true), field("Risk Score", fmt.Sprint(st.RiskScore), true),
-		field("Status", "System showing signs of instability - crash risk elevated", false),
-	}
+	fields := []discord.Field{field("Risk", fmt.Sprintf("%s · %d", strings.ToLower(level), st.RiskScore), true)}
 	if len(st.Indicators) > 0 {
-		fields = append(fields, field("Warning Indicators", strings.Join(st.Indicators[:min(8, len(st.Indicators))], "\n"), false))
+		fields = append(fields, field("Signs", strings.Join(st.Indicators[:min(6, len(st.Indicators))], "\n"), false))
 	}
 	if len(st.Recommendations) > 0 {
-		fields = append(fields, field("Recommended Actions", strings.Join(st.Recommendations[:min(5, len(st.Recommendations))], "\n"), false))
+		fields = append(fields, field("What to do", strings.Join(st.Recommendations[:min(4, len(st.Recommendations))], "\n"), false))
 	}
-	title := fmt.Sprintf("Kernel Alert: System Stability Risk (%s)", level)
-	desc := "System showing signs of instability that may lead to kernel crash"
+	title := "The kernel may crash"
+	if st.RiskLevel == "critical" {
+		title = "The kernel is close to crashing"
+	}
+	desc := "The kernel log shows signs of instability."
 	sorted := append([]discord.Field(nil), fields...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name+sorted[i].Value < sorted[j].Name+sorted[j].Value })
 	raw, _ := json.Marshal(map[string]any{"title": title, "description": desc, "fields": sorted})
@@ -172,11 +172,9 @@ func bootTimeString(ts float64) string {
 
 func (h *kernelChecks) alertReboot(r kernel.Reboot) {
 	h.log.Error(fmt.Sprintf("[KERNEL] Unexpected system reboot detected! Previous boot: %s, Current boot: %s", bootTimeString(r.PreviousBootTime), bootTimeString(r.CurrentBootTime)))
-	h.ctx.send(h.ctx.CrashWebhook, discord.Critical, "Kernel Alert: Unexpected System Reboot", "System reboot detected - possible kernel crash or unexpected shutdown", []discord.Field{
-		field("Event Type", "Unexpected System Reboot", false),
-		field("Previous Boot Time", bootTimeString(r.PreviousBootTime), true),
-		field("Current Boot Time", bootTimeString(r.CurrentBootTime), true),
-		field("Status", "System may have crashed or was unexpectedly rebooted", false),
+	h.ctx.send(h.ctx.CrashWebhook, discord.Critical, "The system rebooted unexpectedly", "It may have crashed, or lost power.", []discord.Field{
+		field("Booted before", bootTimeString(r.PreviousBootTime), true),
+		field("Booted now", bootTimeString(r.CurrentBootTime), true),
 	}, "Kernel")
 }
 
@@ -188,27 +186,22 @@ func (h *kernelChecks) alertEarlyWarnings(critical, hardware []kernel.Event, now
 	if h.ctx.CrashWebhook == nil {
 		return
 	}
-	fields := []discord.Field{
-		field("Warning Type", "Early Warning - System may be heading towards crash", false),
-		field("Critical Warnings", fmt.Sprint(len(critical)), true),
-		field("Hardware Errors", fmt.Sprint(len(hardware)), true),
-	}
+	var fields []discord.Field
 	if len(hardware) > 0 {
 		var lines []string
 		for _, e := range hardware[:min(5, len(hardware))] {
 			lines = append(lines, DescribeHardwareError(e))
 		}
-		fields[2] = field(fmt.Sprintf("Hardware Error Details (%d total)", len(hardware)), strings.Join(lines, "\n"), false)
+		fields = append(fields, field(fmt.Sprintf("Hardware errors · %d", len(hardware)), strings.Join(lines, "\n"), false))
 	}
 	if len(critical) > 0 {
 		var lines []string
 		for _, w := range critical[:min(5, len(critical))] {
-			lines = append(lines, fmt.Sprintf("**%s**: %s", w.Keyword, discord.Truncate(w.Message, 150)))
+			lines = append(lines, fmt.Sprintf("**%s** %s", w.Keyword, discord.Truncate(w.Message, 150)))
 		}
-		fields = append(fields, field("Critical Warnings", strings.Join(lines, "\n"), false))
+		fields = append(fields, field(fmt.Sprintf("Warnings · %d", len(critical)), strings.Join(lines, "\n"), false))
 	}
-	fields = append(fields, field("Action Required", "System showing signs of instability. Monitor closely and investigate hardware/system issues.", false))
-	h.ctx.send(h.ctx.CrashWebhook, discord.Warning, "Kernel Alert: Early Warning Signs Detected", "System showing early warning signs that may indicate impending kernel crash", fields, "Kernel Warning")
+	h.ctx.send(h.ctx.CrashWebhook, discord.Warning, "The kernel is warning of trouble", "These can come before a crash. Keep an eye on the machine and check its hardware.", fields, "Kernel Warning")
 }
 
 func (h *kernelChecks) alertCrashes(crashes []kernel.Event) {
@@ -224,15 +217,18 @@ func (h *kernelChecks) alertCrashes(crashes []kernel.Event) {
 		}
 		byType[c.Keyword] = append(byType[c.Keyword], c)
 	}
-	fields := []discord.Field{field("Total Crashes", fmt.Sprint(len(crashes)), true), field("Check Period", fmt.Sprintf("%d minutes", h.ctx.Cfg.KernelCheckSinceMinutes), true)}
 	var details []string
 	for _, kind := range order[:min(5, len(order))] {
 		items := byType[kind]
-		details = append(details, fmt.Sprintf("**%s** (%d occurrence(s)) - Source: %s\n`%s`", kind, len(items), items[0].Source, discord.Truncate(items[0].Message, 200)))
+		details = append(details, fmt.Sprintf("**%s** ×%d · %s\n`%s`", kind, len(items), items[0].Source, discord.Truncate(items[0].Message, 200)))
 	}
-	fields = append(fields, field("Crash Details", strings.Join(details, "\n\n"), false))
 	if len(order) > 5 {
-		fields = append(fields, field("Note", fmt.Sprintf("Showing first 5 of %d crash types. Check logs for full details.", len(order)), false))
+		details = append(details, fmt.Sprintf("and %d more kinds; the kernel log has them all.", len(order)-5))
 	}
-	h.ctx.send(h.ctx.CrashWebhook, discord.Critical, "Kernel Alert: Crash/Panic Detected", "Kernel crashes, panics, or oops detected in system logs", fields, "Kernel")
+	title := "The kernel crashed"
+	if len(crashes) > 1 {
+		title = fmt.Sprintf("The kernel crashed %d times", len(crashes))
+	}
+	h.ctx.send(h.ctx.CrashWebhook, discord.Critical, title, fmt.Sprintf("Seen in the kernel log in the last %d minutes.", h.ctx.Cfg.KernelCheckSinceMinutes),
+		[]discord.Field{field("What happened", strings.Join(details, "\n\n"), false)}, "Kernel")
 }

@@ -1,0 +1,616 @@
+/* Incidents */
+
+.incident {
+  --tone: var(--warn-mark);
+}
+.incident.sev-critical {
+  --tone: var(--crit-mark);
+}
+.inc-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 14px;
+}
+.inc-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.inc-when {
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+/* Open, resolved, or fixed by Nightjar, in mono capitals; open is solid in its severity. */
+.inc-state {
+  align-self: center;
+  padding: 2px 8px;
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.inc-state.open {
+  border-color: var(--tone, var(--crit-mark));
+  background: var(--tone, var(--crit-mark));
+  color: var(--bg);
+  font-weight: 600;
+}
+/* The likely cause is the point of the card: set large, with how sure Nightjar is. */
+.inc-cause {
+  margin-top: 14px;
+  padding-left: 14px;
+  border-left: 2px solid var(--ink);
+}
+.inc-cause.none {
+  border-left-color: var(--rule-strong);
+  color: var(--ink-3);
+  font-size: 13px;
+}
+.inc-cause p {
+  margin: 4px 0 0;
+  font-size: 16px;
+  line-height: 1.45;
+  max-width: 70ch;
+}
+.inc-confidence {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.inc-confidence.possibly {
+  color: var(--ink-3);
+}
+.inc-kind {
+  margin-left: 10px;
+  padding: 1px 6px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+.inc-also {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+.inc-also li {
+  margin-top: 3px;
+}
+.inc-also .inc-kind {
+  margin: 0 6px 0 0;
+}
+.inc-affected {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.inc-hit {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 10px;
+  border: 1px solid var(--rule-strong);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.inc-hit::before {
+  content: '';
+  align-self: center;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--good-mark);
+}
+.inc-hit.down::before {
+  background: var(--crit-mark);
+}
+.inc-hit span {
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+}
+.inc-hit:hover {
+  border-color: var(--ink-3);
+}
+.inc-peaks {
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.inc-toggle {
+  margin-top: 14px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.inc-toggle:hover {
+  color: var(--ink);
+}
+.inc-toggle::before {
+  content: '+ ';
+}
+.inc-toggle[aria-expanded='true']::before {
+  content: '− ';
+}
+.inc-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 24px 40px;
+  margin-top: 14px;
+}
+/* The timeline: time and offset, a mark on a rule down the middle, and what happened. */
+.inc-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.inc-timeline li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 74px 14px minmax(0, 1fr);
+  gap: 0 10px;
+  padding: 0 0 14px;
+  font-size: 13px;
+}
+.inc-timeline li::after {
+  content: '';
+  position: absolute;
+  left: calc(74px + 10px + 6px);
+  top: 14px;
+  bottom: 0;
+  width: 1px;
+  background: var(--rule-strong);
+}
+.inc-timeline li:last-child::after {
+  content: none;
+}
+.inc-at {
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-align: right;
+  line-height: 1.5;
+}
+.inc-at span {
+  display: block;
+  color: var(--ink-3);
+  font-size: 10.5px;
+}
+.inc-mark {
+  margin-top: 4px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--ink-3);
+  background: var(--bg);
+  position: relative;
+  z-index: 1;
+}
+.role-problem .inc-mark {
+  border-color: var(--crit-mark);
+  background: var(--crit-mark);
+}
+.role-problem.sev-warning .inc-mark {
+  border-color: var(--warn-mark);
+  background: var(--warn-mark);
+}
+.role-recovery .inc-mark {
+  border-color: var(--good-mark);
+  background: var(--good-mark);
+}
+/* Nightjar's own repairs are square, in ink. */
+.role-action .inc-mark {
+  border-radius: 1px;
+  border-color: var(--ink);
+  background: var(--ink);
+}
+.role-before {
+  opacity: 0.85;
+}
+.is-cause .inc-mark {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ink) 22%, transparent);
+}
+.inc-role {
+  display: inline-block;
+  margin-right: 8px;
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.role-action .inc-role {
+  color: var(--ink);
+}
+.inc-timeline strong {
+  font-weight: 600;
+}
+.inc-flag {
+  margin-left: 8px;
+  padding: 0 6px;
+  background: var(--ink);
+  color: var(--bg);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.inc-body {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.inc-readings-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.inc-readings-head .label {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.inc-usual {
+  font-size: 20px !important;
+  white-space: normal;
+  line-height: 1.25;
+  margin-top: 12px;
+}
+@media (max-width: 960px) {
+  .inc-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 640px) {
+  .inc-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .inc-head .inc-state {
+    justify-self: start;
+  }
+  .inc-cause p {
+    font-size: 15px;
+  }
+  .inc-timeline li {
+    grid-template-columns: 56px 14px minmax(0, 1fr);
+  }
+  .inc-timeline li::after {
+    left: calc(56px + 10px + 6px);
+  }
+}
+
+/* The overview's line about the newest incident. */
+.latest-incident {
+  --tone: var(--crit-mark);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 16px;
+  margin-top: 20px;
+  padding: 12px 16px;
+  border: 1px solid var(--rule-strong);
+  border-left: 2px solid var(--ink-3);
+}
+.latest-incident.ongoing {
+  border-left-color: var(--crit-mark);
+}
+.latest-incident:hover {
+  border-color: var(--ink-3);
+}
+.latest-incident strong {
+  display: block;
+  font-weight: 600;
+}
+.latest-why {
+  display: block;
+  color: var(--ink-2);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.latest-when {
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+@media (max-width: 640px) {
+  .latest-incident {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .latest-why {
+    white-space: normal;
+  }
+}
+
+/* A check's repairs and heartbeat. */
+.repair-plan {
+  margin: 0 0 12px;
+  font-size: 13.5px;
+  max-width: 80ch;
+}
+.repairs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+}
+.repairs li {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr) auto;
+  gap: 4px 16px;
+  align-items: baseline;
+  padding: 9px 0;
+  border-top: 1px solid var(--rule);
+}
+.repair-when {
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.repair-detail {
+  display: block;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+.repairs details summary {
+  color: var(--ink-3);
+  font-size: 12px;
+  cursor: pointer;
+}
+.repairs pre,
+.hb-output pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--bg-sunk);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.repair-result {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.repairs li.fixed .repair-result {
+  color: var(--good);
+}
+.repairs li.fail .repair-result {
+  color: var(--crit);
+}
+.hb-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 16px 40px;
+}
+.hb-pings {
+  align-self: start;
+}
+.hb-lead {
+  margin: 0 0 10px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+.hb-lead code,
+.ping-url {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.hb-grid .doc-code {
+  margin: 8px 0 0;
+}
+.hb-output {
+  margin-top: 14px;
+}
+.hb-output summary {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.schedule-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.chip-btn {
+  padding: 2px 9px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.chip-btn:hover,
+.chip-btn.on {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+@media (max-width: 960px) {
+  .hb-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Feedback on a cause, and the status page notice. */
+.inc-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px 24px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px dotted var(--rule-strong);
+}
+.inc-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.inc-feedback-q {
+  color: var(--ink-2);
+}
+.inc-feedback-note {
+  color: var(--ink-3);
+  font-style: italic;
+}
+.inc-feedback-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex-basis: 100%;
+}
+.inc-feedback-more .field {
+  flex: 1 1 260px;
+}
+.inc-kind.learned {
+  background: none;
+  border: 1px dotted var(--ink-3);
+}
+.inc-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.inc-notice-form {
+  display: grid;
+  gap: 8px;
+  width: min(560px, 100%);
+}
+.inc-notice-form .label {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.inc-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Maintenance windows. */
+.maint-when {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-top: 10px;
+}
+.maint-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.maint-list li {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--rule);
+}
+.maint-list li:first-child {
+  border-top: 0;
+}
+.maint-list li.on {
+  --tone: var(--warn-mark);
+}
+.maint-list li .inc-state {
+  justify-self: start;
+}
+.maint-list li.over {
+  opacity: 0.6;
+}
+.maint-list strong {
+  display: block;
+  font-weight: 600;
+}
+.maint-meta {
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.maint-actions {
+  display: flex;
+  gap: 4px;
+}
+@media (max-width: 640px) {
+  .maint-list li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The weekly report. */
+.report-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 13.5px;
+}
+.report-list li {
+  padding: 9px 0;
+  border-top: 1px solid var(--rule);
+}
+.report-list li:first-child {
+  border-top: 0;
+}
+.report-list strong {
+  display: block;
+  font-weight: 600;
+}
+.report-meta {
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.report-cause {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-2);
+}
+.report-more {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}

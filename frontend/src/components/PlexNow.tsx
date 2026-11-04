@@ -38,7 +38,8 @@ function Progress({ stream }: { stream: PlexStream }) {
   );
 }
 
-export function NowPlaying({ streams, compact = false }: { streams: PlexStream[]; compact?: boolean }) {
+// With onManage, each row opens that stream's details and controls.
+export function NowPlaying({ streams, compact = false, onManage }: { streams: PlexStream[]; compact?: boolean; onManage?: (s: PlexStream) => void }) {
   if (streams.length === 0)
     return (
       <p className="note" style={{ padding: '4px 0 0' }}>
@@ -54,11 +55,16 @@ export function NowPlaying({ streams, compact = false }: { streams: PlexStream[]
           <th>Stream</th>
           {!compact && <th className="hide-sm">Progress</th>}
           <th className="r">Bandwidth</th>
+          {onManage && (
+            <th className="shrink hide-sm">
+              <span className="sr-only">Manage</span>
+            </th>
+          )}
         </tr>
       </thead>
       <tbody>
         {streams.map((s) => (
-          <tr key={s.id}>
+          <tr key={s.id} className={onManage ? 'link' : undefined} onClick={onManage && (() => onManage(s))}>
             <td className="shrink">
               <div>{s.user}</div>
               {!compact && (
@@ -76,6 +82,11 @@ export function NowPlaying({ streams, compact = false }: { streams: PlexStream[]
             <td className="shrink">
               <Decision stream={s} />
               {!compact && <div className="sub">{[s.quality, s.throttled ? 'throttled' : s.speed ? `${s.speed.toFixed(1)}×` : ''].filter(Boolean).join(' · ')}</div>}
+              {!compact && s.reason && (
+                <span className="stream-reason" title={s.fix}>
+                  {s.reason}
+                </span>
+              )}
             </td>
             {!compact && (
               <td className="hide-sm" style={{ width: '22%' }}>
@@ -86,6 +97,21 @@ export function NowPlaying({ streams, compact = false }: { streams: PlexStream[]
               <div className="num">{formatKbps(s.bandwidth_kbps)}</div>
               {!compact && <div className="sub">{s.local ? 'local' : 'remote'}</div>}
             </td>
+            {onManage && (
+              <td className="shrink r hide-sm">
+                <button
+                  type="button"
+                  className="btn-ghost np-manage"
+                  aria-label={`Manage ${s.user}'s stream of ${s.title}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onManage(s);
+                  }}
+                >
+                  Manage
+                </button>
+              </td>
+            )}
           </tr>
         ))}
       </tbody>

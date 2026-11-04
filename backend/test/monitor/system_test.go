@@ -7,11 +7,11 @@ import (
 	"sync"
 	"testing"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/smart"
-	"servermonitor/internal/storage"
-	"servermonitor/internal/units"
+	"nightjar/internal/discord"
+	"nightjar/internal/monitor"
+	"nightjar/internal/smart"
+	"nightjar/internal/storage"
+	"nightjar/internal/units"
 )
 
 // bodySender also keeps descriptions and fields, to check what an alert says.

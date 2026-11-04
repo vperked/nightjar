@@ -7,6 +7,7 @@ import { SeverityIcon } from '../components/Bell';
 import { MuteButton } from '../components/MuteButton';
 import { AREA_SHORT, AREAS, delivery, linkFor, MUTE_FOR, plain, subjectLabel, timeLeft } from '../components/notifications';
 import { Select } from '../components/Select';
+import { TimePicker } from '../components/TimePicker';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { Seg, SubTabs } from '../components/ui';
@@ -51,7 +52,7 @@ function day(ts: number): string {
 
 const clockTime = (ts: number) => new Date(ts * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 
-const DELIVERY_TONE: Record<Notification['status'], string> = { sent: 'sent', digest: 'sent', held: 'held', muted: 'muted', failed: 'failed', kept: 'kept' };
+const DELIVERY_TONE: Record<Notification['status'], string> = { sent: 'sent', digest: 'sent', held: 'held', muted: 'muted', failed: 'failed', kept: 'kept', throttled: 'muted', maintenance: 'muted' };
 
 function InboxRow({ n, now, open, onToggle, onRead }: { n: Notification; now: number; open: boolean; onToggle: () => void; onRead: (read: boolean) => void }) {
   const link = linkFor(n);
@@ -95,7 +96,7 @@ function InboxRow({ n, now, open, onToggle, onRead }: { n: Notification; now: nu
             )}
             <MuteButton subject={muteSubject} label={muteLabel} />
             <button type="button" className="btn-quiet" onClick={() => onRead(!n.read)}>
-              mark {n.read ? 'unread' : 'read'}
+              Mark {n.read ? 'unread' : 'read'}
             </button>
           </div>
         </div>
@@ -195,7 +196,7 @@ function InboxView() {
         <div className="toolbar">
           {unreadCount > 0 && (
             <button className="btn-quiet" onClick={() => mark(undefined, true)}>
-              mark all {unreadCount} read
+              Mark all {unreadCount} read
             </button>
           )}
         </div>
@@ -210,7 +211,7 @@ function InboxView() {
             <strong>Quiet hours are on.</strong> {summary.held ? `${plural(summary.held, 'alert')} held` : 'Alerts are held'} for one summary when they end.
           </span>
           <Link className="btn-quiet" to="/notifications/rules">
-            change
+            Change
           </Link>
         </div>
       )}
@@ -236,7 +237,7 @@ function InboxView() {
           options={[{ value: '', label: 'All areas', text: 'all' }, ...Object.entries(AREAS).map(([value, label]) => ({ value, label }))]}
         />
         <label className="check">
-          <input type="checkbox" checked={unread} onChange={(e) => setUnread(e.target.checked)} /> unread only
+          <input type="checkbox" checked={unread} onChange={(e) => setUnread(e.target.checked)} /> Unread only
         </label>
       </div>
 
@@ -280,7 +281,7 @@ function InboxView() {
             <span className="small ink-3 num">{items.length < total ? `${items.length} of ${total}` : plural(total, 'notification')} · kept for 90 days</span>
             {items.length < total && (
               <button className="btn-quiet" onClick={more} disabled={loadingMore}>
-                {loadingMore ? 'loading…' : 'show older'}
+                {loadingMore ? 'Loading…' : 'Show older'}
               </button>
             )}
           </div>
@@ -292,11 +293,11 @@ function InboxView() {
 
 // ---------- rules ----------
 
-const LEVELS: { value: AlertLevel; label: string; text: string }[] = [
-  { value: 'all', label: 'Everything', text: 'everything' },
-  { value: 'warning', label: 'Warnings +', text: 'warnings' },
-  { value: 'critical', label: 'Critical only', text: 'critical' },
-  { value: 'off', label: 'Off', text: 'off' },
+const LEVELS: { value: AlertLevel; label: string; text: string; hint: string }[] = [
+  { value: 'all', label: 'Everything', text: 'everything', hint: 'Info, warnings and critical' },
+  { value: 'warning', label: 'Warnings +', text: 'warnings', hint: 'Warnings and critical' },
+  { value: 'critical', label: 'Critical only', text: 'critical', hint: 'Only what needs you now' },
+  { value: 'off', label: 'Off', text: 'off', hint: 'Nothing goes here' },
 ];
 
 function RulesView() {
@@ -363,7 +364,7 @@ function RulesView() {
           <span className="label">Where alerts go</span>
           {anyChanged && (
             <button type="button" className="btn-quiet" onClick={() => setRules(data.defaults)}>
-              reset to defaults
+              Reset to defaults
             </button>
           )}
         </div>
@@ -423,18 +424,18 @@ function RulesView() {
         <p className="form-help">Alerts raised during quiet hours wait, then arrive as one summary when they end. Every alert still shows in the inbox straight away.</p>
         <div className="quiet-form">
           <label className="check">
-            <input type="checkbox" checked={quiet.enabled} onChange={(e) => setQuiet({ ...quiet, enabled: e.target.checked })} /> keep quiet
+            <input type="checkbox" checked={quiet.enabled} onChange={(e) => setQuiet({ ...quiet, enabled: e.target.checked })} /> Keep quiet
           </label>
-          <label className="quiet-time">
+          <span className="quiet-time">
             from
-            <input className="field" type="time" value={quiet.start} disabled={!quiet.enabled} onChange={(e) => setQuiet({ ...quiet, start: e.target.value })} aria-label="Quiet hours start" />
-          </label>
-          <label className="quiet-time">
+            <TimePicker value={quiet.start} disabled={!quiet.enabled} onChange={(v) => setQuiet({ ...quiet, start: v })} label="Quiet hours start" />
+          </span>
+          <span className="quiet-time">
             until
-            <input className="field" type="time" value={quiet.end} disabled={!quiet.enabled} onChange={(e) => setQuiet({ ...quiet, end: e.target.value })} aria-label="Quiet hours end" />
-          </label>
+            <TimePicker value={quiet.end} disabled={!quiet.enabled} onChange={(v) => setQuiet({ ...quiet, end: v })} label="Quiet hours end" />
+          </span>
           <label className="check">
-            <input type="checkbox" checked={quiet.critical} disabled={!quiet.enabled} onChange={(e) => setQuiet({ ...quiet, critical: e.target.checked })} /> send critical alerts anyway
+            <input type="checkbox" checked={quiet.critical} disabled={!quiet.enabled} onChange={(e) => setQuiet({ ...quiet, critical: e.target.checked })} /> Send critical alerts anyway
           </label>
         </div>
       </section>
@@ -455,7 +456,7 @@ function RulesView() {
                 </span>
                 <span className="num ink-3 small">{timeLeft(m.until, now)}</span>
                 <button type="button" className="btn-quiet" onClick={() => mute(m.subject, m.label, 0)}>
-                  unmute
+                  Unmute
                 </button>
               </li>
             ))}
@@ -465,7 +466,7 @@ function RulesView() {
           <Select label="Area to mute" value={muteArea} onChange={setMuteArea} options={data.areas.map((a) => ({ value: a.id, label: a.label }))} />
           <Select className="short" label="Mute for" value={muteFor} onChange={setMuteFor} options={MUTE_FOR.map((m) => ({ value: String(m.minutes), label: `for ${m.label}`, text: m.label }))} />
           <button type="button" className="btn-quiet" onClick={() => mute(`area:${muteArea}`, AREAS[muteArea] ?? muteArea, Number(muteFor))}>
-            mute
+            Mute
           </button>
         </div>
       </section>

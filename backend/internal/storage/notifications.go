@@ -16,8 +16,9 @@ type Notification struct {
 	Body     string          `json:"body"`
 	Fields   json.RawMessage `json:"fields"`
 	Subject  string          `json:"subject,omitempty"`
-	// Status is sent, failed, held (for the end of quiet hours), digest (sent in that summary),
-	// muted, or kept (no channel takes it).
+	// Status is sent, failed, held (for the end of quiet hours, or after too many alerts at once),
+	// digest (sent in that summary), muted, maintenance (raised during planned downtime), kept (no
+	// channel takes it), or throttled (kept back while its subject flaps, or with no store to hold it).
 	Status string `json:"status"`
 	// Channels are where it was delivered, or where it will go once held.
 	Channels []string `json:"channels"`
@@ -150,6 +151,21 @@ func (s *Store) HeldNotifications() []Notification {
 	rows, err := db.Query("SELECT " + notificationColumns + " FROM notifications WHERE status = 'held' ORDER BY id")
 	if err != nil {
 		log.Warn("Held notification query failed", "err", err)
+		return nil
+	}
+	return scanNotifications(rows)
+}
+
+// NotificationsBetween returns the notifications from `from` to `to`, oldest first, at most limit.
+func (s *Store) NotificationsBetween(from, to float64, limit int) []Notification {
+	db, unlock := s.lock()
+	defer unlock()
+	if db == nil {
+		return nil
+	}
+	rows, err := db.Query("SELECT "+notificationColumns+" FROM notifications WHERE ts >= ? AND ts <= ? ORDER BY ts, id LIMIT ?", from, to, limit)
+	if err != nil {
+		log.Warn("Notification range query failed", "err", err)
 		return nil
 	}
 	return scanNotifications(rows)

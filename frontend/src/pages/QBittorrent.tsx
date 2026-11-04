@@ -123,13 +123,13 @@ function Body({ q, refresh }: { q: QBState; refresh: () => void }) {
                 value: f,
                 label: (
                   <>
-                    {f}
+                    {f[0].toUpperCase() + f.slice(1)}
                     <span className="n">{counts[f]}</span>
                   </>
                 ),
               }))}
             />
-            <input className="search" placeholder="filter…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search torrents" />
+            <input className="search" placeholder="Search torrents…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search torrents" />
             {q.connected && !adding && (
               <button className="btn" onClick={() => setAdding(true)}>
                 Add torrent

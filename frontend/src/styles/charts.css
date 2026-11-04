@@ -9,21 +9,34 @@
   display: block;
   overflow: visible;
 }
+/* Grid lines are dotted, like the matrix the charts are drawn on. */
 .chart .grid-line {
-  stroke: var(--rule);
-  stroke-dasharray: 2 4;
+  stroke: var(--rule-strong);
+  stroke-dasharray: 1 5;
+  stroke-linecap: round;
+}
+.chart .dots {
+  opacity: 0.5;
+}
+.chart .dots.full {
+  opacity: 0.45;
+}
+.chart .mirror-line {
+  stroke: var(--bg);
+  stroke-width: 1;
 }
 .chart .axis-line {
   stroke: var(--rule-strong);
 }
 .chart .axis-text {
   fill: var(--ink-3);
-  font-size: 11px;
+  font-family: var(--mono);
+  font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
 .chart .line {
   fill: none;
-  stroke-width: 2;
+  stroke-width: 1.5;
   stroke-linejoin: round;
   stroke-linecap: round;
 }
@@ -51,8 +64,7 @@
   background: var(--bg-sunk);
 }
 .chart-empty.compact {
-  background: none;
-  border-bottom: 1.5px dashed var(--rule-strong);
+  background: radial-gradient(circle, var(--dot-off) 1.6px, transparent 2.1px) 0 0 / 5px 5px;
   border-radius: 0;
 }
 .tooltip {
@@ -64,9 +76,10 @@
   background: var(--ink);
   color: var(--bg);
   padding: 8px 11px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   box-shadow: var(--shadow-lift);
-  font-size: 12.5px;
+  font-family: var(--mono);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   pointer-events: none;
@@ -97,10 +110,18 @@
   border-radius: 2px;
   flex-shrink: 0;
 }
+/* The second series is a dashed line in the chart, so its key is too. */
+.swatch.dashed {
+  width: 14px;
+  height: 2px;
+  border-radius: 0;
+  background: repeating-linear-gradient(90deg, var(--swatch) 0 4px, transparent 4px 7px);
+}
 .legend {
   display: flex;
   gap: 12px;
-  font-size: 11.5px;
+  font-family: var(--mono);
+  font-size: 11px;
   color: var(--ink-3);
 }
 .legend span {

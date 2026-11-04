@@ -1,5 +1,9 @@
 import type {
+  Finding,
   AlertTestResult,
+  AnalyticsRangeName,
+  AnalyticsResponse,
+  HostAnalytics,
   AppConfig,
   AppJob,
   AppsResponse,
@@ -9,6 +13,12 @@ import type {
   CheckSpec,
   ChecksResponse,
   HistoryResponse,
+  HostBody,
+  HostsResponse,
+  HostSSH,
+  LoginTest,
+  SSHAction,
+  SSHKey,
   LogsResponse,
   NetworkResponse,
   Mute,
@@ -20,6 +30,7 @@ import type {
   AlertRules,
   QuietHours,
   PlexResponse,
+  RemoteHost,
   PlexView,
   PublicStatus,
   QBAction,
@@ -27,6 +38,10 @@ import type {
   SaveResult,
   ServicesResponse,
   SetupStatus,
+  Plugin,
+  PluginCard,
+  PluginChange,
+  PluginsResponse,
   StatusDesign,
   StatusDesignResponse,
   SettingsResponse,
@@ -38,6 +53,19 @@ import type {
   UpdateSpec,
   UpdateTarget,
   UpdatesResponse,
+  Appearance,
+  IncidentsResponse,
+  RepairAttempt,
+  RepairsResponse,
+  ContainersResponse,
+  IncidentFeedback,
+  IncidentNotice,
+  MaintenanceResponse,
+  MaintenanceWindow,
+  ReportResponse,
+  PlexStats,
+  CleanupView,
+  ActivityEntry,
 } from './types';
 
 export class UnauthorizedError extends Error {
@@ -144,7 +172,13 @@ export const api = {
   config: () => request<AppConfig>('/api/config'),
   // createAdmin makes the admin account on a fresh install (with the setup code from the log) and signs in.
   createAdmin: (username: string, password: string, setupCode: string) => request<{ username: string }>('/api/auth/setup', { method: 'POST', body: { username, password, setup_code: setupCode } }),
-  login: (username: string, password: string) => request<{ username: string }>('/api/auth/login', { method: 'POST', body: { username, password } }),
+  login: (username: string, password: string, code = '') => request<{ username: string }>('/api/auth/login', { method: 'POST', body: { username, password, code } }),
+  twoFactorBegin: () => request<{ secret: string; link: string }>('/api/auth/2fa/begin', { method: 'POST', body: {} }),
+  twoFactorEnable: (code: string) => request<{ recovery: string[] }>('/api/auth/2fa/enable', { method: 'POST', body: { code } }),
+  twoFactorDisable: (password: string, code: string) => request<void>('/api/auth/2fa/disable', { method: 'POST', body: { password, code } }),
+  activity: (before = 0) => request<{ activity: ActivityEntry[] }>(`/api/activity?limit=100${before ? `&before=${before}` : ''}`),
+  backup: (secrets: boolean) => request<Record<string, unknown>>(`/api/backup${secrets ? '?secrets=1' : ''}`),
+  restoreBackup: (backup: unknown) => request<{ restored: Record<string, number>; restarting: boolean }>('/api/backup/restore', { method: 'POST', body: backup }),
   logout: () => request<void>('/api/auth/logout', { method: 'POST', body: {} }),
   // changePassword signs every other browser out.
   changePassword: (current: string, next: string) => request<{ changed: boolean }>('/api/auth/password', { method: 'POST', body: { current, new: next } }),
@@ -153,6 +187,28 @@ export const api = {
   services: () => request<ServicesResponse>('/api/services'),
   history: (name: string, hours: number) => request<HistoryResponse>(`/api/services/history?name=${encodeURIComponent(name)}&hours=${hours}`),
   status: () => request<PublicStatus>('/api/status'),
+  // plugins are the owner's own checks, cards and alert channels.
+  plugins: () => request<PluginsResponse>('/api/plugins'),
+  rescanPlugins: () => request<PluginsResponse>('/api/plugins/rescan', { method: 'POST', body: {} }),
+  configurePlugin: (id: string, c: PluginChange) => request<{ plugin: Plugin }>(`/api/plugins/${encodeURIComponent(id)}`, { method: 'PUT', body: c }),
+  tryPlugin: (id: string, mode: 'check' | 'card', argument = '') =>
+    request<{ check?: CheckResult; card?: PluginCard }>(`/api/plugins/${encodeURIComponent(id)}/try`, { method: 'POST', body: { mode, argument } }),
+  pluginCards: () => request<{ cards: PluginCard[] }>('/api/plugins/cards'),
+  incidents: (days = 14) => request<IncidentsResponse>(`/api/incidents?days=${days}`),
+  feedback: (id: number, f: Pick<IncidentFeedback, 'verdict' | 'actual' | 'note'> | null) =>
+    f ? request<{ feedback: IncidentFeedback }>(`/api/incidents/${id}/feedback`, { method: 'PUT', body: f }) : request<void>(`/api/incidents/${id}/feedback`, { method: 'DELETE' }),
+  notice: (id: number, n: Pick<IncidentNotice, 'title' | 'text' | 'published'> | null) =>
+    n ? request<{ notice: IncidentNotice }>(`/api/incidents/${id}/notice`, { method: 'PUT', body: n }) : request<void>(`/api/incidents/${id}/notice`, { method: 'DELETE' }),
+  maintenance: () => request<MaintenanceResponse>('/api/maintenance'),
+  saveMaintenance: (w: MaintenanceWindow) => request<{ window: MaintenanceWindow }>(w.id ? `/api/maintenance/${w.id}` : '/api/maintenance', { method: w.id ? 'PUT' : 'POST', body: w }),
+  deleteMaintenance: (id: string) => request<void>(`/api/maintenance/${id}`, { method: 'DELETE' }),
+  containers: () => request<ContainersResponse>('/api/docker/containers'),
+  report: () => request<ReportResponse>('/api/report'),
+  sendReport: () => request<{ sent: boolean }>('/api/report/send', { method: 'POST' }),
+  repairs: (check = '') => request<RepairsResponse>(`/api/repairs${check ? `?check=${encodeURIComponent(check)}` : ''}`),
+  repairCheck: (name: string) => request<{ repair: RepairAttempt }>(`/api/checks/${encodeURIComponent(name)}/repair`, { method: 'POST' }),
+  appearance: () => request<{ appearance: Appearance }>('/api/appearance'),
+  saveAppearance: (a: Appearance) => request<{ appearance: Appearance }>('/api/appearance', { method: 'PUT', body: a }),
   statusDesign: () => request<StatusDesignResponse>('/api/statuspage'),
   saveStatusDesign: (d: StatusDesign) => request<{ design: StatusDesign }>('/api/statuspage', { method: 'PUT', body: d }),
   checks: () => request<ChecksResponse>('/api/checks'),
@@ -177,7 +233,7 @@ export const api = {
   // qbAdd adds magnet links or URLs, one per line.
   qbAdd: (urls: string, category: string, stopped: boolean) => request<{ added: number }>('/api/qbittorrent/add', { method: 'POST', body: { urls, category, stopped } }),
   units: () => request<UnitsResponse>('/api/units'),
-  unitLogs: (name: string, lines = 80) => request<{ lines: string[] }>(`/api/units/${encodeURIComponent(name)}/logs?lines=${lines}`),
+  unitLogs: (name: string, lines = 80) => request<{ lines: string[]; findings?: Finding[] }>(`/api/units/${encodeURIComponent(name)}/logs?lines=${lines}`),
   // controlUnit starts, stops or restarts a systemd service and returns its new state.
   controlUnit: (name: string, action: UnitAction) => request<{ unit: Unit }>(`/api/units/${encodeURIComponent(name)}/${action}`, { method: 'POST', body: {} }, 95000),
   drives: () => request<DrivesResponse>('/api/drives'),
@@ -204,8 +260,30 @@ export const api = {
   markRead: (ids?: number[], unread = false) => request<{ counts: NotificationCounts }>('/api/notifications/read', { method: 'POST', body: ids ? { ids, unread } : { all: true, unread } }),
   notificationRules: () => request<NotificationRules>('/api/notifications/rules'),
   saveNotificationRules: (rules: AlertRules, quiet: QuietHours) => request<NotificationRules>('/api/notifications/rules', { method: 'PUT', body: { rules, quiet } }),
-  // mute silences a check:, unit:, drive: or area: subject for some minutes; 0 unmutes it.
+  // mute silences a check:, unit:, drive:, host: or area: subject for some minutes; 0 unmutes it.
   mute: (subject: string, label: string, minutes: number) => request<{ mutes: Mute[] }>('/api/notifications/mute', { method: 'POST', body: { subject, label, minutes } }),
+  // hosts are the other servers watched through their agents; tokens never come back.
+  hosts: () => request<HostsResponse>('/api/hosts'),
+  host: (id: string) => request<{ host: RemoteHost }>(`/api/hosts/${encodeURIComponent(id)}`),
+  hostToken: () => request<{ token: string; port: number }>('/api/hosts/token', { method: 'POST', body: {} }),
+  // addHost checks that the agent (or the SSH port) answers before saving it; a server added with just an
+  // SSH login comes back with its first login tried.
+  addHost: (body: HostBody) => request<{ host: RemoteHost; test?: LoginTest }>('/api/hosts', { method: 'POST', body }),
+  // updateHost keeps an agent's saved token when token is empty.
+  updateHost: (id: string, body: HostBody) => request<{ host: RemoteHost }>(`/api/hosts/${encodeURIComponent(id)}`, { method: 'PUT', body }),
+  // analytics is every server's history over a range; hostAnalytics one server's ("local" for this one).
+  analytics: (range: AnalyticsRangeName) => request<AnalyticsResponse>(`/api/analytics?range=${range}`),
+  hostAnalytics: (id: string, range: AnalyticsRangeName) => request<{ host: HostAnalytics; step: number }>(`/api/analytics/${encodeURIComponent(id)}?range=${range}`),
+  deleteHost: (id: string) => request<void>(`/api/hosts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // SSH: the keys on this machine (public halves only), a server's login, and the fixed actions.
+  sshKeys: () => request<{ keys: SSHKey[] }>('/api/ssh/keys'),
+  newSSHKey: (name: string) => request<{ key: SSHKey }>('/api/ssh/keys', { method: 'POST', body: { name } }),
+  // importSSHKey keeps a private key you already have on this machine; it never comes back out.
+  importSSHKey: (name: string, privateKey: string) => request<{ key: SSHKey }>('/api/ssh/keys', { method: 'POST', body: { name, private: privateKey } }),
+  // A login saved comes back already tried.
+  setHostSSH: (id: string, ssh: HostSSH | null) =>
+    request<{ host: RemoteHost; test?: LoginTest }>(`/api/hosts/${encodeURIComponent(id)}/ssh`, ssh ? { method: 'PUT', body: ssh } : { method: 'DELETE' }),
+  runHostSSH: (id: string, action: SSHAction) => request<{ output: string }>(`/api/hosts/${encodeURIComponent(id)}/ssh/${action}`, { method: 'POST', body: {} }),
   apps: () => request<AppsResponse>('/api/apps'),
   // appJob follows the running install; `after` skips log lines already shown.
   appJob: (after = 0) => request<{ job: AppJob | null }>(`/api/apps/job?after=${after}`),
@@ -222,5 +300,10 @@ export const api = {
   applyUpdate: (id: string) => request<{ queued: boolean }>(`${updatePath(id)}/update`, { method: 'POST', body: {} }),
   detectUpdates: () => request<{ added: UpdateTarget[] | null }>('/api/updates/detect', { method: 'POST', body: {} }),
   // The summary view omits charts, libraries and recent plays (used by the overview).
+  cleanup: () => request<CleanupView>('/api/cleanup'),
+  cleanupScan: () => request<CleanupView>('/api/cleanup/scan', { method: 'POST' }),
+  cleanupKeep: (key: string, keep: boolean) => request<CleanupView>(`/api/cleanup/${encodeURIComponent(key)}/keep`, { method: keep ? 'PUT' : 'DELETE' }),
+  plexStats: (days = 7) => request<{ enabled: boolean; stats?: PlexStats }>(`/api/plex/stats?days=${days}`),
   plex: (view: PlexView = 'full') => request<PlexResponse>(view === 'summary' ? '/api/plex?view=summary' : '/api/plex'),
+  stopPlexStream: (id: string, message: string) => request<PlexResponse>(`/api/plex/streams/${encodeURIComponent(id)}/stop`, { method: 'POST', body: { message } }),
 };

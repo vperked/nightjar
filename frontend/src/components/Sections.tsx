@@ -1,18 +1,21 @@
 import { useState } from 'react';
 import { api } from '../api/client';
 import { useConfig } from '../api/ConfigContext';
+import { SettingsGroup } from './SettingsGroup';
 import { useToast } from './Toasts';
 
 // Sections are parts of the dashboard that can be turned off in Settings. Monitoring carries on
 // either way: alerts still go out for a hidden section, it only leaves the screen.
 
 export const SECTIONS = [
+  { id: 'servers', label: 'Servers', group: 'Pages', hint: 'Other machines, watched through their agents' },
   { id: 'network', label: 'Network', group: 'Pages', hint: 'The live network meter tab' },
   { id: 'media', label: 'Media', group: 'Pages', hint: 'Plex and qBittorrent' },
   { id: 'apps', label: 'Apps', group: 'Pages', hint: 'App store and updates' },
   { id: 'notifications', label: 'Notification bell', group: 'Pages', hint: 'The bell and its unread count' },
   { id: 'attention', label: 'Needs attention', group: 'Overview', hint: 'Failed or restarting system services' },
   { id: 'services', label: 'Uptime checks', group: 'Overview', hint: '' },
+  { id: 'remote', label: 'Other servers', group: 'Overview', hint: 'Once a server is added' },
   { id: 'plex', label: 'Now playing', group: 'Overview', hint: 'Plex streams' },
   { id: 'processes', label: 'Processes', group: 'Overview', hint: '' },
   { id: 'host', label: 'Host', group: 'Overview', hint: '' },
@@ -61,12 +64,7 @@ export function SectionsPanel() {
     save(next, `${label} ${on ? 'shown' : 'hidden'}`).then((ok) => !ok && setHidden(undefined));
   };
   return (
-    <section className="section" id="sections">
-      <div className="section-head">
-        <span className="label">Sections</span>
-        <span className="small ink-3">{current.length ? `${current.length} hidden` : 'everything shown'}</span>
-      </div>
-      <p className="form-help sections-help">Turn off what you don't use. Monitoring and alerts carry on; the dashboard just leaves it out.</p>
+    <SettingsGroup id="sections" name="Sections" aside={<span className="small ink-3">{current.length ? `${current.length} hidden` : 'everything shown'}</span>}>
       {(['Pages', 'Overview'] as const).map((group) => (
         <div key={group} className="sections-group">
           <span className="sections-group-label">{group === 'Pages' ? 'Pages and header' : 'Overview cards'}</span>
@@ -86,7 +84,7 @@ export function SectionsPanel() {
           </div>
         </div>
       ))}
-    </section>
+    </SettingsGroup>
   );
 }
 

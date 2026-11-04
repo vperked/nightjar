@@ -1,12 +1,20 @@
-# Server Monitor
+# Nightjar
 
 Host health and service uptime monitoring with Discord alerts, a React dashboard and a public status page.
+
+*A nightjar is a bird that comes alive after dark. This one keeps watch over your servers through the night, and wakes you when a disk fills at 3 am.*
+
+**How to use it** is in the dashboard itself, under **Help and docs** in the account menu (or `/docs`,
+which opens before signing in too): guides for every feature, searchable. The same guides are Markdown
+in [`frontend/src/docs`](frontend/src/docs), readable here on GitHub; add a page there and list it in
+`frontend/src/docs/index.ts`. A test checks that every link in them leads somewhere real.
 
 The monitor is split into two parts:
 
 ```
 backend/                      Go service: monitoring loop, alerts, JSON API
-├── cmd/servermonitor/        Entry point (-test, -install-systemd, -env)
+├── cmd/nightjar/        Entry point (-test, -install-systemd, -env)
+├── cmd/nightjar-agent/  The agent for watching other servers (install, uninstall)
 └── internal/
     ├── config/               .env loading and validated settings
     ├── collect/              CPU, memory, disks, network, GPU (nvidia-smi), sensors, processes
@@ -37,8 +45,8 @@ You need Go 1.26+ and Node 20.19+. (`go.mod` pins the patched Go 1.27.3 toolchai
 
 ```bash
 cp env.recommended .env        # set WEBHOOK, thresholds, etc.
-make                           # builds the UI and one self-contained binary: bin/servermonitor
-./bin/servermonitor            # dashboard on WEB_HOST:WEB_PORT (default http://127.0.0.1:8080)
+make                           # builds the UI and one self-contained binary: bin/nightjar
+./bin/nightjar            # dashboard on WEB_HOST:WEB_PORT (default http://127.0.0.1:8080)
 ```
 
 ### The admin account
@@ -48,15 +56,15 @@ a username, a password (10 characters or more) and a **setup code**: a one-time 
 to its log at startup, so whoever reaches a fresh install first cannot claim it. Find it with
 
 ```bash
-journalctl -u server-monitor | grep setup_code | tail -1
+journalctl -u nightjar | grep setup_code | tail -1
 ```
 
 (or in `LOG_FILE` when not running under systemd). After that, sign in with the account; a browser stays
 signed in for 30 days of use. Change the password under **Settings → Account**, which signs out every
-other browser. Forgot it? `./bin/servermonitor -reset-admin` deletes the account; restart the monitor and
+other browser. Forgot it? `./bin/nightjar -reset-admin` deletes the account; restart the monitor and
 create it again with the new setup code.
 
-The React app is embedded in the binary, so `bin/servermonitor` is all you deploy. Without make,
+The React app is embedded in the binary, so `bin/nightjar` is all you deploy. Without make,
 `./build.sh` does the same. Other targets (`make help` lists them all):
 
 ```bash
@@ -65,29 +73,38 @@ make test                      # go vet + go test, tsc + vitest
 make release                   # static linux/amd64 and linux/arm64 binaries in dist/
 make docker                    # container image (see Dockerfile)
 make install-service           # build, then install and enable the systemd unit (sudo)
-./bin/servermonitor -test      # self-test: collectors, services, webhooks
-./bin/servermonitor -version
+make ui                        # put a new UI build live with no restart (see below)
+./bin/nightjar -test      # self-test: collectors, services, webhooks
+./bin/nightjar -version
 ```
+
+To change the UI on a running install without restarting it, set
+`FRONTEND_DIR=/path/to/serverMonitor/web/current` in `.env` and restart once. From then on `make ui`
+(`./deploy-ui.sh`) builds the UI into `web/releases/` and switches `web/current` to it in one step;
+open tabs pick it up on their next reload. Changes to the Go side still need `make build` and a restart.
 
 Docker needs the host's process and filesystem view for host metrics:
 
 ```bash
-docker run -d --name servermonitor --pid=host --network=host \
+docker run -d --name nightjar --pid=host --network=host \
   -v /:/host:ro -e HOST_PROC=/host/proc -e HOST_SYS=/host/sys -e HOST_ROOT=/host \
-  -v $PWD/data:/data --env-file .env servermonitor:dev
+  -v $PWD/data:/data --env-file .env nightjar:dev
 ```
 
 ## Service monitoring
 
 Add, edit, pause and delete checks on the dashboard's **services** page; changes apply immediately.
 Each check has a type (HTTP, TCP, ping or TLS expiry), a target, an interval, a timeout and a number of
-retries; HTTP checks can also require status codes and a keyword, TLS checks warn ahead of expiry.
+retries; HTTP checks can also require status codes and a keyword, TLS checks warn ahead of expiry, and
+ping checks set how many pings to send and how far apart (default 3, 0.2s apart; up when any is answered).
 Checks and their results are stored in `HISTORY_DB` (SQLite); results are kept for `HISTORY_RETENTION_DAYS`.
 
 An existing `services.json` (see `services.example.json`) is imported once, the first time the database has
 no checks; after that the dashboard is the place to change them.
 
-A service is marked down only after `retries` consecutive failures beyond the first; a Discord alert
+A service is marked down only after `retries` consecutive failures beyond the first. While it is failing
+but not yet down, it is re-checked after its retry interval (default 20s, never longer than its interval)
+rather than its full interval, so an outage is confirmed quickly. A Discord alert
 goes out when it goes down (repeats use the normal alert cooldowns) and again when it recovers.
 
 ## Plex monitoring
@@ -106,7 +123,7 @@ Discord alerts go to `PLEX_WEBHOOK` (or the main webhook):
 - `PLEX_TRANSCODE_ALERT` streams are transcoding at once.
 - Optionally, every new stream (`PLEX_NOTIFY_STREAMS=true`).
 
-`servermonitor -test` checks the Plex connection and token.
+`nightjar -test` checks the Plex connection and token.
 
 ## Updates
 
@@ -138,9 +155,10 @@ when targets are first detected.
 ## Alerts
 
 Every alert has a severity, shown the same way everywhere: 🔴 critical (down, crashed, out of space),
-🟠 warning (a threshold crossed), 🟢 recovered, 🔵 info (reports, routine cleanup). Discord embeds are
-coloured to match, carry the host's name in the footer and, with `DASHBOARD_URL`, link back to the
-dashboard.
+🟠 warning (a threshold crossed), 🟢 recovered, 🔵 info (reports, routine cleanup). Discord alerts are
+Components V2 messages: a card coloured to match, with what happened as its heading, the details, the
+host and when in small print and, with `DASHBOARD_URL`, an **Open Nightjar** button. A webhook that
+refuses components gets classic embeds instead.
 
 Alerts go to Discord (`WEBHOOK`, with optional per-category webhooks) and to any of these, all set on the
 **settings** page under *Alert channels*:
@@ -154,7 +172,7 @@ Alerts go to Discord (`WEBHOOK`, with optional per-category webhooks) and to any
 | JSON webhook | `ALERT_WEBHOOK_URL` | `{title, description, severity, fields, host, category, dashboard_url, time}` |
 
 `ALERT_CHANNELS_MIN_SEVERITY` keeps routine alerts off noisy channels (e.g. `WARNING` for phone push);
-a recovery always follows its outage. **Send test alert** on the settings page (and `servermonitor -test`)
+a recovery always follows its outage. **Send test alert** on the settings page (and `nightjar -test`)
 sends a test to every channel and reports which ones failed and why.
 
 While the dashboard is open it also shows a toast when a check goes down or recovers.
@@ -264,6 +282,27 @@ Alerts for the same condition are rate-limited with escalating cooldowns, and fl
 suppressed. Discord calls are capped at 30 per minute behind a circuit breaker; anything that cannot
 be delivered is written to `ALERT_LOG_PATH`.
 
+## Moving from Server Monitor
+
+Nightjar was called Server Monitor, and every name changed with it: the program (`bin/nightjar`), the agent (`nightjar-agent`), the systemd unit (`nightjar.service`) and the default files. A machine that ran the old one moves over by stopping it, renaming its files, and installing the new unit. Checks, history, settings, notifications and the admin account all carry over; browsers sign in again.
+
+```bash
+cd /path/to/the/checkout
+make build
+sudo systemctl disable --now server-monitor
+sqlite3 server_monitor_history.db 'PRAGMA wal_checkpoint(TRUNCATE);'
+mv server_monitor_history.db nightjar.db && rm -f server_monitor_history.db-wal server_monitor_history.db-shm
+mv ~/.servermonitor_kernel_tracking.json ~/.nightjar_kernel_tracking.json 2>/dev/null
+sudo mv /var/log/server-monitor-alerts.log /var/log/nightjar-alerts.log 2>/dev/null
+sudo ./bin/nightjar -install-systemd
+sudo rm /etc/systemd/system/server-monitor.service && sudo systemctl daemon-reload
+sudo systemctl start nightjar
+```
+
+If `.env` sets `HISTORY_DB`, `LOG_FILE`, `ALERT_LOG_PATH`, `KERNEL_TRACKING_FILE` or `SYSTEMD_SERVICE_NAME` itself, those paths are kept as they are, and only the files it doesn't name need moving. The old log, `server_monitor.log`, can stay or go; new lines go to `nightjar.log`.
+
+Agents installed before the rename keep running under their old names, but they pin a key the new dashboard no longer expects, so reinstall each with **Servers → Add a server** (and remove the old one with `sudo servermonitor-agent uninstall`). Apps from the app store keep running; the store lists them again once their manifests move: `sudo mv /etc/servermonitor /etc/nightjar`.
+
 ## Development
 
 ```bash
@@ -282,13 +321,15 @@ data out entirely.
 
 | Path | What it holds |
 | --- | --- |
-| `backend/cmd/servermonitor` | Startup: reads settings, wires every part together, restarts in place |
+| `backend/cmd/nightjar` | Startup: reads settings, wires every part together, restarts in place |
 | `backend/internal/monitor` | The monitoring loop and its alert handlers, one file per area |
 | `backend/internal/api` | The HTTP API, one file per area (`checks.go`, `settings.go`, `updates.go`, `network.go`…) |
 | `backend/internal/config` | Every setting, declared once in `settings.go` |
 | `backend/internal/collect`, `netload`, `smart`, `units` | Reading the machine: resources, live network, drive health, systemd |
 | `backend/internal/services`, `plex`, `qbittorrent`, `updates` | Uptime checks and the integrations |
 | `backend/internal/apps` | The app store: its catalog, install and remove scripts, and jobs |
+| `backend/internal/analytics` | Every server's minutes, and the summaries, outages and disk forecasts made from them |
+| `backend/internal/agent`, `agentbin`, `remote` | Watching other servers: the agent (sampling, serving, installing), its builds carried inside the monitor, and the dashboard's poller and alerts |
 | `backend/internal/accounts` | The admin account, its setup code, password hashing (PBKDF2) and sessions |
 | `backend/internal/discord`, `notify`, `alerts` | Alert delivery, channels and cooldowns; `notify/hub.go` keeps, routes, holds and mutes every alert |
 | `backend/internal/storage` | The SQLite database |
@@ -317,9 +358,84 @@ Installs run as transient systemd units, so they work even though the monitor's 
 down. `GET /api/apps`, `POST /api/apps/{id}/install` (`{"port", "check"}`), `POST /api/apps/{id}/remove`
 (`{"purge"}`) and `GET /api/apps/job?after=` drive it.
 
+## Watching other servers
+
+**Servers** shows other machines next to this one, each either through just an SSH login (whether
+its SSH port answers, its checks, test and reboot) or through a small agent installed on it
+(`nightjar-agent`, about 7 MB, no dependencies) that only reports and changes nothing on the machine:
+CPU, memory, CPU temperature, fans, GPU, disks, SMART drive health and temperatures, network and uptime,
+refreshed every 10 seconds with the last hour charted.
+
+Something that only needs to answer (a router's page, a port, a ping) is an uptime check under
+**Services**. A check can name the server it runs on, and that server's page lists it under
+**Services on it**. Servers added as "ping only" before this became uptime checks, history included, the
+first time this version started. Each server can also have an SSH login (a key Nightjar made, or your
+own pasted in) to test, restart the agent or reboot it when the agent can't help.
+
+Adding an agent:
+
+1. In **Servers → Add a server**, enter the server's address and download the agent: both builds
+   (x86-64, and ARM64 for a Raspberry Pi 4 or 5) are inside the monitor, so they always match its
+   version. `make build` puts them there; `make agent` alone also leaves them in `bin/`.
+2. Drag the downloaded file onto the server, into any folder (with WinSCP, FileZilla or Cyberduck, a
+   shared folder, or a USB stick). The sheet makes a token and shows the install command to run in a
+   terminal on the server, in that folder, ready to copy:
+
+   ```bash
+   chmod +x nightjar-agent-linux-amd64 && sudo ./nightjar-agent-linux-amd64 install -token <token>
+   ```
+
+   `install` copies it to `/usr/local/bin`, puts the token in `/etc/nightjar-agent.env` (readable by
+   root only) and starts `nightjar-agent.service`, sandboxed so it can read the machine but write
+   nothing. Drive readings need smartmontools on the server. `-listen :9200` picks another port, and
+   `-tls=false` serves plain HTTP instead of HTTPS.
+3. Press **Connect**: the dashboard checks that the agent answers with that token before saving it.
+
+The dashboard does the asking; servers never connect to it, so it can stay on 127.0.0.1. Each agent's
+port (9101) only needs to be reachable from this machine, over the LAN or a VPN such as Tailscale.
+
+Agents serve HTTPS by default, with a key derived from their token: the dashboard, holding the same token,
+accepts only that key, so a machine without the token cannot pose as the agent, and there is no
+certificate to copy or renew. With `-tls=false` (and an `http://` address in the dashboard) the readings
+and token cross the network unencrypted, which is only for a network you trust. Tokens are stored in the
+database and never sent to the browser.
+
+Alerts go through the notification rules under **Other servers**: offline after three missed polls (30
+seconds) for both kinds, and for agents, CPU temperature over `TEMP_THRESHOLD` for two polls, memory over `MEMORY_THRESHOLD` for three, a
+disk over `DISK_THRESHOLD`, and a drive whose SMART health turns to warning or failing; each clears with a
+recovery message once it is back a little under the limit (5° or 5 points under; 2 for disks), so it does not flap. A server can be
+muted from its page. `sudo nightjar-agent uninstall` removes the agent.
+
+`GET /api/hosts`, `GET /api/hosts/{id}`, `POST /api/hosts`, `PUT /api/hosts/{id}`, `DELETE /api/hosts/{id}`
+`POST /api/hosts/token` (a fresh token) and `GET /api/agent/download?arch=amd64|arm64` drive it. An agent is `{"name", "address", "token"}` (an empty
+token keeps the saved one on `PUT`); a ping-only server is `{"kind": "check", "name", "check": {"type":
+"http"|"tcp"|"ping", "target", "self_signed"}}`.
+
+## Analytics
+
+**Servers → Analytics** covers every server, this one included, over the last 24 hours, 7 days or 30 days:
+
+- Headline tiles: uptime across the watched servers with its outages and downtime, the hottest and the
+  busiest server, and the data moved.
+- A table with each server's uptime, average and peak CPU and temperature (with sparklines), average
+  memory, its fullest disk and when that disk fills at the rate it is filling ("full in ~9 days"), its
+  average response time when it is checked without an agent, and the data it moved.
+- Trends: one metric (CPU, temperature, memory, fullest disk or response time) for every server side by
+  side, on the same scale.
+- Outages, newest first: when each server stopped answering for most of a minute's checks, and for how
+  long.
+
+Each server's page also switches its charts between the live hour and the last 24 hours, 7 days or 30 days.
+
+Readings are kept one row per server per minute (means, peaks, and the share of checks answered), in the
+`samples` table, for `HISTORY_RETENTION_DAYS` like the uptime checks. A range reads back as about 300
+points; a stretch with no readings shows as a gap. This server has no uptime figure: it records only while
+it runs. `GET /api/analytics?range=1h|24h|7d|30d` returns every server, `GET /api/analytics/{id}` one
+(`local` for this one).
+
 ## Sections
 
-**Settings → Sections** turns parts of the dashboard off: the Network, Media and Apps tabs, the
+**Settings → Sections** turns parts of the dashboard off: the Servers, Network, Media and Apps tabs, the
 notification bell, and each Overview card. Monitoring and alerts carry on; the dashboard only leaves
 them out (`DASHBOARD_HIDDEN`, applied at once).
 
@@ -333,7 +449,7 @@ Each log entry is one aligned line: level, component, message, then `key=value` 
 ```
 
 - **Under systemd** lines carry their syslog priority and no timestamp (journald adds one), so
-  `journalctl -u server-monitor -p warning` shows only problems and journalctl colours them.
+  `journalctl -u nightjar -p warning` shows only problems and journalctl colours them.
 - **In a terminal** lines are coloured with a short clock (`NO_COLOR` turns colour off).
 - **`LOG_FILE`** gets full timestamps, rotated at `LOG_MAX_BYTES`; `LOG_FORMAT=json` writes JSON lines
   everywhere for log shippers.
@@ -345,10 +461,11 @@ Each log entry is one aligned line: level, component, message, then `key=value` 
 
 ## Troubleshooting
 
-- **No Discord alerts:** check `WEBHOOK`, then run `./bin/servermonitor -test`, which sends a test embed
+- **No Discord alerts:** check `WEBHOOK`, then run `./bin/nightjar -test`, which sends a test alert
   to each configured webhook. Alerts that failed to send are in `ALERT_LOG_PATH`.
-- **Dashboard unreachable:** the default `WEB_HOST=127.0.0.1` only listens locally. To expose it, set
-  `WEB_HOST=0.0.0.0` and `WEB_AUTH_TOKEN`; the monitor refuses a public address without a token.
+- **Dashboard unreachable:** the default `WEB_HOST=127.0.0.1` only listens locally. Reach it over an SSH
+  tunnel, a VPN, or a reverse proxy with HTTPS (the docs' *Account and security* page has an nginx
+  example). `WEB_HOST=0.0.0.0` listens everywhere; everyone must still sign in.
 - **No temperatures:** the host must expose sensors (`/sys/class/hwmon`; install `lm-sensors` on Linux).
 - **Kernel checks find nothing:** the monitor needs to read `journalctl`, `dmesg` or `/var/log/kern.log`;
   run it as root or add the user to the `adm` / `systemd-journal` groups.

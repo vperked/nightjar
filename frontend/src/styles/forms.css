@@ -40,7 +40,7 @@
   font-family: var(--mono);
   font-size: 11px;
   padding: 1px 5px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--bg-sunk);
 }
 .form-control {
@@ -57,10 +57,11 @@
   width: 130px;
   flex: none;
 }
+/* A quick fade with a hair of scale: no slide. */
 @keyframes select-open {
   from {
     opacity: 0;
-    transform: translateY(-4px);
+    transform: scale(0.98);
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -133,11 +134,13 @@
   transition: transform 0.18s;
 }
 .check input[type='checkbox']:checked {
-  background: var(--ink);
+  background: var(--accent);
 }
 .check input[type='checkbox']:checked::after {
   transform: translateX(15px);
-  background: var(--bg);
+  /* The knob takes the opposite of the track, so on reads clearly in both themes. */
+  background: var(--accent-ink);
+  box-shadow: none;
 }
 .form-actions {
   display: flex;

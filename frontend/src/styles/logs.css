@@ -27,7 +27,7 @@
   color: var(--warn);
 }
 .seg-count.crit {
-  background: color-mix(in srgb, var(--crit-mark) 18%, transparent);
+  background: color-mix(in srgb, var(--crit-mark) 12%, transparent);
   color: var(--crit);
 }
 

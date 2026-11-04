@@ -10,7 +10,7 @@ const maxBody = 64 << 10
 
 // writable guards changes: a signed-in admin (via auth), then fromDashboard.
 func (s *Server) writable(next http.HandlerFunc) http.Handler {
-	return s.auth(fromDashboard(next))
+	return s.auth(fromDashboard(s.logged(next)))
 }
 
 // fromDashboard accepts only a JSON body and, when the browser names one, a same-origin Origin. A

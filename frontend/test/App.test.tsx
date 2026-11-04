@@ -10,31 +10,50 @@ import { UpdatesProvider } from '../src/api/UpdatesContext';
 import { AccountSection, CreateAdmin, SignIn } from '../src/components/Account';
 import { AccountMenu } from '../src/components/AccountMenu';
 import { SectionsPanel } from '../src/components/Sections';
+import { AppearancePanel } from '../src/components/AppearancePanel';
+import { useAppearance } from '../src/appearance';
 import { Bell } from '../src/components/Bell';
 import { Finder } from '../src/components/Finder';
 import { MuteButton } from '../src/components/MuteButton';
 import { HealthInTab, useProblems } from '../src/components/HealthInTab';
 import { Num } from '../src/components/Num';
 import { NowPlaying } from '../src/components/PlexNow';
+import { PlexStreamSheet } from '../src/components/PlexStreamSheet';
+import { Diagnosis } from '../src/components/Diagnosis';
 import { Select } from '../src/components/Select';
 import { ToastProvider } from '../src/components/Toasts';
-import { TrendChart } from '../src/components/TrendChart';
+import { TrendChart, withGaps } from '../src/components/TrendChart';
 import { State, Ticks } from '../src/components/ui';
 import { verdict as unitVerdict } from '../src/components/unitState';
 import { formatBytes, formatClock, formatKbps, formatPercent } from '../src/format';
 import { usePoll } from '../src/hooks/usePoll';
 import { CheckForm } from '../src/pages/CheckForm';
+import { IncidentsPage } from '../src/pages/Incidents';
+import { MaintenancePage } from '../src/pages/Maintenance';
+import { CleanupPage } from '../src/pages/Cleanup';
+import { BackupPanel } from '../src/components/BackupPanel';
+import { WeeklyReportPage } from '../src/pages/WeeklyReport';
+import { demoCleanup, demoIncidents } from '../src/api/demoIncidents';
 import { NetworkPage } from '../src/pages/Network';
 import { AppsPage } from '../src/pages/Apps';
 import { LogsPage } from '../src/pages/Logs';
 import { NotificationsPage } from '../src/pages/Notifications';
+import { authorizeCommand, ServerDetail } from '../src/pages/Servers';
 import { QBittorrentPage } from '../src/pages/QBittorrent';
 import { group } from '../src/pages/qbittorrent/states';
 import { ServiceRow, ServicesPage } from '../src/pages/Services';
+import { AnalyticsPage, fullIn } from '../src/pages/Analytics';
+import { DocsPage, docBody, searchDocs } from '../src/pages/Docs';
+import { DOCS } from '../src/docs';
+import { Markdown, plain, slug } from '../src/components/Markdown';
+import { ServersPage } from '../src/pages/Servers';
 import { SettingsPage } from '../src/pages/Settings';
 import { SetupPage } from '../src/pages/Setup';
 import { StatusDesignerPage } from '../src/pages/StatusDesigner';
+import { PluginsPage } from '../src/pages/Plugins';
+import { PluginCardBody } from '../src/components/PluginCards';
 import { StatusPage, StatusView } from '../src/pages/StatusPage';
+import { sanitizeHTML, scopeCSS } from '../src/customCode';
 import { SystemServicesPage } from '../src/pages/SystemServices';
 import { UpdatesPage, verdict } from '../src/pages/Updates';
 
@@ -115,16 +134,50 @@ describe('TrendChart', () => {
 });
 
 describe('StatusPage', () => {
-  it('shows the overall state from the public API', async () => {
+  const day = (i: number, uptime: number | null, down_s = 0) => ({ t: 1_700_000_000 + i * 86400, uptime, down_s });
+  it('shows the overall state, each service and its 90 days', async () => {
+    const days = Array.from({ length: 90 }, (_, i) => (i === 89 ? day(i, 97.2, 2400) : i < 10 ? day(i, null) : day(i, 100)));
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ title: 'Acme status', overall: 'degraded', updated: 1, services: [{ name: 'web', status: 'down', uptime_24h: 90, uptime_30d: 97.5, recent: [] }] }), {
-        status: 200,
-      }),
+      new Response(
+        JSON.stringify({
+          title: 'Acme status',
+          overall: 'degraded',
+          updated: Date.now() / 1000,
+          groups: [{ name: 'Web', services: [{ name: 'web', status: 'down', uptime_24h: 90, uptime_30d: 97.5, uptime_90d: 99.21, recent: [], days }] }],
+          services: [{ name: 'web', status: 'down', uptime_24h: 90, uptime_30d: 97.5, uptime_90d: 99.21, recent: [], days }],
+        }),
+        { status: 200 },
+      ),
     );
     render(<StatusPage />);
     await waitFor(() => expect(screen.getByText('Partial outage')).toBeInTheDocument());
     expect(screen.getByText('Acme status')).toBeInTheDocument();
-    expect(screen.getByText('97.50%')).toBeInTheDocument();
+    // The title is set once the page has its data, which can come a moment after its text.
+    await waitFor(() => expect(document.title).toBe('Partial outage · Acme status'));
+    expect(screen.getByText('0 of 1 operational')).toBeInTheDocument();
+    expect(screen.getByText('99.21% uptime')).toBeInTheDocument();
+    expect(screen.getByText('Updated just now')).toBeInTheDocument();
+    const bars = screen.getByRole('img', { name: 'web, the last 90 days: 1 day with downtime' });
+    expect(bars.querySelectorAll('.day')).toHaveLength(90);
+    expect(bars.querySelectorAll('.day.none')).toHaveLength(10);
+    // Hovering today says how it went.
+    fireEvent.pointerEnter(bars.querySelectorAll('.day')[89]);
+    const tip = screen.getByRole('tooltip');
+    expect(tip).toHaveTextContent('97.2% up');
+    expect(tip).toHaveTextContent('about 40m 0s down');
+  });
+
+  it('falls back to the 30-day figure from an older monitor without days', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ title: 'Acme status', overall: 'operational', updated: 1, services: [{ name: 'web', status: 'up', uptime_24h: 100, uptime_30d: 97.5, recent: [] }] }), {
+        status: 200,
+      }),
+    );
+    render(<StatusPage />);
+    await waitFor(() => expect(screen.getByText('All systems operational')).toBeInTheDocument());
+    expect(screen.getByText('97.5% uptime')).toBeInTheDocument();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe('Acme status'));
   });
 });
 
@@ -174,6 +227,39 @@ describe('plex', () => {
     render(<NowPlaying streams={[]} />);
     expect(screen.getByText('Nothing playing.')).toBeTruthy();
   });
+
+  it('stops a stream with a message, after asking once more', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ enabled: true, plex: null })));
+    const onStopped = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <ToastProvider>
+        <PlexStreamSheet stream={stream({ address: '203.0.113.58', local: false })} onClose={onClose} onStopped={onStopped} />
+      </ToastProvider>,
+    );
+    expect(screen.getByText(/203\.0\.113\.58/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: 'Server maintenance, back soon.' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop stream' }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, stop it' }));
+    await waitFor(() => expect(onStopped).toHaveBeenCalled());
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/plex/streams/1/stop');
+    expect(JSON.parse(init?.body as string)).toEqual({ message: 'Server maintenance, back soon.' });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('says why Plex would not stop a stream, and when it has ended', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: 'Plex refused to stop the stream' }), { status: 502 }));
+    const s = stream({});
+    const { rerender } = render(<PlexStreamSheet stream={s} onClose={() => {}} onStopped={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop stream' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, stop it' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Plex refused to stop the stream');
+    rerender(<PlexStreamSheet stream={undefined} onClose={() => {}} onStopped={() => {}} />);
+    expect(screen.getByText('This stream has ended.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop stream' })).not.toBeInTheDocument();
+  });
 });
 
 describe('usePoll', () => {
@@ -202,6 +288,8 @@ describe('api client', () => {
 
 describe('CheckForm', () => {
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  // The form also asks for the servers a check can belong to; these tests are about the check.
+  const sent = (m: { mock: { calls: Parameters<typeof fetch>[] } }) => m.mock.calls.filter(([u]) => String(u) !== '/api/hosts');
   const fill = () => {
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'web' } });
     fireEvent.change(screen.getByLabelText('Target'), { target: { value: 'https://example.com' } });
@@ -217,8 +305,8 @@ describe('CheckForm', () => {
     fireEvent.change(screen.getByLabelText('Expected status codes'), { target: { value: '200, 204' } });
     fireEvent.click(screen.getByText('Add check'));
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
-    expect(fetchMock.mock.calls.map(([u]) => u)).toEqual(['/api/checks/test', '/api/checks']);
-    const [, init] = fetchMock.mock.calls[1];
+    expect(sent(fetchMock).map(([u]) => u)).toEqual(['/api/checks/test', '/api/checks']);
+    const [, init] = sent(fetchMock)[1];
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toMatchObject({ name: 'web', type: 'http', expected_status: [200, 204], interval: 60 });
   });
@@ -239,22 +327,50 @@ describe('CheckForm', () => {
 
     fireEvent.click(screen.getByText('Save anyway'));
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
-    expect(fetchMock.mock.calls.map(([u]) => u)).toEqual(['/api/checks/test', '/api/checks']);
+    expect(sent(fetchMock).map(([u]) => u)).toEqual(['/api/checks/test', '/api/checks']);
 
     // Changing the target makes the old result stale.
     fireEvent.change(screen.getByLabelText('Target'), { target: { value: 'https://example.org' } });
     expect(screen.queryByText('Not reachable')).not.toBeInTheDocument();
   });
 
+  it('adds a heartbeat with its schedule and a repair, with nothing to test', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => (String(input) === '/api/units' ? json({ enabled: true, units: [] }) : json({ check: { name: 'backup' } }, 201)));
+    const onSaved = vi.fn();
+    render(<CheckForm onSaved={onSaved} onCancel={() => {}} />);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'backup' } });
+    fireEvent.click(screen.getByRole('button', { name: 'heartbeat' }));
+    expect(screen.queryByLabelText('Target')).not.toBeInTheDocument();
+    expect(screen.queryByText('Test')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'nightly at 3:00' }));
+    expect(screen.getByLabelText('Schedule')).toHaveValue('0 3 * * *');
+    fireEvent.click(screen.getByRole('button', { name: 'Restart a service' }));
+    // Without a list of services, the name is typed.
+    fireEvent.change(await screen.findByLabelText('Service to restart'), { target: { value: 'backup.service' } });
+    fireEvent.click(screen.getByText('Add check'));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    const post = fetchMock.mock.calls.find(([u, i]) => String(u) === '/api/checks' && i?.method === 'POST');
+    expect(JSON.parse(post?.[1]?.body as string)).toMatchObject({
+      name: 'backup',
+      type: 'heartbeat',
+      schedule: '0 3 * * *',
+      grace: 600,
+      repair: { action: 'restart', unit: 'backup.service', max: 2, wait: 120 },
+    });
+    expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/checks/test')).toBe(false);
+  });
+
   it('paused checks save without a test', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ check: { name: 'web', paused: true } }, 201));
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => json({ check: { name: 'web', paused: true } }, 201));
     const onSaved = vi.fn();
     render(<CheckForm onSaved={onSaved} onCancel={() => {}} />);
     fill();
-    fireEvent.click(screen.getByLabelText(/paused/));
+    fireEvent.click(screen.getByLabelText(/paused/i));
     fireEvent.click(screen.getByText('Add check'));
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
-    expect(fetchMock.mock.calls.map(([u]) => u)).toEqual(['/api/checks']);
+    expect(sent(fetchMock).map(([u]) => u)).toEqual(['/api/checks']);
   });
 });
 
@@ -313,10 +429,11 @@ describe('SettingsPage', () => {
         },
       ],
     };
-    const fetchMock = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response(JSON.stringify(settings)))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Some settings are invalid', fields: { CPU_THRESHOLD: 'must be at most 100' } }), { status: 400 }));
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (String(input).startsWith('/api/activity')) return new Response(JSON.stringify({ activity: [] }));
+      if (init?.method === 'PUT') return new Response(JSON.stringify({ error: 'Some settings are invalid', fields: { CPU_THRESHOLD: 'must be at most 100' } }), { status: 400 });
+      return new Response(JSON.stringify(settings));
+    });
     render(
       <MemoryRouter>
         <SettingsPage />
@@ -327,7 +444,8 @@ describe('SettingsPage', () => {
     fireEvent.change(screen.getByLabelText('CPU'), { target: { value: '150' } });
     fireEvent.click(screen.getByText('Save and restart'));
     expect(await screen.findByText('must be at most 100')).toBeInTheDocument();
-    expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toEqual({ values: { CPU_THRESHOLD: '150' } });
+    const put = fetchMock.mock.calls.find(([, i]) => i?.method === 'PUT')!;
+    expect(JSON.parse(put[1]?.body as string)).toEqual({ values: { CPU_THRESHOLD: '150' } });
   });
 });
 
@@ -382,7 +500,7 @@ describe('toasts', () => {
     expect(await screen.findByText('api is back up')).toBeInTheDocument();
     fireEvent.click(screen.getByText('refresh'));
     expect(await screen.findByText('api is down')).toBeInTheDocument();
-    fireEvent.click(screen.getAllByLabelText('Dismiss')[1]);
+    fireEvent.click(within(screen.getByText('api is down').closest('.toast') as HTMLElement).getByLabelText('Dismiss'));
     await waitFor(() => expect(screen.queryByText('api is down')).not.toBeInTheDocument());
   });
 });
@@ -529,7 +647,7 @@ describe('qBittorrent', () => {
     expect(screen.getByText(/stalled 21m 0s, 1 recovery try/)).toBeInTheDocument();
     expect(screen.getByText(/10m 0s left/)).toBeInTheDocument();
 
-    fireEvent.click(within(screen.getByRole('group', { name: 'Filter torrents' })).getByRole('button', { name: /^seeding/ }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Filter torrents' })).getByRole('button', { name: /^seeding/i }));
     expect(screen.queryByText('stuck.mkv')).not.toBeInTheDocument();
     expect(screen.getByText('seeding.iso')).toBeInTheDocument();
   });
@@ -565,7 +683,7 @@ describe('qBittorrent', () => {
     expect(all.checked).toBe(false);
     const bar = screen.getByRole('toolbar', { name: 'Selected torrents' });
     expect(bar).toHaveTextContent('2 selected');
-    fireEvent.click(within(bar).getByText('stop'));
+    fireEvent.click(within(bar).getByText('Stop'));
     await waitFor(() => expect(posted('/api/qbittorrent/action')).toEqual([{ action: 'stop', hashes: [h('a'), h('b')], delete_files: false }]));
     expect(await screen.findByText('Stopped 2 torrents')).toBeInTheDocument();
   });
@@ -574,10 +692,10 @@ describe('qBittorrent', () => {
     const posted = manage([torrent({ hash: h('a'), name: 'old.iso', state: 'stoppedup' })]);
     fireEvent.click(await screen.findByRole('button', { name: 'old.iso' }));
     expect(screen.getByText(h('a'))).toBeInTheDocument(); // details show the hash
-    fireEvent.click(screen.getByText('delete…'));
+    fireEvent.click(screen.getByText('Delete…'));
     expect(posted('/api/qbittorrent/action')).toEqual([]);
     expect(screen.getByText('Delete this torrent?')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('delete files too'));
+    fireEvent.click(screen.getByText('Delete files too'));
     await waitFor(() => expect(posted('/api/qbittorrent/action')).toEqual([{ action: 'delete', hashes: [h('a')], delete_files: true }]));
   });
 
@@ -588,7 +706,7 @@ describe('qBittorrent', () => {
     fireEvent.click(screen.getByRole('combobox', { name: 'Category' }));
     fireEvent.mouseDown(await screen.findByRole('option', { name: 'tv' }));
     expect(screen.getByRole('combobox', { name: 'Category' })).toHaveTextContent('tv');
-    fireEvent.click(screen.getByLabelText(/add stopped/));
+    fireEvent.click(screen.getByLabelText(/add stopped/i));
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await waitFor(() => expect(posted('/api/qbittorrent/add')).toEqual([{ urls: 'magnet:?xt=urn:btih:abc', category: 'tv', stopped: true }]));
     expect(await screen.findByText('Added 1 torrent')).toBeInTheDocument();
@@ -656,13 +774,17 @@ describe('easy configuration', () => {
       </MemoryRouter>,
     );
     fireEvent.change(await screen.findByLabelText('CPU'), { target: { value: '90' } });
-    expect(screen.getByText(/applies at once/)).toBeInTheDocument();
+    expect(screen.getByText(/applies at once/i)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Server URL'), { target: { value: 'http://nas:32400' } });
-    expect(screen.getByText(/saving restarts the monitor \(Server URL\)/)).toBeInTheDocument();
+    expect(screen.getByText(/restarts the monitor \(Server URL\)/i)).toBeInTheDocument();
+    // Put back as it was, the address is no change, so saving needs no restart.
     fireEvent.change(screen.getByLabelText('Server URL'), { target: { value: 'http://localhost:32400' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save and restart' }));
+    expect(screen.queryByRole('button', { name: 'Save and restart' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByText('Settings saved')).toBeInTheDocument();
-    expect(fetchMock.mock.calls.filter(([, i]) => i?.method === 'PUT')).toHaveLength(1);
+    const puts = fetchMock.mock.calls.filter(([, i]) => i?.method === 'PUT');
+    expect(puts).toHaveLength(1);
+    expect(Object.keys(JSON.parse(puts[0][1]?.body as string).values)).toEqual(['CPU_THRESHOLD']);
     // The test button sends what is on screen, saved or not.
     fireEvent.change(screen.getByLabelText('Server URL'), { target: { value: 'http://nas:32400' } });
     fetchMock.mockImplementation(async () => json({ ok: true, detail: 'Connected to nas (Plex 1.43)' }));
@@ -757,12 +879,12 @@ describe('system services', () => {
   });
 
   it('shows logs, restarts a failed service, and asks before stopping', async () => {
-    const units = [u('bazarr', { active: 'failed', sub: 'failed', result: 'exit-code', exit_status: 1 }), u('sonarr'), u('server-monitor')];
+    const units = [u('bazarr', { active: 'failed', sub: 'failed', result: 'exit-code', exit_status: 1 }), u('sonarr'), u('nightjar')];
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);
       if (url.includes('/logs')) return json({ lines: ['bazarr[1]: database disk image is malformed'] });
       if (init?.method === 'POST') return json({ unit: u(url.split('/')[3]) });
-      return json({ enabled: true, self: 'server-monitor.service', units });
+      return json({ enabled: true, self: 'nightjar.service', units });
     });
     render(
       <MemoryRouter>
@@ -773,9 +895,9 @@ describe('system services', () => {
     );
     expect(await screen.findByText('Failed')).toBeInTheDocument();
     expect(screen.getByText(/exit-code \(exit 1\)/)).toBeInTheDocument();
-    fireEvent.click(within(screen.getByRole('group', { name: 'Filter services' })).getByRole('button', { name: /problems/ }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Filter services' })).getByRole('button', { name: /problems/i }));
     expect(screen.queryByText('sonarr')).not.toBeInTheDocument();
-    fireEvent.click(within(screen.getByRole('group', { name: 'Filter services' })).getByRole('button', { name: /all/ }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Filter services' })).getByRole('button', { name: /all/i }));
 
     fireEvent.click(screen.getByText('bazarr'));
     expect(await screen.findByText(/database disk image is malformed/)).toBeInTheDocument();
@@ -784,12 +906,12 @@ describe('system services', () => {
     expect(fetchMock.mock.calls.some(([url, i]) => url === '/api/units/bazarr.service/start' && i?.method === 'POST')).toBe(true);
 
     fireEvent.click(screen.getByText('sonarr'));
-    fireEvent.click(await screen.findByText('stop…'));
+    fireEvent.click(await screen.findByText('Stop…'));
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/stop'))).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: 'stop' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, i]) => url === '/api/units/sonarr.service/stop' && i?.method === 'POST')).toBe(true));
 
-    fireEvent.click(screen.getByText('server-monitor'));
+    fireEvent.click(screen.getByText('nightjar'));
     await screen.findAllByText(/Recent log/);
     expect(screen.queryByText('stop…')).not.toBeInTheDocument(); // the monitor cannot stop itself from here
   });
@@ -923,8 +1045,12 @@ describe('easy to use', () => {
     page();
     expect(await screen.findByLabelText('CPU')).toHaveValue(93);
     expect(screen.getByLabelText('Token')).toHaveValue('');
-    expect(sessionStorage.getItem('servermonitor.settings.draft')).not.toContain('secret-value');
+    expect(sessionStorage.getItem('nightjar.settings.draft')).not.toContain('secret-value');
     expect(screen.getByRole('region', { name: 'Unsaved changes' })).toHaveTextContent('1 unsaved change');
+    // Put back as it was, it is no change, and there is nothing to save.
+    fireEvent.change(screen.getByLabelText('CPU'), { target: { value: '80' } });
+    expect(screen.queryByRole('region', { name: 'Unsaved changes' })).not.toBeInTheDocument();
+    sessionStorage.clear();
   });
 
   it('updates everything available at once, the monitor last', async () => {
@@ -941,7 +1067,7 @@ describe('easy to use', () => {
       latest: '2',
       ...over,
     });
-    const targets = [t('servermonitor', { kind: 'git', self: true }), t('sonarr'), t('qbittorrent', { can_update: false })];
+    const targets = [t('nightjar', { kind: 'git', self: true }), t('sonarr'), t('qbittorrent', { can_update: false })];
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')
       .mockImplementation(async (_input, init) =>
@@ -958,11 +1084,11 @@ describe('easy to use', () => {
         </ToastProvider>
       </MemoryRouter>,
     );
-    fireEvent.click(await screen.findByText('update all (2)'));
+    fireEvent.click(await screen.findByText('Update all (2)'));
     expect(screen.getByText(/the monitor restarts last/)).toBeInTheDocument();
-    fireEvent.click(screen.getByText('yes, update all'));
+    fireEvent.click(screen.getByText('Yes, update all'));
     await waitFor(() => expect(fetchMock.mock.calls.filter(([, i]) => i?.method === 'POST')).toHaveLength(2));
-    expect(fetchMock.mock.calls.filter(([, i]) => i?.method === 'POST').map(([u]) => u)).toEqual(['/api/updates/sonarr/update', '/api/updates/servermonitor/update']);
+    expect(fetchMock.mock.calls.filter(([, i]) => i?.method === 'POST').map(([u]) => u)).toEqual(['/api/updates/sonarr/update', '/api/updates/nightjar/update']);
   });
 
   it('Escape closes a form', () => {
@@ -1090,6 +1216,14 @@ describe('status page design', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Take website off the page' }));
     expect(within(preview).queryByText('Our website')).not.toBeInTheDocument();
 
+    // Code typed and deleted again leaves nothing to save.
+    const unsaved = () => screen.queryByRole('region', { name: 'Unsaved changes' });
+    const before = !!unsaved();
+    fireEvent.change(screen.getByLabelText('CSS'), { target: { value: 'body { color: red }' } });
+    expect(unsaved()).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('CSS'), { target: { value: '' } });
+    expect(!!unsaved()).toBe(before);
+
     fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: 'Back soon' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([u, i]) => u === '/api/statuspage' && i?.method === 'PUT')).toBe(true));
@@ -1097,6 +1231,45 @@ describe('status page design', () => {
     expect(sent.groups[0].items).toEqual([{ check: 'plex' }]);
     expect(sent.announcement).toBe('Back soon');
     expect(await screen.findByText('Status page saved')).toBeInTheDocument();
+  });
+
+  it("shows the owner's HTML with anything that runs code taken out", () => {
+    const html = sanitizeHTML(
+      '<a href="https://example.com" target="_blank" onclick="steal()">Home</a><img src="javascript:alert(1)" alt="x"><script>steal()</script><iframe src="https://evil.example"></iframe><custom-tag><b>kept</b></custom-tag><a href=" java\tscript:alert(1)">bad</a>',
+    );
+    expect(html).not.toMatch(/onclick|script|iframe|custom-tag|javascript/i);
+    expect(html).toContain('<a href="https://example.com" target="_blank" rel="noopener noreferrer">Home</a>');
+    expect(html).toContain('<b>kept</b>');
+    expect(html).toContain('<img alt="x">');
+  });
+
+  it("keeps the owner's CSS inside the preview", () => {
+    const css = scopeCSS(
+      '@import url("https://fonts.example/a.css");\nbody { background: #111 }\n:root{--x:1}\n.status-row { color: red; content: "}" }\n@keyframes glow { to { opacity: 1 } }\n@media (max-width: 600px) { html .status-top { display: none } }',
+      '.sd-frame',
+    );
+    expect(css.startsWith('@import url("https://fonts.example/a.css");\n@keyframes glow')).toBe(true);
+    expect(css).toContain('@scope (.sd-frame) {\n:scope { background: #111 }\n:scope{--x:1}\n.status-row { color: red; content: "}" }\n@media (max-width: 600px) { :scope .status-top');
+  });
+
+  it("puts the owner's code on the page", () => {
+    const { container } = render(
+      <StatusView
+        data={{
+          title: 'Status',
+          overall: 'operational',
+          updated: Date.now() / 1000,
+          css: '.status-row { color: red }',
+          header_html: '<img src="https://example.com/logo.png" alt="Perked logo"><script>bad()</script>',
+          footer_html: '<p>Email <a href="mailto:a@example.com">us</a></p>',
+          services: [],
+        }}
+      />,
+    );
+    expect(screen.getByAltText('Perked logo')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'us' })).toHaveAttribute('href', 'mailto:a@example.com');
+    expect(container.querySelector('script')).toBeNull();
+    expect(container.querySelector('style')?.textContent).toBe('.status-row { color: red }');
   });
 });
 
@@ -1128,7 +1301,7 @@ describe('finish', () => {
         </ServicesProvider>
       </MemoryRouter>,
     );
-    await waitFor(() => expect(document.title).toBe('2 down · Network · servermonitor'));
+    await waitFor(() => expect(document.title).toBe('2 down · Network · Nightjar'));
     expect(document.querySelector<HTMLLinkElement>('link[rel="icon"]')?.href).toContain('d03b3b');
   });
 });
@@ -1203,8 +1376,12 @@ describe('notifications', () => {
     expect(screen.getByText(/Quiet hours are on/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('Search notifications'), { target: { value: 'bazarr' } });
-    await waitFor(() => expect(screen.queryByText('Download Complete')).not.toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: /bazarr failed/ }));
+    // The list empties while the search loads, so wait until the rest has gone and the match is back.
+    const result = await waitFor(() => {
+      expect(screen.queryByText('Download Complete')).not.toBeInTheDocument();
+      return screen.getByRole('button', { name: /bazarr failed/ });
+    });
+    fireEvent.click(result);
     expect(screen.getByText('failed (exit-code)')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/system?open=bazarr.service');
   });
@@ -1230,8 +1407,13 @@ describe('notifications', () => {
     wrap(<NotificationsPage />, '/notifications/rules');
     fireEvent.click(await screen.findByRole('combobox', { name: 'qBittorrent on ntfy' }));
     fireEvent.mouseDown(screen.getByRole('option', { name: 'Off' }));
-    fireEvent.click(screen.getByLabelText('keep quiet'));
-    fireEvent.change(screen.getByLabelText('Quiet hours start'), { target: { value: '22:30' } });
+    fireEvent.click(screen.getByLabelText('Keep quiet'));
+    // 23:00, an hour back with the arrow keys, then 30 minutes from the panel.
+    const start = screen.getByRole('button', { name: 'Quiet hours start' });
+    for (let i = 0; i < 4; i++) fireEvent.keyDown(start, { key: 'ArrowDown' });
+    fireEvent.click(start);
+    fireEvent.click(within(screen.getByRole('listbox', { name: 'Min' })).getByRole('option', { name: '30' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([u, i]) => u === '/api/notifications/rules' && i?.method === 'PUT')).toBe(true));
     const sent = JSON.parse(fetchMock.mock.calls.find(([u, i]) => u === '/api/notifications/rules' && i?.method === 'PUT')![1]?.body as string);
@@ -1252,11 +1434,40 @@ describe('notifications', () => {
     });
     wrap(<MuteButton subject="unit:sonarr.service" label="sonarr" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Mute sonarr' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: '4 hours' }));
+    // The menu lives outside the button, so pressing an item must not count as a click away.
+    const item = screen.getByRole('menuitem', { name: '4 hours' });
+    fireEvent.mouseDown(item);
+    fireEvent.click(item);
     expect(await screen.findByRole('button', { name: 'Unmute sonarr' })).toHaveTextContent('muted · 4h left');
     const sent = JSON.parse(fetchMock.mock.calls.find(([u]) => u === '/api/notifications/mute')![1]?.body as string);
     expect(sent).toEqual({ subject: 'unit:sonarr.service', label: 'sonarr', minutes: 240 });
     expect(screen.getByText('sonarr muted for 4 hours')).toBeInTheDocument();
+  });
+
+  it('keeps the mute menu on screen when its button is at the left edge, outside any clipping list', async () => {
+    mockApi((url) => {
+      if (url === '/api/notifications/summary') return json(summary);
+    });
+    const width = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(160);
+    const height = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(180);
+    wrap(
+      <ul style={{ overflow: 'hidden' }}>
+        <li>
+          <MuteButton subject="unit:apt-daily.service" label="apt-daily" />
+        </li>
+      </ul>,
+    );
+    const button = await screen.findByRole('button', { name: 'Mute apt-daily' });
+    button.getBoundingClientRect = () => ({ left: 20, right: 90, top: 300, bottom: 330, width: 70, height: 30, x: 20, y: 300, toJSON: () => ({}) });
+    fireEvent.click(button);
+    const menu = screen.getByRole('menu', { name: 'Mute apt-daily for' });
+    expect(menu.parentElement).toBe(document.body);
+    // Lined up with the button's left edge, since lining up its right edge would run off the window.
+    expect(menu.style.left).toBe('20px');
+    expect(menu.style.top).toBe('336px');
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: '1 hour' }));
+    width.mockRestore();
+    height.mockRestore();
   });
 });
 
@@ -1267,18 +1478,22 @@ describe('admin account', () => {
     authorized: false,
     status_page_enabled: false,
     status_page_title: '',
-    account: { ...account, service: 'server-monitor' },
+    account: { ...account, service: 'nightjar' },
   });
 
   it('creates the account with the setup code, checking the password first', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ username: 'jay' }));
     const done = vi.fn();
     render(
-      <ConfigContext.Provider value={config({ configured: false })}>
-        <CreateAdmin onDone={done} />
-      </ConfigContext.Provider>,
+      <MemoryRouter>
+        <ConfigContext.Provider value={config({ configured: false })}>
+          <CreateAdmin onDone={done} />
+        </ConfigContext.Provider>
+      </MemoryRouter>,
     );
-    expect(screen.getByText('journalctl -u server-monitor | grep setup_code | tail -1')).toBeInTheDocument();
+    expect(screen.getByText('journalctl -u nightjar | grep setup_code | tail -1')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Read the getting started guide.' })).toHaveAttribute('href', '/docs/getting-started#create-the-admin-account');
+    expect(screen.getByText(/Confused\?/)).toBeInTheDocument();
     const submit = screen.getByRole('button', { name: 'Create account and sign in' });
     fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'jay' } });
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'short' } });
@@ -1301,9 +1516,11 @@ describe('admin account', () => {
     const signedOut = vi.fn();
     onUnauthorized(signedOut);
     render(
-      <ConfigContext.Provider value={config({ configured: true, username: 'jay' })}>
-        <SignIn onDone={() => undefined} />
-      </ConfigContext.Provider>,
+      <MemoryRouter>
+        <ConfigContext.Provider value={config({ configured: true, username: 'jay' })}>
+          <SignIn onDone={() => undefined} />
+        </ConfigContext.Provider>
+      </MemoryRouter>,
     );
     expect(screen.getByLabelText('Username')).toHaveValue('jay');
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'nope nope nope' } });
@@ -1312,7 +1529,7 @@ describe('admin account', () => {
     expect(screen.getByLabelText('Password')).toHaveValue('');
     expect(signedOut).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Forgot the password?' }));
-    expect(screen.getByText('servermonitor -reset-admin')).toBeInTheDocument();
+    expect(screen.getByText('nightjar -reset-admin')).toBeInTheDocument();
   });
 
   it('keeps theme, status page and signing out in one menu', () => {
@@ -1373,7 +1590,7 @@ describe('monitor log', () => {
       const level = url.searchParams.get('level');
       const rank = { info: 1, warn: 2, error: 3 };
       const entries = all.filter((e) => e.seq > after && (!level || rank[e.level] >= rank[level as 'warn']));
-      return new Response(JSON.stringify({ entries, latest: all.length, components: ['disk', 'web'], level: 'INFO', file: 'server_monitor.log', kept: 3000 }), {
+      return new Response(JSON.stringify({ entries, latest: all.length, components: ['disk', 'web'], level: 'INFO', file: 'nightjar.log', kept: 3000 }), {
         headers: { 'Content-Type': 'application/json' },
       });
     });
@@ -1384,7 +1601,7 @@ describe('monitor log', () => {
     );
     expect(await screen.findByText('Failed sign-in')).toBeInTheDocument();
     expect(screen.getAllByText('203.0.113.9')).toHaveLength(2);
-    expect(screen.getByText('server_monitor.log')).toBeInTheDocument();
+    expect(screen.getByText('nightjar.log')).toBeInTheDocument();
 
     // Following asks only for what is newer.
     expect(await screen.findByText('Listener died', {}, { timeout: 3000 })).toBeInTheDocument();
@@ -1460,10 +1677,658 @@ describe('app store', () => {
     // Reopened later, the sheet manages the app instead of showing the finished install again.
     fireEvent.click(within(sheet).getByRole('button', { name: 'Close' }));
     const installed = (await screen.findAllByRole('article')).find((a) => a.textContent?.includes('Lidarr'))!;
-    fireEvent.click(await within(installed).findByRole('button', { name: 'manage' }));
+    fireEvent.click(await within(installed).findByRole('button', { name: 'Manage' }));
     const again = screen.getByRole('dialog', { name: 'Lidarr' });
-    expect(within(again).getByRole('button', { name: 'reinstall latest' })).toBeInTheDocument();
-    expect(within(again).getByRole('button', { name: 'remove…' })).toBeInTheDocument();
+    expect(within(again).getByRole('button', { name: 'Reinstall latest' })).toBeInTheDocument();
+    expect(within(again).getByRole('button', { name: 'Remove…' })).toBeInTheDocument();
+  });
+});
+
+describe('servers', () => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const readings = (temp: number | null) => ({
+    version: 1,
+    agent: 'v1',
+    time: 1,
+    system: { hostname: 'nas', platform: 'Linux', platform_release: '6.1', platform_version: 'debian 12', architecture: 'amd64', boot_time: 0, uptime_seconds: 3600, uptime_formatted: '', users: 0 },
+    cpu: { percent: 12, cores: [10, 14], count: 2, load: [0.2, 0.1, 0.1], freq_mhz: 3000 },
+    memory: { total: 8e9, used: 3e9, free: 5e9, available: 5e9, percent: 37.5 },
+    swap: { total: 0, used: 0, free: 0, available: 0, percent: 0 },
+    temperature: temp,
+    fans: [],
+    gpu: null,
+    disks: [{ device: '/dev/sda1', mountpoint: '/', fstype: 'ext4', total: 1e11, used: 9.3e10, free: 7e9, percent: 93, is_nvme: false }],
+    network: { bytes_recv_per_sec: 1000, bytes_sent_per_sec: 500 },
+    disk_io: { read_per_sec: 0, write_per_sec: 0 },
+    drives: [],
+  });
+
+  it('shows each server and adds one with the install commands', async () => {
+    const hosts = [
+      { id: 'a1', name: 'nas', address: 'http://192.168.0.20:9101', added: 1, status: 'online', readings: readings(84), history: [], problems: ['CPU at 84°C', '/ 93% full'] },
+      {
+        id: 'b2',
+        name: 'backup',
+        address: 'http://192.168.0.44:9101',
+        added: 1,
+        status: 'offline',
+        error: 'no answer: timed out',
+        last_seen: 1,
+        readings: null,
+        history: [],
+        problems: ['Offline: timed out'],
+      },
+    ];
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/api/hosts' && (init?.method ?? 'GET') === 'GET')
+        return json({
+          hosts,
+          port: 9101,
+          agents: [
+            { arch: 'amd64', file: 'nightjar-agent-linux-amd64', size: 7_700_000 },
+            { arch: 'arm64', file: 'nightjar-agent-linux-arm64', size: 7_200_000 },
+          ],
+        });
+      if (url === '/api/hosts/token') return json({ token: 'f'.repeat(48), port: 9101 });
+      if (url === '/api/hosts' && init?.method === 'POST') return json({ error: 'no answer from http://192.168.0.50:9200: connection refused (is the agent running, on that port?)' }, 400);
+      return json({}, 404);
+    });
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <ServersPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    const nas = await screen.findByRole('link', { name: 'nas: Online' });
+    expect(within(nas).getByText('CPU at 84°C')).toBeInTheDocument();
+    expect(within(nas).getByText('84')).toBeInTheDocument();
+    const backup = screen.getByRole('link', { name: 'backup: Offline' });
+    expect(within(backup).getByText(/timed out/)).toBeInTheDocument();
+    // The offline chip would repeat the error right above it.
+    expect(within(backup).queryByText(/^Offline:/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add a server' }));
+    const sheet = screen.getByRole('dialog', { name: 'Add a server' });
+    fireEvent.change(within(sheet).getByLabelText('Address'), { target: { value: '192.168.0.50:9200' } });
+    // The agent comes from the dashboard itself; it is dropped on the server and installed from there.
+    expect(within(sheet).getByRole('link', { name: /Download nightjar-agent-linux-amd64/ })).toHaveAttribute('href', '/api/agent/download?arch=amd64');
+    expect(within(sheet).queryByText(/\b(scp|ssh) /)).not.toBeInTheDocument();
+    expect(await within(sheet).findByText(`chmod +x nightjar-agent-linux-amd64 && sudo ./nightjar-agent-linux-amd64 install -token ${'f'.repeat(48)} -listen :9200`)).toBeInTheDocument();
+    fireEvent.click(within(sheet).getByRole('button', { name: 'ARM64' }));
+    expect(within(sheet).getByText(/sudo \.\/nightjar-agent-linux-arm64 install/)).toBeInTheDocument();
+    expect(within(sheet).getByRole('link', { name: /Download nightjar-agent-linux-arm64/ })).toHaveAttribute('href', '/api/agent/download?arch=arm64');
+
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Connect' }));
+    expect(await within(sheet).findByText(/connection refused/)).toBeInTheDocument();
+    // An address without a scheme gets the one the agent serves: HTTPS unless that is turned off.
+    expect(JSON.parse(fetchMock.mock.calls.find(([u, i]) => u === '/api/hosts' && i?.method === 'POST')![1]?.body as string)).toEqual({
+      kind: 'agent',
+      name: '',
+      address: 'https://192.168.0.50:9200',
+      token: 'f'.repeat(48),
+    });
+    fireEvent.click(within(sheet).getByLabelText('Encrypt with HTTPS'));
+    expect(within(sheet).getByText(/install -token f+ -listen :9200 -tls=false$/)).toBeInTheDocument();
+  });
+
+  it('sends something with nothing installed to uptime checks, and lists the checks on a server', async () => {
+    const host = { id: 'a1', name: 'nas', address: 'https://192.168.0.20:9101', added: 1, kind: 'agent', status: 'online', readings: null, history: [], problems: [] };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === '/api/hosts') return json({ hosts: [host], port: 9101 });
+      if (url === '/api/hosts/a1') return json({ host });
+      if (url === '/api/hosts/token') return json({ token: 'f'.repeat(48), port: 9101 });
+      if (url === '/api/services')
+        return json({
+          services: [svc({ name: 'rsync', target: 'nas.local:873', server: 'a1', latency_ms: 4 }), svc({ name: 'website', target: 'https://example.com' })],
+        });
+      return json({}, 404);
+    });
+    const { unmount } = render(
+      <MemoryRouter>
+        <ToastProvider>
+          <ServersPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Add a server' }));
+    const sheet = screen.getByRole('dialog', { name: 'Add a server' });
+    expect(within(sheet).getByRole('link', { name: 'uptime check' })).toHaveAttribute('href', '/services');
+    expect(within(sheet).queryByText(/Ping only/)).not.toBeInTheDocument();
+    unmount();
+
+    render(
+      <MemoryRouter initialEntries={['/servers/a1']}>
+        <ToastProvider>
+          <ServicesProvider enabled>
+            <Routes>
+              <Route path="/servers/:id" element={<ServerDetail />} />
+            </Routes>
+          </ServicesProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    const on = (await screen.findByText('Services on it')).closest('section') as HTMLElement;
+    expect(await within(on).findByRole('link', { name: 'rsync' })).toHaveAttribute('href', '/services/rsync');
+    expect(within(on).queryByText('website')).not.toBeInTheDocument();
+    expect(within(on).getByRole('link', { name: /add a check/ })).toHaveAttribute('href', '/services?server=a1#add');
+  });
+
+  it('explains how to start when there are none', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ hosts: [], port: 9101 }));
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <ServersPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('No other servers yet')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add a server' })).toBeInTheDocument();
+  });
+});
+
+describe('analytics', () => {
+  const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
+  const point = (t: number, over = {}) => ({ t, up: 1, cpu: 20, cpu_max: 40, mem: 50, temp: 55, temp_max: 60, disk: 80, rx: 1000, tx: 500, latency: null, minutes: 5, ...over });
+  const summary = (over = {}) => ({
+    coverage: 1,
+    uptime: 100,
+    downtime_s: 0,
+    incidents: 0,
+    cpu_avg: 20,
+    cpu_peak: 40,
+    mem_avg: 50,
+    mem_peak: 52,
+    temp_avg: 55,
+    temp_peak: 60,
+    disk_now: 80,
+    disk_change: 1,
+    disk_full_days: null,
+    rx_bytes: 1e9,
+    tx_bytes: 5e8,
+    latency_avg: null,
+    latency_peak: null,
+    ...over,
+  });
+
+  it('summarises every server over the chosen range', async () => {
+    const hosts = [
+      { id: 'local', name: 'home', kind: 'local', status: 'online', points: [point(1000), point(1300)], summary: summary({ uptime: null }), incidents: [] },
+      {
+        id: 'a1',
+        name: 'nas',
+        kind: 'agent',
+        status: 'online',
+        points: [point(1000, { temp: 81, temp_max: 88 }), point(1300)],
+        summary: summary({ uptime: 98.5, incidents: 1, downtime_s: 1300, temp_avg: 70, temp_peak: 88, disk_now: 93, disk_full_days: 9.4 }),
+        incidents: [{ start: 1700000000, end: 1700001300 }],
+      },
+    ];
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const range = new URL(String(input), 'http://x').searchParams.get('range');
+      return json({ range: { name: range, label: range }, ranges: [], step: range === '7d' ? 1800 : 300, hosts, kept: true });
+    });
+    render(
+      <MemoryRouter>
+        <AnalyticsPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('Hottest')).toBeInTheDocument();
+    expect(screen.getByText('88°C')).toBeInTheDocument();
+    expect(screen.getByText('nas, 70°C on average')).toBeInTheDocument();
+    expect(screen.getByText('full in ~9 days')).toBeInTheDocument();
+    // This server has no uptime of its own: nothing is recorded while it is down.
+    const home = screen.getAllByRole('row').find((r) => r.textContent?.startsWith('home'))!;
+    expect(within(home).getAllByText('—').length).toBeGreaterThan(0);
+    expect(screen.getByText('down 21m 40s')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '7 days' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/analytics?range=7d')).toBe(true));
+  });
+
+  it('breaks lines where readings are missing and says when a disk fills', () => {
+    const pts = withGaps(
+      [
+        { t: 0, v: 1 },
+        { t: 300, v: 2 },
+        { t: 1800, v: 3 },
+      ],
+      300,
+    );
+    expect(pts.map((p) => p.v)).toEqual([1, 2, null, 3]);
+    expect(fullIn(0.4)).toBe('full within a day');
+    expect(fullIn(12.4)).toBe('full in ~12 days');
+    expect(fullIn(900)).toBe('full in over a year');
+  });
+});
+
+describe('docs', () => {
+  it('renders the Markdown the docs use, and nothing that could run', () => {
+    const { container } = render(
+      <MemoryRouter>
+        <Markdown
+          source={[
+            '# Title',
+            '',
+            'Some **bold [link](/settings)** and `code`, press <kbd>Ctrl</kbd> <kbd>K</kbd>.',
+            '',
+            'An _italic phrase_, but snake_case_words and `A_B_C` stay as they are.',
+            '',
+            "## When it won't connect",
+            '',
+            '1. First step.',
+            '2. Run this:',
+            '',
+            '   ```bash',
+            '   make agent',
+            '   ```',
+            '',
+            '3. Last.',
+            '',
+            '- a [web link](https://example.com)',
+            '- a [bad link](javascript:alert(1))',
+            '',
+            '| A | B |',
+            '| --- | --- |',
+            '| `x` | y |',
+            '',
+            '> **Tip:** a note.',
+            '',
+            '<script>alert(1)</script> stays text.',
+          ].join('\n')}
+        />
+      </MemoryRouter>,
+    );
+    expect(container.querySelector('h2#when-it-won-t-connect')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'link' })).toHaveAttribute('href', '/settings');
+    expect(container.querySelectorAll('kbd')).toHaveLength(2);
+    expect([...container.querySelectorAll('em')].map((e) => e.textContent)).toEqual(['italic phrase']);
+    expect(screen.getByText(/snake_case_words/)).toBeInTheDocument();
+    expect(plain('_Held_ means quiet hours')).toBe('Held means quiet hours');
+    const ol = container.querySelector('ol')!;
+    expect(ol.querySelectorAll(':scope > li')).toHaveLength(3);
+    expect(ol.querySelector('pre code')?.textContent).toBe('make agent');
+    expect(screen.getByRole('link', { name: 'web link' })).toHaveAttribute('target', '_blank');
+    expect(screen.queryByRole('link', { name: 'bad link' })).not.toBeInTheDocument();
+    expect(screen.getByText(/a bad link/)).toBeInTheDocument(); // its text stays, as plain text
+    expect(container.querySelector('table td code')?.textContent).toBe('x');
+    // A quote that opens with **Tip:** becomes a tip, labelled and with its own icon.
+    expect(container.querySelector('aside.doc-note.tip .doc-note-label')?.textContent).toBe('Tip');
+    expect(container.querySelector('aside.doc-note.tip')).toHaveTextContent('a note.');
+    // Code blocks say their language and colour the command and its flags, as text.
+    expect(container.querySelector('.doc-code-lang')?.textContent).toBe('Shell');
+    expect(container.querySelector('.doc-code .tok-cmd')?.textContent).toBe('make');
+    expect(container.querySelector('script')).toBeNull();
+    expect(screen.getByText(/<script>alert\(1\)<\/script> stays text\./)).toBeInTheDocument();
+  });
+
+  it('has a page for every entry, and every link goes somewhere real', () => {
+    const routes = [
+      '/',
+      '/services',
+      '/incidents',
+      '/plex/cleanup',
+      '/incidents/maintenance',
+      '/incidents/report',
+      '/system',
+      '/servers',
+      '/servers/analytics',
+      '/network',
+      '/plex',
+      '/qbittorrent',
+      '/apps',
+      '/updates',
+      '/logs',
+      '/notifications',
+      '/notifications/rules',
+      '/settings',
+      '/setup',
+      '/status-page',
+      '/plugins',
+      '/docs',
+    ];
+    const anchors = (s: string) =>
+      new Set(
+        (docBody(s) ?? '')
+          .split('\n')
+          .filter((l) => /^#{2,3}\s/.test(l))
+          .map((l) => slug(plain(l.replace(/^#+\s+/, '')))),
+      );
+    const problems: string[] = [];
+    for (const d of DOCS) {
+      const body = docBody(d.slug);
+      if (!body) {
+        problems.push(`${d.slug}: no file`);
+        continue;
+      }
+      if (body.split('\n')[0] !== `# ${d.title}`) problems.push(`${d.slug}: its first line should be "# ${d.title}"`);
+      for (const [, href] of body.matchAll(/\]\(([^)]+)\)/g)) {
+        if (/^https?:/.test(href)) continue;
+        const [path, hash] = href.split('#');
+        const doc = path.match(/^\/docs\/(.+)$/)?.[1];
+        if (doc) {
+          if (!DOCS.some((x) => x.slug === doc)) problems.push(`${d.slug}: links to a missing page ${href}`);
+          else if (hash && !anchors(doc).has(hash)) problems.push(`${d.slug}: links to a missing section ${href}`);
+        } else if (!routes.includes(path)) problems.push(`${d.slug}: links to an unknown page ${href}`);
+        else if (path === '/settings' && hash && !['sections', 'appearance'].includes(hash)) problems.push(`${d.slug}: links to an unknown part of settings ${href}`);
+      }
+    }
+    const files = Object.keys(import.meta.glob('../src/docs/*.md')).map((f) => f.replace(/^.*\/(.*)\.md$/, '$1'));
+    for (const f of files) if (!DOCS.some((d) => d.slug === f)) problems.push(`${f}.md is not listed in docs/index.ts`);
+    expect(problems).toEqual([]);
+  });
+
+  it('opens on a home of every guide, and copies code', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    render(
+      <MemoryRouter initialEntries={['/docs']}>
+        <Routes>
+          <Route path="/docs" element={<DocsPage />} />
+          <Route path="/docs/:slug" element={<DocsPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('heading', { level: 1, name: /Everything Nightjar does/ })).toBeInTheDocument();
+    for (const d of DOCS) expect(screen.getAllByRole('link', { name: new RegExp(d.title.replace(/[()*]/g, '.')) }).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByRole('link', { name: /Getting started.*Install Nightjar, create/ })[0]);
+    expect(screen.getByRole('heading', { level: 1, name: 'Getting started' })).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Copy to clipboard' })[0]);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('cp env.recommended .env\nmake\n./bin/nightjar'));
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument();
+  });
+
+  it('searches every page and opens the section', async () => {
+    expect(searchDocs('setup code')[0].section.doc.slug).toBe('getting-started');
+    expect(searchDocs('authorized_keys')[0].section.doc.slug).toBe('servers');
+    render(
+      <MemoryRouter initialEntries={['/docs/servers']}>
+        <Routes>
+          <Route path="/docs/:slug" element={<DocsPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('heading', { level: 1, name: 'Watching other servers' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Next →\s*Analytics/ })).toHaveAttribute('href', '/docs/analytics');
+    expect(screen.getByText(/\d+ min read/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Search the docs'), { target: { value: 'quiet hours' } });
+    const hit = await screen.findAllByRole('link', { name: /Quiet hours/ });
+    expect(hit[0]).toHaveAttribute('href', '/docs/notifications#quiet-hours');
+    fireEvent.change(screen.getByLabelText('Search the docs'), { target: { value: 'zzqqxx' } });
+    expect(screen.getByText(/Nothing matches/)).toBeInTheDocument();
+  });
+});
+
+describe('incidents', () => {
+  it('leads with the likely cause, and opens the newest timeline', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ incidents: demoIncidents(30), days: 7 }), { headers: { 'Content-Type': 'application/json' } }));
+    render(
+      <MemoryRouter>
+        <IncidentsPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/the kernel stopped rsync to free some/)).toBeInTheDocument();
+    expect(screen.getByText('Ongoing')).toBeInTheDocument();
+    expect(screen.getAllByText('Fixed by Nightjar').length).toBeGreaterThan(1);
+    // The newest incident's timeline is open, with its cause marked; the others open on request.
+    expect(screen.getByText('the likely cause')).toBeInTheDocument();
+    expect(screen.queryByText('Repair of nas-backup failed')).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: /Show the timeline/ })[0]);
+    expect(screen.getByText('Repair of nas-backup failed')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /nas-backup/ })).toHaveAttribute('href', '/services/nas-backup');
+  });
+});
+
+describe('teaching and telling', () => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+  it('takes feedback on a cause, and publishes a notice drafted for visitors', async () => {
+    const list = demoIncidents(30);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/feedback')) return json({ feedback: JSON.parse(init?.body as string) });
+      if (url.includes('/notice')) return json({ notice: JSON.parse(init?.body as string) });
+      return json({ incidents: list, days: 7 });
+    });
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <IncidentsPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByText(/the kernel stopped rsync/);
+    const memory = screen.getByText(/the kernel stopped rsync/).closest('article')!;
+    fireEvent.click(within(memory).getByRole('button', { name: 'No' }));
+    fireEvent.change(within(memory).getByLabelText('A note'), { target: { value: 'it was the backup job' } });
+    fireEvent.click(within(memory).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith(`/api/incidents/${list[1].id}/feedback`))).toBe(true));
+    const fb = fetchMock.mock.calls.find(([u]) => String(u).includes('/feedback'))!;
+    expect(JSON.parse(fb[1]?.body as string)).toEqual({ verdict: 'wrong', actual: '', note: 'it was the backup job' });
+
+    const plex = screen.getByText(/so programs could not write/).closest('article')!;
+    fireEvent.click(within(plex).getByRole('button', { name: 'Tell visitors on the status page' }));
+    expect(within(plex).getByLabelText('Notice title')).toHaveValue('Movies & TV outage');
+    expect((within(plex).getByLabelText('Notice text') as HTMLTextAreaElement).value).toMatch(/fixed automatically/);
+    fireEvent.click(within(plex).getByRole('button', { name: 'Publish' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/notice'))).toBe(true));
+    const notice = fetchMock.mock.calls.find(([u]) => String(u).includes('/notice'))!;
+    expect(JSON.parse(notice[1]?.body as string)).toMatchObject({ title: 'Movies & TV outage', published: true });
+  });
+
+  it('plans a weekly maintenance window over chosen checks', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/api/services') return json({ services: [{ name: 'nas', status: 'up', recent: [] }] });
+      if (init?.method === 'POST') return json({ window: { ...JSON.parse(init.body as string), id: 'abc' } }, 201);
+      return json({ windows: [], upcoming: [] });
+    });
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <ServicesProvider enabled>
+            <MaintenancePage />
+          </ServicesProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('No maintenance planned')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Plan maintenance' }));
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Nightly backups' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Every week' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Mon' }));
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '03:00' } });
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: '03:30' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'nas' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add window' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, i]) => i?.method === 'POST')).toBe(true));
+    const post = fetchMock.mock.calls.find(([, i]) => i?.method === 'POST')!;
+    expect(JSON.parse(post[1]?.body as string)).toMatchObject({ title: 'Nightly backups', days: [0, 1], from: '03:00', to: '03:30', checks: ['nas'], public: true });
+  });
+
+  it('shows the week as the report sums it up, and sends it on request', async () => {
+    const report = {
+      from: 0,
+      to: 0,
+      checks: [{ name: 'nas', uptime: 97.5 }],
+      overall: 97.5,
+      incidents: 2,
+      open: 0,
+      down: 900,
+      causes: [{ name: 'disk full', n: 2 }],
+      top: [{ id: 1, title: 'plex is down', cause: 'The disk was full', started: 1, length: 600, open: false }],
+      repairs: 2,
+      fixed: 1,
+      alerts: 9,
+      noisiest: [{ name: 'tautulli', n: 6 }],
+      forecasts: ['The disk is 91% full and growing 1.0% a day: full in about 9 days'],
+    };
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => (String(input) === '/api/report/send' ? json({ sent: true }) : json({ report, enabled: true, at: 'Mon 09:00', next: 1 })));
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <WeeklyReportPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('97.50%', { selector: '.readout-value' })).toBeInTheDocument();
+    expect(screen.getByText(/full in about 9 days/)).toBeInTheDocument();
+    expect(screen.getByText('The disk was full.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Send it now' }));
+    expect(await screen.findByText('Report sent')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([u, i]) => String(u) === '/api/report/send' && i?.method === 'POST')).toBe(true);
+  });
+});
+
+describe('media cleanup', () => {
+  it('lists what nobody watched, says when it leaves, and keeps one on request', async () => {
+    const view = { ...structuredClone(demoCleanup()), enabled: false };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const body = init?.method === 'PUT' ? { ...view, items: view.items.filter((i) => i.key !== 'k2'), kept: [...view.kept, { key: 'k2', title: 'Cats', at: 1 }] } : view;
+      return new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
+    });
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <CleanupPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('Waterworld (1995)')).toBeInTheDocument();
+    expect(screen.getByText(/This is a preview of what would be listed; nothing is removed/)).toBeInTheDocument();
+    expect(screen.getByText(/seeding to ratio 1.00: at 0.64/)).toBeInTheDocument();
+    const cats = screen.getByText('Cats (2019)').closest('tr')!;
+    fireEvent.click(within(cats).getByRole('button', { name: 'Keep' }));
+    expect(await screen.findByText('Cats is kept')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([u, i]) => String(u) === '/api/cleanup/k2/keep' && i?.method === 'PUT')).toBe(true);
+    expect(screen.queryByText('Cats (2019)')).not.toBeInTheDocument();
+  });
+});
+
+describe('two-factor and backups', () => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const account = { auth_required: true, authorized: true, status_page_enabled: false, status_page_title: '', account: { configured: true, username: 'jay' } };
+
+  it('asks for the code after the password when two-factor sign-in is on', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const body = JSON.parse(init?.body as string);
+      if (!body.code) return json({ error: 'Enter the code from your authenticator app', need_code: true, fields: { code: 'needed' } }, 401);
+      return body.code === '123456' ? json({ username: 'jay' }) : json({ error: 'that code is not right', fields: { code: 'x' } }, 401);
+    });
+    const done = vi.fn();
+    render(
+      <MemoryRouter>
+        <ConfigContext.Provider value={account}>
+          <SignIn onDone={done} />
+        </ConfigContext.Provider>
+      </MemoryRouter>,
+    );
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'correct horse battery' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    const code = await screen.findByLabelText('Code from your authenticator app');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.change(code, { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await waitFor(() => expect(done).toHaveBeenCalled());
+    expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toMatchObject({ username: 'jay', password: 'correct horse battery', code: '123456' });
+  });
+
+  it('sets up two-factor sign-in and shows the recovery codes once', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) =>
+      String(input).endsWith('/begin') ? json({ secret: 'JBSWY3DPEHPK3PXP', link: 'otpauth://totp/Nightjar:jay?secret=JBSWY3DPEHPK3PXP' }) : json({ recovery: ['aaaaa-bbbbb', 'ccccc-ddddd'] }),
+    );
+    render(
+      <ToastProvider>
+        <ConfigContext.Provider value={account}>
+          <AccountSection />
+        </ConfigContext.Provider>
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Set it up' }));
+    expect(await screen.findByText('JBSW Y3DP EHPK 3PXP')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Code from the app'), { target: { value: '654321' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on' }));
+    expect(await screen.findByText(/aaaaa-bbbbb/)).toBeInTheDocument();
+    expect(screen.getByText(/not shown again/)).toBeInTheDocument();
+  });
+
+  it('restores a backup once confirmed', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ restored: { checks: 2, settings: 3, parts: 4 }, restarting: true }));
+    render(
+      <ToastProvider>
+        <BackupPanel />
+      </ToastProvider>,
+    );
+    const file = new File([JSON.stringify({ nightjar: '1.0', made: 1700000000, checks: [{}, {}], settings: {} })], 'nightjar-backup.json', { type: 'application/json' });
+    fireEvent.change(screen.getByLabelText('Backup file'), { target: { files: [file] } });
+    expect(await screen.findByText((_, el) => el?.tagName === 'SPAN' && /with 2 checks\?$/.test(el.textContent ?? ''))).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    expect(await screen.findByText(/Nightjar is restarting/)).toBeInTheDocument();
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/backup/restore');
+  });
+});
+
+describe('appearance', () => {
+  // Look shows the look in force, as the rest of the dashboard sees it.
+  const Look = () => {
+    const a = useAppearance();
+    return <output aria-label="look">{`${a.style} ${a.charts || 'own'} ${a.density}`}</output>;
+  };
+  const config = { auth_required: true, authorized: true, status_page_enabled: false, status_page_title: '', appearance: { style: 'matrix', charts: '', density: 'comfortable', css: '' } } as const;
+
+  it('previews a change everywhere and saves it, with nothing to save until something changes', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ appearance: {} }), { headers: { 'Content-Type': 'application/json' } }));
+    const reloaded = vi.fn();
+    window.addEventListener('config-changed', reloaded);
+    const { unmount } = render(
+      <ToastProvider>
+        <ConfigContext.Provider value={{ ...config, appearance: { ...config.appearance } }}>
+          <AppearancePanel />
+          <Look />
+        </ConfigContext.Provider>
+      </ToastProvider>,
+    );
+    const save = screen.getByRole('button', { name: 'Save appearance' });
+    expect(save).toBeDisabled();
+    fireEvent.click(screen.getByRole('radio', { name: /Cards/ }));
+    expect(screen.getByLabelText('look')).toHaveTextContent('cards own comfortable');
+    fireEvent.click(screen.getByRole('button', { name: 'Compact' }));
+    fireEvent.change(screen.getByLabelText(/Your own CSS/), { target: { value: '.readout-value { font-weight: 300 }' } });
+    fireEvent.click(save);
+    await waitFor(() => expect(reloaded).toHaveBeenCalled());
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/api/appearance');
+    expect(JSON.parse(init?.body as string)).toEqual({ style: 'cards', charts: '', density: 'compact', css: '.readout-value { font-weight: 300 }' });
+    expect(await screen.findByText('Appearance saved')).toBeInTheDocument();
+
+    // Discarding goes back to the saved look; so does leaving Settings.
+    fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(screen.getByLabelText('look')).toHaveTextContent('matrix own comfortable');
+    fireEvent.click(screen.getByRole('button', { name: 'Dots' }));
+    expect(screen.getByLabelText('look')).toHaveTextContent('matrix dots comfortable');
+    unmount();
+    window.removeEventListener('config-changed', reloaded);
+  });
+
+  it('draws charts as lines, or in dots when asked', () => {
+    const points = Array.from({ length: 40 }, (_, i) => ({ t: 1000 + i * 10, v: 20 + (i % 7) }));
+    const chart = (charts: '' | 'dots') => (
+      <ConfigContext.Provider value={{ ...config, appearance: { ...config.appearance, charts } }}>
+        <TrendChart series={[{ label: 'CPU', color: 'var(--series-1)', points }]} height={60} compact format={String} />
+      </ConfigContext.Provider>
+    );
+    const { container, rerender } = render(chart(''));
+    expect(container.querySelector('pattern')).toBeNull();
+    expect(container.querySelector('linearGradient')).not.toBeNull();
+    rerender(chart('dots'));
+    expect(container.querySelector('pattern')).not.toBeNull();
+    expect(container.querySelector('linearGradient')).toBeNull();
   });
 });
 
@@ -1485,5 +2350,335 @@ describe('sections', () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual({ values: { DASHBOARD_HIDDEN: 'drives,network' } });
     expect(await screen.findByText('Network hidden')).toBeInTheDocument();
     window.removeEventListener('config-changed', reloaded);
+  });
+});
+
+describe('log diagnosis', () => {
+  it('says what went wrong, the likely cause first, with the fix and the line', () => {
+    render(
+      <Diagnosis
+        findings={[
+          {
+            id: 'port_in_use',
+            title: 'Port 8989 is already in use',
+            explain: 'Another program holds it.',
+            fix: "See what holds it with `sudo ss -ltnp 'sport = :8989'`.",
+            severity: 'critical',
+            line: 'address already in use',
+            count: 1,
+            known: true,
+          },
+          { id: 'repeated', title: 'Indexer 9 returned error 429', explain: 'Seen 3 times.', severity: 'warning', line: 'Indexer 9 returned error 429', count: 3, known: false },
+        ]}
+      />,
+    );
+    expect(screen.getByText('Likely cause')).toBeInTheDocument();
+    expect(screen.getByText('Port 8989 is already in use')).toBeInTheDocument();
+    expect(screen.getByText("sudo ss -ltnp 'sport = :8989'").tagName).toBe('CODE');
+    expect(screen.getByText('×3')).toBeInTheDocument();
+    expect(screen.getAllByText('The log line')).toHaveLength(2);
+  });
+
+  it('names no likely cause when nothing was recognised', () => {
+    render(<Diagnosis findings={[{ id: 'repeated', title: 'Something failed', explain: 'Seen twice.', severity: 'warning', count: 2, known: false }]} />);
+    expect(screen.queryByText('Likely cause')).not.toBeInTheDocument();
+    expect(screen.getByText('Something failed')).toBeInTheDocument();
+  });
+});
+
+describe('plugins', () => {
+  const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
+  afterEach(() => vi.restoreAllMocks());
+  const base = { version: '1.0.0', description: '', run: 'run.sh', dir: '/p', values: {}, secrets_set: [] as string[] };
+  const list = () => [
+    {
+      ...base,
+      id: 'dns',
+      name: 'DNS lookup',
+      provides: ['check'],
+      check: { argument: 'Host name' },
+      enabled: false,
+      settings: [{ key: 'TOKEN', label: 'Token', type: 'secret', required: true }],
+      missing: ['Token'],
+    },
+    { ...base, id: 'broken', name: 'Broken', provides: ['card'], enabled: false, problem: 'run.sh is missing' },
+  ];
+
+  it('turns a plugin on with its settings, and tries it', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/api/plugins') return json({ dir: '/opt/nightjar/plugins', plugins: list() });
+      if (url === '/api/plugins/dns' && init?.method === 'PUT') {
+        const c = JSON.parse(init.body as string);
+        return json({ plugin: { ...list()[0], enabled: !!c.enabled, secrets_set: ['TOKEN'], missing: [] } });
+      }
+      if (url === '/api/plugins/dns/try') return json({ check: { up: true, detail: `${JSON.parse(init!.body as string).argument} is 1.2.3.4`, latency_ms: 9 } });
+      return json({});
+    });
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <PluginsPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('DNS lookup')).toBeInTheDocument();
+    expect(screen.getByText('/opt/nightjar/plugins')).toBeInTheDocument();
+    expect(screen.getByRole('note')).toHaveTextContent('run.sh is missing');
+    expect(screen.getByRole('switch', { name: 'Turn Broken on' })).toBeDisabled();
+    expect(screen.getByText('Fill in Token to turn it on.')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Host name'), { target: { value: 'example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Try the check' }));
+    expect(await screen.findByText('· example.com is 1.2.3.4', { exact: false })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^Token/), { target: { value: 'abc' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.getByLabelText(/^Token/)).toHaveAttribute('placeholder', 'Saved. Type to replace it'));
+    fireEvent.click(screen.getByRole('switch', { name: 'Turn DNS lookup on' }));
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Turn DNS lookup off' })).toBeChecked());
+    const puts = fetchMock.mock.calls.filter(([u, i]) => u === '/api/plugins/dns' && i?.method === 'PUT').map(([, i]) => JSON.parse(i!.body as string));
+    expect(puts).toEqual([{ settings: { TOKEN: 'abc' } }, { enabled: true }]);
+    expect(screen.getByText(/add a check of type/)).toHaveTextContent('dns:argument');
+  });
+
+  it('shows a plugin card', () => {
+    render(<PluginCardBody card={{ plugin: 'speed', title: 'Internet', updated: 0, items: [{ label: 'Down', value: '930 Mbps', tone: 'good' }] }} />);
+    expect(screen.getByText('930 Mbps')).toHaveClass('tone-good');
+    render(<PluginCardBody card={{ plugin: 'x', title: 'X', updated: 0, error: 'it exited with status 1' }} />);
+    expect(screen.getByText('it exited with status 1')).toBeInTheDocument();
+  });
+});
+
+describe('SSH for a watched server', () => {
+  it('picks a key, shows its public line, saves the login and tests it', async () => {
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+    const host = {
+      id: 'h1',
+      name: 'vps',
+      address: 'https://vps.example.net:9101',
+      added: 0,
+      kind: 'agent',
+      status: 'online',
+      readings: null,
+      history: [],
+      problems: [],
+    };
+    let ssh: unknown = null;
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      calls.push(`${method} ${url}`);
+      if (url === '/api/ssh/keys')
+        return json({
+          keys: [{ path: '/srv/nightjar/ssh/nightjar', name: 'nightjar', type: 'ED25519', fingerprint: 'SHA256:abc', public: 'ssh-ed25519 AAAATEST nightjar@box', own: true }],
+        });
+      if (url === '/api/hosts/h1/ssh' && method === 'PUT') {
+        ssh = JSON.parse(String(init?.body));
+        return json({
+          host: { ...host, ssh: { port: 22, user: 'root', key: '/srv/nightjar/ssh/nightjar' }, ssh_command: 'ssh -i /srv/nightjar/ssh/nightjar root@vps.example.net' },
+          test: { ok: true, output: 'root@vps\n first login' },
+        });
+      }
+      if (url === '/api/hosts/h1/ssh/test') return json({ output: 'root@vps\n up 3 days' });
+      if (url === '/api/hosts/h1')
+        return json({ host: ssh ? { ...host, ssh: { port: 22, user: 'root', key: '/srv/nightjar/ssh/nightjar' }, ssh_command: 'ssh -i /srv/nightjar/ssh/nightjar root@vps.example.net' } : host });
+      return json({}, 404);
+    });
+    render(
+      <MemoryRouter initialEntries={['/servers/h1']}>
+        <ToastProvider>
+          <ServicesProvider enabled>
+            <Routes>
+              <Route path="/servers/:id" element={<ServerDetail />} />
+            </Routes>
+          </ServicesProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Set up SSH…' }));
+    // The key's public half is shown to copy; the host defaults to the server's own address.
+    expect(await screen.findByText('ssh-ed25519 AAAATEST nightjar@box')).toBeInTheDocument();
+    expect(screen.getByLabelText('Host')).toHaveAttribute('placeholder', 'vps.example.net');
+    fireEvent.change(screen.getByLabelText('User'), { target: { value: 'admin' } });
+    const sshSection = screen.getByText('ssh-ed25519 AAAATEST nightjar@box').closest('section') as HTMLElement;
+    fireEvent.click(within(sshSection).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(ssh).toEqual({ key: '/srv/nightjar/ssh/nightjar', user: 'admin', port: 22 }));
+    // Saved: the command to log in by hand, and the actions.
+    expect(await screen.findByText('ssh -i /srv/nightjar/ssh/nightjar root@vps.example.net')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Restart agent' })).toBeInTheDocument();
+    // Saving tried the login at once.
+    expect(await screen.findByText(/first login/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Test login' }));
+    expect(await screen.findByText(/up 3 days/)).toBeInTheDocument();
+    expect(calls).toContain('POST /api/hosts/h1/ssh/test');
+    // Rebooting asks first.
+    fireEvent.click(screen.getByRole('button', { name: 'Reboot…' }));
+    expect(screen.getByText('Reboot vps?')).toBeInTheDocument();
+    expect(calls).not.toContain('POST /api/hosts/h1/ssh/reboot');
+  });
+
+  it('adds a private key you already have, and never shows it back', async () => {
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+    const host = { id: 'h1', name: 'vps', address: 'https://vps.example.net:9101', added: 0, kind: 'agent', status: 'online', readings: null, history: [], problems: [] };
+    const posted: unknown[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/api/ssh/keys' && init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)));
+        return json({ key: { path: '/srv/nightjar/ssh/laptop', name: 'laptop', type: 'ED25519', fingerprint: 'SHA256:x', public: 'ssh-ed25519 AAAAMINE laptop@nightjar', own: true } });
+      }
+      if (url === '/api/ssh/keys') return json({ keys: [] });
+      if (url === '/api/hosts/h1') return json({ host });
+      return json({}, 404);
+    });
+    render(
+      <MemoryRouter initialEntries={['/servers/h1']}>
+        <ToastProvider>
+          <ServicesProvider enabled>
+            <Routes>
+              <Route path="/servers/:id" element={<ServerDetail />} />
+            </Routes>
+          </ServicesProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Set up SSH…' }));
+    // With no keys on the machine, bringing your own is the first choice.
+    const box = await screen.findByLabelText('Private key');
+    fireEvent.change(screen.getByLabelText('Name for the key'), { target: { value: 'laptop' } });
+    fireEvent.change(box, { target: { value: '-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n-----END OPENSSH PRIVATE KEY-----' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add key' }));
+    expect(await screen.findByText('ssh-ed25519 AAAAMINE laptop@nightjar')).toBeInTheDocument();
+    expect(posted).toEqual([{ name: 'laptop', private: '-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n-----END OPENSSH PRIVATE KEY-----' }]);
+    expect(screen.queryByText(/SECRET/)).not.toBeInTheDocument();
+  });
+
+  it('adds a server that is only an SSH login, with a page of its own', async () => {
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+    const key = { path: '/srv/nightjar/ssh/laptop', name: 'laptop', type: 'ED25519', fingerprint: 'SHA256:x', public: 'ssh-ed25519 AAAAMINE laptop', own: true };
+    const vps = {
+      id: 'v1',
+      name: 'USVA-2',
+      address: '203.0.113.40',
+      added: 0,
+      kind: 'ssh',
+      status: 'online',
+      readings: null,
+      history: [],
+      problems: [],
+      ssh: { host: '203.0.113.40', port: 655, user: 'root', key: key.path },
+      ssh_command: 'ssh -i /srv/nightjar/ssh/laptop -p 655 root@203.0.113.40',
+    };
+    let added: unknown;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/api/hosts' && init?.method === 'POST') {
+        added = JSON.parse(String(init.body));
+        return json({ host: vps });
+      }
+      if (url === '/api/hosts') return json({ hosts: [], port: 9101 });
+      if (url === '/api/hosts/token') return json({ token: 'f'.repeat(48), port: 9101 });
+      if (url === '/api/ssh/keys') return json({ keys: [key] });
+      if (url === '/api/hosts/v1') return json({ host: vps });
+      if (url === '/api/services') return json({ services: [svc({ name: 'USVA-2', target: '203.0.113.40:655', server: 'v1' })] });
+      return json({}, 404);
+    });
+    const { unmount } = render(
+      <MemoryRouter>
+        <ToastProvider>
+          <ServersPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Add a server' }));
+    const sheet = screen.getByRole('dialog', { name: 'Add a server' });
+    fireEvent.click(within(sheet).getByLabelText(/SSH only/));
+    expect(within(sheet).queryByText(/Download nightjar-agent/)).not.toBeInTheDocument();
+    fireEvent.change(within(sheet).getByLabelText('Address'), { target: { value: '203.0.113.40' } });
+    fireEvent.change(within(sheet).getByLabelText('Name'), { target: { value: 'USVA-2' } });
+    expect(await within(sheet).findByText('ssh-ed25519 AAAAMINE laptop')).toBeInTheDocument();
+    fireEvent.change(within(sheet).getByLabelText('Port'), { target: { value: '655' } });
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add server' }));
+    await waitFor(() => expect(added).toEqual({ kind: 'ssh', name: 'USVA-2', ssh: { key: key.path, user: 'root', port: 655, host: '203.0.113.40' } }));
+    unmount();
+
+    render(
+      <MemoryRouter initialEntries={['/servers/v1']}>
+        <ToastProvider>
+          <ServicesProvider enabled>
+            <Routes>
+              <Route path="/servers/:id" element={<ServerDetail />} />
+            </Routes>
+          </ServicesProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('ssh -i /srv/nightjar/ssh/laptop -p 655 root@203.0.113.40')).toBeInTheDocument();
+    // No agent: nothing to restart, and its login is all it has, so it cannot be forgotten.
+    expect(screen.queryByRole('button', { name: 'Restart agent' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Forget…' })).not.toBeInTheDocument();
+    expect(screen.queryByText('CPU and memory')).not.toBeInTheDocument();
+    const on = screen.getByText('Services on it').closest('section') as HTMLElement;
+    expect(await within(on).findByRole('link', { name: 'USVA-2' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('New token')).not.toBeInTheDocument();
+  });
+
+  it('reinstalls the agent over SSH from the server page', async () => {
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+    const host = {
+      id: 'h1',
+      name: 'nas',
+      address: 'https://192.168.0.20:9101',
+      added: 0,
+      kind: 'agent',
+      status: 'offline',
+      readings: null,
+      history: [],
+      problems: [],
+      ssh: { port: 22, user: 'root', key: '/srv/nightjar/ssh/nightjar' },
+      ssh_command: 'ssh -i /srv/nightjar/ssh/nightjar root@192.168.0.20',
+    };
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      calls.push(`${init?.method ?? 'GET'} ${url}`);
+      if (url === '/api/hosts/h1/ssh/reinstall-agent') return json({ output: "Reinstalling with this machine's agent settings." });
+      if (url === '/api/hosts/h1') return json({ host });
+      return json({}, 404);
+    });
+    render(
+      <MemoryRouter initialEntries={['/servers/h1']}>
+        <ToastProvider>
+          <ServicesProvider enabled>
+            <Routes>
+              <Route path="/servers/:id" element={<ServerDetail />} />
+            </Routes>
+          </ServicesProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Reinstall agent' }));
+    expect(await screen.findByText('Agent reinstalled')).toBeInTheDocument();
+    expect(screen.getByText(/Reinstalling with this machine/)).toBeInTheDocument();
+    expect(calls).toContain('POST /api/hosts/h1/ssh/reinstall-agent');
+  });
+
+  it('gives one command that lets the key in, safely run twice', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const { mkdtempSync, readFileSync, statSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const home = mkdtempSync(join(tmpdir(), 'nightjar-home-'));
+    const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHk3 jay's laptop";
+    const cmd = authorizeCommand(key);
+    for (let i = 0; i < 2; i++) execFileSync('sh', ['-c', cmd], { env: { ...process.env, HOME: home } });
+    const lines = readFileSync(join(home, '.ssh', 'authorized_keys'), 'utf8')
+      .trim()
+      .split('\n');
+    expect(lines).toEqual([key]);
+    expect(statSync(join(home, '.ssh')).mode & 0o777).toBe(0o700);
+    expect(statSync(join(home, '.ssh', 'authorized_keys')).mode & 0o777).toBe(0o600);
   });
 });

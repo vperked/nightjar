@@ -1,41 +1,74 @@
 import { useCallback, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { api } from '../api/client';
+import { useCharts } from '../appearance';
 import { useServices } from '../api/ServicesContext';
 import type { Process, Sample, Stats } from '../api/types';
+import { LatestIncident } from '../components/LatestIncident';
 import { Num } from '../components/Num';
 import { PlexSummary } from '../components/PlexNow';
+import { PluginCards } from '../components/PluginCards';
+import { RemoteSummary } from '../components/RemoteSummary';
 import { useShown } from '../components/Sections';
 import { Skeleton } from '../components/Skeleton';
 import { Legend, TrendChart, type Point, type Scrub } from '../components/TrendChart';
 import { Bar, Pct, Section, State, Ticks } from '../components/ui';
-import { formatBytes, formatRate, formatUptime } from '../format';
+import { formatBytes, formatRate, formatResponse, formatUptime } from '../format';
 import { usePoll } from '../hooks/usePoll';
 import { DrivesSection } from './overview/Drives';
 import { HealthSummary, ServiceProblems } from './overview/Health';
 
 const pct = (v: number) => `${Math.round(v)}%`;
 
+// Gauge is a tile's fill as a block of dots (or a row of segments, drawn as lines), for a reading
+// that changes too slowly to chart.
+function Gauge({ percent }: { percent: number }) {
+  const v = Math.min(100, Math.max(0, percent));
+  return (
+    <div className={`readout-gauge ${percent >= 90 ? 'crit' : percent >= 75 ? 'warn' : ''}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)} aria-label="Used">
+      {/* The stylesheet rounds the fill to whole columns of dots, or segments. */}
+      <span style={{ ['--v' as string]: v }} />
+    </div>
+  );
+}
+
 // Hovering a card's sparkline scrubs through it: the headline shows the value at that moment and
 // the line below says when, instead of a tooltip covering the card.
-function Readout({ label, value, unit, sub, points }: { label: string; value: number; unit?: string; sub: string; points: Point[] }) {
+export function Readout({
+  label,
+  value,
+  unit,
+  sub,
+  points,
+  color = 'var(--series-1)',
+  gauge = false,
+}: {
+  label: string;
+  value: number;
+  unit?: string;
+  sub: string;
+  points: Point[];
+  color?: string;
+  gauge?: boolean;
+}) {
   const [scrub, setScrub] = useState<Scrub | null>(null);
   const v = scrub?.values[0];
   return (
-    <div className={`readout ${scrub ? 'scrubbing' : ''}`}>
+    <div className={`readout ${scrub ? 'scrubbing' : ''}`} style={{ ['--metric' as string]: color }}>
       <span className="label">{label}</span>
       <div className="readout-value">
         {scrub ? v === null || v === undefined ? '--' : v.toFixed(1) : <Num value={value} format={(n) => n.toFixed(1)} />}
         {unit && <span className="unit">{unit}</span>}
       </div>
       <div className="readout-sub">{scrub ? `at ${scrub.time}` : sub}</div>
-      <TrendChart series={[{ label, color: 'var(--series-1)', points }]} height={44} compact format={pct} onScrub={setScrub} />
+      {gauge ? <Gauge percent={value} /> : <TrendChart series={[{ label, color, points }]} height={60} compact format={pct} onScrub={setScrub} />}
     </div>
   );
 }
 
 function NetworkReadout({ stats, rx, tx }: { stats: Stats; rx: Point[]; tx: Point[] }) {
   const [scrub, setScrub] = useState<Scrub | null>(null);
+  const charts = useCharts();
   const bw = stats.network.bandwidth;
   const series = [
     { label: 'In', color: 'var(--series-1)', points: rx },
@@ -54,7 +87,17 @@ function NetworkReadout({ stats, rx, tx }: { stats: Stats; rx: Point[]; tx: Poin
         <Link to="/network" className="label readout-link" title="Live network meter">
           Network →
         </Link>
-        {scrub ? <span className="readout-sub">at {scrub.time}</span> : <Legend series={series} />}
+        {scrub ? (
+          <span className="readout-sub">at {scrub.time}</span>
+        ) : charts === 'dots' ? (
+          // In grows up from the middle of the chart and out grows down.
+          <span className="legend">
+            <span>↑ in</span>
+            <span>↓ out</span>
+          </span>
+        ) : (
+          <Legend series={series} />
+        )}
       </div>
       <div className="net-pair">
         <div className="readout-value">
@@ -66,7 +109,7 @@ function NetworkReadout({ stats, rx, tx }: { stats: Stats; rx: Point[]; tx: Poin
           {rate(1, bw?.bytes_sent_per_sec)}
         </div>
       </div>
-      <TrendChart series={series} height={44} compact format={formatRate} onScrub={setScrub} />
+      <TrendChart series={series} height={60} compact format={formatRate} onScrub={setScrub} />
     </div>
   );
 }
@@ -125,7 +168,7 @@ function ServicesSection() {
               <td className="ticks-cell hide-sm">
                 <Ticks beats={s.recent} slots={30} />
               </td>
-              <td className="r num hide-sm">{s.latency_ms !== null ? `${Math.round(s.latency_ms)}ms` : '—'}</td>
+              <td className="r num hide-sm">{formatResponse(s)}</td>
               <td className="r">
                 <Pct value={s.uptime_24h} />
               </td>
@@ -216,15 +259,18 @@ function Body({ stats }: { stats: Stats }) {
           sub={`${formatBytes(stats.memory.used)} / ${formatBytes(stats.memory.total)}`}
           points={h.map((p) => ({ t: p.ts, v: p.memory }))}
         />
-        <Readout label="Disk" value={stats.disk.total.percent} unit="%" sub={`${formatBytes(stats.disk.total.free)} free`} points={h.map((p) => ({ t: p.ts, v: p.disk }))} />
+        <Readout label="Disk" value={stats.disk.total.percent} unit="%" sub={`${formatBytes(stats.disk.total.free)} free`} points={h.map((p) => ({ t: p.ts, v: p.disk }))} gauge />
         <NetworkReadout stats={stats} rx={h.map((p) => ({ t: p.ts, v: p.rx_bps }))} tx={h.map((p) => ({ t: p.ts, v: p.tx_bps }))} />
       </div>
 
+      <LatestIncident />
       {shown('attention') && <ServiceProblems data={units} />}
       <div className="columns">
         <div className="col">
           {shown('services') && <ServicesSection />}
+          {shown('remote') && shown('servers') && <RemoteSummary />}
           {shown('plex') && <PlexSummary />}
+          <PluginCards />
           {shown('processes') && <Processes stats={stats} />}
         </div>
         <div className="col">

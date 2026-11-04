@@ -13,6 +13,8 @@
 @import './styles/controls.css';
 @import './styles/forms.css';
 @import './styles/select.css';
+@import './styles/timepicker.css';
+@import './styles/diagnosis.css';
 @import './styles/settings.css';
 @import './styles/pages.css';
 @import './styles/status-public.css';
@@ -30,5 +32,11 @@
 @import './styles/auth.css';
 @import './styles/logs.css';
 @import './styles/apps.css';
+@import './styles/servers.css';
+@import './styles/analytics.css';
+@import './styles/docs.css';
 @import './styles/motion.css';
 @import './styles/overview.css';
+@import './styles/plugins.css';
+@import './styles/incidents.css';
+@import './styles/looks.css';

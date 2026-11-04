@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"servermonitor/internal/accounts"
-	"servermonitor/internal/api"
-	"servermonitor/internal/collect"
-	"servermonitor/internal/config"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/storage"
+	"nightjar/internal/accounts"
+	"nightjar/internal/api"
+	"nightjar/internal/collect"
+	"nightjar/internal/config"
+	"nightjar/internal/monitor"
+	"nightjar/internal/storage"
 )
 
 func TestAdminAccountGuardsEverything(t *testing.T) {
@@ -38,7 +38,7 @@ func TestAdminAccountGuardsEverything(t *testing.T) {
 		var out map[string]any
 		json.Unmarshal(rec.Body.Bytes(), &out)
 		for _, c := range rec.Result().Cookies() {
-			if c.Name == "servermonitor_session" {
+			if c.Name == "nightjar_session" {
 				cookie = c
 			}
 		}

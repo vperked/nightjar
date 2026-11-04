@@ -6,10 +6,12 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,13 +21,13 @@ import (
 	"sync"
 	"time"
 
-	"servermonitor/internal/accounts"
-	"servermonitor/internal/collect"
-	"servermonitor/internal/logx"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/storage"
-	"servermonitor/internal/updates"
-	"servermonitor/internal/web"
+	"nightjar/internal/accounts"
+	"nightjar/internal/collect"
+	"nightjar/internal/logx"
+	"nightjar/internal/monitor"
+	"nightjar/internal/storage"
+	"nightjar/internal/updates"
+	"nightjar/internal/web"
 )
 
 var log = logx.Component("Web")
@@ -69,6 +71,31 @@ type Server struct {
 	stats    *Stats
 	statsAt  time.Time
 	statsTTL time.Duration
+
+	days dayCache // the status page's days per check
+
+	testMu   sync.Mutex
+	lastTest time.Time // when a test alert last went out
+}
+
+// testAlertGap keeps test alerts from being sent over and over, by a stuck button or a script.
+const testAlertGap = 10 * time.Second
+
+// allowTestAlert claims the next test alert, or says how long until one is allowed.
+func (s *Server) allowTestAlert() (wait time.Duration) {
+	s.testMu.Lock()
+	defer s.testMu.Unlock()
+	if wait := testAlertGap - time.Since(s.lastTest); wait > 0 {
+		return wait
+	}
+	s.lastTest = time.Now()
+	return 0
+}
+
+// tooSoon answers a test alert asked for within testAlertGap of the last.
+func tooSoon(w http.ResponseWriter, wait time.Duration) {
+	w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+	writeJSON(w, http.StatusTooManyRequests, errBody(fmt.Sprintf("A test alert was just sent; try again in %ds.", int(wait.Seconds())+1)))
 }
 
 func New(cfg Config, ctx *monitor.Context) *Server {
@@ -80,7 +107,45 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.HandleFunc("POST /api/auth/login", fromDashboard(s.login))
 	mux.HandleFunc("POST /api/auth/logout", fromDashboard(s.logout))
 	mux.Handle("POST /api/auth/password", s.writable(s.changePassword))
+	mux.Handle("POST /api/auth/2fa/begin", s.writable(s.beginTwoFactor))
+	mux.Handle("POST /api/auth/2fa/enable", s.writable(s.enableTwoFactor))
+	mux.Handle("POST /api/auth/2fa/disable", s.writable(s.disableTwoFactor))
+	mux.Handle("GET /api/activity", s.auth(s.activity))
+	mux.Handle("GET /api/backup", s.auth(s.makeBackup))
+	// A backup can be larger than other changes, so it skips their size limit for its own.
+	mux.Handle("POST /api/backup/restore", s.auth(s.logged(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if u, err := url.Parse(origin); err != nil || u.Host != r.Host {
+				writeJSON(w, http.StatusForbidden, errBody("Cross-origin changes are not allowed"))
+				return
+			}
+		}
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+			writeJSON(w, http.StatusUnsupportedMediaType, errBody("Send JSON"))
+			return
+		}
+		s.restoreBackup(w, r)
+	})))
 	mux.HandleFunc("GET /api/status", s.statusPage)
+	mux.Handle("GET /api/incidents", s.auth(s.incidents))
+	mux.Handle("PUT /api/incidents/{id}/feedback", s.writable(s.saveFeedback))
+	mux.Handle("DELETE /api/incidents/{id}/feedback", s.writable(s.saveFeedback))
+	mux.Handle("PUT /api/incidents/{id}/notice", s.writable(s.saveNotice))
+	mux.Handle("DELETE /api/incidents/{id}/notice", s.writable(s.saveNotice))
+	mux.Handle("GET /api/maintenance", s.auth(s.maintenanceList))
+	mux.Handle("POST /api/maintenance", s.writable(s.saveMaintenance))
+	mux.Handle("PUT /api/maintenance/{id}", s.writable(s.saveMaintenance))
+	mux.Handle("DELETE /api/maintenance/{id}", s.writable(s.deleteMaintenance))
+	mux.Handle("GET /api/docker/containers", s.auth(s.containers))
+	mux.Handle("GET /api/report", s.auth(s.weeklyReport))
+	mux.Handle("GET /api/plex/stats", s.auth(s.plexStats))
+	mux.Handle("GET /api/cleanup", s.auth(s.cleanupView))
+	mux.Handle("POST /api/cleanup/scan", s.writable(s.cleanupScan))
+	mux.Handle("PUT /api/cleanup/{key}/keep", s.writable(s.cleanupKeep))
+	mux.Handle("DELETE /api/cleanup/{key}/keep", s.writable(s.cleanupKeep))
+	mux.Handle("POST /api/report/send", s.writable(s.sendReport))
+	mux.Handle("GET /api/appearance", s.auth(s.getAppearance))
+	mux.Handle("PUT /api/appearance", s.writable(s.saveAppearance))
 	mux.Handle("GET /api/statuspage", s.auth(s.statusPageDesign))
 	mux.Handle("PUT /api/statuspage", s.writable(s.saveStatusPageDesign))
 	mux.Handle("GET /api/stats", s.auth(s.serveStats))
@@ -89,15 +154,36 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("GET /api/apps/job", s.auth(s.needApps(s.appJob)))
 	mux.Handle("POST /api/apps/{id}/install", s.writable(s.needApps(s.installApp)))
 	mux.Handle("POST /api/apps/{id}/remove", s.writable(s.needApps(s.removeApp)))
+	mux.Handle("GET /api/plugins", s.auth(s.needPlugins(s.listPlugins)))
+	mux.Handle("GET /api/plugins/cards", s.auth(s.needPlugins(s.pluginCards)))
+	mux.Handle("POST /api/plugins/rescan", s.writable(s.needPlugins(s.rescanPlugins)))
+	mux.Handle("PUT /api/plugins/{id}", s.writable(s.needPlugins(s.configurePlugin)))
+	mux.Handle("POST /api/plugins/{id}/try", s.writable(s.needPlugins(s.tryPlugin)))
 	mux.Handle("GET /api/notifications", s.auth(s.notifications))
 	mux.Handle("GET /api/notifications/summary", s.auth(s.notificationSummary))
 	mux.Handle("POST /api/notifications/read", s.writable(s.markNotifications))
 	mux.Handle("GET /api/notifications/rules", s.auth(s.notificationRules))
 	mux.Handle("PUT /api/notifications/rules", s.writable(s.saveNotificationRules))
 	mux.Handle("POST /api/notifications/mute", s.writable(s.mute))
+	mux.Handle("GET /api/hosts", s.auth(s.needRemote(s.listHosts)))
+	mux.Handle("GET /api/hosts/{id}", s.auth(s.needRemote(s.getHost)))
+	mux.Handle("POST /api/hosts/token", s.writable(s.needRemote(s.newHostToken)))
+	mux.Handle("GET /api/agent/download", s.auth(s.downloadAgent))
+	mux.Handle("GET /api/analytics", s.auth(s.analyticsAll))
+	mux.Handle("GET /api/analytics/{id}", s.auth(s.analyticsHost))
+	mux.Handle("POST /api/hosts", s.writable(s.needRemote(s.saveHost)))
+	mux.Handle("PUT /api/hosts/{id}", s.writable(s.needRemote(s.saveHost)))
+	mux.Handle("DELETE /api/hosts/{id}", s.writable(s.needRemote(s.deleteHost)))
+	mux.Handle("PUT /api/hosts/{id}/ssh", s.writable(s.needRemote(s.setHostSSH)))
+	mux.Handle("DELETE /api/hosts/{id}/ssh", s.writable(s.needRemote(s.setHostSSH)))
+	mux.Handle("POST /api/hosts/{id}/ssh/{action}", s.writable(s.needRemote(s.runHostSSH)))
+	mux.Handle("GET /api/ssh/keys", s.auth(s.needRemote(s.sshKeys)))
+	mux.Handle("POST /api/ssh/keys", s.writable(s.needRemote(s.newSSHKey)))
+	mux.Handle("POST /api/ssh/authorize", s.writable(s.needRemote(s.authorizeSSHKey)))
 	mux.Handle("GET /api/services", s.auth(s.services))
 	mux.Handle("GET /api/services/history", s.auth(s.serviceHistory))
 	mux.Handle("GET /api/plex", s.auth(s.plex))
+	mux.Handle("POST /api/plex/streams/{id}/stop", s.writable(s.plexStop))
 	mux.Handle("GET /api/qbittorrent", s.auth(s.qbittorrent))
 	mux.Handle("GET /api/qbittorrent/categories", s.auth(s.needQB(s.qbCategories)))
 	mux.Handle("POST /api/qbittorrent/action", s.writable(s.needQB(s.qbAction)))
@@ -107,6 +193,19 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("POST /api/checks/test", s.writable(s.testCheck))
 	mux.Handle("PUT /api/checks/{name}", s.writable(s.saveCheck))
 	mux.Handle("DELETE /api/checks/{name}", s.writable(s.deleteCheck))
+	mux.Handle("POST /api/checks/{name}/repair", s.writable(s.repairCheck))
+	mux.Handle("GET /api/repairs", s.auth(s.repairs))
+	// Discord signs each button click with the bot's key; the bot checks it, and who clicked.
+	mux.HandleFunc("POST /discord/interactions", func(w http.ResponseWriter, r *http.Request) {
+		if s.ctx.DiscordBot == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.ctx.DiscordBot.Interactions(w, r)
+	})
+	// A heartbeat's token is its credential; jobs ping without signing in.
+	mux.HandleFunc("/ping/{token}", s.ping)
+	mux.HandleFunc("/ping/{token}/{kind}", s.ping)
 	mux.Handle("GET /api/settings", s.auth(s.settings))
 	mux.Handle("PUT /api/settings", s.writable(s.saveSettings))
 	mux.Handle("POST /api/settings/test", s.writable(s.testSettings))
@@ -183,15 +282,27 @@ func (s *Server) Shutdown(ctx context.Context) error { return s.http.Shutdown(ct
 func (s *Server) headers(next http.Handler) http.Handler {
 	csp := "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
 		"font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+	// The status page, and its designer's preview, may show the owner's images, fonts and
+	// stylesheets from other sites. Scripts stay the page's own.
+	custom := "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; " +
+		"font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", csp)
+		if r.URL.Path == "/status" || r.URL.Path == "/status-page" {
+			h.Set("Content-Security-Policy", custom)
+		} else {
+			h.Set("Content-Security-Policy", csp)
+		}
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Access-Control-Allow-Origin", s.cfg.AllowedOrigin)
-		h.Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		h.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
+		// Only a site named in the settings may read answers from another origin. Left unset, no
+		// header goes out: "null" would let sandboxed frames and local files read them.
+		if o := s.cfg.AllowedOrigin; o != "" && o != "null" {
+			h.Set("Access-Control-Allow-Origin", s.cfg.AllowedOrigin)
+			h.Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			h.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
+		}
 		h.Set("Vary", "Origin")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -305,6 +416,11 @@ func (s *Server) auth(next http.HandlerFunc) http.Handler {
 	})
 }
 
+// statusRefused answers a request Nightjar carried out but that something it talks to turned down or
+// did not answer: Plex, qBittorrent, systemd, a server over SSH. Not a 5xx: a proxy in front (Cloudflare)
+// swaps those for its own page, and the reason in the body would never reach the dashboard.
+const statusRefused = http.StatusUnprocessableEntity
+
 func errBody(msg string) map[string]string { return map[string]string{"error": msg} }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -316,19 +432,27 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func nowSeconds() float64 { return float64(time.Now().UnixNano()) / 1e9 }
 
+// config is what the page needs before it draws. Signed out, that is only enough to sign in: what
+// runs on the machine, its version and the admin's name are left out.
 func (s *Server) config(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	signedIn := s.authorized(r)
+	out := map[string]any{
 		"auth_required":       s.signInRequired(),
-		"authorized":          s.authorized(r),
-		"account":             s.account(),
+		"authorized":          signedIn,
+		"account":             s.account(signedIn),
 		"status_page_enabled": s.ctx.Config().StatusPageEnabled,
 		"status_page_title":   s.ctx.Config().StatusPageTitle,
-		"plex_enabled":        s.ctx.Plex != nil,
-		"qbittorrent_enabled": s.ctx.QBittorrentBoard != nil,
-		"needs_setup":         s.authorized(r) && s.needsSetup(),
-		"version":             s.cfg.Version,
-		"hidden":              append([]string{}, s.ctx.Config().HiddenSections...),
-	})
+		"needs_setup":         false,
+		"hidden":              []string{},
+		"appearance":          s.publicAppearance(r),
+	}
+	if signedIn {
+		out["plex_enabled"], out["qbittorrent_enabled"] = s.ctx.Plex != nil, s.ctx.QBittorrentBoard != nil
+		out["needs_setup"] = s.needsSetup()
+		out["version"] = s.cfg.Version
+		out["hidden"] = append([]string{}, s.ctx.Config().HiddenSections...)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type check struct {

@@ -9,7 +9,7 @@ import (
 
 	"github.com/shirou/gopsutil/v4/host"
 
-	"servermonitor/internal/kernel"
+	"nightjar/internal/kernel"
 )
 
 func TestRebootDetectedFromSavedBootTime(t *testing.T) {

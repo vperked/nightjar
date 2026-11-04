@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/notify"
-	"servermonitor/internal/storage"
+	"nightjar/internal/discord"
+	"nightjar/internal/notify"
+	"nightjar/internal/storage"
 )
 
 // fake is a channel that records what it is sent.
@@ -303,5 +303,85 @@ func TestAQuietHoursSummaryThatFailsIsRetried(t *testing.T) {
 	}
 	if h := history(db); h[0].Status != "failed" {
 		t.Fatalf("after the retries it is marked failed, got %+v", h[0])
+	}
+}
+
+func TestFlappingSubjectIsPausedThenSettles(t *testing.T) {
+	c := &fake{name: "Discord"}
+	hub, db := newHub(t, notify.Destination{Channel: c})
+	now := at("12:00")
+	hub.Now = func() time.Time { return now }
+	api := discord.About(hub.Route("uptime"), "check:api")
+	titles := []string{"Service Down: api", "Service Recovered: api"}
+	for i := range 10 {
+		api.SendEmbed(titles[i%2], "", discord.Critical, nil, "Uptime")
+		now = now.Add(time.Minute)
+	}
+	got := c.sent()
+	if len(got) != 7 || got[6] != "Alerts paused: Service Down: api" {
+		t.Fatalf("six alerts, then one saying the rest are paused, got %v", got)
+	}
+	throttled := 0
+	for _, n := range history(db) {
+		if n.Status == "throttled" {
+			throttled++
+		}
+	}
+	if throttled != 4 {
+		t.Fatalf("the four alerts after the sixth are kept but not sent, got %d", throttled)
+	}
+	discord.About(hub.Route("uptime"), "check:web").SendEmbed("Service Down: web", "", discord.Critical, nil, "Uptime")
+	if got := c.sent(); got[len(got)-1] != "Service Down: web" {
+		t.Fatal("another check is not held back by api's flapping")
+	}
+
+	hub.Tick()
+	if len(c.sent()) != 8 {
+		t.Fatal("it has not settled yet")
+	}
+	now = now.Add(15 * time.Minute)
+	hub.Tick()
+	if got := c.sent(); got[len(got)-1] != "Settled: Service Recovered: api" {
+		t.Fatalf("one message should say how it ended up, got %v", got)
+	}
+	api.SendEmbed("Service Down: api", "", discord.Critical, nil, "Uptime")
+	if got := c.sent(); got[len(got)-1] != "Service Down: api" {
+		t.Fatal("once settled, its alerts go out again")
+	}
+}
+
+func TestAlertStormIsHeldForOneSummary(t *testing.T) {
+	c := &fake{name: "Discord"}
+	hub, db := newHub(t, notify.Destination{Channel: c})
+	now := at("12:00")
+	hub.Now = func() time.Time { return now }
+	for i := range 15 {
+		discord.About(hub.Route("servers"), "host:"+string(rune('a'+i))).SendEmbed("Server offline: "+string(rune('a'+i)), "", discord.Critical, nil, "Servers")
+	}
+	if n := len(c.sent()); n != 10 {
+		t.Fatalf("ten alerts a minute go out, got %d", n)
+	}
+	hub.Tick()
+	if n := len(c.sent()); n != 10 {
+		t.Fatal("the summary waits, so it cannot become a flood itself")
+	}
+	now = now.Add(5 * time.Minute)
+	hub.Tick()
+	got := c.sent()
+	if len(got) != 11 || got[10] != "Alert summary: 5 alerts" {
+		t.Fatalf("the held alerts go out in one summary, got %v", got)
+	}
+	for _, n := range history(db) {
+		if n.Status == "held" {
+			t.Fatalf("nothing should stay held, got %+v", n)
+		}
+	}
+	hub.Tick()
+	if len(c.sent()) != 11 {
+		t.Fatal("the summary is sent once")
+	}
+	discord.About(hub.Route("servers"), "host:z").SendEmbed("Server offline: z", "", discord.Critical, nil, "Servers")
+	if len(c.sent()) != 12 {
+		t.Fatal("once the minute has passed, alerts go out again")
 	}
 }

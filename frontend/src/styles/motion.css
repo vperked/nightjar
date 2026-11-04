@@ -1,16 +1,15 @@
 /* Finish: motion and depth */
 
-/* Pages arrive with a short rise, their blocks a step apart. "backwards" leaves no transform once
-   done, so fixed bars inside a page (save bar, selection bar) stay fixed to the window. */
+/* Pages fade in, their blocks a step apart. Only opacity changes, which costs nothing to animate;
+   nothing slides or blurs. */
 @keyframes enter {
   from {
     opacity: 0;
-    transform: translateY(8px);
   }
 }
 .page > main > *,
 .page > .skeleton {
-  animation: enter 0.38s cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+  animation: enter 0.3s ease-out backwards;
 }
 .page > main > *:nth-child(2) {
   animation-delay: 40ms;
@@ -26,7 +25,7 @@
 }
 .readouts > *,
 .stats-row > * {
-  animation: enter 0.4s cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+  animation: enter 0.3s ease-out backwards;
 }
 .readouts > :nth-child(2),
 .stats-row > :nth-child(2) {
@@ -98,17 +97,147 @@
     opacity: 0;
   }
 }
-/* The theme switch cross-fades (View Transitions) a little slower than the default. */
+/* The theme switch: the new theme spreads in a circle from the click (motion.ts animates the
+   clip), over a still picture of the old one. */
 ::view-transition-old(root),
 ::view-transition-new(root) {
-  animation-duration: 0.28s;
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-new(root) {
+  z-index: 2;
+}
+
+/* Cards catch the light along their edge where the pointer is (motion.ts sets --mx and --my).
+   Only a 1px ring is lit: the mask cuts out everything inside the border. */
+:root {
+  --edge-light: rgba(255, 255, 255, 0.6);
+}
+:root[data-theme='light'] {
+  --edge-light: rgba(0, 0, 0, 0.42);
+}
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  :is(.section, .readout, .panel, .stats-row > div) {
+    position: relative;
+  }
+  :is(.section, .readout, .panel, .stats-row > div)::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    padding: 1px;
+    border-radius: inherit;
+    background: radial-gradient(240px circle at var(--mx, -500px) var(--my, -500px), var(--edge-light), transparent 72%);
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box exclude,
+      linear-gradient(#000 0 0);
+    opacity: 0;
+    transition: opacity 0.35s ease-out;
+    pointer-events: none;
+  }
+  :is(.section, .readout, .panel, .stats-row > div):hover::after {
+    opacity: 1;
+  }
+  /* Ruled cells are square, where a lit ring reads as a box; they get a soft glow under the
+     pointer instead, faint enough to fade out before it reaches the rules. */
+  :root:not([data-style='cards']) :is(.section, .readout, .panel, .stats-row > div)::after {
+    padding: 0;
+    background: radial-gradient(200px circle at var(--mx, -500px) var(--my, -500px), var(--hover-glow), transparent 70%);
+    -webkit-mask: none;
+    mask: none;
+  }
+}
+:root {
+  --hover-glow: rgba(255, 255, 255, 0.045);
+}
+:root[data-theme='light'] {
+  --hover-glow: rgba(0, 0, 0, 0.03);
+}
+
+/* Charts draw themselves in from the left when they first appear. */
+@keyframes plot-draw {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+.chart .plot {
+  animation: plot-draw 0.6s cubic-bezier(0.3, 0.7, 0.2, 1) both;
+}
+
+/* Uptime rows wipe in from the left once, as one piece, rather than animating every tick. */
+.ticks {
+  animation: plot-draw 0.5s cubic-bezier(0.3, 0.7, 0.2, 1) both;
+}
+
+/* The mark: a shooting star crosses its sky on hover, and the moon's star twinkles. */
+.brand-sky {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.brand-star {
+  position: absolute;
+  top: 2px;
+  left: -16px;
+  width: 17px;
+  height: 2px;
+  border-radius: 2px;
+  /* A tail that thickens into a bright head. */
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, currentColor 60%, transparent) 65%, currentColor);
+  opacity: 0;
+  transform: rotate(28deg);
+}
+.wordmark:hover .brand-star {
+  animation: shooting-star 0.9s cubic-bezier(0.4, 0, 0.2, 1) 0.08s;
+}
+@keyframes shooting-star {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) rotate(28deg);
+  }
+  15% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(44px, 24px) rotate(28deg);
+  }
+}
+.brand-mark svg circle {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.wordmark:hover .brand-mark svg circle {
+  animation: twinkle 0.9s ease-in-out 0.35s;
+}
+@keyframes twinkle {
+  40% {
+    transform: scale(1.7);
+    opacity: 0.6;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .page > main > *,
   .page > .skeleton,
   .readouts > *,
   .stats-row > *,
-  .live-dot::after {
+  .live-dot::after,
+  .chart .plot,
+  .ticks,
+  .wordmark:hover .brand-star,
+  .wordmark:hover .brand-mark svg circle {
     animation: none;
   }
   .nav.ind-ready .nav-indicator,

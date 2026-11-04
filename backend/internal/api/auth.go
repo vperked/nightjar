@@ -6,12 +6,12 @@ import (
 	"net/http"
 	"strings"
 
-	"servermonitor/internal/accounts"
+	"nightjar/internal/accounts"
 )
 
 // The admin account: create it once with the setup code, then sign in and out.
 
-const cookieName = "servermonitor_session"
+const cookieName = "nightjar_session"
 
 func sessionCookie(r *http.Request) string {
 	c, err := r.Cookie(cookieName)
@@ -22,12 +22,19 @@ func sessionCookie(r *http.Request) string {
 }
 
 // account is what /api/config says about the admin account.
-func (s *Server) account() map[string]any {
+// account describes the admin account. Signed out, it says only what the sign-in and setup screens
+// need: whether there is an account, whether it asks for a code, and (for the setup code) which
+// journal to look in. The username and recovery codes are for whoever is signed in.
+func (s *Server) account(signedIn bool) map[string]any {
 	if s.cfg.Accounts == nil {
 		return map[string]any{"configured": true}
 	}
 	// The service name lets the setup screen say which journal holds the setup code.
-	return map[string]any{"configured": s.cfg.Accounts.Configured(), "username": s.cfg.Accounts.Username(), "service": s.ctx.Config().SystemdServiceName}
+	out := map[string]any{"configured": s.cfg.Accounts.Configured(), "service": s.ctx.Config().SystemdServiceName, "two_factor": s.cfg.Accounts.TwoFactor()}
+	if signedIn {
+		out["username"], out["recovery_left"] = s.cfg.Accounts.Username(), s.cfg.Accounts.RecoveryLeft()
+	}
+	return out
 }
 
 // setCookie signs the browser in. The cookie is HttpOnly, so scripts on the page never see it, and
@@ -53,6 +60,7 @@ type credentials struct {
 	Username  string `json:"username"`
 	Password  string `json:"password"`
 	SetupCode string `json:"setup_code"`
+	Code      string `json:"code"` // the authenticator's, with two-factor sign-in on
 }
 
 func (s *Server) readCredentials(w http.ResponseWriter, r *http.Request) (credentials, bool) {
@@ -105,7 +113,21 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, errBody(err.Error()))
 		return
 	}
+	// With two-factor sign-in on, the password alone is not enough: the page then asks for a code.
+	if s.cfg.Accounts.TwoFactor() {
+		if strings.TrimSpace(c.Code) == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Enter the code from your authenticator app", "need_code": true, "fields": map[string]string{"code": "needed"}})
+			return
+		}
+		if err := s.cfg.Accounts.CheckCode(c.Code); err != nil {
+			s.recordFailure(clientIP(r))
+			log.Warn("Failed sign-in: wrong code", "ip", clientIP(r))
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error(), "need_code": true, "fields": map[string]string{"code": err.Error()}})
+			return
+		}
+	}
 	log.Info("Signed in", "ip", clientIP(r))
+	s.record(r, "Signed in", "account", "", "from "+clientIP(r))
 	s.startSession(w, r)
 }
 
@@ -140,4 +162,40 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"changed": true})
+}
+
+// beginTwoFactor offers a new authenticator secret, to confirm with enableTwoFactor.
+func (s *Server) beginTwoFactor(w http.ResponseWriter, r *http.Request) {
+	secret, link, err := s.cfg.Accounts.BeginTwoFactor()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"secret": secret, "link": link})
+}
+
+func (s *Server) enableTwoFactor(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Code string `json:"code"`
+	}
+	json.NewDecoder(r.Body).Decode(&in)
+	codes, err := s.cfg.Accounts.EnableTwoFactor(in.Code)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"recovery": codes})
+}
+
+func (s *Server) disableTwoFactor(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	json.NewDecoder(r.Body).Decode(&in)
+	if err := s.cfg.Accounts.DisableTwoFactor(in.Password, in.Code); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

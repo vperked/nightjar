@@ -47,7 +47,7 @@
   margin: 0;
   vertical-align: -3px;
   border: 1.5px solid var(--rule-strong);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   cursor: pointer;
   transition:
@@ -123,26 +123,105 @@
   text-decoration-color: var(--rule-strong);
   text-underline-offset: 3px;
 }
+/* A torrent's details: a panel under its row. */
 .qb-detail td {
-  padding-top: 0 !important;
-  background: color-mix(in srgb, var(--bg-sunk) 45%, transparent);
+  padding: 2px 0 14px !important;
 }
-.qb-facts {
+.qb-row.open td {
+  border-bottom-color: transparent;
+}
+.qb-panel {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 4px 16px;
-  margin: 4px 0 10px;
-  font-size: 12.5px;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+  animation: qb-panel-in 0.14s ease-out;
 }
-.qb-facts dt {
+@keyframes qb-panel-in {
+  from {
+    opacity: 0;
+  }
+}
+.qb-panel-stall {
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn-mark) 35%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warn-mark) 9%, transparent);
+  color: var(--warn);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.qb-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+.qb-tiles > div {
+  padding: 10px 12px;
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.qb-tiles dt {
+  font-size: 11.5px;
   color: var(--ink-3);
 }
-.qb-facts dd {
-  margin: 0;
+.qb-tiles dd {
+  margin: 3px 0 0;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
+.qb-lines {
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.qb-line {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 40px;
+  padding: 4px 6px 4px 12px;
+  font-size: 12.5px;
+}
+.qb-line + .qb-line {
+  border-top: 1px solid var(--rule);
+}
+.qb-line-label {
+  flex: none;
+  width: 70px;
+  color: var(--ink-3);
+}
+.qb-line-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink);
+}
+.qb-copy {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.qb-copy:hover {
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink);
+}
+
 .qb-actions,
 .qb-confirm {
   display: inline-flex;
@@ -154,6 +233,89 @@
 .qb-confirm {
   margin-left: 0;
   font-size: 13px;
+}
+.qb-actions.in-panel,
+.qb-confirm.in-panel {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+}
+.qb-actions-gap {
+  flex: 1;
+}
+.qb-confirm.in-panel .qb-confirm-text {
+  flex: 1;
+  font-weight: 500;
+  color: var(--ink);
+}
+.qb-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 0.12s,
+    background 0.12s;
+}
+.qb-btn:hover {
+  border-color: var(--ink-3);
+  background: var(--surface-2);
+}
+.qb-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.qb-btn.danger {
+  border-color: color-mix(in srgb, var(--crit-mark) 45%, transparent);
+  background: color-mix(in srgb, var(--crit-mark) 9%, transparent);
+  color: var(--crit);
+}
+.qb-btn.danger:hover {
+  background: color-mix(in srgb, var(--crit-mark) 16%, transparent);
+}
+.qb-btn.danger.solid {
+  border-color: transparent;
+  background: var(--crit-mark);
+  color: #fff;
+}
+.qb-btn-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+@media (max-width: 760px) {
+  .qb-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .qb-actions.in-panel .qb-actions-gap {
+    display: none;
+  }
+  .qb-actions.in-panel,
+  .qb-confirm.in-panel {
+    flex-wrap: wrap;
+  }
+  .qb-confirm.in-panel .qb-confirm-text {
+    flex-basis: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .qb-panel {
+    animation: none;
+  }
 }
 /* The selection bar floats at the bottom of the screen in inverted colours, like a toast with buttons. */
 .qb-bulk {
@@ -168,7 +330,7 @@
   gap: 2px;
   max-width: calc(100vw - 24px);
   padding: 5px;
-  border-radius: 14px;
+  border-radius: var(--radius);
   background: var(--ink);
   color: var(--bulk-ink);
   box-shadow: var(--shadow-lift);
@@ -222,7 +384,7 @@
 }
 .qb-bulk .btn-quiet {
   padding: 7px 11px;
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   color: color-mix(in srgb, var(--bulk-ink) 85%, transparent);
 }
 .qb-bulk .btn-quiet:hover {
@@ -248,7 +410,7 @@
   width: 32px;
   height: 32px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   background: none;
   color: color-mix(in srgb, var(--bulk-ink) 70%, transparent);
   cursor: pointer;

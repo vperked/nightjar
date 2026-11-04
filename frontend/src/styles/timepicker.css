@@ -1,0 +1,183 @@
+/* Time picker */
+
+.tp {
+  position: relative;
+  display: inline-block;
+}
+.tp-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 124px;
+  height: 36px;
+  padding: 0 10px 0 12px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13.5px;
+  cursor: pointer;
+  transition:
+    border-color 0.12s,
+    box-shadow 0.12s;
+}
+.tp-trigger:hover,
+.tp.open .tp-trigger {
+  border-color: var(--ink-3);
+}
+.tp-trigger:focus-visible {
+  outline: 0;
+  border-color: var(--ink-3);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink) 14%, transparent);
+}
+.tp-trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.tp-value {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.tp-icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: var(--ink-3);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tp-panel {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  padding: 8px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lift);
+  transform-origin: top left;
+  animation: tp-open 0.12s ease-out;
+}
+.tp-panel.right {
+  left: auto;
+  right: 0;
+  transform-origin: top right;
+}
+.tp-panel.above.right {
+  transform-origin: bottom right;
+}
+.tp-panel.above {
+  top: auto;
+  bottom: calc(100% + 6px);
+  transform-origin: bottom left;
+}
+@keyframes tp-open {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+.tp-cols {
+  display: flex;
+  gap: 4px;
+}
+.tp-col {
+  display: flex;
+  flex-direction: column;
+  width: 56px;
+}
+.tp-col + .tp-col {
+  padding-left: 4px;
+  border-left: 1px solid var(--rule);
+}
+.tp-col-head {
+  padding: 2px 0 6px;
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.tp-list {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  height: 200px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  /* Items fade out at the column's ends. */
+  mask-image: linear-gradient(transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  /* Room above and below, so the first and last items can sit in the middle too. */
+  padding: 85px 0;
+}
+.tp-list::-webkit-scrollbar {
+  display: none;
+}
+.tp-ampm .tp-list {
+  height: auto;
+  /* The chosen half of the day sits on the middle row, with the other columns' choices. */
+  padding: 53px 0 0;
+  mask-image: none;
+}
+.tp-ampm.am .tp-list {
+  padding-top: 85px;
+}
+.tp-list button {
+  flex: none;
+  height: 30px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background 0.1s,
+    color 0.1s;
+}
+.tp-list button:hover {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--ink);
+}
+.tp-list button:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 1px var(--ink-3);
+}
+.tp-list button.selected {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.tp-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 2px 0 6px;
+  border-top: 1px solid var(--rule);
+}
+.tp-preview {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tp-done {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tp-panel {
+    animation: none;
+  }
+}

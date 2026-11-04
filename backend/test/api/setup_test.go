@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"servermonitor/internal/setup"
+	"nightjar/internal/setup"
 )
 
 func fakePlexToken(t *testing.T, token string) {

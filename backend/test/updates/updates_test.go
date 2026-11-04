@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/storage"
-	"servermonitor/internal/updates"
+	"nightjar/internal/discord"
+	"nightjar/internal/storage"
+	"nightjar/internal/updates"
 )
 
 func TestVersions(t *testing.T) {
@@ -434,20 +434,20 @@ func TestSelfUpdateRestartsTheMonitor(t *testing.T) {
 
 	restarted := make(chan struct{}, 1)
 	m := updates.New(updates.Options{Store: openStore(t), Restart: func() { restarted <- struct{}{} }, Poll: time.Millisecond}, nil, false)
-	m.Save("", updates.Spec{ID: "servermonitor", Name: "Server Monitor", Kind: updates.KindGit, Dir: checkout, Self: true, Auto: true})
-	settle(t, m, "servermonitor", func(s updates.Status) bool { return s.Available })
+	m.Save("", updates.Spec{ID: "nightjar", Name: "Nightjar", Kind: updates.KindGit, Dir: checkout, Self: true, Auto: true})
+	settle(t, m, "nightjar", func(s updates.Status) bool { return s.Available })
 	// The first tick finds no check round yet and starts one; a later one installs.
 	deadline := time.After(10 * time.Second)
 	for {
 		m.Tick(time.Now(), time.Hour, updates.Window{})
 		select {
 		case <-restarted:
-			if st, _ := m.Get("servermonitor"); git(t, checkout, "rev-parse", "HEAD") != git(t, upstream, "rev-parse", "HEAD") {
+			if st, _ := m.Get("nightjar"); git(t, checkout, "rev-parse", "HEAD") != git(t, upstream, "rev-parse", "HEAD") {
 				t.Fatalf("restarted without pulling: %+v", st)
 			}
 			return
 		case <-deadline:
-			st, _ := m.Get("servermonitor")
+			st, _ := m.Get("nightjar")
 			t.Fatalf("no restart after the self-update: %+v", st)
 		case <-time.After(20 * time.Millisecond):
 		}
@@ -457,4 +457,16 @@ func TestSelfUpdateRestartsTheMonitor(t *testing.T) {
 func ExampleSlug() {
 	fmt.Println(updates.Slug("Plex Media Server"), updates.Slug("AdGuard Home!"))
 	// Output: plex-media-server adguard-home
+}
+
+func TestTheMonitorsOwnCheckoutIsKeptOnce(t *testing.T) {
+	m := newManager(t, openStore(t), nil, "", nil)
+	checkout := t.TempDir()
+	// Kept under the monitor's old name, then detected again under its new one.
+	if _, err := m.Save("", updates.Spec{ID: "servermonitor", Name: "Server Monitor", Kind: updates.KindGit, Dir: checkout, Self: true}); err != nil {
+		t.Fatal(err)
+	}
+	if added := m.AddDetected([]updates.Spec{{ID: "nightjar", Name: "Nightjar", Kind: updates.KindGit, Dir: checkout, Self: true}}); len(added) != 0 {
+		t.Fatalf("a second entry for the same checkout: %+v", added)
+	}
 }

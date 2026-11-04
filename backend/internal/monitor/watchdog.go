@@ -14,8 +14,8 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/process"
 
-	"servermonitor/internal/collect"
-	"servermonitor/internal/discord"
+	"nightjar/internal/collect"
+	"nightjar/internal/discord"
 )
 
 // FreezeMonitor flags a frozen host: a stale heartbeat, metrics that stopped changing, or slow system calls.
@@ -221,20 +221,16 @@ func (w *Watchdog) loop() {
 		}
 		if w.Webhook != nil {
 			fields := []discord.Field{
-				{Name: "Time Since Last Heartbeat", Value: fmt.Sprintf("%.1f seconds", since.Seconds()), Inline: true},
-				{Name: "Watchdog Timeout", Value: fmt.Sprintf("%.1f seconds", w.Timeout.Seconds()), Inline: true},
-				{Name: "Status", Value: "CRITICAL - Monitoring may have crashed"},
+				{Name: "Last heartbeat", Value: discord.Span(since.Seconds()) + " ago", Inline: true},
+				{Name: "Allowed", Value: discord.Span(w.Timeout.Seconds()), Inline: true},
 			}
-			desc := fmt.Sprintf("Monitoring loop has stopped responding. No heartbeat detected for %.1f seconds.", since.Seconds())
+			desc := fmt.Sprintf("Its checks have not run for %s, so nothing is being watched.", discord.Span(since.Seconds()))
 			if attempted {
-				outcome := map[bool]string{true: "succeeded", false: "failed"}[restarted]
-				status := map[bool]string{true: "SUCCESS", false: "FAILED"}[restarted]
-				fields = append(fields,
-					discord.Field{Name: "Auto-Restart Attempt", Value: fmt.Sprintf("%s - Service restart %s", status, outcome)},
-					discord.Field{Name: "Total Restart Attempts", Value: fmt.Sprint(w.restartCount), Inline: true})
-				desc += " Auto-restart " + outcome + "."
+				outcome := map[bool]string{true: "restarted it", false: "tried to restart it, and failed"}[restarted]
+				fields = append(fields, discord.Field{Name: "Restarts", Value: fmt.Sprint(w.restartCount), Inline: true})
+				desc += " The watchdog " + outcome + "."
 			}
-			if w.Webhook.SendEmbed("Monitoring Loop Stopped", desc, discord.Critical, fields, "Watchdog") {
+			if w.Webhook.SendEmbed("Nightjar stopped checking", desc, discord.Critical, fields, "Watchdog") {
 				log.Info("    Discord watchdog alert sent")
 			}
 		}

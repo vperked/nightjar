@@ -1,11 +1,17 @@
 package monitor
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"sync"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/services"
+	"nightjar/internal/analytics"
+	"nightjar/internal/diagnose"
+	"nightjar/internal/discord"
+	"nightjar/internal/incidents"
+	"nightjar/internal/services"
+	"nightjar/internal/storage"
 )
 
 // serviceChecks runs due checks in the background, so a slow target never holds up the loop,
@@ -33,13 +39,20 @@ func (h *serviceChecks) check(s *Snapshot) {
 		go func() {
 			defer h.running.Done()
 			h.slots <- struct{}{}
-			r := services.Run(spec)
+			var r services.Result
+			if spec.Type == "heartbeat" {
+				r = m.Heartbeat(spec, now)
+			} else {
+				r = services.Run(spec)
+			}
 			<-h.slots
 			h.report(spec, r, m.Record(spec.Name, r, now), now)
 		}()
 	}
 	if s.Now-h.lastPrune >= pruneInterval {
 		h.lastPrune = s.Now
+		// The activity log is kept a year.
+		h.ctx.Store.PruneActivity(s.Now - 365*86400)
 		if n := m.Prune(s.Now - float64(h.ctx.Cfg.HistoryRetentionDays)*86400); n > 0 {
 			h.log.Info(fmt.Sprintf("Pruned %d service check(s) older than %d days", n, h.ctx.Cfg.HistoryRetentionDays))
 		}
@@ -55,7 +68,11 @@ func (h *serviceChecks) report(spec services.Spec, r services.Result, change str
 		h.log.Debug(fmt.Sprintf("%s: up (%s)", spec.Name, r.Detail))
 		if change == services.StatusUp {
 			h.log.Info(fmt.Sprintf("[RECOVERED] Service up: %s (%s)", spec.Name, r.Detail))
-			if h.ctx.Webhook != nil && h.send(spec, "Service Recovered", r, discord.OK, now) {
+			var extra []discord.Field
+			if fix := h.ctx.Repairs.Recovered(spec.Name); fix != nil {
+				extra = append(extra, field("Fixed by", "Nightjar: "+fix.Detail+", "+discord.Span(now-fix.TS)+" before", false))
+			}
+			if h.ctx.Webhook != nil && h.send(spec, "is back up", r, discord.OK, now, extra...) {
 				h.log.Info("    Discord recovery alert sent")
 			}
 		}
@@ -66,23 +83,72 @@ func (h *serviceChecks) report(spec services.Spec, r services.Result, change str
 		return
 	}
 	h.raiseAlert("service:"+spec.Name, now, fmt.Sprintf("Service down: %s (%s)", spec.Name, r.Detail), h.ctx.Webhook,
-		func() bool { return h.send(spec, "Service Down", r, discord.Critical, now) }, "service_down", true)
+		func() bool { return h.send(spec, "is down", r, discord.Critical, now) }, "service_down", true)
+	if h.ctx.Repairs.Due(spec, now) {
+		h.running.Add(1)
+		go func() {
+			defer h.running.Done()
+			h.repair(spec, r, now)
+		}()
+	}
 }
 
-func (h *serviceChecks) send(spec services.Spec, title string, r services.Result, sev discord.Severity, now float64) bool {
-	detail := r.Detail
-	if detail == "" {
-		detail = "n/a"
+// repair runs a down check's repair, says what it did, and looks at the check again at once.
+func (h *serviceChecks) repair(spec services.Spec, r services.Result, now float64) {
+	attempt := h.ctx.Repairs.Attempts(spec.Name)
+	h.log.Info(fmt.Sprintf("%s: down, repairing (attempt %d of %d)", spec.Name, attempt, spec.Repair.Max))
+	rec := h.ctx.Repairs.Run(context.Background(), spec, r.Detail, now, true)
+	what := map[string]string{"restart": "restart " + rec.Target, "container": "restart the " + rec.Target + " container", "script": "run " + rec.Target}[rec.Action]
+	fields := []discord.Field{field("Attempt", fmt.Sprintf("%d of %d", attempt, spec.Repair.Max), true)}
+	if line := strings.TrimSpace(rec.Output); line != "" {
+		fields = append(fields, field("Output", "```\n"+discord.Truncate(line, 900)+"\n```", false))
 	}
-	fields := []discord.Field{
-		field("Service", spec.Name, true), field("Type", spec.Type, true),
-		field("Target", spec.Target, false), field("Detail", detail, false),
+	if h.ctx.Activity != nil {
+		h.ctx.Activity("Nightjar", "repair", spec.Name, fmt.Sprintf("Repaired %s: %s", spec.Name, rec.Detail))
 	}
-	if r.LatencyMS != nil {
-		fields = append(fields, field("Response time", fmt.Sprintf("%.0f ms", *r.LatencyMS), true))
+	if rec.OK {
+		h.log.Info(fmt.Sprintf("%s: repair done (%s)", spec.Name, rec.Detail))
+		discord.About(h.ctx.Webhook, "check:"+spec.Name).SendEmbed("Nightjar repaired "+spec.Name, "It was down, so Nightjar tried to "+what+": "+rec.Detail+". Checking it again now.", discord.Info, fields, "Uptime")
+	} else {
+		h.log.Warn(fmt.Sprintf("%s: repair failed (%s)", spec.Name, rec.Detail))
+		discord.About(h.ctx.Webhook, "check:"+spec.Name).SendEmbed("Repair of "+spec.Name+" failed", "Nightjar tried to "+what+": "+rec.Detail+".", discord.Warning, fields, "Uptime")
+	}
+	h.ctx.Services.RunSoon(spec.Name)
+}
+
+// why is the likely cause of a check going down now, from the alerts and readings of the last minutes.
+func (h *serviceChecks) why(spec services.Spec, r services.Result, now float64) *incidents.Cause {
+	if !h.ctx.Store.Available() {
+		return nil
+	}
+	notes := h.ctx.Store.NotificationsBetween(now-incidents.Lead, now, 500)
+	samples := h.ctx.Store.SampleBuckets(analytics.Local, now-incidents.Lead, 60)
+	return incidents.Explain(notes, samples, storage.Notification{TS: now, Area: "uptime", Severity: "critical", Title: spec.Name + " is down", Body: r.Detail, Subject: "check:" + spec.Name}, incidents.LearnedFrom(h.ctx.Store))
+}
+
+func (h *serviceChecks) send(spec services.Spec, title string, r services.Result, sev discord.Severity, now float64, extra ...discord.Field) bool {
+	// The title says which check and what happened; the description is what the check saw.
+	desc := r.Detail
+	if desc != "" {
+		desc = strings.ToUpper(desc[:1]) + desc[1:]
+	}
+	// A long address gets its own line rather than squeezing the numbers beside it.
+	fields := []discord.Field{field("Target", "`"+spec.Target+"`", len(spec.Target) <= 28)}
+	if r.LatencyMS != nil && r.Up {
+		fields = append(fields, field("Response", fmt.Sprintf("%.0f ms", *r.LatencyMS), true))
 	}
 	if u := h.ctx.Services.Uptime(spec.Name, now-86400); u != nil {
-		fields = append(fields, field("Uptime (24h)", fmt.Sprintf("%.2f%%", *u), true))
+		fields = append(fields, field("Uptime today", fmt.Sprintf("%.2f%%", *u), true))
 	}
-	return discord.About(h.ctx.Webhook, "check:"+spec.Name).SendEmbed(fmt.Sprintf("%s: %s", title, spec.Name), r.Detail, sev, fields, "Uptime")
+	if !r.Up {
+		// Why: what else happened on the machine just before, when it points somewhere.
+		if c := h.why(spec, r, now); c != nil {
+			fields = append(fields, field("Why", c.Text+" ("+c.Confidence+")", false))
+		}
+	}
+	if f, ok := diagnose.Text(r.Detail); ok && !r.Up {
+		fields = append(fields, field("Likely cause", "**"+f.Title+"**\n"+f.Fix, false))
+	}
+	fields = append(fields, extra...)
+	return discord.About(h.ctx.Webhook, "check:"+spec.Name).SendEmbed(spec.Name+" "+title, desc, sev, fields, "Uptime")
 }

@@ -26,7 +26,7 @@ func Available() bool {
 func UnitContent(binary, workingDir, user, envFile string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `[Unit]
-Description=Server Monitor - System resource and uptime monitoring with Discord alerts
+Description=Nightjar - System resource and uptime monitoring with Discord alerts
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300

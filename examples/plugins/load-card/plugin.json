@@ -1,0 +1,10 @@
+{
+  "id": "load-card",
+  "name": "System load",
+  "version": "1.0.0",
+  "description": "Load averages, running processes and signed-in users, as a card on the overview.",
+  "author": "Nightjar examples",
+  "provides": ["card"],
+  "run": "run.sh",
+  "interval": 60
+}

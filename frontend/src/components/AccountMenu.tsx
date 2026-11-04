@@ -21,6 +21,7 @@ const MOON = 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z';
 const SUN = 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4';
 const GLOBE = 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z';
 const LOG = 'M4 5h16M4 10h16M4 15h10M4 20h7';
+const HELP = 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.2a2.6 2.6 0 0 1 5 .8c0 1.8-2.5 2.2-2.5 4M12 17.2h.01';
 const EXIT = 'M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 16l-4-4 4-4M6 12h10';
 
 function Item({ children, onClick, href }: { children: ReactNode; onClick?: () => void; href?: string }) {
@@ -91,6 +92,10 @@ export function AccountMenu({ theme, onToggleTheme, onSignOut }: { theme: 'light
           <Item onClick={run(() => navigate('/logs'))}>
             {icon(LOG)}
             <span>Monitor log</span>
+          </Item>
+          <Item onClick={run(() => navigate('/docs'))}>
+            {icon(HELP)}
+            <span>Help and docs</span>
           </Item>
           {config?.status_page_enabled && (
             <Item href="/status" onClick={() => setOpen(false)}>

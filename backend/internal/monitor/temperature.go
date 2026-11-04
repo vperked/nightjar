@@ -5,8 +5,8 @@ import (
 	"slices"
 	"strings"
 
-	"servermonitor/internal/collect"
-	"servermonitor/internal/config"
+	"nightjar/internal/collect"
+	"nightjar/internal/config"
 )
 
 var downloadKeywords = []string{

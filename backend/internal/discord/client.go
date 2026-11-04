@@ -3,17 +3,21 @@ package discord
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
-	"servermonitor/internal/logx"
+	"nightjar/internal/logx"
 )
 
 // Severity sets an alert's colour, emoji and, on channels that have one, its priority.
@@ -91,6 +95,19 @@ func BuildEmbed(title, description string, color int, fields []Field, footer str
 	return e
 }
 
+// tidy drops fields with nothing to say, so an embed shows only what it knows.
+func tidy(fields []Field) []Field {
+	out := make([]Field, 0, len(fields))
+	for _, f := range fields {
+		v := strings.TrimSpace(f.Value)
+		if v == "" || v == "n/a" || v == "N/A" || v == "None" {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
 // Sender delivers alerts: Discord, another channel, or several at once. Tests capture them.
 type Sender interface {
 	SendEmbed(title, description string, sev Severity, fields []Field, footer string) bool
@@ -113,11 +130,24 @@ type Origin struct {
 	DashboardURL string
 }
 
-// Footer joins the product, host and category ("servermonitor · nas · Disk").
+// areaLabel is how a category reads in a footer. Categories also route alerts, so several older
+// ones read as the area they belong to.
+var areaLabel = map[string]string{
+	"Storage Monitoring": "Storage", "Directory Monitoring": "Storage", "Disk": "Storage", "Emergency": "Storage",
+	"Kernel Warning": "Kernel", "Kernel Stability": "Kernel",
+	"Watchdog": "Nightjar", "Error Alert": "Nightjar", "Metrics Report": "Nightjar", "Monitor": "Nightjar",
+}
+
+// Footer is where an alert comes from: the host and the area ("nas · Storage"), or "Nightjar"
+// and the area when the host is unknown.
 func (o Origin) Footer(category string) string {
-	parts := []string{"servermonitor"}
-	for _, p := range []string{o.Host, category} {
-		if p != "" {
+	area := category
+	if l, ok := areaLabel[category]; ok {
+		area = l
+	}
+	parts := []string{}
+	for _, p := range []string{cmp.Or(o.Host, "Nightjar"), area} {
+		if p != "" && !slices.Contains(parts, p) {
 			parts = append(parts, p)
 		}
 	}
@@ -134,6 +164,7 @@ type Webhook struct {
 	breaker      *CircuitBreaker
 	mu           sync.Mutex
 	lastErr      string
+	classic      atomic.Bool // the webhook refused components, so alerts go as embeds
 }
 
 func (w *Webhook) Name() string { return "Discord" }
@@ -165,17 +196,31 @@ func NewWebhook(url, alertLogPath string) (*Webhook, error) {
 	}, nil
 }
 
-// SendEmbed sends one embed. It never blocks on a saturated rate limit or open breaker:
-// the alert goes to the fallback log instead.
+// SendEmbed sends one alert. It never blocks on a saturated rate limit or open breaker: the alert
+// goes to the fallback log instead. Alerts go as Components V2 messages; a webhook that refuses
+// them gets the classic embed from then on.
 func (w *Webhook) SendEmbed(title, description string, sev Severity, fields []Field, footer string) bool {
-	embed := BuildEmbed(sev.Emoji()+" "+title, description, sev.Color(), fields, w.Origin.Footer(footer))
-	embed.URL = w.Origin.DashboardURL
-	payload := map[string]any{"embeds": []Embed{embed}}
 	fallback := title
 	if description != "" {
 		fallback = fmt.Sprintf("%s: %s", title, Truncate(description, 100))
 	}
-	return w.post(payload, fallback)
+	if !w.classic.Load() {
+		status, err := w.send(withComponents(w.URL), Message(title, description, sev, fields, footer, w.Origin, time.Now()))
+		if err == nil {
+			w.setError("")
+			return true
+		}
+		if status != http.StatusBadRequest {
+			w.failed(err, fallback)
+			return false
+		}
+		log.Warn("Discord refused a components message; sending classic embeds from now on", "err", err)
+		w.classic.Store(true)
+	}
+	// The colour bar says how serious it is; the title says what happened, without an emoji.
+	embed := BuildEmbed(title, description, sev.Color(), tidy(fields), w.Origin.Footer(footer))
+	embed.URL = w.Origin.DashboardURL
+	return w.post(map[string]any{"embeds": []Embed{embed}}, fallback)
 }
 
 // SendMessage sends a plain-text message.
@@ -186,48 +231,61 @@ func (w *Webhook) SendMessage(content string) bool {
 var errRateLimited = errors.New("discord returned 429")
 
 func (w *Webhook) post(payload any, fallback string) bool {
+	if _, err := w.send(w.URL, payload); err != nil {
+		w.failed(err, fallback)
+		return false
+	}
+	w.setError("")
+	return true
+}
+
+// failed notes why a delivery failed and keeps the alert in the fallback log.
+func (w *Webhook) failed(err error, fallback string) {
+	w.setError(err.Error())
+	w.logFallback(fallback)
+}
+
+// send posts payload to target behind the breaker and the rate limit, with the HTTP status.
+func (w *Webhook) send(target string, payload any) (int, error) {
 	if w.breaker.IsOpen() {
 		log.Debug("Circuit breaker open, using fallback")
-		w.setError("paused after repeated failures")
-		w.logFallback(fallback)
-		return false
+		return 0, errors.New("paused after repeated failures")
 	}
 	if !w.limiter.tryAcquire() {
 		log.Warn("Rate limit reached, dropping alert", "next_slot_s", fmt.Sprintf("%.1f", w.limiter.retryAfter().Seconds()))
-		w.setError("rate limited")
-		w.logFallback(fallback)
-		return false
+		return 0, errors.New("rate limited")
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		log.Error("Encode payload", "err", err)
-		return false
+		return 0, err
 	}
+	status := 0
 	err = w.breaker.Call(func() error {
-		resp, err := w.client.Post(w.URL, "application/json", bytes.NewReader(body))
+		resp, err := w.client.Post(target, "application/json", bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
 		defer resp.Body.Close()
+		status = resp.StatusCode
 		if resp.StatusCode == http.StatusTooManyRequests {
 			log.Warn("Discord returned 429", "retry_after", resp.Header.Get("Retry-After"))
 			return errRateLimited
 		}
 		if resp.StatusCode >= 400 {
+			// Discord says why in the body; keep a little of it for the dashboard.
+			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+			if m := strings.TrimSpace(string(msg)); m != "" {
+				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, m)
+			}
 			return fmt.Errorf("HTTP %d", resp.StatusCode)
 		}
 		return nil
 	})
-	if err != nil {
-		if !errors.Is(err, errRateLimited) && !errors.Is(err, ErrBreakerOpen) {
-			log.Warn("Webhook request failed", "err", err)
-		}
-		w.setError(err.Error())
-		w.logFallback(fallback)
-		return false
+	if err != nil && !errors.Is(err, errRateLimited) && !errors.Is(err, ErrBreakerOpen) {
+		log.Warn("Webhook request failed", "err", err)
 	}
-	w.setError("")
-	return true
+	return status, err
 }
 
 func (w *Webhook) logFallback(message string) {

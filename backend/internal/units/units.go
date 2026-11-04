@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nightjar/internal/diagnose"
 )
 
 // Unit is one systemd service as the dashboard shows it.
@@ -30,6 +32,8 @@ type Unit struct {
 	// Flapping is how many times it restarted in the last ten minutes, once that reaches the alert level.
 	Flapping int  `json:"flapping,omitempty"`
 	Ignored  bool `json:"ignored,omitempty"`
+	// Cause is the likely reason it failed, read from its journal when it did.
+	Cause *diagnose.Finding `json:"cause,omitempty"`
 }
 
 // Failed reports whether the service is down after failing (or stuck restarting).
@@ -73,6 +77,7 @@ type Monitor struct {
 	failedAt map[string]time.Time
 	restarts map[string][]restartObs
 	flapped  map[string]bool
+	causes   map[string]diagnose.Finding
 	polled   bool
 }
 
@@ -82,7 +87,7 @@ type restartObs struct {
 }
 
 func New() *Monitor {
-	return &Monitor{Run: execRunner, units: map[string]Unit{}, failedAt: map[string]time.Time{}, restarts: map[string][]restartObs{}, flapped: map[string]bool{}}
+	return &Monitor{Run: execRunner, units: map[string]Unit{}, failedAt: map[string]time.Time{}, restarts: map[string][]restartObs{}, flapped: map[string]bool{}, causes: map[string]diagnose.Finding{}}
 }
 
 // properties read for every service that is not idle.
@@ -197,6 +202,7 @@ func (m *Monitor) transition(u Unit, now time.Time, first bool) []Event {
 	case !u.Failed() && known && prev.Failed():
 		down := now.Sub(m.failedAt[u.Name])
 		delete(m.failedAt, u.Name)
+		delete(m.causes, u.Name)
 		if !u.Ignored {
 			return []Event{{Kind: EventRecovered, Unit: u, Downtime: down}}
 		}
@@ -256,6 +262,27 @@ func ignored(name string, patterns []string) bool {
 	return false
 }
 
+// SetCause records why a service failed, so the dashboard can say so until it runs again.
+func (m *Monitor) SetCause(name string, f diagnose.Finding) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.causes[name] = f
+}
+
+// withCause adds the recorded cause to a service that is still down or restarting.
+func (m *Monitor) withCause(u Unit) Unit {
+	if f, ok := m.causes[u.Name]; ok && (u.Failed() || u.Flapping > 0) {
+		u.Cause = &f
+	}
+	return u
+}
+
+// Diagnose reads a known service's journal and says what most likely went wrong.
+func (m *Monitor) Diagnose(name string, lines []string) []diagnose.Finding {
+	u, _ := m.Get(name)
+	return diagnose.Lines(lines, diagnose.Context{Result: u.Result, ExitStatus: u.ExitStatus})
+}
+
 // Units lists the services worth showing: failed or restarting ones first, then running ones,
 // then the rest of the enabled ones, each by name.
 func (m *Monitor) Units() []Unit {
@@ -266,7 +293,7 @@ func (m *Monitor) Units() []Unit {
 		if u.Active == "inactive" && u.Enabled != "enabled" {
 			continue
 		}
-		out = append(out, u)
+		out = append(out, m.withCause(u))
 	}
 	rank := func(u Unit) int {
 		switch {
@@ -293,7 +320,7 @@ func (m *Monitor) Get(name string) (Unit, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	u, ok := m.units[name]
-	return u, ok
+	return m.withCause(u), ok
 }
 
 // ErrUnknown means the unit is not a service the monitor has seen; only those can be managed.

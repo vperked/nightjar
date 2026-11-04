@@ -1,6 +1,9 @@
 import { useId, useState, type FormEvent, type ReactNode } from 'react';
+import { Link } from 'react-router';
 import { ApiError, api } from '../api/client';
 import { useConfig } from '../api/ConfigContext';
+import { SettingsGroup } from './SettingsGroup';
+import { configChanged } from './Sections';
 import { useToast } from './Toasts';
 
 // The admin account: the first-run screen that creates it, the sign-in screen, and the Settings
@@ -18,14 +21,29 @@ function Password({ label, value, onChange, autoComplete, autoFocus }: { label: 
       <span className="auth-password">
         <input id={id} className="field" type={shown ? 'text' : 'password'} value={value} onChange={(e) => onChange(e.target.value)} autoComplete={autoComplete} autoFocus={autoFocus} required />
         <button type="button" className="btn-quiet" onClick={() => setShown((s) => !s)} aria-label={shown ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`}>
-          {shown ? 'hide' : 'show'}
+          {shown ? 'Hide' : 'Show'}
         </button>
       </span>
     </div>
   );
 }
 
-function AuthCard({ title, intro, children, onSubmit }: { title: string; intro: ReactNode; children: ReactNode; onSubmit: (e: FormEvent) => void }) {
+// help is where "Help with this" leads, or with helpNote, a sentence of its own around the link.
+function AuthCard({
+  title,
+  intro,
+  children,
+  onSubmit,
+  help,
+  helpNote,
+}: {
+  title: string;
+  intro: ReactNode;
+  children: ReactNode;
+  onSubmit: (e: FormEvent) => void;
+  help: string;
+  helpNote?: { before: string; link: string; after: string };
+}) {
   return (
     <main className="auth">
       <form className="signin" onSubmit={onSubmit}>
@@ -38,6 +56,15 @@ function AuthCard({ title, intro, children, onSubmit }: { title: string; intro: 
         <h1>{title}</h1>
         <p className="auth-intro">{intro}</p>
         {children}
+        {helpNote ? (
+          <p className="auth-note">
+            {helpNote.before} <Link to={help}>{helpNote.link}</Link> {helpNote.after}
+          </p>
+        ) : (
+          <Link className="auth-help" to={help}>
+            Help with this
+          </Link>
+        )}
       </form>
     </main>
   );
@@ -64,7 +91,7 @@ export function CreateAdmin({ onDone }: { onDone: () => void }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const command = `journalctl -u ${config?.account?.service || 'server-monitor'} | grep setup_code | tail -1`;
+  const command = `journalctl -u ${config?.account?.service || 'nightjar'} | grep setup_code | tail -1`;
   const problem = problemsWith(password, confirm, username);
   const ready = username.trim() && password.length >= MIN_PASSWORD && confirm === password && code.trim() && !problem;
 
@@ -90,7 +117,13 @@ export function CreateAdmin({ onDone }: { onDone: () => void }) {
   };
 
   return (
-    <AuthCard title="Create the admin account" intro="The dashboard needs an admin account before it shows anything. You will sign in with it from now on." onSubmit={submit}>
+    <AuthCard
+      title="Create the admin account"
+      intro="The dashboard needs an admin account before it shows anything. You will sign in with it from now on."
+      onSubmit={submit}
+      help="/docs/getting-started#create-the-admin-account"
+      helpNote={{ before: 'Confused?', link: 'Read the getting started guide.', after: 'It walks through this step and what to set up next.' }}
+    >
       <label className="auth-field">
         <span>Username</span>
         <input className="field" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required />
@@ -106,7 +139,7 @@ export function CreateAdmin({ onDone }: { onDone: () => void }) {
         <span className="auth-command">
           <code>{command}</code>
           <button type="button" className="btn-quiet" onClick={copy}>
-            {copied ? 'copied' : 'copy'}
+            {copied ? 'Copied' : 'Copy'}
           </button>
         </span>
       </div>
@@ -129,40 +162,64 @@ export function SignIn({ onDone }: { onDone: () => void }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [forgot, setForgot] = useState(false);
+  // With two-factor sign-in on, the password is followed by a code from the authenticator.
+  const [askCode, setAskCode] = useState(false);
+  const [code, setCode] = useState('');
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError('');
     try {
-      await api.login(username.trim(), password);
+      await api.login(username.trim(), password, code.trim());
       onDone();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
-      setPassword('');
+      const needsCode = err instanceof ApiError && !!err.fields.code;
+      if (needsCode && !askCode) {
+        setAskCode(true);
+      } else {
+        setError(err instanceof ApiError ? err.message : String(err));
+      }
+      if (!needsCode) setPassword('');
+      setCode('');
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <AuthCard title="Sign in" intro="Sign in with the admin account." onSubmit={submit}>
+    <AuthCard title="Sign in" intro="Sign in with the admin account." onSubmit={submit} help="/docs/troubleshooting#can-t-sign-in">
       <label className="auth-field">
         <span>Username</span>
         <input className="field" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus={!username} required />
       </label>
       <Password label="Password" value={password} onChange={setPassword} autoComplete="current-password" autoFocus={!!username} />
+      {askCode && (
+        <label className="auth-field">
+          <span>Code from your authenticator app</span>
+          <input
+            className="field mono"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            autoComplete="one-time-code"
+            inputMode="numeric"
+            autoFocus
+            placeholder="123456, or a recovery code"
+            required
+          />
+        </label>
+      )}
       {error && (
         <p className="form-error" role="alert">
           {sentence(error)}
         </p>
       )}
-      <button type="submit" className="btn" disabled={!username.trim() || !password || busy}>
+      <button type="submit" className="btn" disabled={!username.trim() || !password || (askCode && !code.trim()) || busy}>
         {busy ? 'Signing in…' : 'Sign in'}
       </button>
       {forgot ? (
         <p className="auth-forgot">
-          On the server, run <code>servermonitor -reset-admin</code> and restart the monitor, then create the account again with the setup code it logs.
+          On the server, run <code>nightjar -reset-admin</code> and restart the monitor, then create the account again with the setup code it logs.
         </p>
       ) : (
         <button type="button" className="btn-quiet auth-forgot-btn" onClick={() => setForgot(true)}>
@@ -204,13 +261,15 @@ export function AccountSection() {
 
   if (!config?.account?.username) return null;
   return (
-    <section className="section" id="account">
-      <div className="section-head">
-        <span className="label">Account</span>
+    <SettingsGroup
+      id="account"
+      name="Account"
+      aside={
         <span className="small ink-3">
           signed in as <strong>{config.account.username}</strong>
         </span>
-      </div>
+      }
+    >
       <form className="account-form" onSubmit={submit}>
         <Password label="Current password" value={current} onChange={setCurrent} autoComplete="current-password" />
         <Password label="New password" value={next} onChange={setNext} autoComplete="new-password" />
@@ -222,6 +281,107 @@ export function AccountSection() {
           </button>
         </div>
       </form>
-    </section>
+      <TwoFactor on={!!config.account.two_factor} left={config.account.recovery_left ?? 0} />
+    </SettingsGroup>
+  );
+}
+
+// TwoFactor turns on sign-in codes from an authenticator app, or off again.
+function TwoFactor({ on, left }: { on: boolean; left: number }) {
+  const notify = useToast();
+  const [setup, setSetup] = useState<{ secret: string; link: string }>();
+  const [code, setCode] = useState('');
+  const [password, setPassword] = useState('');
+  const [recovery, setRecovery] = useState<string[]>();
+  const [error, setError] = useState('');
+  const [turningOff, setTurningOff] = useState(false);
+  const run = async (fn: () => Promise<void>) => {
+    setError('');
+    try {
+      await fn();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  };
+  const begin = () => run(async () => setSetup(await api.twoFactorBegin()));
+  const enable = () =>
+    run(async () => {
+      const r = await api.twoFactorEnable(code.trim());
+      setRecovery(r.recovery);
+      setSetup(undefined);
+      setCode('');
+      configChanged();
+      notify({ tone: 'ok', title: 'Two-factor sign-in is on' });
+    });
+  const disable = () =>
+    run(async () => {
+      await api.twoFactorDisable(password, code.trim());
+      setTurningOff(false);
+      setPassword('');
+      setCode('');
+      configChanged();
+      notify({ tone: 'ok', title: 'Two-factor sign-in is off' });
+    });
+  return (
+    <div className="twofa">
+      <div className="twofa-head">
+        <strong>Two-factor sign-in</strong>
+        <span className={`state ${on ? 'up' : 'paused'}`}>{on ? 'On' : 'Off'}</span>
+      </div>
+      <p className="form-help">
+        {on
+          ? `Signing in asks for a code from your authenticator app after the password. ${left} of 10 recovery codes left.`
+          : 'Ask for a code from an authenticator app (1Password, Google Authenticator, Aegis…) after the password.'}
+      </p>
+      {recovery && (
+        <div className="twofa-recovery">
+          <strong>Your recovery codes</strong>
+          <span className="form-help">Each signs you in once without the app. Keep them somewhere safe: they are not shown again.</span>
+          <code>{recovery.join('  ')}</code>
+        </div>
+      )}
+      {!on && !setup && (
+        <button type="button" className="btn-quiet" onClick={begin}>
+          Set it up
+        </button>
+      )}
+      {setup && (
+        <div className="twofa-setup">
+          <span className="form-help">
+            Add this key to your authenticator app, or <a href={setup.link}>open it in the app</a> on this device:
+          </span>
+          <code className="twofa-secret">{setup.secret.replace(/(.{4})/g, '$1 ').trim()}</code>
+          <span className="inline-fields">
+            <input
+              className="field short mono"
+              aria-label="Code from the app"
+              placeholder="123456"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+            />
+            <button type="button" className="btn" onClick={enable} disabled={code.trim().length !== 6}>
+              Turn on
+            </button>
+          </span>
+        </div>
+      )}
+      {on && !turningOff && (
+        <button type="button" className="btn-quiet" onClick={() => setTurningOff(true)}>
+          Turn off
+        </button>
+      )}
+      {on && turningOff && (
+        <span className="inline-fields twofa-off">
+          <Password label="Password" value={password} onChange={setPassword} autoComplete="current-password" />
+          <input className="field short mono" aria-label="Code to turn it off" placeholder="123456" value={code} onChange={(e) => setCode(e.target.value)} />
+          <button type="button" className="btn-quiet danger" onClick={disable} disabled={!password || !code.trim()}>
+            Turn off
+          </button>
+        </span>
+      )}
+      {error && <p className="form-error">{sentence(error)}</p>}
+    </div>
   );
 }

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
 import type { LogEntry, LogLevel, LogsResponse } from '../api/types';
+import { Diagnosis } from '../components/Diagnosis';
 import { Select } from '../components/Select';
 import { Skeleton } from '../components/Skeleton';
 import { Seg } from '../components/ui';
@@ -135,7 +136,7 @@ export function LogsPage() {
     const blob = new Blob([(entries ?? []).map(asText).join('\n') + '\n'], { type: 'text/plain' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `servermonitor-${new Date().toISOString().slice(0, 19).replace(/:/g, '')}.log`;
+    a.download = `nightjar-${new Date().toISOString().slice(0, 19).replace(/:/g, '')}.log`;
     a.click();
     URL.revokeObjectURL(a.href);
   };
@@ -171,14 +172,15 @@ export function LogsPage() {
         </div>
         <div className="toolbar">
           <label className="check">
-            <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> follow
+            <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> Follow
           </label>
           <button className="btn-quiet" onClick={download} disabled={!entries?.length}>
-            download
+            Download
           </button>
         </div>
       </div>
 
+      {meta?.findings && meta.findings.length > 0 && <Diagnosis findings={meta.findings} label="Problems in this log" />}
       <div className="log-filters">
         <input className="search" type="search" placeholder="Search the log…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search the log" />
         <Seg<Show>
@@ -222,7 +224,7 @@ export function LogsPage() {
             </span>
             {follow && scrolledUp && (
               <button className="btn-quiet" onClick={toBottom}>
-                jump to newest ↓
+                Jump to newest ↓
               </button>
             )}
           </div>

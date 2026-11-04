@@ -11,14 +11,15 @@ import (
 	"sync"
 	"time"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/storage"
+	"nightjar/internal/discord"
+	"nightjar/internal/storage"
 )
 
 // The hub sits between the monitors and the channels. Every alert is kept in the notification
 // history, then routed by the rules: which channels hear about which area, at what severity. Quiet
 // hours hold alerts back for one summary when they end, and a mute silences one check, service,
-// drive or area for a while.
+// drive or area for a while. Throttling (throttle.go) stops a flapping subject or an alert storm
+// from flooding the channels.
 
 // Area is a kind of alert, for routing, filtering and muting.
 type Area struct {
@@ -36,6 +37,7 @@ var Areas = []Area{
 	{"updates", "Updates"},
 	{"torrents", "qBittorrent"},
 	{"media", "Plex"},
+	{"servers", "Other servers"},
 }
 
 func knownArea(id string) bool {
@@ -58,6 +60,8 @@ func areaOf(route, category string) string {
 		return "updates"
 	case "qBittorrent":
 		return "torrents"
+	case "Servers":
+		return "servers"
 	}
 	return route
 }
@@ -167,7 +171,7 @@ func (q Quiet) holds(now time.Time, sev discord.Severity) bool {
 	return q.Active(now) && !(q.Critical && sev == discord.Critical)
 }
 
-// Mute silences one subject ("check:Plex", "unit:sonarr.service", "drive:S4EV…", "area:torrents")
+// Mute silences one subject ("check:Plex", "unit:sonarr.service", "drive:S4EV…", "host:<id>", "area:torrents")
 // until a time.
 type Mute struct {
 	Subject string  `json:"subject"`
@@ -194,6 +198,11 @@ type Hub struct {
 	dests []Destination
 	// Now is the clock; tests replace it.
 	Now func() time.Time
+	// Limits throttle delivery; tests may change them before the first alert.
+	Limits Limits
+	// Maintenance, when set, says whether planned downtime holds back an alert about subject:
+	// such alerts are kept, marked maintenance, and sent nowhere.
+	Maintenance func(subject string, now time.Time) bool
 
 	mu     sync.Mutex
 	prefs  Prefs
@@ -201,12 +210,19 @@ type Hub struct {
 	pruned time.Time
 	// summaryTries counts quiet hours summaries that did not get through, which are retried a few times.
 	summaryTries int
+
+	subjects map[string]*subjectLog
+	recent   []time.Time // deliveries in the last hour, for the rate limit
+	// rateHeld is set while alerts are held for the rate limit rather than quiet hours.
+	rateHeld      bool
+	rateHeldSince time.Time
+	lastSummary   time.Time
 }
 
 // NewHub routes to dests and keeps history in store (which may be unavailable: alerts are then
 // delivered without being kept, and quiet hours send them straight away).
 func NewHub(store *storage.Store, dests []Destination) *Hub {
-	h := &Hub{store: store, dests: dests, Now: time.Now, failed: map[string]int64{}}
+	h := &Hub{store: store, dests: dests, Now: time.Now, Limits: DefaultLimits, failed: map[string]int64{}, subjects: map[string]*subjectLog{}}
 	h.prefs = Prefs{Quiet: Quiet{Start: "23:00", End: "07:00", Critical: true}}
 	if raw := store.Meta(prefsKey); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &h.prefs); err != nil {
@@ -225,7 +241,7 @@ type route struct {
 }
 
 func (r route) SendEmbed(title, description string, sev discord.Severity, fields []discord.Field, category string) bool {
-	return r.hub.send(newAlert(title, description, sev, fields, category), areaOf(r.area, category), r.subject)
+	return r.hub.send(newAlert(title, description, sev, fields, category), areaOf(r.area, category), r.subject, true)
 }
 
 func (r route) About(subject string) discord.Sender {
@@ -257,7 +273,8 @@ func (h *Hub) targets(p Prefs, area string, sev discord.Severity) []target {
 	return out
 }
 
-func (h *Hub) send(a Alert, area, subject string) bool {
+// send keeps an alert and routes it; throttle applies the limits, which the hub's own messages skip.
+func (h *Hub) send(a Alert, area, subject string, throttle bool) bool {
 	fields, _ := json.Marshal(nonNilFields(a.Fields))
 	rec := storage.Notification{
 		TS: float64(a.Time.UnixMilli()) / 1000, Area: area, Severity: a.Severity.String(),
@@ -270,6 +287,8 @@ func (h *Hub) send(a Alert, area, subject string) bool {
 	h.mu.Unlock()
 
 	switch targets := h.targets(p, area, a.Severity); {
+	case h.Maintenance != nil && h.Maintenance(subject, now):
+		rec.Status = "maintenance"
 	case muted:
 		rec.Status = "muted"
 	case len(targets) == 0:
@@ -279,8 +298,33 @@ func (h *Hub) send(a Alert, area, subject string) bool {
 		for _, t := range targets {
 			rec.Channels = append(rec.Channels, t.name)
 		}
-	default:
+	case !throttle:
 		return h.deliver(rec, targets, a)
+	default:
+		h.mu.Lock()
+		verdict := h.admit(a, area, subject, now)
+		h.mu.Unlock()
+		switch verdict {
+		case admit:
+			return h.deliver(rec, targets, a)
+		case overRate:
+			if h.store.Available() {
+				rec.Status = "held"
+				for _, t := range targets {
+					rec.Channels = append(rec.Channels, t.name)
+				}
+				break
+			}
+			// Nowhere to hold it for the summary: keep it, unsent.
+			rec.Status, rec.Error = "throttled", "too many alerts at once"
+		case startFlap:
+			rec.Status, rec.Error = "throttled", "paused while this flaps"
+			h.store.AddNotification(rec)
+			h.send(h.flapNotice(a), area, subject, false)
+			return true
+		case flapping:
+			rec.Status, rec.Error = "throttled", "paused while this flaps"
+		}
 	}
 	h.store.AddNotification(rec)
 	return true
@@ -295,7 +339,14 @@ func (h *Hub) deliver(rec storage.Notification, targets []target, a Alert) bool 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ok[i] = t.channel.SendEmbed(a.Title, a.Description, a.Severity, a.Fields, a.Category)
+			// A channel that can act on what an alert is about (the Discord bot's buttons) is told.
+			if about, can := t.channel.(interface {
+				SendAbout(subject, title, description string, sev discord.Severity, fields []discord.Field, footer string) bool
+			}); can {
+				ok[i] = about.SendAbout(rec.Subject, a.Title, a.Description, a.Severity, a.Fields, a.Category)
+			} else {
+				ok[i] = t.channel.SendEmbed(a.Title, a.Description, a.Severity, a.Fields, a.Category)
+			}
 		}()
 	}
 	wg.Wait()
@@ -363,9 +414,25 @@ func (h *Hub) Tick() {
 	if prune {
 		h.store.PruneNotifications(float64(now.Add(-Keep).Unix()))
 	}
-	if !p.Quiet.Active(now) {
+	for _, s := range h.settled(now) {
+		h.send(s.alert, s.area, s.subject, false)
+	}
+	if !p.Quiet.Active(now) && h.summaryDue(now) {
 		h.sendSummary(p.Quiet)
 	}
+}
+
+// summaryDue holds back the summary of alerts held for the rate limit until SummaryGap has passed
+// since the hold began and since the last summary, so the summary cannot become a flood itself.
+// Without a rate hold, quiet hours' summary goes as soon as they end.
+func (h *Hub) summaryDue(now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.rateHeld {
+		return true
+	}
+	gap := h.Limits.SummaryGap
+	return now.Sub(h.rateHeldSince) >= gap && now.Sub(h.lastSummary) >= gap
 }
 
 // sendSummary delivers what quiet hours held, as one message per channel.
@@ -397,9 +464,16 @@ func (h *Hub) sendSummary(q Quiet) {
 			}
 		}
 	}
+	h.mu.Lock()
+	rate := h.rateHeld
+	h.lastSummary = h.Now()
+	h.mu.Unlock()
 	delivered := map[int64][]string{}
 	for _, b := range batches {
 		title, desc, sev := summary(b.alerts, q)
+		if rate {
+			title, desc, sev = h.rateSummary(b.alerts)
+		}
 		if b.channel.SendEmbed(title, desc, sev, nil, "Notifications") {
 			for _, n := range b.alerts {
 				delivered[n.ID] = append(delivered[n.ID], b.channel.Name())
@@ -412,7 +486,7 @@ func (h *Hub) sendSummary(q Quiet) {
 	if retry {
 		h.summaryTries++
 	} else {
-		h.summaryTries = 0
+		h.summaryTries, h.rateHeld = 0, false
 	}
 	h.mu.Unlock()
 	for _, n := range held {
@@ -448,6 +522,15 @@ func summary(alerts []storage.Notification, q Quiet) (string, string, discord.Se
 		fmt.Fprintf(&b, "\n…and %d more in the dashboard's notifications.", len(alerts)-shown)
 	}
 	return fmt.Sprintf("Quiet hours summary: %d %s", len(alerts), plural(len(alerts), "alert", "alerts")), b.String(), sev
+}
+
+// rateSummary writes the summary of alerts held because too many arrived at once.
+func (h *Hub) rateSummary(alerts []storage.Notification) (string, string, discord.Severity) {
+	title, desc, sev := summary(alerts, Quiet{})
+	_, list, _ := strings.Cut(desc, "\n")
+	title = strings.Replace(title, "Quiet hours summary", "Alert summary", 1)
+	return title, fmt.Sprintf("Held because more than %d alerts arrived in a minute, or %d in an hour.\n%s",
+		h.Limits.PerMinute, h.Limits.PerHour, list), sev
 }
 
 func severityNamed(name string) discord.Severity {
@@ -573,8 +656,8 @@ const MaxMute = 7 * 24 * time.Hour
 func (h *Hub) Mute(subject, label string, d time.Duration) error {
 	kind, name, _ := strings.Cut(subject, ":")
 	switch {
-	case name == "" || len(subject) > 300 || !slices.Contains([]string{"check", "unit", "drive", "area"}, kind):
-		return errors.New("mute a check:, unit:, drive: or area: subject")
+	case name == "" || len(subject) > 300 || !slices.Contains([]string{"check", "unit", "drive", "host", "area"}, kind):
+		return errors.New("mute a check:, unit:, drive:, host: or area: subject")
 	case kind == "area" && !knownArea(name):
 		return fmt.Errorf("unknown alert area %q", name)
 	case d < 0 || d > MaxMute:

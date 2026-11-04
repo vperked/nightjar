@@ -1,4 +1,4 @@
-server_monitor.log
+nightjar.log
 *.log
 *.log.*
 .env
@@ -6,8 +6,21 @@ server_monitor.log
 *.db
 *.db-wal
 *.db-shm
-frontend/node_modules/
+# Build output, made by make, build.sh and deploy-ui.sh; never committed. The two embed folders keep
+# only their .gitkeep, so a plain go build still compiles.
 bin/
 dist/
+/web/
 backend/internal/web/dist/*
 !backend/internal/web/dist/.gitkeep
+backend/internal/agentbin/dist/*
+!backend/internal/agentbin/dist/.gitkeep
+*.tsbuildinfo
+node_modules/
+.vite/
+coverage/
+
+# Plugins installed on this machine; the examples live in examples/plugins.
+/plugins/
+# SSH keys Nightjar makes to log in to other servers, private halves included.
+/ssh/

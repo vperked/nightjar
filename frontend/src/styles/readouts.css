@@ -1,13 +1,37 @@
 /* Readouts */
 
+/* The overview's four readings sit in one ruled strip, divided by hairlines, like an instrument's dials. */
 .readouts {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 16px;
+  margin-top: 22px;
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule);
 }
+/* A reading: its name, a large mono number, and its last half hour on a dot matrix. */
 .readout {
-  padding: 16px 18px 12px;
+  --metric: var(--series-1);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 20px 18px;
+  border-top: 0;
+  border-left: 1px solid var(--rule);
+}
+.readout:first-child {
+  border-left: 0;
+  padding-left: 0;
+}
+.readout:last-child {
+  padding-right: 0;
+}
+.readout > .label,
+.readout-head .label {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
 }
 .readout-head {
   display: flex;
@@ -16,30 +40,33 @@
   gap: 8px;
 }
 .readout-value {
-  font-size: 30px;
-  font-weight: 600;
-  letter-spacing: -0.03em;
-  line-height: 1.15;
-  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 40px;
+  font-weight: 500;
+  letter-spacing: -0.05em;
+  line-height: 1.1;
+  margin-top: 10px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 .readout-value .unit {
   font-size: 15px;
-  font-weight: 500;
+  font-weight: 400;
   color: var(--ink-3);
-  margin-left: 2px;
+  margin-left: 4px;
   letter-spacing: 0;
 }
 .readout-sub {
   color: var(--ink-3);
-  font-size: 12px;
-  margin-top: 1px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  margin-top: 2px;
   font-variant-numeric: tabular-nums;
 }
 .readout .chart,
 .readout .chart-empty {
-  margin-top: 12px;
+  margin-top: auto;
+  padding-top: 16px;
 }
 .net-pair {
   display: flex;
@@ -47,22 +74,33 @@
   gap: 0 18px;
 }
 .net-pair .readout-value {
-  font-size: 20px;
+  font-size: 24px;
+  letter-spacing: -0.03em;
+}
+.net-pair .readout-value .unit {
+  margin: 0 4px 0 0;
 }
 @media (max-width: 960px) {
   .readouts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .readout:nth-child(odd) {
+    border-left: 0;
+    padding-left: 0;
+  }
+  .readout:nth-child(even) {
+    padding-right: 0;
+  }
+  .readout:nth-child(n + 3) {
+    border-top: 1px solid var(--rule);
+  }
 }
 @media (max-width: 640px) {
-  .readouts {
-    gap: 10px;
-  }
   .readout {
-    padding: 12px 14px 10px;
+    padding: 12px 14px 14px;
   }
   .readout-value {
-    font-size: 22px;
+    font-size: 28px;
   }
   .readout .legend {
     display: none;
@@ -75,4 +113,41 @@
     font-size: 14px;
     margin-top: 2px;
   }
+}
+
+/* A slow reading's fill: a block of dots lit from the left to the value, its edge column bright,
+   warm near the limit. */
+.readout-gauge {
+  --lit: var(--metric);
+  position: relative;
+  height: 60px;
+  margin-top: auto;
+  background: radial-gradient(circle, var(--dot-off) 1.6px, transparent 2.1px) 0 0 / 5px 5px;
+}
+.readout-gauge.warn {
+  --lit: var(--warn-mark);
+}
+.readout-gauge.crit {
+  --lit: var(--crit-mark);
+}
+.readout-gauge > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: round(down, calc(var(--v) * 1%), 5px);
+  background:
+    radial-gradient(circle, var(--lit) 1.6px, transparent 2.1px) right top / 5px 5px repeat-y,
+    radial-gradient(circle, color-mix(in srgb, var(--lit) 45%, transparent) 1.6px, transparent 2.1px) 0 0 / 5px 5px;
+}
+
+/* Drawn as lines: forty segments in a row, lit to the value. */
+:root[data-charts='lines'] .readout-gauge {
+  height: 30px;
+  margin: auto 0 16px;
+  background: repeating-linear-gradient(90deg, var(--track) 0 calc(2.5% - 3px), transparent calc(2.5% - 3px) 2.5%);
+}
+/* The lit row spans the gauge and is cut back to the value, so its segments line up with the track's. */
+:root[data-charts='lines'] .readout-gauge > span {
+  width: 100%;
+  clip-path: inset(0 calc(100% - round(down, calc(var(--v) * 1%), 2.5%)) 0 0);
+  background: repeating-linear-gradient(90deg, var(--lit) 0 calc(2.5% - 3px), transparent calc(2.5% - 3px) 2.5%);
 }

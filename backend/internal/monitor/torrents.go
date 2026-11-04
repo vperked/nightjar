@@ -2,13 +2,15 @@ package monitor
 
 import (
 	"cmp"
+	"context"
 	"fmt"
+	"nightjar/internal/arr"
 	"sort"
 	"strings"
 	"time"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/qbittorrent"
+	"nightjar/internal/discord"
+	"nightjar/internal/qbittorrent"
 )
 
 // torrentWatcher tracks torrents across cycles to recover stalls, apply the cleanup policy and notify.
@@ -24,6 +26,7 @@ type trackedTorrent struct {
 	stalledSince, unstalledSince                       *float64
 	lastStalledAction                                  *float64
 	recoveryAttempts                                   int
+	replaced                                           bool // handed to Sonarr or Radarr to replace
 	lastRatioAction                                    float64
 	seenAt                                             float64
 }
@@ -166,6 +169,11 @@ func (h *torrentWatcher) handleStall(t qbittorrent.Torrent, tr *trackedTorrent, 
 	}
 	duration := now - *tr.stalledSince
 	if tr.notifiedStalled && tr.recoveryAttempts >= cfg.StalledMaxRecoveryAttempts {
+		// Recovery did not help: once more time has passed, Sonarr or Radarr replace it.
+		if !tr.replaced && cfg.StalledReplace && tr.lastStalledAction != nil && now-*tr.lastStalledAction >= cfg.StalledActionCooldown {
+			tr.replaced = true
+			go h.replace(t, duration)
+		}
 		return
 	}
 	if duration < cfg.StalledThreshold || (tr.lastStalledAction != nil && now-*tr.lastStalledAction < cfg.StalledActionCooldown) {
@@ -262,5 +270,37 @@ func (h *torrentWatcher) notifyProgress(t qbittorrent.Torrent, tr *trackedTorren
 			discord.Seeding(wh, info(t))
 		}
 		tr.notifiedSeeding = true
+	}
+}
+
+// replace has whichever of Sonarr and Radarr queued a stalled download remove it, blocklist the
+// release and search for another, and says so.
+func (h *torrentWatcher) replace(t qbittorrent.Torrent, stalled float64) {
+	cfg := h.ctx.Config()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, c := range []*arr.Client{arr.Connect("sonarr", cfg.SonarrURL, cfg.SonarrAPIKey), arr.Connect("radarr", cfg.RadarrURL, cfg.RadarrAPIKey)} {
+		if c == nil {
+			continue
+		}
+		q, ok, err := c.Queued(ctx, t.Hash)
+		if err != nil {
+			h.log.Warn(fmt.Sprintf("[qBittorrent] Could not ask %s about %s: %v", c.Name(), t.Name, err))
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if err := c.Replace(ctx, q.ID); err != nil {
+			h.log.Warn(fmt.Sprintf("[qBittorrent] %s could not replace %s: %v", c.Name(), t.Name, err))
+			return
+		}
+		h.log.Info(fmt.Sprintf("[qBittorrent] %s replaced stalled download %s", c.Name(), t.Name))
+		if h.ctx.QBittorrentWebhook != nil {
+			h.ctx.QBittorrentWebhook.SendEmbed("Replaced: "+discord.Truncate(t.Name, 200),
+				fmt.Sprintf("It stalled for %s and recovery did not help, so %s removed it, blocklisted the release and is searching for another.", discord.Span(stalled), c.Name()),
+				discord.Info, []discord.Field{{Name: "Progress", Value: fmt.Sprintf("%.0f%%", t.ProgressPercent()), Inline: true}}, "qBittorrent")
+		}
+		return
 	}
 }

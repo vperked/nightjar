@@ -6,19 +6,20 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
-	"servermonitor/internal/alerts"
-	"servermonitor/internal/api"
-	"servermonitor/internal/cleanup"
-	"servermonitor/internal/collect"
-	"servermonitor/internal/config"
-	"servermonitor/internal/metrics"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/plex"
-	"servermonitor/internal/services"
-	"servermonitor/internal/storage"
+	"nightjar/internal/alerts"
+	"nightjar/internal/api"
+	"nightjar/internal/cleanup"
+	"nightjar/internal/collect"
+	"nightjar/internal/config"
+	"nightjar/internal/metrics"
+	"nightjar/internal/monitor"
+	"nightjar/internal/plex"
+	"nightjar/internal/services"
+	"nightjar/internal/storage"
 )
 
 // TestLoopToAPI runs real monitoring cycles against local services and reads the results back through the API.
@@ -28,7 +29,11 @@ func TestLoopToAPI(t *testing.T) {
 	pms := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/status/sessions":
-			w.Write([]byte(`{"MediaContainer":{"Metadata":[{"sessionKey":"7","type":"movie","title":"Heat","User":{"title":"sam"},"Session":{"bandwidth":8000}}]}}`))
+			w.Write([]byte(`{"MediaContainer":{"Metadata":[{"sessionKey":"7","type":"movie","title":"Heat","User":{"title":"sam"},"Session":{"id":"s7","bandwidth":8000}}]}}`))
+		case "/status/sessions/terminate":
+			if r.URL.Query().Get("sessionId") != "s7" || r.URL.Query().Get("reason") != "Bedtime" {
+				w.WriteHeader(http.StatusNotFound)
+			}
 		case "/":
 			w.Write([]byte(`{"MediaContainer":{"friendlyName":"nas","version":"1.40.0"}}`))
 		default:
@@ -122,6 +127,18 @@ func TestLoopToAPI(t *testing.T) {
 	}
 	if rec, _ := get(t, s, "/api/plex", nil); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("plex must require auth, got %d", rec.Code)
+	}
+
+	// Stopping a stream: the message reaches Plex, and the stream leaves the list at once.
+	h2 := s.Handler()
+	if code, _ := call(t, h2, http.MethodPost, "/api/plex/streams/7/stop", `{"message":"`+strings.Repeat("x", 201)+`"}`); code != http.StatusBadRequest {
+		t.Fatalf("an overlong message should be refused, got %d", code)
+	}
+	if code, body := call(t, h2, http.MethodPost, "/api/plex/streams/7/stop", `{"message":"Bedtime"}`); code != http.StatusOK || len(body["plex"].(map[string]any)["streams"].([]any)) != 0 {
+		t.Fatalf("stop: %d %v", code, body)
+	}
+	if code, _ := call(t, h2, http.MethodPost, "/api/plex/streams/7/stop", `{}`); code != http.StatusNotFound {
+		t.Fatalf("stopping an ended stream should be 404, got %d", code)
 	}
 
 	_, body = get(t, s, "/api/services/history?name=web&hours=1", auth)

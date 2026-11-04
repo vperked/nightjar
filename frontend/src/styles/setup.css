@@ -83,8 +83,8 @@
   font-weight: 600;
 }
 .setup-step.done .setup-n {
-  background: var(--good-mark);
-  color: #fff;
+  background: var(--good);
+  color: var(--bg);
 }
 .setup-body {
   margin-left: 38px;

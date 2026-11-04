@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/netload"
-	"servermonitor/internal/qbittorrent"
+	"nightjar/internal/netload"
+	"nightjar/internal/qbittorrent"
 )
 
 func TestNetworkRoute(t *testing.T) {

@@ -1,10 +1,12 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 
 export interface Option {
   value: string;
   label: ReactNode;
   // text is what type-ahead matches; defaults to the value.
   text?: string;
+  // hint is a short line under the label in the open menu, saying what the choice does.
+  hint?: string;
 }
 
 // Select is the dashboard's dropdown: a button showing the choice and a listbox menu, styled like
@@ -15,7 +17,9 @@ export function Select({ value, options, onChange, label, className = '' }: { va
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const [above, setAbove] = useState(false);
+  const [right, setRight] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  const menu = useRef<HTMLUListElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const id = useId();
   const selected = Math.max(
@@ -32,6 +36,13 @@ export function Select({ value, options, onChange, label, className = '' }: { va
     return () => document.removeEventListener('mousedown', close);
   }, [open]);
 
+  // A menu wider than its button lines up with the button's right edge when it would run off the screen.
+  useLayoutEffect(() => {
+    if (!open) return setRight(false);
+    const rect = menu.current?.getBoundingClientRect();
+    if (rect && rect.right > window.innerWidth - 8) setRight(true);
+  }, [open]);
+
   // Keep the active option in view while moving through a long list.
   useEffect(() => {
     if (open) document.getElementById(`${id}-${active}`)?.scrollIntoView?.({ block: 'nearest' });
@@ -40,7 +51,8 @@ export function Select({ value, options, onChange, label, className = '' }: { va
   const show = () => {
     const rect = button.current?.getBoundingClientRect();
     // Open upwards when there is no room below (the save bar sits along the bottom).
-    setAbove(!!rect && window.innerHeight - rect.bottom < Math.min(280, options.length * 36 + 16) && rect.top > window.innerHeight - rect.bottom);
+    const tall = options.length * (options.some((o) => o.hint) ? 50 : 36) + 16;
+    setAbove(!!rect && window.innerHeight - rect.bottom < Math.min(300, tall) && rect.top > window.innerHeight - rect.bottom);
     setActive(selected);
     setOpen(true);
   };
@@ -115,13 +127,15 @@ export function Select({ value, options, onChange, label, className = '' }: { va
         </svg>
       </button>
       {open && (
-        <ul className={`select-menu ${above ? 'above' : ''}`} role="listbox" id={`${id}-list`} aria-label={label}>
+        <ul ref={menu} className={`select-menu ${above ? 'above' : ''} ${right ? 'right' : ''}`} role="listbox" id={`${id}-list`} aria-label={label}>
           {options.map((o, i) => (
             <li
               key={o.value}
               id={`${id}-${i}`}
               role="option"
               aria-selected={i === selected}
+              aria-labelledby={`${id}-${i}-label`}
+              aria-describedby={o.hint ? `${id}-${i}-hint` : undefined}
               className={`${i === active ? 'active' : ''} ${i === selected ? 'selected' : ''}`}
               onMouseEnter={() => setActive(i)}
               // mousedown, so the pick lands before the button loses focus.
@@ -130,7 +144,16 @@ export function Select({ value, options, onChange, label, className = '' }: { va
                 pick(i);
               }}
             >
-              <span>{o.label}</span>
+              <span className="select-option">
+                <span className="select-label" id={`${id}-${i}-label`}>
+                  {o.label}
+                </span>
+                {o.hint && (
+                  <span className="select-hint" id={`${id}-${i}-hint`}>
+                    {o.hint}
+                  </span>
+                )}
+              </span>
               {i === selected && (
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M5 12.5l4.5 4.5L19 7.5" />

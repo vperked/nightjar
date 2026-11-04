@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { api } from '../api/client';
 import { useServices } from '../api/ServicesContext';
@@ -6,14 +6,14 @@ import type { CheckSpec, Service } from '../api/types';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { Pct, Seg, State, Ticks } from '../components/ui';
-import { formatAgo } from '../format';
+import { formatAgo, formatResponse } from '../format';
 import { useNow } from '../hooks/useNow';
 import { CheckForm } from './CheckForm';
 import { ServicesTabs } from './SystemServices';
 
 type Filter = 'all' | 'up' | 'down';
 
-export function ServiceRow({ s, now, onEdit }: { s: Service; now: number; onEdit?: () => void }) {
+export function ServiceRow({ s, now, onEdit, server }: { s: Service; now: number; onEdit?: () => void; server?: string }) {
   const navigate = useNavigate();
   const href = `/services/${encodeURIComponent(s.name)}`;
   return (
@@ -26,7 +26,8 @@ export function ServiceRow({ s, now, onEdit }: { s: Service; now: number; onEdit
           {s.name}
         </Link>
         <span className="svc-target truncate" title={s.detail}>
-          {s.type} · {s.target}
+          {s.type === 'heartbeat' ? `heartbeat · ${s.schedule}` : `${s.type} · ${s.target}`}
+          {server && ` · on ${server}`}
         </span>
         <div className="show-sm">
           <Ticks beats={s.recent} slots={30} />
@@ -35,7 +36,7 @@ export function ServiceRow({ s, now, onEdit }: { s: Service; now: number; onEdit
       <td className="ticks-cell hide-sm">
         <Ticks beats={s.recent} slots={48} />
       </td>
-      <td className="r num hide-sm">{s.latency_ms !== null ? `${Math.round(s.latency_ms)}ms` : '—'}</td>
+      <td className="r num hide-sm">{formatResponse(s)}</td>
       <td className="r num ink-3 hide-sm">{formatAgo(s.last_check, now)}</td>
       <td className="r">
         <Pct value={s.uptime_24h} />
@@ -66,6 +67,9 @@ export function ServicesPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const [adding, setAdding] = useState(location.hash === '#add');
+  // A server's page opens the form for a check of something on it (?server=id#add).
+  const presetServer = new URLSearchParams(location.search).get('server') ?? undefined;
+  const servers = useServerNames();
   const [editing, setEditing] = useState<CheckSpec>();
   const notify = useToast();
   const [filter, setFilter] = useState<Filter>('all');
@@ -103,13 +107,13 @@ export function ServicesPage() {
               value: f,
               label: (
                 <>
-                  {f}
+                  {f[0].toUpperCase() + f.slice(1)}
                   <span className="n">{counts[f]}</span>
                 </>
               ),
             }))}
           />
-          <input className="search" placeholder="filter…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Filter services" />
+          <input className="search" placeholder="Filter checks…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Filter services" />
           {!adding && list.length > 0 && (
             <button
               className="btn"
@@ -136,6 +140,7 @@ export function ServicesPage() {
       )}
       {adding && (
         <CheckForm
+          server={presetServer}
           onCancel={() => setAdding(false)}
           onSaved={(check) => {
             refresh();
@@ -177,7 +182,7 @@ export function ServicesPage() {
             </thead>
             <tbody>
               {shown.map((s) => (
-                <ServiceRow key={s.name} s={s} now={now} onEdit={() => edit(s.name)} />
+                <ServiceRow key={s.name} s={s} now={now} onEdit={() => edit(s.name)} server={s.server ? servers[s.server] : undefined} />
               ))}
             </tbody>
           </table>
@@ -185,4 +190,16 @@ export function ServicesPage() {
       )}
     </main>
   );
+}
+
+// useServerNames names the watched servers by id, for the checks that belong to one.
+function useServerNames(): Record<string, string> {
+  const [names, setNames] = useState<Record<string, string>>({});
+  useEffect(() => {
+    api.hosts().then(
+      (r) => setNames(Object.fromEntries((r.hosts ?? []).map((h) => [h.id, h.name]))),
+      () => setNames({}),
+    );
+  }, []);
+  return names;
 }

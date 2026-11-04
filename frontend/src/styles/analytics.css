@@ -1,0 +1,79 @@
+/* Analytics: headline tiles, the servers table with sparklines, small multiples and outages. */
+
+.analytics-tile {
+  display: block;
+  color: var(--ink);
+}
+a.analytics-tile:hover {
+  border-color: color-mix(in srgb, var(--ink) 22%, var(--rule));
+}
+.analytics-tile .readout-value {
+  margin: 4px 0 2px;
+}
+
+.analytics-scroll {
+  overflow-x: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+.analytics-table {
+  min-width: 860px;
+}
+.analytics-table td {
+  vertical-align: middle;
+}
+.analytics-name {
+  display: grid;
+  min-width: 0;
+  max-width: 220px;
+  color: var(--ink);
+}
+.analytics-name strong {
+  font-weight: 600;
+}
+.analytics-cell {
+  display: grid;
+  grid-template-columns: 82px minmax(70px, 120px);
+  align-items: center;
+  gap: 10px;
+}
+.analytics-disk {
+  display: grid;
+  line-height: 1.3;
+}
+
+.analytics-multiples {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 18px 24px;
+}
+.analytics-multiple {
+  min-width: 0;
+}
+.analytics-multiple-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.analytics-multiple-head a {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+@media (max-width: 640px) {
+  .analytics-multiples {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* A server page's chart range, above its charts. */
+.range-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}

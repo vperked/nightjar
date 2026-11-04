@@ -6,7 +6,8 @@ import type { PublicService, PublicStatus, StatusDesign, StatusDesignResponse } 
 import { Select } from '../components/Select';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
-import { StatusView } from './StatusPage';
+import { Seg } from '../components/ui';
+import { StatusView, uptimeOf } from './StatusPage';
 
 // The status page designer: everything on the public page, edited on the left and previewed live
 // on the right with the checks' real state. Only checks added here are ever shown publicly.
@@ -121,6 +122,107 @@ function GroupEditor({
   );
 }
 
+type CodeKey = 'css' | 'header_html' | 'footer_html';
+
+const CODE: Record<CodeKey, { tab: string; limit: number; hint: string; placeholder: string }> = {
+  css: {
+    tab: 'CSS',
+    limit: 50000,
+    hint: 'Styles the public page. Rules for body and :root work too. The preview keeps them to itself, so the dashboard never changes.',
+    placeholder: '.status-page {\n  max-width: 820px;\n}\n.status-hero.operational {\n  background: #0f2a1d;\n}',
+  },
+  header_html: {
+    tab: 'Top HTML',
+    limit: 20000,
+    hint: 'Shown above the title: a logo, links, a notice. Scripts, frames and forms are taken out; links and images work.',
+    placeholder: '<a href="https://example.com">\n  <img src="https://example.com/logo.png" alt="Example" height="32">\n</a>',
+  },
+  footer_html: {
+    tab: 'Bottom HTML',
+    limit: 20000,
+    hint: 'Shown above the footer: contact details, links to your other pages. Scripts, frames and forms are taken out.',
+    placeholder: '<p>Something wrong? <a href="mailto:you@example.com">Email us</a>.</p>',
+  },
+};
+
+// The page's parts, for the owner's CSS.
+const CLASSES: [string, string][] = [
+  ['.status-page', 'the whole page'],
+  ['.status-custom-top', 'your top HTML'],
+  ['.status-top', 'title and intro'],
+  ['.status-announcement', 'the banner (.info, .warning, .crit)'],
+  ['.status-hero', 'the verdict (.operational, .degraded, .outage)'],
+  ['.status-group', 'a group of checks'],
+  ['.status-row', 'one check'],
+  ['.status-state', 'its state (.up, .down, .paused)'],
+  ['.day', 'a day bar (.good, .minor, .major, .none)'],
+  ['.status-legend', 'what the bars mean'],
+  ['.status-custom-bottom', 'your bottom HTML'],
+  ['.status-footer', 'the footer'],
+];
+
+// CodePanel is the owner's own CSS and HTML, one at a time.
+function CodePanel({ design, set }: { design: StatusDesign; set: (k: CodeKey, v: string) => void }) {
+  const [tab, setTab] = useState<CodeKey>('css');
+  const spec = CODE[tab];
+  const value = design[tab] ?? '';
+  const over = value.length > spec.limit;
+  return (
+    <section className="panel">
+      <div className="section-head">
+        <span className="label">Your own code</span>
+        <span className="small ink-3">{(['css', 'header_html', 'footer_html'] as CodeKey[]).filter((k) => design[k]?.trim()).length || 'none'} in use</span>
+      </div>
+      <Seg<CodeKey>
+        label="Code to edit"
+        value={tab}
+        onChange={setTab}
+        options={(Object.keys(CODE) as CodeKey[]).map((k) => ({
+          value: k,
+          label: (
+            <>
+              {CODE[k].tab}
+              {design[k]?.trim() ? <span className="sd-code-dot" aria-label="(in use)" /> : null}
+            </>
+          ),
+        }))}
+      />
+      <p className="form-help sd-code-hint">{spec.hint}</p>
+      <textarea
+        className={`field mono sd-code ${over ? 'over' : ''}`}
+        aria-label={spec.tab}
+        rows={11}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        value={value}
+        placeholder={spec.placeholder}
+        onChange={(e) => set(tab, e.target.value)}
+      />
+      <div className="sd-code-foot">
+        {tab === 'css' ? (
+          <details className="sd-classes">
+            <summary>Classes you can style</summary>
+            <dl>
+              {CLASSES.map(([c, what]) => (
+                <div key={c}>
+                  <dt className="mono">{c}</dt>
+                  <dd>{what}</dd>
+                </div>
+              ))}
+            </dl>
+          </details>
+        ) : (
+          <span />
+        )}
+        <span className={`small num ${over ? 'sd-over' : 'ink-3'}`}>
+          {value.length.toLocaleString()} / {spec.limit.toLocaleString()}
+        </span>
+      </div>
+    </section>
+  );
+}
+
 export function StatusDesignerPage() {
   const [loaded, setLoaded] = useState<StatusDesignResponse>();
   const [design, setDesign] = useState<StatusDesign>();
@@ -141,7 +243,12 @@ export function StatusDesignerPage() {
     );
   }, []);
 
-  const dirty = !!loaded && JSON.stringify(design) !== JSON.stringify(loaded.design);
+  // Your own code left empty is the same as none, so typing and deleting it is no change.
+  const same = (a?: StatusDesign, b?: StatusDesign) => {
+    const plain = (d?: StatusDesign) => d && JSON.stringify({ ...d, css: d.css ?? '', header_html: d.header_html ?? '', footer_html: d.footer_html ?? '' });
+    return plain(a) === plain(b);
+  };
+  const dirty = !!loaded && !same(design, loaded.design);
   const used = useMemo(() => new Set(design?.groups.flatMap((g) => g.items.map((i) => i.check)) ?? []), [design]);
   const available = (loaded?.checks ?? []).filter((c) => !used.has(c));
 
@@ -160,7 +267,9 @@ export function StatusDesignerPage() {
             status: s.status,
             uptime_24h: design.show_uptime ? s.uptime_24h : null,
             uptime_30d: design.show_uptime ? s.uptime_30d : null,
+            uptime_90d: design.show_uptime ? uptimeOf(loaded?.days?.[it.check] ?? []) : null,
             recent: design.show_history ? s.recent : [],
+            days: design.show_history ? (loaded?.days?.[it.check] ?? []) : [],
           },
         ];
       }),
@@ -175,12 +284,15 @@ export function StatusDesignerPage() {
       show_uptime: design.show_uptime,
       show_history: design.show_history,
       announcement: design.announcement ? { text: design.announcement, tone: design.tone } : undefined,
+      css: design.css,
+      header_html: design.header_html,
+      footer_html: design.footer_html,
       overall: down === 0 ? 'operational' : down === watched.length ? 'outage' : 'degraded',
       updated: Date.now() / 1000,
       groups,
       services: all,
     };
-  }, [design, live]);
+  }, [design, live, loaded]);
 
   if (error) return <main className="alert">{error}</main>;
   if (!design || !loaded) return <Skeleton kind="form" />;
@@ -220,18 +332,18 @@ export function StatusDesignerPage() {
       <div className="page-title">
         <div>
           <div className="crumb">
-            <Link to="/settings">settings</Link> /
+            <Link to="/settings">Settings</Link> /
           </div>
           <h1>Status page</h1>
           <div className="page-sub">A public page with the checks you choose, at /status. Targets and error details are never shown.</div>
         </div>
         <div className="toolbar">
           <label className="check">
-            <input type="checkbox" checked={enabled} onChange={(e) => toggleEnabled(e.target.checked)} /> {enabled ? 'public' : 'off'}
+            <input type="checkbox" checked={enabled} onChange={(e) => toggleEnabled(e.target.checked)} /> {enabled ? 'Public' : 'Off'}
           </label>
           {enabled && (
             <a className="btn-quiet" href="/status" target="_blank" rel="noreferrer">
-              open ↗
+              Open ↗
             </a>
           )}
         </div>
@@ -250,14 +362,14 @@ export function StatusDesignerPage() {
               <textarea className="field" rows={2} value={design.description} onChange={(e) => set('description', e.target.value)} />
             </Field>
             <Field label="Footer" hint="Shown at the bottom (optional).">
-              <input className="field" value={design.footer} placeholder="server monitor" onChange={(e) => set('footer', e.target.value)} />
+              <input className="field" value={design.footer} placeholder="Nightjar" onChange={(e) => set('footer', e.target.value)} />
             </Field>
             <div className="sd-toggles">
               <label className="check">
-                <input type="checkbox" checked={design.show_uptime} onChange={(e) => set('show_uptime', e.target.checked)} /> uptime percentages
+                <input type="checkbox" checked={design.show_uptime} onChange={(e) => set('show_uptime', e.target.checked)} /> Uptime percentages
               </label>
               <label className="check">
-                <input type="checkbox" checked={design.show_history} onChange={(e) => set('show_history', e.target.checked)} /> recent checks
+                <input type="checkbox" checked={design.show_history} onChange={(e) => set('show_history', e.target.checked)} /> 90-day history
               </label>
             </div>
           </section>
@@ -307,17 +419,19 @@ export function StatusDesignerPage() {
               />
             ))}
             <button type="button" className="btn-quiet" onClick={() => set('groups', [...design.groups, { name: '', items: [] }])}>
-              + add a group
+              + Add a group
             </button>
           </section>
+
+          <CodePanel design={design} set={set} />
         </div>
 
         <div className="sd-preview" aria-label="Preview">
           <div className="sd-preview-label">
             <span className="label">Preview</span>
-            <span className="small ink-3">live, with your checks' real state</span>
+            <span className="small ink-3">live, with your checks' real state{design.css?.trim() ? ' and your CSS' : ''}</span>
           </div>
-          <div className="sd-frame">{preview && <StatusView data={preview} />}</div>
+          <div className="sd-frame">{preview && <StatusView data={preview} scope=".sd-frame" />}</div>
         </div>
       </div>
 
@@ -326,10 +440,10 @@ export function StatusDesignerPage() {
           <span>Unsaved changes to the status page</span>
           <span className="savebar-actions">
             <button className="btn-quiet" onClick={() => setDesign(loaded.design)}>
-              discard
+              Discard
             </button>
             <button className="btn" onClick={save} disabled={saving}>
-              {saving ? 'saving…' : 'Save'}
+              {saving ? 'Saving…' : 'Save'}
             </button>
           </span>
         </div>

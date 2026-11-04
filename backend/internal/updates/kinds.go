@@ -535,7 +535,7 @@ func (m *Manager) postJSON(ctx context.Context, url, key string, body any) error
 
 func (m *Manager) do(req *http.Request, key string, v any) error {
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "servermonitor")
+	req.Header.Set("User-Agent", "nightjar")
 	if key != "" {
 		req.Header.Set("X-Api-Key", key)
 	} else if m.opt.GitHubToken != "" && strings.HasPrefix(req.URL.String(), m.opt.GitHubAPI) {

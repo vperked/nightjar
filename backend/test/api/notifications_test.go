@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"testing"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/logx"
-	"servermonitor/internal/notify"
+	"nightjar/internal/discord"
+	"nightjar/internal/logx"
+	"nightjar/internal/notify"
 )
 
 type quietChannel struct{ name string }

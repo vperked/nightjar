@@ -1,33 +1,4 @@
-/* Status page */
-
-.status-announcement {
-  --tone: var(--series-1);
-  margin-bottom: 18px;
-  padding: 12px 16px;
-  border-radius: var(--radius-sm);
-  border: 1px solid color-mix(in srgb, var(--tone) 35%, transparent);
-  background: color-mix(in srgb, var(--tone) 10%, var(--surface));
-  font-size: 14px;
-  line-height: 1.5;
-}
-.status-announcement.warning {
-  --tone: var(--warn);
-}
-.status-announcement.crit {
-  --tone: var(--crit);
-}
-.status-description {
-  margin: -10px 0 18px;
-  color: var(--ink-2);
-  font-size: 14.5px;
-  line-height: 1.55;
-  white-space: pre-line;
-}
-.status-group h2 {
-  margin: 24px 0 -6px;
-  font-size: 15px;
-  font-weight: 600;
-}
+/* The status page designer. The public page's own styles are in status-public.css. */
 
 /* Designer: editor on the left, the page as visitors will see it on the right. */
 .sd-layout {
@@ -155,5 +126,77 @@
   }
   .sd-preview {
     position: static;
+  }
+}
+
+/* The owner's own CSS and HTML. */
+.sd-code-hint {
+  margin: 10px 0 8px;
+}
+.sd-code-dot {
+  width: 5px;
+  height: 5px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+  vertical-align: middle;
+}
+textarea.sd-code {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+  background: var(--bg-sunk);
+}
+textarea.sd-code.over {
+  border-color: var(--crit);
+}
+.sd-code-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 8px;
+}
+.sd-code-foot > .small {
+  white-space: nowrap;
+}
+.sd-over {
+  color: var(--crit);
+}
+.sd-classes summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.sd-classes dl {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 0;
+}
+.sd-classes dl div {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 10px;
+  font-size: 12.5px;
+}
+.sd-classes dt {
+  color: var(--ink);
+}
+.sd-classes dd {
+  margin: 0;
+  color: var(--ink-3);
+}
+@media (max-width: 560px) {
+  .sd-classes dl div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
   }
 }

@@ -4,8 +4,8 @@ import (
 	"errors"
 	"net/http"
 
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/setup"
+	"nightjar/internal/monitor"
+	"nightjar/internal/setup"
 )
 
 // The setup guide: what is set up, and what was found on this machine.

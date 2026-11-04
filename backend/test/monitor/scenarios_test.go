@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/collect"
-	"servermonitor/internal/discord"
-	"servermonitor/internal/kernel"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/plex"
-	"servermonitor/internal/qbittorrent"
+	"nightjar/internal/collect"
+	"nightjar/internal/discord"
+	"nightjar/internal/kernel"
+	"nightjar/internal/monitor"
+	"nightjar/internal/plex"
+	"nightjar/internal/qbittorrent"
 )
 
 func TestTemperatureAlertWaitsForSustainedHeat(t *testing.T) {
@@ -33,9 +33,9 @@ func TestTemperatureAlertWaitsForSustainedHeat(t *testing.T) {
 	temp(65, 90)
 	expectTitles(t, wh)
 	temp(70, 91)
-	expectTitles(t, wh, "Temperature Alert")
+	expectTitles(t, wh, "CPU at 91°C")
 	temp(75, 91)
-	expectTitles(t, wh, "Temperature Alert")
+	expectTitles(t, wh, "CPU at 91°C")
 }
 
 func TestNetworkAndGPUAlerts(t *testing.T) {
@@ -45,7 +45,7 @@ func TestNetworkAndGPUAlerts(t *testing.T) {
 	eval(monitor.Snapshot{Now: 1, NetworkMBps: &mbps, Bandwidth: &collect.Bandwidth{SentPerSec: 1e6, RecvPerSec: 2e6}})
 	eval(monitor.Snapshot{Now: 2, GPU: &collect.GPU{Utilization: 50}})
 	eval(monitor.Snapshot{Now: 3, GPU: &collect.GPU{Utilization: 95}})
-	expectTitles(t, wh, "Network Bandwidth Alert", "GPU Usage Alert")
+	expectTitles(t, wh, "Network at 150.0 MB/s", "GPU at 95%")
 }
 
 func diskContext(wh *fakeSender) *monitor.Context {
@@ -64,10 +64,10 @@ func TestFullPartitionAlertsOnce(t *testing.T) {
 	for i := range 3 {
 		eval(monitor.Snapshot{Now: 1000 + float64(i*5), Partitions: full})
 	}
-	expectTitles(t, wh, "Disk Usage Alert: "+mount)
+	expectTitles(t, wh, mount+" is ")
 
 	eval(monitor.Snapshot{Now: 2000, Partitions: []collect.Partition{{Mountpoint: t.TempDir(), Percent: 77}}})
-	expectTitles(t, wh, "Disk Usage Alert: "+mount, "Drive Early Warning")
+	expectTitles(t, wh, mount+" is ", "/")
 }
 
 func TestMediaDirectoryAlert(t *testing.T) {
@@ -82,7 +82,7 @@ func TestMediaDirectoryAlert(t *testing.T) {
 	eval(monitor.Snapshot{Now: 1})
 	expectTitles(t, wh)
 	eval(monitor.Snapshot{Now: 2})
-	expectTitles(t, wh, "Directory Size Alert")
+	expectTitles(t, wh, "/")
 }
 
 func TestReportErrorIsRateLimited(t *testing.T) {
@@ -92,7 +92,7 @@ func TestReportErrorIsRateLimited(t *testing.T) {
 	ctx.ErrorLogFile = filepath.Join(t.TempDir(), "errors.log")
 	ctx.ReportError(errors.New("boom"), "cycle")
 	ctx.ReportError(errors.New("again"), "cycle")
-	expectTitles(t, crash, "Monitoring Error Detected")
+	expectTitles(t, crash, "Nightjar hit an error")
 	data, _ := os.ReadFile(ctx.ErrorLogFile)
 	if !strings.Contains(string(data), "boom") || !strings.Contains(string(data), "again") {
 		t.Fatalf("every error belongs in the error log: %q", data)
@@ -107,7 +107,7 @@ func TestMetricsReportInterval(t *testing.T) {
 	eval(monitor.Snapshot{Now: 10_000})
 	eval(monitor.Snapshot{Now: 12_000})
 	eval(monitor.Snapshot{Now: 13_600})
-	expectTitles(t, wh, "Server Monitor Metrics Report", "Server Monitor Metrics Report")
+	expectTitles(t, wh, "Nightjar report", "Nightjar report")
 	if ctx.Latest().Now != 13_600 {
 		t.Fatal("evaluated snapshots are published for the API")
 	}
@@ -130,7 +130,7 @@ func TestFailedMetricsReportBacksOff(t *testing.T) {
 		eval(monitor.Snapshot{Now: now})
 	}
 	eval(monitor.Snapshot{Now: 10_300})
-	expectTitles(t, &wh.fakeSender, "Server Monitor Metrics Report", "Server Monitor Metrics Report")
+	expectTitles(t, &wh.fakeSender, "Nightjar report", "Nightjar report")
 }
 
 func TestWatchdogAlertsOnceWhenTheLoopStops(t *testing.T) {
@@ -139,12 +139,12 @@ func TestWatchdogAlertsOnceWhenTheLoopStops(t *testing.T) {
 	w.Start()
 	defer w.Stop()
 	time.Sleep(120 * time.Millisecond)
-	expectTitles(t, wh, "Monitoring Loop Stopped")
+	expectTitles(t, wh, "Nightjar stopped checking")
 	// A beating loop re-arms the alert.
 	w.Heartbeat()
 	w.ResetAlertState()
 	time.Sleep(120 * time.Millisecond)
-	expectTitles(t, wh, "Monitoring Loop Stopped", "Monitoring Loop Stopped")
+	expectTitles(t, wh, "Nightjar stopped checking", "Nightjar stopped checking")
 }
 
 func TestFreezeMonitorFlagsStalls(t *testing.T) {
@@ -245,7 +245,7 @@ func TestTorrentLifecycle(t *testing.T) {
 	poll(500, stalled, false) // action cooldown
 	poll(2300, stalled, false)
 	poll(5000, stalled, false) // out of recovery attempts
-	expectTitles(t, wh, "Torrent Stalled")
+	expectTitles(t, wh, "Stalled: ")
 	if got := qbServer.recorded(); got != recovery+" "+recovery {
 		t.Fatalf("recovery actions %q", got)
 	}
@@ -255,19 +255,19 @@ func TestTorrentLifecycle(t *testing.T) {
 	poll(5050, "[]", true)
 	poll(5060, stalled, false)
 	poll(5400, stalled, false)
-	expectTitles(t, wh, "Torrent Stalled")
+	expectTitles(t, wh, "Stalled: ")
 
 	// Moving again for the grace period clears the stall, so a new stall is reported.
 	poll(5500, downloading, false)
 	poll(5700, downloading, false)
 	poll(5800, stalled, false)
 	poll(6200, stalled, false)
-	expectTitles(t, wh, "Torrent Stalled", "Torrent Stalled")
+	expectTitles(t, wh, "Stalled: ", "Stalled: ")
 
 	poll(6300, `[{"hash":"a","name":"distro.iso","state":"uploading","progress":1,"ratio":0.5}]`, false)
-	expectTitles(t, wh, "Torrent Stalled", "Torrent Stalled", "Download Complete", "Torrent Seeding")
+	expectTitles(t, wh, "Stalled: ", "Stalled: ", "Downloaded: ", "Seeding: ")
 	poll(6400, `[{"hash":"a","name":"distro.iso","state":"uploading","progress":1,"ratio":2.5}]`, false)
-	expectTitles(t, wh, "Torrent Stalled", "Torrent Stalled", "Download Complete", "Torrent Seeding", "Seeding Ratio Limit Reached")
+	expectTitles(t, wh, "Stalled: ", "Stalled: ", "Downloaded: ", "Seeding: ", "Seeded enough: ")
 	if got := qbServer.recorded(); !strings.HasSuffix(got, recovery+" delete:a") {
 		t.Fatalf("ratio limit should delete the torrent, actions %q", got)
 	}
@@ -276,7 +276,7 @@ func TestTorrentLifecycle(t *testing.T) {
 	poll(6500, "[]", false)
 	poll(6600, stalled, false)
 	poll(6900, stalled, false)
-	expectTitles(t, wh, "Torrent Stalled", "Torrent Stalled", "Download Complete", "Torrent Seeding", "Seeding Ratio Limit Reached", "Torrent Stalled")
+	expectTitles(t, wh, "Stalled: ", "Stalled: ", "Downloaded: ", "Seeding: ", "Seeded enough: ", "Stalled: ")
 }
 
 func TestTorrentBoardForTheDashboard(t *testing.T) {
@@ -357,21 +357,21 @@ func TestPlexAlerts(t *testing.T) {
 
 	pms.sessions.Store("[" + plexSession("1", "Heat", true) + "," + plexSession("2", "Ronin", true) + "]")
 	eval(monitor.Snapshot{Now: 0}) // streams already playing at startup are not announced
-	expectTitles(t, wh, "Plex Transcode Load")
+	expectTitles(t, wh, "Plex is transcoding")
 
 	pms.sessions.Store("[" + plexSession("1", "Heat", true) + "," + plexSession("2", "Ronin", true) + "," + plexSession("3", "Thief", false) + "]")
 	eval(monitor.Snapshot{Now: 15})
-	expectTitles(t, wh, "Plex Transcode Load", "Now playing: Thief")
+	expectTitles(t, wh, "Plex is transcoding", "Now playing: Thief")
 
 	pms.down.Store(true)
 	eval(monitor.Snapshot{Now: 30}) // first failure is within PLEX_RETRIES
-	expectTitles(t, wh, "Plex Transcode Load", "Now playing: Thief")
+	expectTitles(t, wh, "Plex is transcoding", "Now playing: Thief")
 	eval(monitor.Snapshot{Now: 45})
-	expectTitles(t, wh, "Plex Transcode Load", "Now playing: Thief", "Plex Down")
+	expectTitles(t, wh, "Plex is transcoding", "Now playing: Thief", "Plex is down")
 
 	pms.down.Store(false)
 	eval(monitor.Snapshot{Now: 60})
-	expectTitles(t, wh, "Plex Transcode Load", "Now playing: Thief", "Plex Down", "Plex Recovered")
+	expectTitles(t, wh, "Plex is transcoding", "Now playing: Thief", "Plex is down", "Plex is back up")
 }
 
 func TestHardwareErrorDescriptions(t *testing.T) {

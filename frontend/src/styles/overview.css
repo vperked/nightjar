@@ -6,19 +6,21 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 16px;
 }
 .health-verdict {
   --tone: var(--good);
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 12px 5px 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--tone) 12%, transparent);
-  color: var(--tone);
-  font-size: 13px;
+  padding: 4px 11px 4px 9px;
+  background: var(--tone);
+  color: var(--bg);
+  font-family: var(--mono);
+  font-size: 11.5px;
   font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 .health-verdict.warn {
   --tone: var(--warn);
@@ -43,31 +45,43 @@
   opacity: 0;
   animation: live-ring 2.4s ease-out infinite;
 }
+/* Each chip is a ruled tag in mono capitals, its number in ink, tinted by how it is doing. */
 .health-chip {
+  --tone: var(--ink-2);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 5px 11px;
-  border-radius: 999px;
-  border: 1px solid var(--rule);
-  background: var(--surface);
-  color: var(--ink-2);
-  font-size: 12.5px;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   transition:
     border-color 0.12s,
     color 0.12s;
 }
+.health-chip .num {
+  color: var(--ink);
+  font-weight: 600;
+}
 .health-chip:hover {
-  border-color: var(--rule-strong);
+  border-color: var(--ink-2);
   color: var(--ink);
 }
-.health-chip.warn {
-  color: var(--warn);
-  border-color: color-mix(in srgb, var(--warn) 35%, var(--rule));
+.health-chip.warn,
+.health-chip.crit {
+  --tone: var(--warn);
+  color: var(--tone);
+  border-color: color-mix(in srgb, var(--tone) 55%, transparent);
 }
 .health-chip.crit {
-  color: var(--crit);
-  border-color: color-mix(in srgb, var(--crit) 35%, var(--rule));
+  --tone: var(--crit);
+}
+.health-chip.warn .num,
+.health-chip.crit .num {
+  color: inherit;
 }
 @media (prefers-reduced-motion: reduce) {
   .health-dot::after {

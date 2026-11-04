@@ -13,14 +13,19 @@ RUN go mod download
 COPY backend/ ./
 COPY --from=ui /src/backend/internal/web/dist ./internal/web/dist
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /servermonitor ./cmd/servermonitor
+# The agent goes inside the monitor, for the dashboard's Add server to hand out.
+RUN for arch in amd64 arm64; do \
+      CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /tmp/agent ./cmd/nightjar-agent && \
+      gzip -9 -n -c /tmp/agent > internal/agentbin/dist/nightjar-agent-linux-$arch.gz; \
+    done
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /nightjar ./cmd/nightjar
 
 FROM alpine:3.24
 # iputils for ping checks; ca-certificates for HTTPS checks and Discord.
 RUN apk add --no-cache ca-certificates iputils tzdata
-COPY --from=go /servermonitor /usr/local/bin/servermonitor
+COPY --from=go /nightjar /usr/local/bin/nightjar
 WORKDIR /data
-ENV WEB_HOST=0.0.0.0 LOG_FILE=/data/server_monitor.log HISTORY_DB=/data/history.db SERVICES_FILE=/data/services.json
+ENV WEB_HOST=0.0.0.0 LOG_FILE=/data/nightjar.log HISTORY_DB=/data/history.db SERVICES_FILE=/data/services.json
 EXPOSE 8080
 # Host metrics need --pid=host and the host's /proc and /sys; see README.
-ENTRYPOINT ["/usr/local/bin/servermonitor"]
+ENTRYPOINT ["/usr/local/bin/nightjar"]

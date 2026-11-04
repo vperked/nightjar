@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type MouseEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { useNotifications } from '../api/NotificationsContext';
 import { useNow } from '../hooks/useNow';
 import { MUTE_FOR, timeLeft } from './notifications';
@@ -15,15 +16,48 @@ export function MuteButton({ subject, label, compact = false }: { subject: strin
   const { summary, mutedUntil, mute } = useNotifications();
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLSpanElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const [place, setPlace] = useState<CSSProperties>();
   const until = mutedUntil(subject);
 
   useEffect(() => {
     if (!open) return;
     const close = (e: globalThis.MouseEvent) => {
-      if (!root.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (!root.current?.contains(t) && !menu.current?.contains(t)) setOpen(false);
     };
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+
+  // The menu is fixed to the window, in a portal, so a list that clips its overflow cannot cut it off. It opens
+  // under the button, lined up with whichever of its edges keeps it on screen, or above it when
+  // there is no room below.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const position = () => {
+      const b = button.current?.getBoundingClientRect();
+      // offset sizes, as the opening animation scales the menu.
+      const m = menu.current && { width: menu.current.offsetWidth, height: menu.current.offsetHeight };
+      if (!b || !m) return;
+      const gap = 6;
+      const edge = 8;
+      const left = b.right - m.width >= edge ? b.right - m.width : b.left;
+      const below = b.bottom + gap + m.height <= window.innerHeight - edge;
+      setPlace({
+        left: Math.max(edge, Math.min(left, window.innerWidth - m.width - edge)),
+        top: below ? b.bottom + gap : Math.max(edge, b.top - gap - m.height),
+      });
+    };
+    position();
+    menu.current?.querySelector('button')?.focus({ preventScroll: true });
+    window.addEventListener('resize', position);
+    window.addEventListener('scroll', position, true);
+    return () => {
+      window.removeEventListener('resize', position);
+      window.removeEventListener('scroll', position, true);
+    };
   }, [open]);
 
   if (!summary) return null;
@@ -33,6 +67,7 @@ export function MuteButton({ subject, label, compact = false }: { subject: strin
   return (
     <span className={`mute ${open ? 'open' : ''}`} ref={root} onClick={stop}>
       <button
+        ref={button}
         type="button"
         className={compact ? 'icon-btn mute-btn' : 'btn-quiet mute-btn'}
         aria-haspopup="menu"
@@ -42,37 +77,41 @@ export function MuteButton({ subject, label, compact = false }: { subject: strin
         onClick={() => setOpen((o) => !o)}
       >
         <BellOffIcon />
-        {!compact && <span>mute</span>}
+        {!compact && <span>Mute</span>}
       </button>
-      {open && (
-        <div
-          className="mute-menu"
-          role="menu"
-          aria-label={`Mute ${label} for`}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              e.stopPropagation();
-              setOpen(false);
-            }
-          }}
-        >
-          <div className="mute-menu-head">Mute alerts for</div>
-          {MUTE_FOR.map((m, i) => (
-            <button
-              key={m.minutes}
-              type="button"
-              role="menuitem"
-              autoFocus={i === 0}
-              onClick={() => {
+      {open &&
+        createPortal(
+          <div
+            ref={menu}
+            className="mute-menu"
+            style={place}
+            role="menu"
+            aria-label={`Mute ${label} for`}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.stopPropagation();
                 setOpen(false);
-                mute(subject, label, m.minutes);
-              }}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-      )}
+                button.current?.focus();
+              }
+            }}
+          >
+            <div className="mute-menu-head">Mute alerts for</div>
+            {MUTE_FOR.map((m) => (
+              <button
+                key={m.minutes}
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setOpen(false);
+                  mute(subject, label, m.minutes);
+                }}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
     </span>
   );
 }

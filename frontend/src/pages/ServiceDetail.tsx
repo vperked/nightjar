@@ -2,12 +2,14 @@ import { useCallback, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { api } from '../api/client';
 import { useServices } from '../api/ServicesContext';
-import type { CheckSpec } from '../api/types';
+import type { CheckSpec, HistoryPoint } from '../api/types';
+import { HeartbeatPanel, RepairsPanel, runtime } from '../components/CheckExtras';
+import { Diagnosis } from '../components/Diagnosis';
 import { MuteButton } from '../components/MuteButton';
 import { useToast } from '../components/Toasts';
 import { TrendChart } from '../components/TrendChart';
 import { Pct, Section, Seg, State, Ticks } from '../components/ui';
-import { formatAgo } from '../format';
+import { formatAgo, formatDuration } from '../format';
 import { useNow } from '../hooks/useNow';
 import { usePoll } from '../hooks/usePoll';
 import { CheckForm } from './CheckForm';
@@ -20,6 +22,41 @@ const RANGES = [
 ];
 
 const ms = (v: number) => `${Math.round(v)}ms`;
+
+// shortTime reads like "Nov 2, 10:56 AM" in the browser's own language.
+const shortTime = (ts: number) => new Date(ts * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const clockTime = (ts: number) => new Date(ts * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+
+// span reads like "Nov 2, 10:27 – 10:49 PM", naming the day twice only when it changes.
+function span(from: number, to: number): string {
+  if (from === to) return shortTime(from);
+  const sameDay = new Date(from * 1000).toDateString() === new Date(to * 1000).toDateString();
+  return `${shortTime(from)} – ${sameDay ? clockTime(to) : shortTime(to)}`;
+}
+
+type Outage = { from: number; to: number; fails: number; detail: string };
+
+// outages folds failed checks in a row with the same reason into one, so a long outage reads as
+// one line rather than a page of identical ones. A passing check in between starts a new one.
+function outages(points: HistoryPoint[]): Outage[] {
+  const out: Outage[] = [];
+  let open: Outage | undefined;
+  for (const p of points) {
+    if (p.up) {
+      open = undefined;
+      continue;
+    }
+    const detail = p.detail || 'down';
+    if (open && open.detail === detail) {
+      open.to = p.ts;
+      open.fails += p.fails ?? 1;
+    } else {
+      open = { from: p.ts, to: p.ts, fails: p.fails ?? 1, detail };
+      out.push(open);
+    }
+  }
+  return out;
+}
 
 export function ServiceDetail() {
   const { name = '' } = useParams();
@@ -37,6 +74,7 @@ export function ServiceDetail() {
   const p95 = sorted.length ? sorted[Math.floor(sorted.length * 0.95)] : null;
   const failures = points.filter((p) => !p.up);
   const failCount = failures.reduce((n, p) => n + (p.fails ?? 1), 0);
+  const runs = useMemo(() => outages(points), [points]);
   const svc = services.data?.services.find((s) => s.name === name);
   const navigate = useNavigate();
   const [editing, setEditing] = useState<CheckSpec>();
@@ -72,38 +110,38 @@ export function ServiceDetail() {
       <div className="page-title">
         <div className="min0">
           <div className="crumb">
-            <Link to="/services">services</Link> /
+            <Link to="/services">Services</Link> /
           </div>
           <h1 className="truncate">{name}</h1>
           {svc && (
-            <div className="svc-target truncate">
-              {svc.type} · {svc.target}
+            <div className="title-meta">
+              <State status={svc.status} />
+              <span className="svc-target truncate">{svc.type === 'heartbeat' ? `heartbeat · ${svc.schedule}` : `${svc.type} · ${svc.target}`}</span>
             </div>
           )}
         </div>
         {svc && (
           <div className="title-actions">
-            <State status={svc.status} />
             <button className="btn-quiet" onClick={edit}>
-              edit
+              Edit
             </button>
             <button className="btn-quiet" onClick={togglePause}>
-              {svc.status === 'paused' ? 'resume' : 'pause'}
+              {svc.status === 'paused' ? 'Resume' : 'Pause'}
             </button>
             <MuteButton subject={`check:${name}`} label={name} />
             {confirmDelete ? (
               <span className="confirm">
-                delete with its history?{' '}
+                Delete it and its history?{' '}
                 <button className="btn-quiet danger" onClick={remove}>
-                  delete
+                  Delete
                 </button>{' '}
                 <button className="btn-quiet" onClick={() => setConfirmDelete(false)}>
-                  keep
+                  Keep
                 </button>
               </span>
             ) : (
               <button className="btn-quiet" onClick={() => setConfirmDelete(true)}>
-                delete
+                Delete
               </button>
             )}
           </div>
@@ -127,11 +165,19 @@ export function ServiceDetail() {
         <>
           {svc && (
             <div className="stats-row">
-              <div>
-                <span className="label">Response</span>
-                <div className="readout-value">{svc.latency_ms !== null ? ms(svc.latency_ms) : '—'}</div>
-                <div className="readout-sub">{avg !== null ? `avg ${ms(avg)} · p95 ${ms(p95 ?? 0)}` : 'no data in range'}</div>
-              </div>
+              {svc.type === 'heartbeat' ? (
+                <div>
+                  <span className="label">Last run took</span>
+                  <div className="readout-value">{runtime(svc) !== null ? formatDuration(runtime(svc) as number) : '—'}</div>
+                  <div className="readout-sub">{svc.pings?.ok ? `finished ${formatAgo(svc.pings.ok, now)}` : 'no run reported yet'}</div>
+                </div>
+              ) : (
+                <div>
+                  <span className="label">Response</span>
+                  <div className="readout-value">{svc.latency_ms !== null ? ms(svc.latency_ms) : '—'}</div>
+                  <div className="readout-sub">{avg !== null ? `avg ${ms(avg)} · p95 ${ms(p95 ?? 0)}` : 'no data in range'}</div>
+                </div>
+              )}
               <div>
                 <span className="label">Uptime 24h</span>
                 <div className="readout-value">
@@ -151,38 +197,37 @@ export function ServiceDetail() {
               <div>
                 <span className="label">In this state</span>
                 <div className="readout-value">{svc.last_change ? formatAgo(svc.last_change, now).replace(' ago', '') : '—'}</div>
-                <div className="readout-sub">{svc.last_change ? `since ${new Date(svc.last_change * 1000).toLocaleString()}` : 'no change recorded'}</div>
+                <div className="readout-sub">{svc.last_change ? `since ${shortTime(svc.last_change)}` : 'no change recorded'}</div>
               </div>
             </div>
           )}
+          {svc?.cause && svc.status === 'down' && <Diagnosis findings={[svc.cause]} label="Why it is down" />}
           {svc && (
             <Section label="Last 60 checks" aside={<span className="small ink-3">oldest → newest</span>}>
               <Ticks beats={svc.recent} slots={60} tall />
             </Section>
           )}
-          <Section label="Response time" aside={<Seg label="Time range" value={hours} onChange={setHours} options={RANGES} />}>
-            <TrendChart series={series} height={220} format={ms} markers={failures.map((f) => f.ts)} emptyText="no checks recorded in this range" />
-          </Section>
+          {svc?.type === 'heartbeat' && <HeartbeatPanel svc={svc} now={now} />}
+          {svc && <RepairsPanel svc={svc} now={now} />}
+          {svc?.type !== 'heartbeat' && (
+            <Section label="Response time" aside={<Seg label="Time range" value={hours} onChange={setHours} options={RANGES} />}>
+              <TrendChart series={series} height={220} format={ms} markers={failures.map((f) => f.ts)} emptyText="no checks recorded in this range" />
+            </Section>
+          )}
           {failures.length > 0 && (
             <Section label="Failed checks" aside={<span className="small ink-3 num">{failCount} in range</span>}>
-              <table className="table">
-                <tbody>
-                  {failures
-                    .slice(-25)
-                    .reverse()
-                    .map((p) => (
-                      <tr key={p.ts}>
-                        <td className="num ink-3" style={{ whiteSpace: 'nowrap', width: 1 }}>
-                          {new Date(p.ts * 1000).toLocaleString()}
-                        </td>
-                        <td>
-                          {(p.fails ?? 1) > 1 && <span className="num ink-3">{p.fails}× </span>}
-                          {p.detail || 'down'}
-                        </td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
+              <ul className="outages">
+                {runs
+                  .slice(-25)
+                  .reverse()
+                  .map((o) => (
+                    <li key={o.from}>
+                      <span className="outage-when num">{span(o.from, o.to)}</span>
+                      <span className="outage-why">{o.detail}</span>
+                      <span className="outage-count num">{o.fails === 1 ? '1 check' : `${o.fails} checks`}</span>
+                    </li>
+                  ))}
+              </ul>
             </Section>
           )}
         </>

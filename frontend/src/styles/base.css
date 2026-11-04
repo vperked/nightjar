@@ -1,75 +1,73 @@
 /*
-  Soft cards on a warm paper background. Hierarchy comes from surfaces, spacing and type weight;
-  colour is reserved for state (up/down/warn) and the two chart series.
+  Black and white, drawn like an instrument at night: true black (pure white by day), panels as
+  ruled regions instead of cards, labels and readings in mono, and charts on a dot matrix. Colour
+  appears only where it means something (up, warning, down).
 */
 :root {
-  --bg: #f6f5f1;
-  --bg-sunk: #eeece6;
-  --surface: #fcfbf8;
-  --rule: #e3e0d8;
-  --rule-strong: #c9c5ba;
-  --ink: #1a1915;
-  --ink-2: #4a4740;
-  --ink-3: #6f6b62;
-  --series-1: #2a78d6;
-  --series-2: #eb6834;
-  --good: #0a7d0a;
-  --good-mark: #0ca30c;
-  --warn: #946100;
-  --warn-mark: #fab219;
-  --crit: #b42a2a;
-  --crit-mark: #d03b3b;
-  --track: #e8e5de;
-  --header: rgba(246, 245, 241, 0.82);
-  --shadow: 0 1px 2px rgba(26, 25, 21, 0.04), 0 2px 8px rgba(26, 25, 21, 0.03);
-  --shadow-lift: 0 8px 28px rgba(26, 25, 21, 0.12), 0 1px 3px rgba(26, 25, 21, 0.08);
-  --radius: 14px;
-  --radius-sm: 9px;
+  --bg: #000000;
+  --bg-sunk: #0a0a0a;
+  --surface: #0f0f0f;
+  --surface-2: #171717;
+  --rule: #222222;
+  --rule-strong: #383838;
+  --card-rule: rgba(255, 255, 255, 0.09);
+  --ink: #f5f5f5;
+  --ink-2: #b4b4b4;
+  --ink-3: #8c8c8c;
+  --accent: #f5f5f5;
+  --accent-ink: #000000;
+  --series-1: #f5f5f5;
+  --series-2: #8c8c8c;
+  --good: #4ccf7a;
+  --good-mark: #3fc46f;
+  --warn: #f0b43c;
+  --warn-mark: #f0b43c;
+  --crit: #f47272;
+  --crit-mark: #f05d5d;
+  --track: #1c1c1c;
+  --dot-off: #262626;
+  --dot-sky: #161616;
+  --header: rgba(0, 0, 0, 0.72);
+  --sheen: linear-gradient(transparent, transparent);
+  --glow: none;
+  --shadow: none;
+  --shadow-lift: 0 16px 44px rgba(0, 0, 0, 0.7), 0 0 0 1px var(--rule-strong);
+  --radius: 8px;
+  --radius-sm: 5px;
   --sans: 'IBM Plex Sans', system-ui, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
-  color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    --bg: #111110;
-    --bg-sunk: #1d1d1a;
-    --surface: #171715;
-    --rule: #262522;
-    --rule-strong: #3d3b36;
-    --ink: #ebe9e3;
-    --ink-2: #b6b2a8;
-    --ink-3: #8a867b;
-    --series-1: #3987e5;
-    --series-2: #d95926;
-    --good: #41c24a;
-    --warn: #e8a92b;
-    --crit: #ef6461;
-    --track: #262522;
-    --header: rgba(17, 17, 16, 0.8);
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-    --shadow-lift: 0 10px 32px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
-    color-scheme: dark;
-  }
-}
-:root[data-theme='dark'] {
-  --bg: #111110;
-  --bg-sunk: #1d1d1a;
-  --surface: #171715;
-  --rule: #262522;
-  --rule-strong: #3d3b36;
-  --ink: #ebe9e3;
-  --ink-2: #b6b2a8;
-  --ink-3: #8a867b;
-  --series-1: #3987e5;
-  --series-2: #d95926;
-  --good: #41c24a;
-  --warn: #e8a92b;
-  --crit: #ef6461;
-  --track: #262522;
-  --header: rgba(17, 17, 16, 0.8);
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-lift: 0 10px 32px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
   color-scheme: dark;
+}
+:root[data-theme='light'] {
+  --bg: #ffffff;
+  --bg-sunk: #f4f4f4;
+  --surface: #fafafa;
+  --surface-2: #f1f1f1;
+  --rule: #e8e8e8;
+  --rule-strong: #cfcfcf;
+  --card-rule: rgba(0, 0, 0, 0.08);
+  --ink: #0a0a0a;
+  --ink-2: #454545;
+  --ink-3: #6b6b6b;
+  --accent: #0a0a0a;
+  --accent-ink: #ffffff;
+  --series-1: #0a0a0a;
+  --series-2: #8f8f8f;
+  --good: #0f7a3d;
+  --good-mark: #17a34a;
+  --warn: #805300;
+  --warn-mark: #f0a91b;
+  --crit: #b3312a;
+  --crit-mark: #d6372d;
+  --track: #ececec;
+  --dot-off: #e2e2e2;
+  --dot-sky: #ededed;
+  --header: rgba(255, 255, 255, 0.8);
+  --sheen: linear-gradient(transparent, transparent);
+  --glow: none;
+  --shadow: none;
+  --shadow-lift: 0 14px 40px rgba(0, 0, 0, 0.12), 0 0 0 1px var(--rule-strong);
+  color-scheme: light;
 }
 * {
   box-sizing: border-box;
@@ -79,6 +77,26 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
+}
+/* With charts in dots, a faint field of dots behind every page too. */
+:root[data-charts='dots'] body {
+  background-image: radial-gradient(circle, var(--dot-sky) 1px, transparent 1.6px);
+  background-size: 24px 24px;
+  background-position: 12px 12px;
+}
+/* A faint light at the top of every page, behind everything; it catches no clicks. */
+body::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 520px;
+  z-index: -1;
+  background: var(--glow);
+  pointer-events: none;
+}
+body {
+  position: relative;
+  isolation: isolate;
 }
 html {
   scroll-padding-top: 76px;
@@ -92,6 +110,16 @@ a {
   color: inherit;
   text-decoration: none;
 }
+/* A link inside a sentence is underlined, or it reads as plain text. */
+:is(.page-sub, .form-help, .setup-why, .note) a:not([class*='btn']) {
+  text-decoration: underline;
+  text-decoration-color: var(--rule-strong);
+  text-underline-offset: 3px;
+}
+:is(.page-sub, .form-help, .setup-why, .note) a:hover {
+  color: var(--ink);
+  text-decoration-color: currentColor;
+}
 button,
 input,
 select,
@@ -100,9 +128,9 @@ textarea {
   color: inherit;
 }
 :focus-visible {
-  outline: 2px solid var(--series-1);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .mono {
   font-family: var(--mono);
@@ -135,4 +163,16 @@ textarea {
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+/* On touch screens, small text links get a bigger hit area, drawn past their edges so nothing moves. */
+@media (pointer: coarse) {
+  :is(.crumb a, .readout-link, .inc-toggle) {
+    position: relative;
+  }
+  :is(.crumb a, .readout-link, .inc-toggle)::after {
+    content: '';
+    position: absolute;
+    inset: -7px -4px;
+  }
 }

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/storage"
+	"nightjar/internal/storage"
 )
 
 func TestUptimeSeriesAndPrune(t *testing.T) {

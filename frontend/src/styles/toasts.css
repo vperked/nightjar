@@ -1,9 +1,10 @@
 /* Toasts */
 
+/* Top right, just under the header; the newest sits on top. */
 .toasts {
   position: fixed;
   right: 20px;
-  bottom: 20px;
+  top: 68px;
   z-index: 40;
   display: flex;
   flex-direction: column;
@@ -13,37 +14,54 @@
   pointer-events: none;
 }
 .toast {
-  --tone: var(--series-1);
+  --tone: var(--ink-2);
+  position: relative;
   pointer-events: auto;
   width: 100%;
   display: flex;
   align-items: flex-start;
-  gap: 11px;
-  padding: 12px 10px 12px 14px;
-  border-radius: 12px;
+  gap: 12px;
+  padding: 12px 10px 13px 12px;
+  border-radius: var(--radius);
   background: var(--surface);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--rule-strong);
   box-shadow: var(--shadow-lift);
   font-size: 13px;
-  animation: toast-in 0.22s ease-out;
+  overflow: hidden;
+  transform-origin: top right;
+  animation: toast-in 0.2s cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 .toast.ok {
-  --tone: var(--good-mark);
+  --tone: var(--good);
 }
 .toast.warning {
-  --tone: var(--warn-mark);
+  --tone: var(--warn);
 }
 .toast.error {
-  --tone: var(--crit-mark);
+  --tone: var(--crit);
 }
-.toast-mark {
+.toast.leaving {
+  animation: toast-out 0.16s ease-in forwards;
+}
+.toast-icon {
   flex: none;
-  width: 8px;
-  height: 8px;
-  margin-top: 5px;
-  border-radius: 50%;
-  background: var(--tone);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--tone) 18%, transparent);
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  color: var(--tone);
+  background: color-mix(in srgb, var(--tone) 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 22%, transparent);
+}
+.toast-icon svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .toast-text {
   flex: 1;
@@ -51,38 +69,90 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  padding-top: 3px;
+  line-height: 1.45;
 }
 .toast-text strong {
+  font-size: 13.5px;
   font-weight: 600;
+  color: var(--ink);
 }
 .toast-text span {
   color: var(--ink-3);
+  font-size: 12.5px;
   overflow-wrap: anywhere;
 }
 .toast-close {
   flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
   border: 0;
+  border-radius: var(--radius-sm);
   background: none;
   color: var(--ink-3);
-  font-size: 18px;
-  line-height: 1;
-  padding: 0 4px;
-  border-radius: 6px;
   cursor: pointer;
+  opacity: 0.7;
+  transition:
+    opacity 0.15s,
+    background 0.15s;
+}
+.toast-close svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.toast:hover .toast-close {
+  opacity: 1;
 }
 .toast-close:hover {
   color: var(--ink);
   background: var(--bg-sunk);
 }
+/* The time left, as a hairline along the bottom edge. It stops while the pointer rests on the toast. */
+.toast-time {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: color-mix(in srgb, var(--tone) 70%, transparent);
+  transform-origin: left;
+  animation: toast-time var(--toast-time, 5s) linear forwards;
+}
+.toast.paused .toast-time {
+  animation-play-state: paused;
+}
+@keyframes toast-time {
+  to {
+    transform: scaleX(0);
+  }
+}
+/* No slide: it fades in and settles from a hair smaller, and leaves the same way. */
 @keyframes toast-in {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.98);
+    transform: scale(0.96);
+  }
+}
+@keyframes toast-out {
+  to {
+    opacity: 0;
+    transform: scale(0.96);
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .toast {
+  .toast,
+  .toast.leaving {
     animation: none;
+  }
+  .toast-time {
+    display: none;
   }
 }
 @media (max-width: 760px) {
@@ -90,15 +160,6 @@
     right: 16px;
     left: 16px;
     width: auto;
-    bottom: calc(76px + env(safe-area-inset-bottom));
-  }
-}
-/* Stay clear of the settings save bar. */
-body:has(.savebar) .toasts {
-  bottom: 92px;
-}
-@media (max-width: 760px) {
-  body:has(.savebar) .toasts {
-    bottom: calc(176px + env(safe-area-inset-bottom));
+    top: 60px;
   }
 }

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/netload"
+	"nightjar/internal/netload"
 )
 
 const procNetDev = `Inter-|   Receive                                                |  Transmit

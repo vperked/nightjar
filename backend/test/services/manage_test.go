@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"servermonitor/internal/services"
-	"servermonitor/internal/storage"
+	"nightjar/internal/services"
+	"nightjar/internal/storage"
 )
 
 func parseSpec(t *testing.T, json string) services.Spec {

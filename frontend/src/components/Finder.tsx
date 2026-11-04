@@ -3,13 +3,14 @@ import { useNavigate } from 'react-router';
 import { api } from '../api/client';
 import { useServices } from '../api/ServicesContext';
 import type { SettingsResponse, Unit } from '../api/types';
+import { DOCS } from '../docs';
 import { useToast } from './Toasts';
 
 // The finder (Ctrl+K, ⌘K or /) jumps anywhere: a page, an uptime check, a system service, a
 // setting, or a common action, by typing a few letters of it.
 
 interface Item {
-  kind: 'Page' | 'Check' | 'Service' | 'Setting' | 'Action';
+  kind: 'Page' | 'Check' | 'Service' | 'Setting' | 'Action' | 'Help';
   label: string;
   hint?: string;
   words: string; // what the query matches, lower-cased
@@ -29,17 +30,25 @@ const PAGES: [string, string, string][] = [
   ['Overview', '/', 'home dashboard cpu memory disk network drives health'],
   ['Uptime checks', '/services', 'services monitors ping http tcp tls'],
   ['Network', '/network', 'bandwidth traffic nload interfaces download upload speed'],
+  ['Servers', '/servers', 'other servers remote machines agent ping hosts'],
+  ['Analytics', '/servers/analytics', 'history trends uptime outages forecast reports'],
+  ['Help and docs', '/docs', 'help documentation guide how to manual'],
   ['System services', '/system', 'systemd units daemons failed restart logs'],
   ['Plex', '/plex', 'streams media'],
   ['qBittorrent', '/qbittorrent', 'torrents downloads seeding'],
   ['App store', '/apps', 'install apps store marketplace torrent sonarr radarr prowlarr jackett lidarr autobrr unpackerr ntfy qbittorrent'],
   ['Updates', '/updates', 'upgrade packages apps'],
   ['Notifications', '/notifications', 'alerts inbox history bell unread'],
+  ['Incidents', '/incidents', 'outages why cause root timeline what happened down'],
+  ['Maintenance', '/incidents/maintenance', 'planned downtime window quiet updating'],
+  ['Weekly report', '/incidents/report', 'summary week monday digest forecast'],
+  ['Media cleanup', '/plex/cleanup', 'unwatched remove delete leaving keep sonarr radarr ratio free space'],
   ['Notification rules', '/notifications/rules', 'alerts routing channels quiet hours mute snooze discord ntfy email'],
   ['Monitor log', '/logs', 'logs logging debug errors warnings journal output'],
   ['Settings', '/settings', 'configuration options thresholds alerts'],
   ['Setup guide', '/setup', 'get started onboarding connect'],
   ['Status page designer', '/status-page', 'public status page design customize announcement groups'],
+  ['Plugins', '/plugins', 'plugins extensions add-ons custom checks cards alert channels scripts'],
 ];
 
 export function Finder({ onToggleTheme }: { onToggleTheme: () => void }) {
@@ -87,6 +96,7 @@ export function Finder({ onToggleTheme }: { onToggleTheme: () => void }) {
   const items = useMemo<Item[]>(() => {
     const go = (to: string) => () => navigate(to);
     const out: Item[] = PAGES.map(([label, to, words]) => ({ kind: 'Page', label, words: `${label} ${words}`.toLowerCase(), run: go(to) }));
+    for (const d of DOCS) out.push({ kind: 'Help', label: d.title, hint: d.group, words: `${d.title} ${d.words} help docs how`.toLowerCase(), run: go(`/docs/${d.slug}`) });
     out.push(
       { kind: 'Action', label: 'Add an uptime check', words: 'add new uptime check monitor service', run: go('/services#add') },
       { kind: 'Action', label: 'Add a torrent', words: 'add torrent magnet download qbittorrent', run: go('/qbittorrent?add=1') },

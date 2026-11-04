@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"servermonitor/internal/format"
+	"nightjar/internal/format"
 )
 
 const maxHistory = 1000

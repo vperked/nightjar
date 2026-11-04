@@ -86,11 +86,15 @@ export function delivery(n: Notification): string {
     case 'sent':
       return n.error ? `sent to ${to}; ${n.error}` : `sent to ${to}`;
     case 'digest':
-      return `sent to ${to} in the quiet hours summary`;
+      return `sent to ${to} in a summary`;
     case 'held':
-      return `held for the end of quiet hours (${to})`;
+      return `held for a summary (${to})`;
+    case 'throttled':
+      return `not sent: ${n.error || 'too many alerts'}`;
     case 'muted':
       return 'muted: sent nowhere';
+    case 'maintenance':
+      return 'raised during maintenance: sent nowhere';
     case 'failed':
       return `not delivered: ${n.error || 'every channel failed'}`;
   }

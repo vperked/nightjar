@@ -3,7 +3,7 @@ package format_test
 import (
 	"testing"
 
-	"servermonitor/internal/format"
+	"nightjar/internal/format"
 )
 
 func TestBytes(t *testing.T) {

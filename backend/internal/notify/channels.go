@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"servermonitor/internal/config"
-	"servermonitor/internal/discord"
+	"nightjar/internal/config"
+	"nightjar/internal/discord"
 )
 
 // ---------- ntfy ----------
@@ -173,7 +173,7 @@ func (e *email) SendEmbed(title, description string, sev discord.Severity, field
 }
 
 func (e *email) message(a Alert) []byte {
-	const boundary = "servermonitor-alert"
+	const boundary = "nightjar-alert"
 	subject := mime.QEncoding.Encode("utf-8", a.Severity.Emoji()+" "+a.Title)
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\n", e.cfg.From, strings.Join(e.cfg.To, ", "), subject, a.Time.Format(time.RFC1123Z))
@@ -275,6 +275,14 @@ func FromSettings(cfg config.Settings, origin discord.Origin) (channels []Channe
 	if cfg.SlackWebhookURL != "" {
 		add(NewSlack(cfg.SlackWebhookURL, origin))
 	}
+	if cfg.DiscordBotToken != "" || cfg.DiscordChannelID != "" {
+		b, err := discord.NewBot(cfg.DiscordBotToken, cfg.DiscordChannelID, cfg.DiscordPublicKey, cfg.DiscordAllowedUsers, origin)
+		if err != nil {
+			add(nil, err)
+		} else {
+			add(b, nil)
+		}
+	}
 	if cfg.AlertWebhookURL != "" {
 		add(NewWebhook(cfg.AlertWebhookURL, origin))
 	}
@@ -282,4 +290,39 @@ func FromSettings(cfg config.Settings, origin discord.Origin) (channels []Channe
 		add(NewEmail(SMTP{Host: cfg.SMTPHost, Port: cfg.SMTPPort, Username: cfg.SMTPUsername, Password: cfg.SMTPPassword, From: cfg.SMTPFrom, To: cfg.SMTPTo}, origin))
 	}
 	return channels, problems
+}
+
+// ---------- plugins ----------
+
+// plugin hands each alert to a plugin's program, which delivers it however it likes.
+type plugin struct {
+	delivery
+	name   string
+	origin discord.Origin
+	send   func(payload map[string]any) error
+}
+
+// NewPlugin is a channel for a plugin that provides notify. send runs the plugin with the alert.
+func NewPlugin(name string, send func(payload map[string]any) error, origin discord.Origin) Channel {
+	return &plugin{name: name, send: send, origin: origin}
+}
+
+func (p *plugin) Name() string { return p.name }
+
+func (p *plugin) SendEmbed(title, description string, sev discord.Severity, fields []discord.Field, footer string) bool {
+	a := newAlert(title, description, sev, fields, footer)
+	list := make([]map[string]string, 0, len(a.Fields))
+	for _, f := range a.Fields {
+		list = append(list, map[string]string{"name": f.Name, "value": plain(f.Value)})
+	}
+	return p.record(p.name, p.send(map[string]any{
+		"title":         a.Title,
+		"description":   plain(a.Description),
+		"severity":      a.Severity.String(),
+		"fields":        list,
+		"host":          p.origin.Host,
+		"category":      a.Category,
+		"dashboard_url": p.origin.DashboardURL,
+		"time":          a.Time.UTC().Format(time.RFC3339),
+	}))
 }

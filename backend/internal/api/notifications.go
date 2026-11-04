@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"servermonitor/internal/notify"
-	"servermonitor/internal/storage"
+	"nightjar/internal/notify"
+	"nightjar/internal/storage"
 )
 
 // The notification center: every alert the monitor raised, the routing rules, quiet hours and mutes.

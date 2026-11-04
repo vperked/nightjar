@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/logx"
+	"nightjar/internal/logx"
 )
 
 func line(t *testing.T, style logx.Style, log func(*slog.Logger)) string {

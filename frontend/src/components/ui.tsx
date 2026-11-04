@@ -17,7 +17,7 @@ export function Section({ label, aside, children }: { label: string; aside?: Rea
   );
 }
 
-const WORD: Record<ServiceStatus, string> = { up: 'Up', down: 'Down', unknown: 'Pending', paused: 'Paused' };
+const WORD: Record<ServiceStatus, string> = { up: 'Up', down: 'Down', unknown: 'Pending', paused: 'Paused', maintenance: 'Maintenance' };
 
 // State is a square mark plus a word, so colour never carries the status alone.
 export function State({ status }: { status: ServiceStatus }) {
@@ -59,7 +59,7 @@ export function Seg<T extends string | number>({ options, value, onChange, label
   return (
     <div className="seg" role="group" aria-label={label}>
       {options.map((o) => (
-        <button key={String(o.value)} className={o.value === value ? 'active' : ''} aria-pressed={o.value === value} onClick={() => onChange(o.value)}>
+        <button type="button" key={String(o.value)} className={o.value === value ? 'active' : ''} aria-pressed={o.value === value} onClick={() => onChange(o.value)}>
           {o.label}
         </button>
       ))}
@@ -91,20 +91,30 @@ export function SubTabs({ label, items, current }: { label: string; items: { to:
   );
 }
 
-// MediaTabs shows Plex and qBittorrent as one Media tab, when both are watched.
-export function MediaTabs({ current }: { current: '/plex' | '/qbittorrent' }) {
-  const config = useConfig();
-  if (!config?.plex_enabled || !config.qbittorrent_enabled) return null;
+// ServersTabs switches between the servers and their analytics.
+export function ServersTabs({ current }: { current: '/servers' | '/servers/analytics' }) {
   return (
     <SubTabs
-      label="Media"
+      label="Servers"
       current={current}
       items={[
-        { to: '/plex', label: 'Plex' },
-        { to: '/qbittorrent', label: 'qBittorrent' },
+        { to: '/servers', label: 'Servers' },
+        { to: '/servers/analytics', label: 'Analytics' },
       ]}
     />
   );
+}
+
+// MediaTabs joins Plex, qBittorrent and the media cleanup under one Media tab, for those watched.
+export function MediaTabs({ current }: { current: '/plex' | '/qbittorrent' | '/plex/cleanup' }) {
+  const config = useConfig();
+  const items = [
+    ...(config?.plex_enabled ? [{ to: '/plex', label: 'Plex' }] : []),
+    ...(config?.qbittorrent_enabled ? [{ to: '/qbittorrent', label: 'qBittorrent' }] : []),
+    ...(config?.plex_enabled ? [{ to: '/plex/cleanup', label: 'Cleanup' }] : []),
+  ];
+  if (items.length < 2) return null;
+  return <SubTabs label="Media" current={current} items={items} />;
 }
 
 // AppsTabs joins the app store and updates under one Apps tab.

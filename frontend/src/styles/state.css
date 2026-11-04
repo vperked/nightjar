@@ -4,14 +4,14 @@
   --tone: var(--ink-3);
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 9px 2px 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   white-space: nowrap;
   color: var(--tone);
-  background: color-mix(in srgb, var(--tone) 12%, transparent);
 }
 .state::before {
   content: '';
@@ -28,6 +28,12 @@
 }
 .state.down::before {
   animation: pulse 1.6s ease-in-out infinite;
+}
+.state.maintenance {
+  --tone: var(--warn);
+}
+.state.maintenance::before {
+  border-radius: 1px;
 }
 .state.paused::before {
   background: transparent;
@@ -52,29 +58,34 @@
 .pct-poor {
   color: var(--crit);
 }
-/* Check history: rounded ticks, oldest left. */
+/* Check history: a row of dots, oldest left; a failure is a red dot, a slot not run yet a dim one. */
 .ticks {
   display: flex;
+  justify-content: space-between;
+  align-items: center;
   gap: 2px;
   height: 18px;
-  align-items: stretch;
   min-width: 0;
 }
 .ticks.tall {
   height: 30px;
-  gap: 3px;
 }
 .tick {
-  flex: 1 1 0;
+  flex: 0 1 6px;
   min-width: 2px;
-  border-radius: 2px;
-  background: var(--good-mark);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: var(--ink-2);
+}
+.ticks.tall .tick {
+  flex-basis: 9px;
 }
 .tick.down {
   background: var(--crit-mark);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--crit-mark) 25%, transparent);
 }
 .tick.pad {
-  background: var(--track);
+  background: var(--dot-off);
 }
 .tick:hover {
   outline: 2px solid var(--ink);

@@ -1,8 +1,10 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
-import type { PlexPlay, PlexState } from '../api/types';
+import type { PlexPlay, PlexResponse, PlexState } from '../api/types';
 import { Decision, NowPlaying, plexState } from '../components/PlexNow';
+import { PlexStatsSection } from '../components/PlexStats';
+import { PlexStreamSheet } from '../components/PlexStreamSheet';
 import { Skeleton } from '../components/Skeleton';
 import { Legend, TrendChart } from '../components/TrendChart';
 import { MediaTabs, Section, State } from '../components/ui';
@@ -38,8 +40,9 @@ function Recent({ plays, now }: { plays: PlexPlay[]; now: number }) {
   );
 }
 
-function Body({ p }: { p: PlexState }) {
+function Body({ p, onChange }: { p: PlexState; onChange: (r: PlexResponse) => void }) {
   const now = useNow(5000);
+  const [managing, setManaging] = useState<string>();
   const streams = useMemo(
     () => [
       { label: 'Direct', color: 'var(--series-1)', points: p.samples.map((s) => ({ t: s.ts, v: s.direct })) },
@@ -107,13 +110,14 @@ function Body({ p }: { p: PlexState }) {
         </div>
       </div>
 
+      <PlexStatsSection />
       <div className="columns">
         <div className="col">
           <Section label="Now playing" aside={<span className="small ink-3 num">{plural(total, 'stream')}</span>}>
-            <NowPlaying streams={p.streams} />
+            <NowPlaying streams={p.streams} onManage={(s) => setManaging(s.id)} />
           </Section>
           <Section label="Concurrent streams" aside={<Legend series={streams} />}>
-            <TrendChart series={streams} height={150} max={countMax} format={count} tip={(v) => `${Math.round(v)} ${Math.round(v) === 1 ? 'stream' : 'streams'}`} emptyText="collecting data…" />
+            <TrendChart series={streams} raw height={150} max={countMax} format={count} tip={(v) => `${Math.round(v)} ${Math.round(v) === 1 ? 'stream' : 'streams'}`} emptyText="collecting data…" />
             <div className="chart-note small ink-3 num">
               peak {peakTotal} at once since {p.samples.length ? new Date(p.samples[0].ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
             </div>
@@ -172,6 +176,7 @@ function Body({ p }: { p: PlexState }) {
           </Section>
         </div>
       </div>
+      {managing && <PlexStreamSheet stream={p.streams.find((s) => s.id === managing)} onClose={() => setManaging(undefined)} onStopped={onChange} />}
     </>
   );
 }
@@ -190,7 +195,7 @@ export function PlexPage() {
       {!plex.data ? (
         <Skeleton kind="dashboard" />
       ) : plex.data.enabled && plex.data.plex ? (
-        <Body p={plex.data.plex} />
+        <Body p={plex.data.plex} onChange={() => plex.refresh()} />
       ) : (
         <p className="note">
           Plex monitoring is off. Set <code>PLEX_MONITOR=true</code>, <code>PLEX_URL</code> and <code>PLEX_TOKEN</code>, then restart. <Link to="/">Back to overview</Link>

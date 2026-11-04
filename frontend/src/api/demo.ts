@@ -2,6 +2,7 @@
 // are generated from the current time so charts move; checks and settings can be edited and are kept
 // for the browser tab. Production builds never include this file.
 import type {
+  Finding,
   AlertRules,
   AppConfig,
   AppJob,
@@ -23,6 +24,7 @@ import type {
   PlexResponse,
   PlexSample,
   PlexStream,
+  PublicDay,
   PublicStatus,
   QBResponse,
   QBTorrent,
@@ -39,7 +41,40 @@ import type {
   UpdateSpec,
   UpdateTarget,
   UpdatesResponse,
+  AnalyticsPoint,
+  AnalyticsRangeName,
+  HostAnalytics,
+  RemoteHost,
+  HostSSH,
+  SSHKey,
+  Appearance,
+  MaintenanceWindow,
 } from './types';
+import { demoPluginCheck, pluginRoute } from './demoPlugins';
+import {
+  demoActivity,
+  demoCleanup,
+  demoTwoFactor,
+  demoTwoFactorRoute,
+  demoCleanupKeep,
+  demoCleanupScan,
+  demoContainers,
+  demoDeleteWindow,
+  demoFeedback,
+  demoHeartbeatDetail,
+  demoIncidents,
+  demoMaintenance,
+  demoNotice,
+  demoPlexStats,
+  demoPings,
+  demoPublicMaintenance,
+  demoPublicNotices,
+  demoRepairNow,
+  demoRepairs,
+  demoReport,
+  demoResting,
+  demoSaveWindow,
+} from './demoIncidents';
 
 const GB = 1024 ** 3;
 const now = () => Date.now() / 1000;
@@ -65,9 +100,10 @@ interface DemoState {
   settings: Record<string, string>;
   updates?: UpdateTarget[];
   statusDesign?: StatusDesign;
+  appearance?: Appearance;
 }
 
-const STORE_KEY = 'servermonitor.demo';
+const STORE_KEY = 'nightjar.demo';
 
 const check = (over: Partial<CheckSpec> & Pick<CheckSpec, 'name' | 'type' | 'target'>): CheckSpec => ({
   interval: 60,
@@ -78,16 +114,22 @@ const check = (over: Partial<CheckSpec> & Pick<CheckSpec, 'name' | 'type' | 'tar
   verify_tls: true,
   tls_warn_days: 14,
   paused: false,
+  retry_interval: 20,
+  ping_count: 3,
+  ping_interval: 0.2,
   ...over,
 });
 
 const INITIAL: DemoState = {
   checks: [
     check({ name: 'website', type: 'http', target: 'https://example.com' }),
-    check({ name: 'plex', type: 'http', target: 'http://127.0.0.1:32400/identity', interval: 30 }),
-    check({ name: 'home-assistant', type: 'http', target: 'http://10.0.0.20:8123', interval: 30 }),
-    check({ name: 'nas-backup', type: 'tcp', target: '10.0.0.30:873', retries: 1 }),
+    check({ name: 'plex', type: 'http', target: 'http://127.0.0.1:32400/identity', interval: 30, repair: { action: 'restart', unit: 'plexmediaserver.service', max: 2, wait: 120 } }),
+    check({ name: 'home-assistant', type: 'http', target: 'http://192.168.0.31:8123', interval: 30, server: 'b2c3d4e5f6a1' }),
+    check({ name: 'nas-backup', type: 'tcp', target: '192.168.0.20:873', retries: 1, repair: { action: 'script', script: 'restart-rsync.sh', max: 2, wait: 120 }, server: 'a1b2c3d4e5f6' }),
+    check({ name: 'sonarr', type: 'docker', target: 'sonarr', repair: { action: 'container', container: 'sonarr', max: 2, wait: 120 } }),
+    check({ name: 'nightly-backup', type: 'heartbeat', target: 'q7Lr2xVb9KpTn4WcYs3mEa', interval: 30, retries: 0, schedule: '0 3 * * *', grace: 600, max_runtime: 3600 }),
     check({ name: 'router', type: 'ping', target: '10.0.0.1', interval: 30 }),
+    check({ name: 'vps web', type: 'http', target: 'https://vps.example.net', server: 'f6a1b2c3d4e5' }),
     check({ name: 'example.com cert', type: 'tls', target: 'example.com:443', interval: 3600 }),
     check({ name: 'old-blog', type: 'http', target: 'https://blog.example.com', paused: true }),
   ],
@@ -105,6 +147,16 @@ function load(): DemoState {
 }
 
 const state = load();
+
+// nextMonday is when the demo's weekly report would next go out.
+function nextMonday(): number {
+  const d = new Date();
+  d.setDate(d.getDate() + ((1 - d.getDay() + 7) % 7 || 7));
+  d.setHours(9, 0, 0, 0);
+  return d.getTime() / 1000;
+}
+
+const demoAppearance = (): Appearance => state.appearance ?? { style: 'matrix', charts: '', density: 'comfortable', css: '' };
 
 function save() {
   try {
@@ -279,10 +331,71 @@ const demoUnits: Unit[] = [
   unit('qbittorrent@media', 'qBittorrent-nox service for media'),
   unit('nginx', 'A high performance web server and a reverse proxy server'),
   unit('ssh', 'OpenBSD Secure Shell server'),
-  unit('server-monitor', 'Server Monitor', { since: now() - 3600 }),
+  unit('nightjar', 'Nightjar', { since: now() - 3600 }),
   unit('apt-daily', 'Daily apt download activities', { active: 'failed', sub: 'failed', result: 'exit-code', exit_status: 100, ignored: true }),
   unit('apparmor', 'Load AppArmor profiles', { sub: 'exited' }),
 ];
+
+// What the backend's log diagnosis says about the demo's failing services and checks.
+const demoFindings: Record<string, Finding[]> = {
+  'bazarr.service': [
+    {
+      id: 'db_corrupt',
+      title: 'Its database is damaged',
+      explain: 'The database file is corrupt, often after a crash, a full disk or a power cut.',
+      fix: 'Stop the app and restore its last backup (most *arr apps keep them under Backups). Check the drive’s health too.',
+      severity: 'critical',
+      line: 'ERROR: database disk image is malformed',
+      count: 1,
+      known: true,
+    },
+  ],
+  'tautulli.service': [
+    {
+      id: 'py_module',
+      title: 'Python module cherrypy is missing',
+      explain: 'A Python package it needs is not installed where it looks for it.',
+      fix: 'Install it into the app’s own environment (`pip install cherrypy` inside its venv), or reinstall the app.',
+      severity: 'critical',
+      line: "ModuleNotFoundError: No module named 'cherrypy'",
+      count: 5,
+      known: true,
+    },
+  ],
+  'check:refused': [
+    {
+      id: 'refused',
+      title: 'Nothing answers at the address it uses',
+      explain: 'It tried to connect, but nothing is listening there: that program is down, or on another port.',
+      fix: 'Start the program it depends on, or correct the address and port in its settings.',
+      severity: 'warning',
+      line: 'connect failed: connection refused',
+      count: 1,
+      known: true,
+    },
+  ],
+  log: [
+    {
+      id: 'db_corrupt',
+      title: 'Its database is damaged',
+      explain: 'The database file is corrupt, often after a crash, a full disk or a power cut.',
+      fix: 'Stop the app and restore its last backup (most *arr apps keep them under Backups). Check the drive’s health too.',
+      severity: 'critical',
+      line: 'Likely cause unit=bazarr.service cause=Its database is damaged',
+      count: 1,
+      known: true,
+    },
+    {
+      id: 'repeated',
+      title: 'Failed sign-in ip=203.0.113.9',
+      explain: 'An error the logs repeat, seen 3 times in these lines. The latest is below.',
+      severity: 'warning',
+      line: 'Failed sign-in ip=203.0.113.9',
+      count: 3,
+      known: false,
+    },
+  ],
+};
 
 const demoLogs: Record<string, string[]> = {
   'bazarr.service': [
@@ -297,9 +410,13 @@ const demoLogs: Record<string, string[]> = {
   ],
 };
 
+// The failing services carry the cause their journal shows, until they run again.
+for (const u of demoUnits) u.cause = demoFindings[u.name]?.[0];
+
 function demoUnitAction(name: string, action: string): Unit | undefined {
   const u = demoUnits.find((x) => x.name === name);
   if (!u) return undefined;
+  if (action !== 'stop') u.cause = undefined;
   if (action === 'stop') Object.assign(u, { active: 'inactive', sub: 'dead', since: now() });
   else Object.assign(u, { active: 'active', sub: 'running', result: 'success', exit_status: 0, flapping: 0, since: now() });
   return u;
@@ -446,10 +563,10 @@ const INITIAL_UPDATES: UpdateTarget[] = [
   }),
   target({ id: 'snaps', name: 'Snaps', kind: 'snap' }),
   target({
-    id: 'servermonitor',
-    name: 'Server Monitor',
+    id: 'nightjar',
+    name: 'Nightjar',
     kind: 'git',
-    dir: '/opt/servermonitor',
+    dir: '/opt/nightjar',
     self: true,
     installed: 'v2.3.0',
     latest: 'v2.3.0-2-g1c9e2aa',
@@ -582,7 +699,7 @@ function profile(name: string) {
   return {
     seed,
     latency: name === 'router' ? 2 : name.includes('plex') ? 4 : 40 + (seed % 9) * 35,
-    flaky: name === 'home-assistant' ? 0.012 : 0.003,
+    flaky: name === 'home-assistant' ? 0.012 : name === 'nightly-backup' ? 0 : 0.003,
     downNow: name === 'nas-backup',
   };
 }
@@ -608,7 +725,7 @@ function uptime(spec: CheckSpec, hours: number): number {
 function summary(spec: CheckSpec): Service {
   const recent = spec.paused ? [] : beats(spec, 60);
   const last = recent[recent.length - 1];
-  const status: Service['status'] = spec.paused ? 'paused' : last?.up ? 'up' : 'down';
+  const status: Service['status'] = spec.paused ? 'paused' : demoResting(spec.name) ? 'maintenance' : last?.up ? 'up' : 'down';
   const detail =
     status === 'down'
       ? spec.type === 'tcp'
@@ -621,15 +738,22 @@ function summary(spec: CheckSpec): Service {
           : spec.type === 'tcp'
             ? 'connected'
             : 'HTTP 200';
+  const heartbeat = spec.type === 'heartbeat';
+  const pings = heartbeat ? demoPings() : undefined;
   return {
     name: spec.name,
     type: spec.type,
     target: spec.target,
     status,
-    latency_ms: last?.latency_ms ?? null,
-    detail,
+    latency_ms: heartbeat && pings ? (pings.ok - pings.start) * 1000 : (last?.latency_ms ?? null),
+    detail: heartbeat && status === 'up' ? demoHeartbeatDetail() : spec.type === 'docker' && status === 'up' ? 'container healthy, started 3d ago' : detail,
+    schedule: spec.schedule,
+    pings,
+    repair: spec.repair,
+    server: spec.server,
     last_check: last?.ts ?? null,
     last_change: status === 'down' ? now() - 25 * 60 : now() - 6 * 86400,
+    cause: status === 'down' && spec.type === 'tcp' ? demoFindings['check:refused'][0] : undefined,
     uptime_24h: spec.paused ? null : uptime(spec, 24),
     uptime_7d: spec.paused ? null : uptime(spec, 168),
     uptime_30d: spec.paused ? null : uptime(spec, 720),
@@ -744,6 +868,9 @@ function stats(): Stats {
 
 // ---------- plex ----------
 
+// Streams stopped from the dashboard, with when, until the page reloads.
+const demoStopped = new Map<string, number>();
+
 function plex(summaryView: boolean): PlexResponse {
   const t = now();
   const stream = (id: string, over: Partial<PlexStream>): PlexStream => ({
@@ -769,8 +896,8 @@ function plex(summaryView: boolean): PlexResponse {
     started_at: t - 2100,
     ...over,
   });
-  const streams = [
-    stream('1', { title: 'Severance', kind: 'episode', subtitle: 'S02E03 · Who Is Alive?', duration_ms: 3_300_000, offset_ms: 1_900_000, progress: 58, started_at: t - 1900 }),
+  const all = [
+    stream('1', { address: '192.168.1.42', title: 'Severance', kind: 'episode', subtitle: 'S02E03 · Who Is Alive?', duration_ms: 3_300_000, offset_ms: 1_900_000, progress: 58, started_at: t - 1900 }),
     stream('2', {
       user: 'alex',
       title: 'Heat',
@@ -779,8 +906,11 @@ function plex(summaryView: boolean): PlexResponse {
       product: 'Plex for iOS',
       platform: 'iOS',
       local: false,
+      address: '203.0.113.58',
       decision: 'transcode',
       video_decision: 'transcode',
+      reason: 'Lowering the quality to 720p',
+      fix: "The player's remote quality is set below the file's, or the server's upload limit is too low: raise either (Plex Settings → Remote Access).",
       audio_decision: 'copy',
       hw_transcode: true,
       throttled: true,
@@ -801,6 +931,7 @@ function plex(summaryView: boolean): PlexResponse {
       player: 'Web',
       product: 'Plex Web',
       platform: 'Chrome',
+      address: '192.168.1.17',
       state: 'paused',
       quality: '',
       bitrate_kbps: 320,
@@ -811,6 +942,7 @@ function plex(summaryView: boolean): PlexResponse {
       started_at: t - 400,
     }),
   ];
+  const streams = all.filter((s) => !demoStopped.has(s.id));
   const samples: PlexSample[] = Array.from({ length: 360 }, (_, i) => {
     const ts = t - (359 - i) * 15;
     const evening = Math.max(0, Math.sin((ts / 5400) * Math.PI));
@@ -819,6 +951,9 @@ function plex(summaryView: boolean): PlexResponse {
     return { ts, direct, transcode, bandwidth_kbps: Math.round(direct * 8200 + transcode * 4300 + noise(ts, 5) * 900) };
   });
   const plays: PlexPlay[] = [
+    ...all
+      .filter((s) => demoStopped.has(s.id))
+      .map((s) => ({ user: s.user, title: s.title, subtitle: s.subtitle, player: s.player, decision: s.decision, started: s.started_at, ended: demoStopped.get(s.id)!, progress: s.progress })),
     { user: 'sam', title: 'Andor', subtitle: 'S02E01 · One Year Later', player: 'Living Room', decision: 'direct play', started: t - 9000, ended: t - 6300, progress: 98 },
     { user: 'alex', title: 'Dune: Part Two', subtitle: '2024', player: 'iPhone', decision: 'transcode', started: t - 20000, ended: t - 11000, progress: 100 },
     { user: 'kim', title: 'Spirited Away', subtitle: '2001', player: 'Bedroom', decision: 'direct stream', started: t - 40000, ended: t - 33000, progress: 74 },
@@ -834,10 +969,10 @@ function plex(summaryView: boolean): PlexResponse {
       latency_ms: 4.2,
       server: { name: 'demo-server', version: '1.41.3.9314', platform: 'Linux', platform_version: '6.8.0', update_available: '1.41.4.9463' },
       streams,
-      direct: 2,
-      transcode: 1,
+      direct: streams.filter((s) => s.decision !== 'transcode').length,
+      transcode: streams.filter((s) => s.decision === 'transcode').length,
       bandwidth_kbps: streams.reduce((a, s) => a + s.bandwidth_kbps, 0),
-      wan_kbps: 4400,
+      wan_kbps: streams.filter((s) => !s.local).reduce((a, s) => a + s.bandwidth_kbps, 0),
       libraries: summaryView
         ? []
         : [
@@ -971,7 +1106,9 @@ const error = (status: number, message: string, fields?: Record<string, string>)
 
 function normalise(spec: Partial<CheckSpec>): CheckSpec | string {
   const name = spec.name?.trim();
-  const target = spec.target?.trim();
+  // A new heartbeat gets its token, as the backend gives it one.
+  const target = spec.target?.trim() || (spec.type === 'heartbeat' ? Math.random().toString(36).slice(2, 13) + Math.random().toString(36).slice(2, 13) : '');
+  if (spec.type === 'heartbeat' && !spec.schedule?.trim()) return `${name}: a heartbeat needs a schedule: cron ("0 3 * * *"), @daily, or "every 1h"`;
   if (!name || !target) return "'name' and 'target' are required";
   if (spec.type === 'http' && !/^https?:\/\//.test(target)) return `${name}: http target must start with http:// or https://`;
   return check({ ...spec, name, target, type: spec.type ?? 'http', interval: Math.max(5, spec.interval ?? 60) } as CheckSpec);
@@ -993,6 +1130,27 @@ function designOrDefault(): StatusDesign {
   );
 }
 
+// demoDays is a check's last 90 days for the status page: mostly clean, with the odd bad day, and
+// nas-backup down since this morning. home-assistant was added three weeks ago.
+function demoDays(name: string): PublicDay[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const seed = [...name].reduce((n, c) => n + c.charCodeAt(0), 0);
+  return Array.from({ length: 90 }, (_, i) => {
+    const t = today.getTime() / 1000 - (89 - i) * 86400;
+    if (name === 'home-assistant' && i < 69) return { t, uptime: null, down_s: 0 };
+    if (name === 'nas-backup' && i === 89) return { t, uptime: 61.2, down_s: 6 * 3600 + 1200 };
+    const r = noise(i, seed);
+    const uptime = r > 0.995 ? 91 + 6 * noise(i, seed + 1) : r > 0.965 ? 99 + 0.85 * noise(i, seed + 2) : 100;
+    return { t, uptime: round(uptime, 2), down_s: Math.round(((100 - uptime) / 100) * 86400) };
+  });
+}
+
+const daysUptime = (days: PublicDay[]) => {
+  const known = days.filter((d) => d.uptime !== null);
+  return known.length ? known.reduce((n, d) => n + d.uptime!, 0) / known.length : null;
+};
+
 function publicStatus(): PublicStatus {
   const d = designOrDefault();
   const byName = new Map(state.checks.map((c) => [c.name, summary(c)]));
@@ -1001,7 +1159,17 @@ function publicStatus(): PublicStatus {
     services: g.items.flatMap((it) => {
       const r = byName.get(it.check);
       return r
-        ? [{ name: it.label || r.name, status: r.status, uptime_24h: d.show_uptime ? r.uptime_24h : null, uptime_30d: d.show_uptime ? r.uptime_30d : null, recent: d.show_history ? r.recent : [] }]
+        ? [
+            {
+              name: it.label || r.name,
+              status: r.status,
+              uptime_24h: d.show_uptime ? r.uptime_24h : null,
+              uptime_30d: d.show_uptime ? r.uptime_30d : null,
+              uptime_90d: d.show_uptime ? daysUptime(demoDays(r.name)) : null,
+              recent: d.show_history ? r.recent : [],
+              days: d.show_history ? demoDays(r.name) : [],
+            },
+          ]
         : [];
     }),
   }));
@@ -1012,9 +1180,14 @@ function publicStatus(): PublicStatus {
     title: d.title || 'Demo status',
     description: d.description,
     footer: d.footer,
+    css: d.css,
+    header_html: d.header_html,
+    footer_html: d.footer_html,
     show_uptime: d.show_uptime,
     show_history: d.show_history,
     announcement: d.announcement ? { text: d.announcement, tone: d.tone } : undefined,
+    maintenance: demoPublicMaintenance(),
+    incidents: demoPublicNotices(),
     overall: down === 0 ? 'operational' : down < watched.length ? 'degraded' : 'outage',
     updated: now(),
     groups: groups.filter((g) => g.services.length),
@@ -1055,23 +1228,24 @@ const demoNotify: { items: Notification[]; rules: AlertRules; quiet: QuietHours;
   });
   const items = [
     n(9 * 86400, 'updates', 'ok', 'Sonarr updated', 'Installed and running.', { fields: [{ name: 'Version', value: '4.0.14 → 4.0.15' }] }),
-    n(4 * 86400 + 3000, 'storage', 'warning', 'Disk Usage Alert: /mnt/media', 'Usage is above threshold', {
+    n(4 * 86400 + 3000, 'storage', 'warning', '/mnt/media is 86% full', 'Above the 85% limit.', {
       fields: [
-        { name: 'Used', value: '86.2%' },
+        { name: 'Used', value: '6.2 TB' },
         { name: 'Free', value: '1.1 TB' },
+        { name: 'Size', value: '7.3 TB' },
       ],
     }),
-    n(2 * 86400 + 600, 'torrents', 'ok', 'Download Complete', 'Torrent download has completed: **Sintel.2010.1080p.mkv**', { status: 'kept', channels: [] }),
-    n(26 * 3600, 'uptime', 'critical', 'Service Down: nas-backup', 'dial tcp 10.0.0.30:873: connect: connection refused', {
+    n(2 * 86400 + 600, 'torrents', 'ok', 'Downloaded: Sintel.2010.1080p.mkv', '', { status: 'kept', channels: [] }),
+    n(26 * 3600, 'uptime', 'critical', 'nas-backup is down', 'Dial tcp 10.0.0.30:873: connect: connection refused', {
       subject: 'check:nas-backup',
       fields: [
-        { name: 'Target', value: '10.0.0.30:873' },
-        { name: 'Uptime (24h)', value: '97.92%' },
+        { name: 'Target', value: '`10.0.0.30:873`' },
+        { name: 'Uptime today', value: '97.92%' },
       ],
     }),
-    n(25.5 * 3600, 'uptime', 'ok', 'Service Recovered: nas-backup', 'connected in 3 ms', { subject: 'check:nas-backup' }),
+    n(25.5 * 3600, 'uptime', 'ok', 'nas-backup is back up', 'Connected in 3 ms', { subject: 'check:nas-backup' }),
     n(7.2 * 3600, 'services', 'warning', 'radarr keeps restarting', 'Radarr Daemon restarted 4 times in the last ten minutes.', { subject: 'unit:radarr.service', status: 'digest' }),
-    n(6.8 * 3600, 'resources', 'warning', 'Memory Usage Alert', 'Memory usage has exceeded the threshold of 90.0%', { status: 'digest', fields: [{ name: 'Used', value: '14.6 GB of 15.6 GB' }] }),
+    n(6.8 * 3600, 'resources', 'warning', 'Memory at 94%', 'Above the 90% limit, with 1.0 GB of 15.6 GB free.', { status: 'digest', fields: [{ name: 'Used', value: '14.6 GB of 15.6 GB' }] }),
     n(6.5 * 3600, 'system', 'info', 'Quiet hours summary: 2 alerts', 'Held from 23:00 to 07:00. Critical alerts were sent straight away.'),
     n(3.1 * 3600, 'storage', 'warning', 'Drive health warning: WDC PC SN530 SDBPNPZ-512G (/dev/nvme0)', '• 214% of its rated write endurance used: plan to replace it', {
       subject: 'drive:/dev/nvme0',
@@ -1237,7 +1411,7 @@ function logs(url: URL): LogsResponse {
     (e) =>
       e.seq > after && rank[e.level] >= min && (!component || e.component === component) && (!q || `${e.message} ${e.attrs?.map((a) => `${a.key}=${a.value}`).join(' ')}`.toLowerCase().includes(q)),
   );
-  return { entries, latest: demoLog.length, components: [...new Set(demoLog.map((e) => e.component ?? ''))].sort(), level: 'INFO', file: 'server_monitor.log', kept: 3000 };
+  return { entries, latest: demoLog.length, components: [...new Set(demoLog.map((e) => e.component ?? ''))].sort(), level: 'INFO', file: 'nightjar.log', kept: 3000 };
 }
 
 // ---------- app store ----------
@@ -1334,10 +1508,391 @@ function startDemoJob(id: string, action: AppJob['action']): AppJob {
   return job;
 }
 
+// ---------- other servers ----------
+
+// Each demo server is a seed and a character: a cool NAS, a Raspberry Pi running hot, and a backup
+// box that went offline twenty minutes ago.
+const demoHosts: { id: string; name: string; address: string; seed: number; temp: number; cpu: number; mem: number; arch: string; os: string; cores: number; offlineSince?: number }[] = [
+  { id: 'a1b2c3d4e5f6', name: 'nas', address: 'https://192.168.0.20:9101', seed: 3, temp: 47, cpu: 9, mem: 38, arch: 'amd64', os: 'debian 12.8', cores: 4 },
+  { id: 'b2c3d4e5f6a1', name: 'pi-dns', address: 'https://192.168.0.31:9101', seed: 7, temp: 79, cpu: 41, mem: 62, arch: 'arm64', os: 'debian 12.8', cores: 4 },
+  { id: 'c3d4e5f6a1b2', name: 'backup-box', address: 'https://192.168.0.44:9101', seed: 11, temp: 39, cpu: 3, mem: 21, arch: 'amd64', os: 'ubuntu 24.04', cores: 2, offlineSince: now() - 1200 },
+];
+
+function demoHost(i: number, points: number): RemoteHost {
+  const d = demoHosts[i];
+  const end = d.offlineSince ?? now();
+  const at = (t: number) => ({
+    cpu: clamp(wave(t, d.cpu, d.cpu * 0.4, 600, d.seed, 0.6), 1, 100),
+    mem: clamp(wave(t, d.mem, 2, 1800, d.seed + 1, 0.02), 1, 100),
+    temp: clamp(wave(t, d.temp, 3, 900, d.seed + 2, 0.03), 20, 110),
+  });
+  const history = Array.from({ length: points }, (_, k) => {
+    const t = Math.floor(end / 10) * 10 - (points - 1 - k) * 10;
+    const v = at(t);
+    return { t, cpu: round(v.cpu), mem: round(v.mem), temp: round(v.temp) };
+  });
+  const v = at(end);
+  const disks = [
+    { device: '/dev/sda2', mountpoint: '/', fstype: 'ext4', total: 64 * GB, used: 0, free: 0, percent: 31 + d.seed, is_nvme: false },
+    ...(d.name === 'nas'
+      ? [{ device: '/dev/md0', mountpoint: '/srv/storage', fstype: 'ext4', total: 16000 * GB, used: 0, free: 0, percent: 93, is_nvme: false }]
+      : d.name === 'backup-box'
+        ? [{ device: '/dev/sdb1', mountpoint: '/backup', fstype: 'xfs', total: 4000 * GB, used: 0, free: 0, percent: 71, is_nvme: false }]
+        : []),
+  ].map((p) => ({ ...p, used: (p.total * p.percent) / 100, free: (p.total * (100 - p.percent)) / 100 }));
+  const problems = [...(v.temp >= 80 ? [`CPU at ${Math.round(v.temp)}°C`] : []), ...disks.filter((p) => p.percent >= 90).map((p) => `${p.mountpoint} ${p.percent}% full`)];
+  if (d.offlineSince) problems.unshift('Offline: no answer from ' + d.address + ': timed out (a firewall is blocking the port: on the server, or on a cloud server in the provider’s firewall too)');
+  return {
+    id: d.id,
+    name: d.name,
+    address: d.address,
+    kind: 'agent',
+    added: now() - 86400 * (5 + d.seed),
+    status: d.offlineSince ? 'offline' : 'online',
+    last_seen: end,
+    error: d.offlineSince ? `no answer from ${d.address}: timed out (a firewall is blocking the port: on the server, or on a cloud server in the provider's firewall too)` : undefined,
+    history,
+    problems,
+    readings: {
+      version: 1,
+      agent: 'v1.4.0',
+      time: end,
+      system: {
+        hostname: d.name,
+        platform: 'Linux',
+        platform_release: d.arch === 'arm64' ? '6.6.51+rpt-rpi-2712' : '6.1.0-28-amd64',
+        platform_version: d.os,
+        architecture: d.arch,
+        boot_time: end - 86400 * (12 + d.seed),
+        uptime_seconds: 86400 * (12 + d.seed),
+        uptime_formatted: '',
+        users: 0,
+      },
+      cpu: {
+        percent: round(v.cpu),
+        cores: Array.from({ length: d.cores }, (_, c) => round(clamp(v.cpu * (0.5 + noise(c + Math.floor(end / 5), d.seed)), 0, 100))),
+        count: d.cores,
+        load: [round((v.cpu / 100) * d.cores, 2), round((v.cpu / 110) * d.cores, 2), round((v.cpu / 120) * d.cores, 2)],
+        freq_mhz: d.arch === 'arm64' ? 2400 : 3400,
+      },
+      memory: { total: 8 * GB, used: (8 * GB * v.mem) / 100, free: (8 * GB * (100 - v.mem)) / 100, available: (8 * GB * (100 - v.mem)) / 100, percent: round(v.mem) },
+      swap: { total: 2 * GB, used: 0.1 * GB, free: 1.9 * GB, available: 1.9 * GB, percent: 5 },
+      temperature: round(v.temp),
+      fans: d.arch === 'arm64' ? [{ name: 'fan1', label: 'pwmfan', speed_rpm: 4120 }] : [],
+      gpu: null,
+      disks,
+      network: {
+        bytes_recv_per_sec: Math.max(0, wave(end, d.name === 'nas' ? 4.2e6 : 9e4, 6e4, 300, d.seed, 0.5)),
+        bytes_sent_per_sec: Math.max(0, wave(end, d.name === 'nas' ? 1.1e6 : 4e4, 3e4, 300, d.seed + 3, 0.5)),
+      },
+      disk_io: { read_per_sec: d.name === 'nas' ? 2.4e6 : 1.2e4, write_per_sec: d.name === 'nas' ? 8e5 : 3e4 },
+      drives:
+        d.name === 'nas'
+          ? [
+              {
+                device: '/dev/sda',
+                type: 'sat',
+                model: 'WDC WD80EFAX-68KNBN0',
+                capacity: 8001563222016,
+                rotational: true,
+                passed: true,
+                temperature: 36,
+                power_on_hours: 31022,
+                asleep: false,
+                checked: end - 200,
+                health: 'good' as const,
+              },
+              {
+                device: '/dev/sdb',
+                type: 'sat',
+                model: 'WDC WD80EFAX-68KNBN0',
+                capacity: 8001563222016,
+                rotational: true,
+                passed: true,
+                temperature: 38,
+                power_on_hours: 31020,
+                asleep: false,
+                checked: end - 200,
+                health: 'good' as const,
+              },
+            ]
+          : [],
+      drives_error: d.name === 'nas' ? undefined : 'smartctl is not installed (apt install smartmontools)',
+    },
+  };
+}
+
+// SSH logins and keys: nas has one set up already; a new key made here is a made-up one.
+const demoKeys: SSHKey[] = [
+  {
+    path: '/root/serverMonitor/ssh/nightjar',
+    name: 'nightjar',
+    type: 'ED25519',
+    fingerprint: 'SHA256:q3Vb7m0yZr1kQe9tJ4cL2wXo8pN6aFhD5sGuIvTzB0E',
+    comment: 'nightjar@demo-server',
+    public: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHk3m9Zq2T0bWc7yPj1sVxLr4dNf8aGuEo6iKt5hBzQe nightjar@demo-server',
+    own: true,
+  },
+  {
+    path: '/root/.ssh/id_ed25519',
+    name: 'id_ed25519',
+    type: 'ED25519',
+    fingerprint: 'SHA256:Hd8kP2xVt6Lq0nZr4bYc9mWs1eJg7uAo3iFz5RNvKQw',
+    comment: 'root@demo-server',
+    public: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGv2Lp8sXn1Qd4cWm7zRb0kTy6hJf3aEu9oNi5BtKrVx root@demo-server',
+    own: false,
+  },
+];
+const demoSSH: Record<string, HostSSH> = { a1b2c3d4e5f6: { port: 22, user: 'root', key: '/root/serverMonitor/ssh/nightjar' } };
+
+function withSSH(h: RemoteHost): RemoteHost {
+  const ssh = demoSSH[h.id];
+  if (!ssh) return h;
+  const target = ssh.host || (h.kind === 'ssh' ? h.address : new URL(h.address).hostname);
+  return { ...h, ssh, ssh_command: `ssh -i ${ssh.key}${ssh.port !== 22 ? ` -p ${ssh.port}` : ''} ${ssh.user}@${target}` };
+}
+
+// demoLoginTest is the demo's first login with a saved login: backup-box is offline, so it fails.
+function demoLoginTest(id: string) {
+  if (demoHosts.find((h) => h.id === id)?.offlineSince) return { ok: false, error: 'the server did not answer SSH in time' };
+  const name = demoHosts.find((h) => h.id === id)?.name ?? demoSSHServers.find((h) => h.id === id)?.name ?? 'server';
+  return { ok: true, output: `${demoSSH[id]?.user ?? 'root'}@${name}\n up 15 days,  2:41,  0 users,  load average: 0.21, 0.18, 0.12` };
+}
+
+// A VPS watched through its SSH login alone.
+const demoSSHServers: { id: string; name: string; address: string }[] = [{ id: 'f6a1b2c3d4e5', name: 'vps', address: 'vps.example.net' }];
+demoSSH.f6a1b2c3d4e5 = { host: 'vps.example.net', port: 22, user: 'root', key: '/root/serverMonitor/ssh/nightjar' };
+
+function demoSSHServer(i: number): RemoteHost {
+  const d = demoSSHServers[i];
+  return { id: d.id, name: d.name, address: d.address, added: now() - 86400 * 2, kind: 'ssh', status: 'online', last_seen: now(), readings: null, history: [], problems: [] };
+}
+
+const allDemoHosts = (points: number) => [...demoHosts.map((_, i) => withSSH(demoHost(i, points))), ...demoSSHServers.map((_, i) => withSSH(demoSSHServer(i)))];
+
+// ---------- analytics ----------
+
+const RANGE_SPECS: Record<AnalyticsRangeName, [number, number, string]> = {
+  '1h': [3600, 60, '1 hour'],
+  '24h': [86400, 300, '24 hours'],
+  '7d': [7 * 86400, 1800, '7 days'],
+  '30d': [30 * 86400, 7200, '30 days'],
+};
+
+// Each demo server's character over time: a daily rhythm, a disk that fills or not, and outages.
+const demoCharacters: Record<string, { cpu: number; mem: number; temp?: number; disk?: [number, number]; rx: number; tx: number; latency?: number; down?: [number, number][]; age?: number }> = {
+  local: { cpu: 22, mem: 51, temp: 60, disk: [66.8, 0.08], rx: 1.4e6, tx: 2.6e6 },
+  a1b2c3d4e5f6: { cpu: 9, mem: 38, temp: 47, disk: [91.2, 0.2], rx: 4e6, tx: 1.1e6, down: [[3 * 86400 + 4000, 3 * 86400 + 4600]] },
+  b2c3d4e5f6a1: { cpu: 38, mem: 62, temp: 77, disk: [38, 0], rx: 9e4, tx: 4e4 },
+  c3d4e5f6a1b2: {
+    cpu: 3,
+    mem: 21,
+    temp: 39,
+    disk: [70.5, 0.03],
+    rx: 8e4,
+    tx: 6e4,
+    down: [
+      [0, 1200],
+      [9 * 86400, 9 * 86400 + 5400],
+    ],
+  },
+};
+
+function demoHostAnalytics(id: string, name: string, kind: HostAnalytics['kind'], status: string, range: AnalyticsRangeName): HostAnalytics {
+  const [span, step] = RANGE_SPECS[range];
+  const c = demoCharacters[id] ?? { cpu: 10, mem: 30, rx: 1e4, tx: 1e4 };
+  const end = Math.floor(now() / step) * step;
+  const seed = id.charCodeAt(0);
+  const daily = (t: number) => Math.sin(((t % 86400) / 86400) * 2 * Math.PI - 1.2);
+  // Seconds ago that were down: down windows are [from, to] seconds before now.
+  const downAt = (ago: number) => (c.down ?? []).some(([a, b]) => ago >= a && ago < b);
+  const points: AnalyticsPoint[] = [];
+  for (let t = end - span + step; t <= end; t += step) {
+    const ago = now() - t;
+    if (c.age !== undefined && ago > c.age) continue;
+    const down = downAt(ago);
+    const cpu = c.latency !== undefined || down ? null : round(clamp(c.cpu * (1 + 0.45 * daily(t)) + c.cpu * 0.3 * (noise(Math.floor(t / step), seed) - 0.5), 0.5, 100));
+    const temp = c.temp === undefined || down || cpu === null ? null : round(c.temp + (cpu - c.cpu) * 0.25 + 2 * (noise(Math.floor(t / step), seed + 1) - 0.5));
+    points.push({
+      t,
+      up: down ? 0 : 1,
+      cpu,
+      cpu_max: cpu === null ? null : round(Math.min(100, cpu * (1.6 + noise(t, seed)))),
+      mem: c.latency !== undefined || down ? null : round(c.mem + 3 * daily(t + 7200)),
+      temp,
+      temp_max: temp === null ? null : round(temp + 3 + 4 * noise(t, seed + 2)),
+      disk: c.disk && !down ? round(c.disk[0] - (c.disk[1] * ago) / 86400, 2) : null,
+      rx: c.latency !== undefined || down ? null : Math.max(0, c.rx * (1 + 0.6 * daily(t + 3600))),
+      tx: c.latency !== undefined || down ? null : Math.max(0, c.tx * (1 + 0.6 * daily(t + 5400))),
+      latency: c.latency === undefined || down ? null : round(Math.max(0.4, c.latency * (1 + 0.25 * daily(t) + 0.3 * (noise(t, seed) - 0.5))), 1),
+      minutes: step / 60,
+    });
+  }
+  const minutes = points.reduce((n, p) => n + p.minutes, 0);
+  const avg = (pick: (p: AnalyticsPoint) => number | null) => {
+    const v = points.map(pick).filter((x): x is number => x !== null);
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+  };
+  const peak = (pick: (p: AnalyticsPoint) => number | null) => {
+    const v = points.map(pick).filter((x): x is number => x !== null);
+    return v.length ? Math.max(...v) : null;
+  };
+  const incidents = (c.down ?? []).filter(([a]) => a < span).map(([a, b]) => ({ start: now() - b, end: now() - a, ongoing: a === 0 && status === 'offline' }));
+  const downtime = incidents.reduce((n, i) => n + (i.end - i.start), 0);
+  const disk = c.disk ? c.disk[0] : null;
+  const fullDays = c.disk && c.disk[1] > 0.01 && span >= 86400 ? (100 - c.disk[0]) / c.disk[1] : null;
+  return {
+    id,
+    name,
+    kind,
+    status,
+    points,
+    incidents,
+    summary: {
+      coverage: Math.min(1, (minutes * 60) / span),
+      uptime: kind === 'local' ? null : 100 * (1 - downtime / Math.min(span, c.age ?? span)),
+      downtime_s: kind === 'local' ? 0 : downtime,
+      incidents: incidents.length,
+      cpu_avg: avg((p) => p.cpu),
+      cpu_peak: peak((p) => p.cpu_max),
+      mem_avg: avg((p) => p.mem),
+      mem_peak: peak((p) => p.mem),
+      temp_avg: avg((p) => p.temp),
+      temp_peak: peak((p) => p.temp_max),
+      disk_now: disk,
+      disk_change: c.disk ? (c.disk[1] * span) / 86400 : null,
+      disk_full_days: fullDays !== null && fullDays < 3650 ? fullDays : null,
+      rx_bytes: points.reduce((n, p) => n + (p.rx ?? 0) * p.minutes * 60, 0),
+      tx_bytes: points.reduce((n, p) => n + (p.tx ?? 0) * p.minutes * 60, 0),
+      latency_avg: avg((p) => p.latency),
+      latency_peak: peak((p) => p.latency),
+    },
+  };
+}
+
+function demoAnalytics(range: AnalyticsRangeName): HostAnalytics[] {
+  return [
+    demoHostAnalytics('local', 'demo-server', 'local', 'online', range),
+    ...allDemoHosts(1)
+      .filter((h) => h.kind === 'agent')
+      .map((h) => demoHostAnalytics(h.id, h.name, 'agent', h.status, range)),
+  ];
+}
+
 function route(method: string, url: URL, body: unknown): Response {
   const path = url.pathname;
+  const plugin = pluginRoute(method, path, body, json, error);
+  if (plugin) return plugin;
   const checkName = path.startsWith('/api/checks/') ? decodeURIComponent(path.slice('/api/checks/'.length)) : null;
   const findCheck = (name: string) => state.checks.findIndex((c) => c.name === name);
+
+  const hostID = path.match(/^\/api\/hosts\/([0-9a-f]+)$/)?.[1];
+  const hostIndex = hostID ? demoHosts.findIndex((h) => h.id === hostID) : -1;
+  const sshIndex = hostID ? demoSSHServers.findIndex((h) => h.id === hostID) : -1;
+  const analyticsRange = (url.searchParams.get('range') ?? '24h') as AnalyticsRangeName;
+  if (method === 'GET' && path === '/api/analytics') {
+    const [, step, label] = RANGE_SPECS[analyticsRange] ?? RANGE_SPECS['24h'];
+    return json({
+      range: { name: analyticsRange, label },
+      ranges: Object.entries(RANGE_SPECS).map(([name, [, , label]]) => ({ name, label })),
+      step,
+      hosts: demoAnalytics(analyticsRange),
+      kept: true,
+    });
+  }
+  const analyticsID = path.match(/^\/api\/analytics\/([0-9a-z]+)$/)?.[1];
+  if (method === 'GET' && analyticsID) {
+    const host = demoAnalytics(analyticsRange).find((h) => h.id === analyticsID);
+    return host ? json({ host, step: RANGE_SPECS[analyticsRange][1] }) : error(404, 'No such server');
+  }
+  if (method === 'GET' && path === '/api/hosts')
+    return json({
+      hosts: allDemoHosts(60),
+      port: 9101,
+      agents: [
+        { arch: 'amd64', file: 'nightjar-agent-linux-amd64', size: 7_759_032 },
+        { arch: 'arm64', file: 'nightjar-agent-linux-arm64', size: 7_209_112 },
+      ],
+    });
+  if (method === 'GET' && hostID && sshIndex >= 0) return json({ host: withSSH(demoSSHServer(sshIndex)) });
+  if (method === 'GET' && hostID) return hostIndex < 0 ? error(404, 'no such server') : json({ host: withSSH(demoHost(hostIndex, 360)) });
+  if (method === 'GET' && path === '/api/ssh/keys') return json({ keys: demoKeys });
+  if (method === 'POST' && path === '/api/ssh/keys') {
+    const { name: given, private: privateKey } = body as { name?: string; private?: string };
+    const name = (given || 'nightjar').trim();
+    if (privateKey !== undefined && !/^-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(privateKey.trim()))
+      return error(400, 'paste the whole private key, from -----BEGIN to -----END; it is the file without .pub, such as ~/.ssh/id_ed25519');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/.test(name)) return error(400, 'name the key with letters, numbers, dots, dashes or underscores');
+    if (demoKeys.some((k) => k.own && k.name === name)) return error(400, `there is already a key called ${name}`);
+    const key: SSHKey = { ...demoKeys[0], path: `/root/serverMonitor/ssh/${name}`, name, fingerprint: `SHA256:demo${name}${demoKeys.length}` };
+    demoKeys.unshift(key);
+    return json({ key });
+  }
+  const sshMatch = path.match(/^\/api\/hosts\/([0-9a-f]+)\/ssh(?:\/([a-z-]+))?$/);
+  if (sshMatch) {
+    const [, id, action] = sshMatch;
+    const i = demoHosts.findIndex((h) => h.id === id);
+    const v = demoSSHServers.findIndex((h) => h.id === id);
+    if (i < 0 && v < 0) return error(404, 'no such server');
+    const host = () => withSSH(i >= 0 ? demoHost(i, 360) : demoSSHServer(v));
+    if (!action && method === 'PUT') {
+      const b = body as HostSSH;
+      if (!demoKeys.some((k) => k.path === b.key)) return error(400, 'choose one of the keys Nightjar found, or make a new one');
+      if (v >= 0 && !b.host?.trim()) return error(400, "enter the server's address");
+      demoSSH[id] = { host: b.host?.trim() || undefined, port: b.port || 22, user: b.user?.trim() || 'root', key: b.key };
+      if (v >= 0) demoSSHServers[v].address = b.host!.trim();
+      return json({ host: host(), test: demoLoginTest(id) });
+    }
+    if (!action && method === 'DELETE') {
+      if (v >= 0) return error(400, 'this server is watched through its SSH login; remove the server instead');
+      delete demoSSH[id];
+      return json({ host: host() });
+    }
+    if (action && method === 'POST') {
+      if (!demoSSH[id]) return error(400, 'set up an SSH login for this server first');
+      // The demo has no network; backup-box is the one that is offline, so it does not answer.
+      if (i >= 0 && demoHosts[i].offlineSince) return error(422, 'the server did not answer SSH in time');
+      const who = `${demoSSH[id].user}@${i >= 0 ? demoHosts[i].name : demoSSHServers[v].name}`;
+      if (action === 'test') return json({ output: `${who}\n ${new Date(now() * 1000).toTimeString().slice(0, 8)} up 15 days,  2:41,  0 users,  load average: 0.21, 0.18, 0.12` });
+      if (action === 'restart-agent') return i >= 0 ? json({ output: 'nightjar-agent restarted' }) : error(400, 'this server has no agent');
+      if (action === 'reinstall-agent')
+        return i >= 0
+          ? json({ output: "Reinstalling with this machine's agent settings.\nThe agent is running as nightjar-agent.service, serving HTTPS on :9101.\nIt updates itself to the dashboard's version." })
+          : error(400, 'this server has no agent');
+      if (action === 'reboot') return json({ output: 'rebooting' });
+      return error(400, `unknown SSH action "${action}"`);
+    }
+  }
+  if (method === 'POST' && path === '/api/hosts/token') return json({ token: Array.from({ length: 48 }, (_, i) => '0123456789abcdef'[Math.floor(noise(i, now()) * 16)]).join(''), port: 9101 });
+  if (method === 'POST' && path === '/api/hosts') {
+    const b = body as { kind?: string; name?: string; ssh?: HostSSH };
+    if (b.kind !== 'ssh' || !b.ssh) return error(400, 'no answer from the agent: the demo has no network; on a real dashboard this connects to it');
+    if (!b.ssh.host?.trim()) return error(400, "enter the server's address");
+    if (!demoKeys.some((k) => k.path === b.ssh!.key)) return error(400, 'choose one of the keys Nightjar found, or make a new one');
+    const id = Array.from({ length: 12 }, (_, i) => '0123456789abcdef'[Math.floor(noise(i, now()) * 16)]).join('');
+    const address = b.ssh.host.trim();
+    demoSSHServers.push({ id, name: b.name?.trim() || address, address });
+    demoSSH[id] = { host: address, port: b.ssh.port || 22, user: b.ssh.user?.trim() || 'root', key: b.ssh.key };
+    return json({ host: withSSH(demoSSHServer(demoSSHServers.length - 1)), test: demoLoginTest(id) });
+  }
+  if (method === 'PUT' && hostID && sshIndex >= 0) {
+    const b = body as { name?: string };
+    if (b.name?.trim()) demoSSHServers[sshIndex].name = b.name.trim();
+    return json({ host: withSSH(demoSSHServer(sshIndex)) });
+  }
+  if (method === 'PUT' && hostID) {
+    if (hostIndex < 0) return error(404, 'no such server');
+    const b = body as { name?: string };
+    if (b.name?.trim()) demoHosts[hostIndex].name = b.name.trim();
+    return json({ host: demoHost(hostIndex, 360) });
+  }
+  if (method === 'DELETE' && hostID) {
+    if (hostIndex >= 0) demoHosts.splice(hostIndex, 1);
+    if (sshIndex >= 0) demoSSHServers.splice(sshIndex, 1);
+    // Checks that belonged to it stay, belonging to none.
+    for (const c of state.checks) if (c.server === hostID) delete c.server;
+    return new Response(null, { status: 204 });
+  }
 
   if (method === 'GET') {
     switch (path) {
@@ -1345,8 +1900,9 @@ function route(method: string, url: URL, body: unknown): Response {
         return json({
           auth_required: true,
           authorized: true,
-          account: { configured: true, username: 'demo', service: 'server-monitor' },
+          account: { configured: true, username: 'demo', service: 'nightjar', two_factor: demoTwoFactor().on, recovery_left: demoTwoFactor().left },
           hidden: (state.settings.DASHBOARD_HIDDEN ?? '').split(',').filter(Boolean),
+          appearance: demoAppearance(),
           status_page_enabled: true,
           status_page_title: 'Demo status',
           plex_enabled: true,
@@ -1374,7 +1930,7 @@ function route(method: string, url: URL, body: unknown): Response {
       case '/api/qbittorrent':
         return json(qbittorrent());
       case '/api/units':
-        return json({ enabled: true, self: 'server-monitor.service', units: demoUnits });
+        return json({ enabled: true, self: 'nightjar.service', units: demoUnits });
       case '/api/network':
         return json(network(url.searchParams.has('since') ? Number(url.searchParams.get('since')) : undefined));
       case '/api/drives':
@@ -1388,16 +1944,89 @@ function route(method: string, url: URL, body: unknown): Response {
         return json({ job: demoJob && { ...demoJob, lines: demoJob.lines.slice(after) } });
       }
       case '/api/logs':
-        return json(logs(url));
+        return json({ ...logs(url), findings: demoFindings.log });
       case '/api/notifications':
         return json(notifications(url));
       case '/api/notifications/summary':
         return json({ counts: notifyCounts(), mutes: liveMutes(), quiet: false, held: 0 });
       case '/api/notifications/rules':
         return json(notifyRules());
+      case '/api/appearance':
+        return json({ appearance: demoAppearance() });
+      case '/api/incidents': {
+        const days = Math.min(90, Math.max(1, Number(url.searchParams.get('days') ?? 14)));
+        return json({ incidents: demoIncidents(days), days });
+      }
+      case '/api/repairs':
+        return json(demoRepairs(url.searchParams.get('check') ?? ''));
+      case '/api/maintenance':
+        return json(demoMaintenance());
+      case '/api/cleanup':
+        return json(demoCleanup());
+      case '/api/activity':
+        return json({ activity: url.searchParams.get('before') ? [] : demoActivity() });
+      case '/api/backup':
+        return json({
+          nightjar: 'demo',
+          made: Date.now() / 1000,
+          secrets: url.searchParams.get('secrets') === '1',
+          checks: state.checks,
+          settings: state.settings,
+          meta: { 'dashboard.appearance': demoAppearance(), 'statuspage.design': designOrDefault() },
+        });
+      case '/api/plex/stats':
+        return json({ enabled: true, stats: demoPlexStats(Math.min(90, Math.max(1, Number(url.searchParams.get('days') ?? 7)))) });
+      case '/api/docker/containers':
+        return json({ available: true, containers: demoContainers });
+      case '/api/report':
+        return json({ report: demoReport(state.checks.map(summary)), enabled: true, at: 'Mon 09:00', next: nextMonday() });
       case '/api/statuspage':
-        return json({ enabled: true, designed: !!state.statusDesign, design: designOrDefault(), checks: state.checks.map((c) => c.name) });
+        return json({
+          enabled: true,
+          designed: !!state.statusDesign,
+          design: designOrDefault(),
+          checks: state.checks.map((c) => c.name),
+          days: Object.fromEntries(state.checks.map((c) => [c.name, demoDays(c.name)])),
+        });
     }
+  }
+  const incidentPart = path.match(/^\/api\/incidents\/(\d+)\/(feedback|notice)$/);
+  if (incidentPart && (method === 'PUT' || method === 'DELETE')) {
+    const id = Number(incidentPart[1]);
+    const out = incidentPart[2] === 'feedback' ? demoFeedback(id, method === 'PUT' ? (body as object) : null) : demoNotice(id, method === 'PUT' ? (body as object) : null);
+    if (out === undefined) return error(404, 'no incident with that id in the last 90 days');
+    return method === 'DELETE' ? new Response(null, { status: 204 }) : json({ [incidentPart[2]]: out });
+  }
+  const windowID = path.match(/^\/api\/maintenance(?:\/([0-9a-z]+))?$/);
+  if (windowID && (method === 'POST' || method === 'PUT')) {
+    const saved = demoSaveWindow({ ...(body as MaintenanceWindow), id: windowID[1] ?? '' });
+    return typeof saved === 'string' ? error(400, saved) : json({ window: saved }, method === 'POST' ? 201 : 200);
+  }
+  if (windowID?.[1] && method === 'DELETE') return demoDeleteWindow(windowID[1]) ? new Response(null, { status: 204 }) : error(404, 'no maintenance window with that id');
+  if (method === 'POST' && path === '/api/report/send') return json({ sent: true });
+  if (method === 'POST' && path === '/api/cleanup/scan') return json(demoCleanupScan());
+  if (method === 'POST' && path.startsWith('/api/auth/2fa/')) {
+    const out = demoTwoFactorRoute(path, body as Record<string, string>);
+    if (typeof out === 'string') return error(400, out);
+    if (out === null) return new Response(null, { status: 204 });
+    if (out !== undefined) return json(out);
+  }
+  if (method === 'POST' && path === '/api/backup/restore') {
+    const b = body as { nightjar?: string; checks?: unknown[]; settings?: Record<string, string> };
+    if (!b?.nightjar) return error(400, 'That is not a Nightjar backup');
+    return json({ restored: { checks: b.checks?.length ?? 0, settings: Object.keys(b.settings ?? {}).length, parts: 2 }, restarting: false });
+  }
+  const keepFor = path.match(/^\/api\/cleanup\/([^/]+)\/keep$/);
+  if (keepFor && (method === 'PUT' || method === 'DELETE')) {
+    const v = demoCleanupKeep(decodeURIComponent(keepFor[1]), method === 'PUT');
+    return v ? json(v) : error(404, 'that is not on the cleanup list');
+  }
+  const repairFor = path.match(/^\/api\/checks\/([^/]+)\/repair$/);
+  if (method === 'POST' && repairFor) {
+    const spec = state.checks.find((c) => c.name === decodeURIComponent(repairFor[1]));
+    if (!spec) return error(404, 'no check with that name');
+    if (!spec.repair) return error(400, 'The check has no repair');
+    return json({ repair: demoRepairNow(spec) });
   }
   if (method === 'POST' && path === '/api/checks/test') {
     const spec = normalise(body as Partial<CheckSpec>);
@@ -1405,7 +2034,9 @@ function route(method: string, url: URL, body: unknown): Response {
     // Targets on .invalid or .test hosts never answer, so the demo can show a failed test.
     const offline = /\.(invalid|test)\b|offline/.test(spec.target);
     const ms = 20 + Math.round(noise(spec.target.length, 7) * 180);
-    const detail = { http: 'HTTP 200', tcp: 'connected', ping: 'reply', tls: 'certificate valid for 61 days' }[spec.type];
+    if (spec.type === 'plugin') return json({ result: demoPluginCheck(spec.target) });
+    if (spec.type === 'heartbeat') return json({ result: { up: false, latency_ms: null, detail: 'a heartbeat has nothing to try: save it, then ping its URL from the job' } });
+    const detail = { http: 'HTTP 200', tcp: 'connected', ping: 'reply', tls: 'certificate valid for 61 days', docker: 'container healthy, started 3d ago' }[spec.type];
     return json({ result: offline ? { up: false, latency_ms: null, detail: spec.type === 'ping' ? 'no reply' : 'connection timed out' } : { up: true, latency_ms: ms, detail } });
   }
   if (method === 'POST' && path === '/api/checks') {
@@ -1435,11 +2066,18 @@ function route(method: string, url: URL, body: unknown): Response {
   }
   if (path.startsWith('/api/units/')) {
     const [, , , name, what] = path.split('/').map(decodeURIComponent);
-    if (method === 'GET' && what === 'logs') return demoUnits.some((u) => u.name === name) ? json({ lines: demoLogs[name] ?? [] }) : error(404, 'no such service');
+    if (method === 'GET' && what === 'logs') return demoUnits.some((u) => u.name === name) ? json({ lines: demoLogs[name] ?? [], findings: demoFindings[name] ?? [] }) : error(404, 'no such service');
     if (method === 'POST') {
       const u = demoUnitAction(name, what);
       return u ? json({ unit: u }) : error(404, 'no such service');
     }
+  }
+  if (method === 'PUT' && path === '/api/appearance') {
+    const a = body as Appearance;
+    if (a.css.toLowerCase().includes('</style')) return error(400, 'the CSS cannot contain </style');
+    state.appearance = { ...a, css: a.css.trim() };
+    save();
+    return json({ appearance: state.appearance });
   }
   if (method === 'PUT' && path === '/api/statuspage') {
     state.statusDesign = body as StatusDesign;
@@ -1476,9 +2114,16 @@ function route(method: string, url: URL, body: unknown): Response {
     return json({ ok: true, detail: 'Connected to demo-server (Plex 1.43.5)' });
   }
   if (path === '/api/qbittorrent/categories') return json({ categories: ['linux', 'movies', 'tv'] });
+  const stopStream = method === 'POST' && path.match(/^\/api\/plex\/streams\/([^/]+)\/stop$/);
+  if (stopStream) {
+    const id = decodeURIComponent(stopStream[1]);
+    if (demoStopped.has(id) || !plex(true).plex?.streams.some((s) => s.id === id)) return error(404, 'that stream has already ended');
+    demoStopped.set(id, now());
+    return json(plex(false));
+  }
   if (method === 'POST' && path === '/api/qbittorrent/action') {
     const { action, hashes } = body as { action: string; hashes: string[] };
-    if (!hashes?.length) return error(502, 'no torrents given');
+    if (!hashes?.length) return error(422, 'no torrents given');
     qbAct(action, hashes);
     return json(qbittorrent());
   }

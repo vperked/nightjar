@@ -3,7 +3,7 @@ package alerts_test
 import (
 	"testing"
 
-	"servermonitor/internal/alerts"
+	"nightjar/internal/alerts"
 )
 
 func TestFirstAlertIsImmediate(t *testing.T) {

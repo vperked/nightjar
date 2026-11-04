@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/alerts"
-	"servermonitor/internal/collect"
-	"servermonitor/internal/config"
-	"servermonitor/internal/discord"
-	"servermonitor/internal/metrics"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/services"
+	"nightjar/internal/alerts"
+	"nightjar/internal/collect"
+	"nightjar/internal/config"
+	"nightjar/internal/discord"
+	"nightjar/internal/metrics"
+	"nightjar/internal/monitor"
+	"nightjar/internal/services"
 )
 
 type fakeSender struct {
@@ -85,9 +85,9 @@ func TestCPUAlertIsThrottled(t *testing.T) {
 	for i := range 5 {
 		eval(monitor.Snapshot{Now: float64(i * 5), CPUPercent: 95, PerCore: []float64{95}})
 	}
-	expectTitles(t, wh, "CPU Usage Alert")
+	expectTitles(t, wh, "CPU at ")
 	eval(monitor.Snapshot{Now: 400, CPUPercent: 95})
-	expectTitles(t, wh, "CPU Usage Alert", "CPU Usage Alert")
+	expectTitles(t, wh, "CPU at ", "CPU at ")
 }
 
 func TestBelowThresholdDoesNotAlert(t *testing.T) {
@@ -114,10 +114,10 @@ func TestServiceDownAndRecoveryAlerts(t *testing.T) {
 	eval(monitor.Snapshot{Now: 1000}) // first failure is within retries
 	expectTitles(t, wh)
 	eval(monitor.Snapshot{Now: 1010})
-	expectTitles(t, wh, "Service Down: api")
+	expectTitles(t, wh, "api is down")
 	failing.Store(false)
 	eval(monitor.Snapshot{Now: 1020})
-	expectTitles(t, wh, "Service Down: api", "Service Recovered: api")
+	expectTitles(t, wh, "api is down", "api is back up")
 	if wh.severities[0] != discord.Critical || wh.severities[1] != discord.OK {
 		t.Fatalf("an outage is critical and its recovery ok, got %v", wh.severities)
 	}

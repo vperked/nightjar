@@ -1,20 +1,34 @@
-/* Cards */
+/* Panels: ruled regions on the page, not cards. Each opens with a strong rule and a registration
+   mark at its corner, and is numbered in page order. */
 
 .section,
 .readout,
 .panel {
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 18px 20px;
+  position: relative;
+  border-top: 1px solid var(--rule-strong);
+  padding: 14px 0 24px;
   min-width: 0;
+}
+.section::before,
+.panel::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: -5px;
+  width: 9px;
+  height: 9px;
+  background:
+    linear-gradient(var(--ink-2), var(--ink-2)) center / 1px 100% no-repeat,
+    linear-gradient(var(--ink-2), var(--ink-2)) center / 100% 1px no-repeat;
+}
+main {
+  counter-reset: panel;
 }
 main > .section,
 .col > .section,
 main > .panel,
 .settings-groups > .section {
-  margin-top: 16px;
+  margin-top: 20px;
 }
 .label {
   font-size: 12.5px;
@@ -29,10 +43,20 @@ main > .panel,
   margin-bottom: 14px;
   min-height: 24px;
 }
+/* Panel titles are mono capitals with their number, quiet, so the readings lead. */
 .section-head .label {
   color: var(--ink);
-  font-size: 14px;
-  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.section-head .label::before {
+  counter-increment: panel;
+  content: counter(panel, decimal-leading-zero);
+  margin-right: 10px;
+  color: var(--ink-3);
 }
 .section-head a {
   font-size: 12.5px;
@@ -45,7 +69,7 @@ main > .panel,
 .columns {
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
-  gap: 0 16px;
+  gap: 0 40px;
   align-items: start;
 }
 .columns > .col {

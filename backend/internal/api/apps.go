@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"servermonitor/internal/apps"
-	"servermonitor/internal/services"
+	"nightjar/internal/apps"
+	"nightjar/internal/services"
 )
 
 // The app store: what can be installed, what is, and the install running now.

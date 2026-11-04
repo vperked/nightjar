@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"servermonitor/internal/cleanup"
+	"nightjar/internal/cleanup"
 )
 
 func TestRotatedLogNames(t *testing.T) {

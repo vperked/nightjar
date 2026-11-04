@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/services"
-	"servermonitor/internal/storage"
+	"nightjar/internal/services"
+	"nightjar/internal/storage"
 )
 
 // slotSeconds is the in-memory history resolution; ranges of a slot or more per point are served from memory.

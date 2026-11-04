@@ -20,7 +20,20 @@
     box-shadow 0.15s;
 }
 .search {
-  width: 220px;
+  width: 240px;
+  height: 36px;
+  padding: 0 12px 0 34px;
+  border-color: var(--card-rule);
+  border-radius: var(--radius);
+  /* A magnifier, mid-grey so it reads on both themes. */
+  background: var(--surface)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M20 20l-4-4'/%3E%3C/svg%3E")
+    no-repeat 11px 50% / 15px;
+  box-shadow: var(--shadow);
+  color: var(--ink);
+}
+.search::-webkit-search-cancel-button {
+  cursor: pointer;
 }
 .field {
   width: 100%;
@@ -33,14 +46,14 @@
 .search:focus,
 .field:focus {
   outline: 0;
-  border-color: var(--series-1);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--series-1) 20%, transparent);
+  border-color: var(--ink-3);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink) 14%, transparent);
 }
 .seg {
   display: inline-flex;
   gap: 2px;
   padding: 3px;
-  border-radius: 11px;
+  border-radius: var(--radius);
   background: var(--bg-sunk);
   /* On narrow screens a long filter scrolls within itself instead of widening the page. */
   max-width: 100%;
@@ -58,7 +71,7 @@
   background: none;
   border: 0;
   padding: 4px 11px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--ink-3);
   font-size: 12.5px;
@@ -72,8 +85,10 @@
 }
 .seg button.active {
   color: var(--ink);
-  background: var(--surface);
-  box-shadow: var(--shadow);
+  background: var(--surface-2);
+  box-shadow:
+    0 0 0 1px var(--card-rule),
+    0 1px 3px rgba(0, 0, 0, 0.18);
 }
 .seg .n {
   margin-left: 5px;
@@ -81,8 +96,9 @@
   font-variant-numeric: tabular-nums;
 }
 .btn {
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
   border: 0;
   border-radius: var(--radius-sm);
   padding: 8px 15px;
@@ -102,7 +118,7 @@
 .btn-quiet {
   background: none;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 6px 10px;
   cursor: pointer;
   color: var(--ink-2);
@@ -121,6 +137,49 @@
 .btn-quiet.danger:hover {
   background: color-mix(in srgb, var(--crit) 10%, transparent);
 }
+/* An outlined button, for actions beside a heading or in a row. Quiet buttons in a page's header
+   and on app cards take the same look, so a page's own actions read as buttons, not loose words. */
+.page-title .toolbar .btn-quiet,
+.title-actions .btn-quiet,
+.app-actions .btn-quiet,
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.page-title .toolbar .btn-quiet:hover,
+.title-actions .btn-quiet:hover,
+.app-actions .btn-quiet:hover,
+.btn-ghost:hover {
+  border-color: var(--ink-3);
+  background: var(--surface-2);
+}
+.page-title .toolbar .btn-quiet.danger,
+.title-actions .btn-quiet.danger {
+  border-color: color-mix(in srgb, var(--crit-mark) 45%, transparent);
+  background: color-mix(in srgb, var(--crit-mark) 9%, transparent);
+  color: var(--crit);
+}
+.page-title .toolbar .btn-quiet:disabled,
+.title-actions .btn-quiet:disabled,
+.btn-ghost:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .switch {
   display: inline-flex;
   align-items: center;
@@ -157,7 +216,10 @@
   transition: transform 0.15s;
 }
 .switch input:checked + .switch-track {
-  background: var(--good-mark);
+  background: var(--accent);
+}
+.switch input:checked + .switch-track::after {
+  background: var(--accent-ink);
 }
 .switch input:checked + .switch-track::after {
   transform: translateX(12px);

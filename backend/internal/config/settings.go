@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	"servermonitor/internal/logx"
+	"nightjar/internal/logx"
 )
 
 var log = logx.Component("Config")
@@ -13,7 +13,7 @@ const (
 	BytesPerMB = 1024 * 1024
 	BytesPerGB = 1024 * 1024 * 1024
 
-	DefaultHistoryDB = "server_monitor_history.db"
+	DefaultHistoryDB = "nightjar.db"
 )
 
 // Settings is every tunable the monitor reads, loaded and clamped once at startup.
@@ -26,9 +26,20 @@ type Settings struct {
 	WebAllowedOrigin string
 	FrontendDir      string
 
-	StatusPageEnabled bool
-	StatusPageTitle   string
-	HiddenSections    []string
+	MediaCleanup            bool
+	MediaCleanupDays        int
+	MediaCleanupNoticeDays  int
+	MediaCleanupRatio       float64
+	MediaCleanupRatioDays   int
+	MediaCleanupLibraries   []string
+	MediaCleanupDiskFull    int
+	SonarrURL, SonarrAPIKey string
+	RadarrURL, RadarrAPIKey string
+	WeeklyReport            bool
+	WeeklyReportAt          string
+	StatusPageEnabled       bool
+	StatusPageTitle         string
+	HiddenSections          []string
 
 	WebhookURL            string
 	DiskWebhookURL        string
@@ -44,6 +55,10 @@ type Settings struct {
 	TelegramBotToken    string
 	TelegramChatID      string
 	SlackWebhookURL     string
+	DiscordBotToken     string
+	DiscordChannelID    string
+	DiscordPublicKey    string
+	DiscordAllowedUsers []string
 	AlertWebhookURL     string
 	SMTPHost            string
 	SMTPPort            int
@@ -137,6 +152,7 @@ type Settings struct {
 	StalledActionCooldown      float64
 	StalledRecoveryGrace       float64
 	StalledAutoHandle          bool
+	StalledReplace             bool
 	StalledRetryBackoff        float64
 	StalledMaxRecoveryAttempts int
 	SeedingRatioLimit          float64
@@ -155,6 +171,11 @@ type Settings struct {
 	PlexTranscodeAlert int
 
 	ServicesFile         string
+	PluginsDir           string
+	RepairsDir           string
+	SSHDir               string
+	AgentAutoUpdate      bool
+	DockerSocket         string
 	HistoryDB            string
 	HistoryRetentionDays int
 
@@ -238,7 +259,7 @@ func (s *Settings) declare() []Field {
 			secret(&s.CrashWebhookURL, "CRASH_WEBHOOK").describe("Kernel webhook", "", "Kernel crashes, hardware errors and monitor errors."),
 			secret(&s.QBittorrentWebhookURL, "QBITTORRENT_WEBHOOK").describe("qBittorrent webhook", "", ""),
 			secret(&s.PlexWebhookURL, "PLEX_WEBHOOK").describe("Plex webhook", "", ""),
-			text(&s.AlertLogPath, "ALERT_LOG_PATH", "/var/log/server-monitor-alerts.log").describe("Fallback alert log", "", "Alerts that cannot reach Discord are written here."),
+			text(&s.AlertLogPath, "ALERT_LOG_PATH", "/var/log/nightjar-alerts.log").describe("Fallback alert log", "", "Alerts that cannot reach Discord are written here."),
 			text(&s.DashboardURL, "DASHBOARD_URL", "").describe("Dashboard address", "", "Where alert titles link to, e.g. https://monitor.example.com. Empty means no link."),
 		),
 		group("Alert channels",
@@ -248,6 +269,10 @@ func (s *Settings) declare() []Field {
 			secret(&s.TelegramBotToken, "TELEGRAM_BOT_TOKEN").describe("Telegram bot token", "", "From @BotFather."),
 			text(&s.TelegramChatID, "TELEGRAM_CHAT_ID", "").describe("Telegram chat ID", "", "A user, group or channel the bot may post to."),
 			secret(&s.SlackWebhookURL, "SLACK_WEBHOOK").describe("Slack webhook", "", "An incoming webhook URL."),
+			secret(&s.DiscordBotToken, "DISCORD_BOT_TOKEN").describe("Discord bot token", "", "A bot posts alerts with buttons to act on them. Use it instead of the Discord webhook."),
+			text(&s.DiscordChannelID, "DISCORD_CHANNEL_ID", "").describe("Bot's channel id", "", "Right-click the channel in Discord (with Developer Mode on) and copy its id."),
+			text(&s.DiscordPublicKey, "DISCORD_PUBLIC_KEY", "").describe("Bot's public key", "", "From the application's General Information page. Set its Interactions Endpoint URL to this dashboard's /discord/interactions."),
+			list(&s.DiscordAllowedUsers, "DISCORD_ALLOWED_USERS", "").describe("Who may press the buttons", "", "Discord user ids, separated by commas."),
 			secret(&s.AlertWebhookURL, "ALERT_WEBHOOK_URL").describe("JSON webhook", "", "Each alert is POSTed as JSON (title, severity, fields…) for home automation or your own tools."),
 			text(&s.SMTPHost, "SMTP_HOST", "").describe("Email server", "", "SMTP host. Port 465 uses TLS; others use STARTTLS when offered."),
 			integer(&s.SMTPPort, "SMTP_PORT", 587, 1, 65535).describe("Email port", "", ""),
@@ -300,13 +325,13 @@ func (s *Settings) declare() []Field {
 			integer(&s.KernelStabilityCheckInterval, "KERNEL_STABILITY_CHECK_INTERVAL", 10, 1).describe("Stability check every", "cycles", ""),
 			integer(&s.KernelCheckSinceMinutes, "KERNEL_CHECK_SINCE_MINUTES", 60, 1).describe("Look back", "min", "How far back each crash check reads the logs."),
 			list(&s.KernelIgnoreDevices, "KERNEL_IGNORE_DEVICES", "").describe("Ignore disk errors on", "", "Disks (e.g. sdb) whose I/O error counters to ignore."),
-			text(&s.KernelTrackingFile, "KERNEL_TRACKING_FILE", "").describe("Tracking file", "", "Remembers boot time and error counts. Empty means ~/.servermonitor_kernel_tracking.json.").startup(),
+			text(&s.KernelTrackingFile, "KERNEL_TRACKING_FILE", "").describe("Tracking file", "", "Remembers boot time and error counts. Empty means ~/.nightjar_kernel_tracking.json.").startup(),
 		),
 		group("Watchdog",
 			number(&s.MonitoringWatchdogTimeout, "MONITORING_WATCHDOG_TIMEOUT", 30, 5).describe("Loop stall timeout", "s", "Alert when a monitoring cycle stops for this long."),
 			boolean(&s.WatchdogAutoRestart, "WATCHDOG_AUTO_RESTART", false).describe("Restart a stalled monitor", "", "Restarts the systemd service."),
 			number(&s.WatchdogRestartCooldown, "WATCHDOG_RESTART_COOLDOWN", 300, 0).describe("Restart cooldown", "s", ""),
-			text(&s.SystemdServiceName, "SYSTEMD_SERVICE_NAME", "server-monitor").describe("systemd service", "", "").startup(),
+			text(&s.SystemdServiceName, "SYSTEMD_SERVICE_NAME", "nightjar").describe("systemd service", "", "").startup(),
 			boolean(&s.FreezeMonitorEnabled, "FREEZE_MONITOR_ENABLED", false).describe("Detect host freezes", "", ""),
 			number(&s.FreezeThreshold, "FREEZE_THRESHOLD", 30, 10).describe("Frozen metrics after", "s", ""),
 			number(&s.FreezeHeartbeatTimeout, "FREEZE_HEARTBEAT_TIMEOUT", 60, 20).describe("Missed heartbeat after", "s", ""),
@@ -330,6 +355,7 @@ func (s *Settings) declare() []Field {
 			integer(&s.UpdatesWindowEnd, "UPDATES_WINDOW_END", 6, 0, 23).describe("Auto-update until", "h", ""),
 			integer(&s.SystemUpdateTimeout, "SYSTEM_UPDATE_TIMEOUT", 3600, 60, 86400).describe("Longest update", "s", ""),
 			boolean(&s.UpdatesNotify, "UPDATES_NOTIFY", true).describe("Announce updates", "", "Alert when updates wait for you; automatic ones alert when installed."),
+			boolean(&s.AgentAutoUpdate, "AGENT_AUTO_UPDATE", true).describe("Update agents", "", "Keep the agents on other servers on this dashboard's version, over their HTTPS."),
 			secret(&s.GitHubToken, "GITHUB_TOKEN").describe("GitHub token", "", "Optional. Raises GitHub's limit of 60 release checks an hour."),
 		),
 		group("qBittorrent",
@@ -341,6 +367,7 @@ func (s *Settings) declare() []Field {
 			number(&s.StalledThreshold, "STALLED_TORRENT_THRESHOLD", 300, 30, 86400).describe("Stalled after", "s", ""),
 			boolean(&s.StalledAutoHandle, "STALLED_TORRENT_AUTO_HANDLE", true).describe("Recover stalled torrents", "", "Reannounces and resumes them."),
 			integer(&s.StalledMaxRecoveryAttempts, "STALLED_TORRENT_MAX_RECOVERY_ATTEMPTS", 2, 1, 20).describe("Recovery attempts", "", ""),
+			boolean(&s.StalledReplace, "STALLED_TORRENT_REPLACE", true).describe("Then replace it", "", "When recovery does not help, Sonarr or Radarr blocklist the release and search for another."),
 			number(&s.StalledActionCooldown, "STALLED_TORRENT_ACTION_COOLDOWN", 1800, 60, 86400).describe("Between attempts", "s", ""),
 			number(&s.StalledRetryBackoff, "STALLED_TORRENT_RETRY_BACKOFF", 60, 5, 3600).describe("Retry a failed attempt after", "s", ""),
 			number(&s.StalledRecoveryGrace, "STALLED_TORRENT_RECOVERY_GRACE", 120, 0, 3600).describe("Recovered after moving for", "s", ""),
@@ -360,7 +387,22 @@ func (s *Settings) declare() []Field {
 			boolean(&s.PlexNotifyStreams, "PLEX_NOTIFY_STREAMS", false).describe("Announce new streams", "", ""),
 			integer(&s.PlexTranscodeAlert, "PLEX_TRANSCODE_ALERT", 0, 0, 100).describe("Alert at transcodes", "", "0 turns it off."),
 		),
+		group("Media cleanup",
+			boolean(&s.MediaCleanup, "MEDIA_CLEANUP", false).describe("Remove what no one watches", "", "Movies and shows nobody has ever played go on a Leaving soon list, then are removed through Sonarr or Radarr, and their torrents once seeded."),
+			integer(&s.MediaCleanupDays, "MEDIA_CLEANUP_DAYS", 60, 7, 3650).describe("Never watched for", "days", "Counted from when Plex added it."),
+			integer(&s.MediaCleanupNoticeDays, "MEDIA_CLEANUP_NOTICE_DAYS", 7, 1, 90).describe("Leaving soon for", "days", "How long it is listed, and Discord told, before it goes. Mark it Keep to spare it."),
+			number(&s.MediaCleanupRatio, "MEDIA_CLEANUP_RATIO", 1.0, 0, 100).describe("Seed torrents to ratio", "", "Its torrents are removed once they reach it; 0 removes them at once."),
+			integer(&s.MediaCleanupRatioDays, "MEDIA_CLEANUP_RATIO_DAYS", 30, 0, 3650).describe("Give up seeding after", "days", "Then it is removed even below the ratio."),
+			integer(&s.MediaCleanupDiskFull, "MEDIA_CLEANUP_DISK_FULL", 90, 0, 100).describe("Hurry when the disk is", "%", "Past this, what is leaving goes after a day instead of the week, biggest first. 0 never hurries."),
+			list(&s.MediaCleanupLibraries, "MEDIA_CLEANUP_LIBRARIES", "").describe("Only these libraries", "", "Library names, separated by commas. Empty takes every movie and show library."),
+			text(&s.SonarrURL, "SONARR_URL", "").describe("Sonarr URL", "", "Such as http://localhost:8989. Shows are removed through it."),
+			secret(&s.SonarrAPIKey, "SONARR_API_KEY").describe("Sonarr API key", "", "Settings → General in Sonarr."),
+			text(&s.RadarrURL, "RADARR_URL", "").describe("Radarr URL", "", "Such as http://localhost:7878. Movies are removed through it."),
+			secret(&s.RadarrAPIKey, "RADARR_API_KEY").describe("Radarr API key", "", "Settings → General in Radarr."),
+		),
 		group("Dashboard",
+			boolean(&s.WeeklyReport, "WEEKLY_REPORT", true).describe("Weekly report", "", "A summary of the week in Discord: uptime, incidents and their causes, repairs, and what is coming."),
+			text(&s.WeeklyReportAt, "WEEKLY_REPORT_AT", "Mon 09:00").describe("Send it", "", `A day and a time, such as "Mon 09:00".`),
 			boolean(&s.StatusPageEnabled, "STATUS_PAGE_ENABLED", false).describe("Public status page", "", "Names, status and uptime at /status, without the token."),
 			text(&s.StatusPageTitle, "STATUS_PAGE_TITLE", "Service Status").describe("Status page title", "", ""),
 			list(&s.HiddenSections, "DASHBOARD_HIDDEN", "").describe("Hidden sections", "", "Dashboard areas turned off under Settings → Sections. Monitoring carries on; only the dashboard hides them."),
@@ -368,7 +410,7 @@ func (s *Settings) declare() []Field {
 			text(&s.WebHost, "WEB_HOST", "127.0.0.1").describe("Listen address", "", "Every address needs the admin account to sign in; 127.0.0.1 keeps the dashboard to this machine and its reverse proxy.").startup(),
 			integer(&s.WebPort, "WEB_PORT", 8080, 1, 65535).describe("Port", "", "").startup(),
 			secret(&s.WebAuthToken, "WEB_AUTH_TOKEN").describe("API token", "", "Lets scripts use the API without signing in, as a Bearer token. People sign in with the admin account.").startup(),
-			text(&s.WebAllowedOrigin, "WEB_ALLOWED_ORIGIN", "null").describe("Allowed CORS origin", "", "").startup(),
+			text(&s.WebAllowedOrigin, "WEB_ALLOWED_ORIGIN", "").describe("Allowed CORS origin", "", "Another site that may read this dashboard's API answers, such as https://home.example.com. Empty for none.").startup(),
 			text(&s.FrontendDir, "FRONTEND_DIR", "").describe("Frontend directory", "", "Serve the UI from disk instead of the binary.").startup(),
 		),
 		group("Storage and logging",
@@ -376,10 +418,14 @@ func (s *Settings) declare() []Field {
 			choice(&s.LogFormat, "LOG_FORMAT", "text", []string{"text", "json"}, nil).describe("Log format", "", "text is one aligned line per entry; json suits log shippers (Loki, Vector, Datadog).").startup(),
 			text(&s.HistoryDB, "HISTORY_DB", DefaultHistoryDB).describe("Database", "", "Check history, checks and dashboard settings.").startup(),
 			text(&s.ServicesFile, "SERVICES_FILE", "services.json").describe("Import checks from", "", "Read once, while the database has no checks.").startup(),
-			text(&s.LogFile, "LOG_FILE", "server_monitor.log").describe("Log file", "", "").startup(),
+			text(&s.PluginsDir, "PLUGINS_DIR", "plugins").describe("Plugins folder", "", "Nightjar looks here for plugins, one folder each.").startup(),
+			text(&s.RepairsDir, "REPAIRS_DIR", "repairs").describe("Repair scripts folder", "", "Scripts a check can run to repair itself when it goes down.").startup(),
+			text(&s.SSHDir, "SSH_DIR", "ssh").describe("SSH keys folder", "", "Keys Nightjar makes to log in to other servers, and the host keys it has seen.").startup(),
+			text(&s.DockerSocket, "DOCKER_SOCKET", "/var/run/docker.sock").describe("Docker socket", "", "Where Docker listens, for container checks and restarts.").startup(),
+			text(&s.LogFile, "LOG_FILE", "nightjar.log").describe("Log file", "", "").startup(),
 			integer(&s.LogMaxBytes, "LOG_MAX_BYTES", 10*1024*1024, 1024).describe("Rotate log at", "bytes", "").startup(),
 			integer(&s.LogBackupCount, "LOG_BACKUP_COUNT", 5, 0, 100).describe("Rotated logs kept", "", "").startup(),
-			text(&s.ErrorLogFile, "ERROR_LOG_FILE", "server_monitor_errors.log").describe("Error log", "", "Unexpected monitor errors with stack traces.").startup(),
+			text(&s.ErrorLogFile, "ERROR_LOG_FILE", "nightjar_errors.log").describe("Error log", "", "Unexpected monitor errors with stack traces.").startup(),
 		),
 	)
 }

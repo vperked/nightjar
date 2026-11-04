@@ -71,7 +71,7 @@ function AppCard({ a, busy, onOpen }: { a: StoreApp; busy: boolean; onOpen: () =
         <span className="app-actions">
           {url && (
             <a className="btn-quiet" href={url} target="_blank" rel="noreferrer">
-              open ↗
+              Open ↗
             </a>
           )}
           {!a.installed ? (
@@ -81,7 +81,7 @@ function AppCard({ a, busy, onOpen }: { a: StoreApp; busy: boolean; onOpen: () =
           ) : (
             a.by === 'store' && (
               <button className="btn-quiet" onClick={onOpen} disabled={busy}>
-                manage
+                Manage
               </button>
             )
           )}
@@ -116,7 +116,7 @@ function Console({ job }: { job: AppJob }) {
 function NtfyHookup({ a }: { a: StoreApp }) {
   const notify = useToast();
   const [busy, setBusy] = useState(false);
-  const topic = useMemo(() => `servermonitor-${Math.random().toString(36).slice(2, 10)}`, []);
+  const topic = useMemo(() => `nightjar-${Math.random().toString(36).slice(2, 10)}`, []);
   // From the box itself (an SSH tunnel), the browser's host is no use to a phone.
   const host = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname) ? '<box-ip>' : window.location.hostname;
   const use = async () => {
@@ -240,7 +240,7 @@ function InstallSheet({ a, job, user, onClose, onStarted }: { a: StoreApp; job: 
             )}
             {a.port > 0 && (
               <label className="check">
-                <input type="checkbox" checked={check} onChange={(e) => setCheck(e.target.checked)} /> add an uptime check for it
+                <input type="checkbox" checked={check} onChange={(e) => setCheck(e.target.checked)} /> Add an uptime check for it
               </label>
             )}
             <p className="form-help">
@@ -260,23 +260,23 @@ function InstallSheet({ a, job, user, onClose, onStarted }: { a: StoreApp; job: 
             {error && <p className="form-error">{error}</p>}
             <div className="install-manage">
               <button className="btn-quiet" onClick={install}>
-                reinstall latest
+                Reinstall latest
               </button>
               {confirmRemove ? (
                 <span className="confirm">
                   <label className="check">
-                    <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} /> also delete its settings and data
+                    <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} /> Also delete its settings and data
                   </label>
                   <button className="btn-quiet danger" onClick={remove}>
-                    remove
+                    Remove
                   </button>
                   <button className="btn-quiet" onClick={() => setConfirmRemove(false)}>
-                    keep
+                    Keep
                   </button>
                 </span>
               ) : (
                 <button className="btn-quiet danger" onClick={() => setConfirmRemove(true)}>
-                  remove…
+                  Remove…
                 </button>
               )}
             </div>

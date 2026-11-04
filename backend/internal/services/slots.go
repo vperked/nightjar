@@ -1,6 +1,6 @@
 package services
 
-import "servermonitor/internal/storage"
+import "nightjar/internal/storage"
 
 // Checks are summarised in 5-minute slots covering the longest reported window (30 days),
 // so uptime and the 7d / 30d charts are short in-memory scans with no database work per request.

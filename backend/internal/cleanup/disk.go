@@ -15,9 +15,9 @@ import (
 	"syscall"
 	"time"
 
-	"servermonitor/internal/collect"
-	"servermonitor/internal/format"
-	"servermonitor/internal/logx"
+	"nightjar/internal/collect"
+	"nightjar/internal/format"
+	"nightjar/internal/logx"
 )
 
 var diskLog = logx.Component("Disk")

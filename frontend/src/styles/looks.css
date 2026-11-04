@@ -1,0 +1,448 @@
+/*
+  The other looks, chosen under Settings → Appearance. The dot matrix is the stylesheets' own;
+  these override it: meters drawn as lines and bars instead of dots, the rounded-card style, and
+  compact density. Their selectors carry the root's attribute, so they win over the base rules.
+*/
+
+/* ---------- charts and meters as lines ---------- */
+
+:root[data-charts='lines'] .chart .grid-line {
+  stroke: var(--rule);
+  stroke-dasharray: 2 4;
+  stroke-linecap: butt;
+}
+:root[data-charts='lines'] .chart .line {
+  stroke-width: 2;
+}
+:root[data-charts='lines'] .chart.compact .line {
+  stroke-width: 1.75;
+}
+:root[data-charts='lines'] .chart-empty.compact {
+  background: none;
+  border-bottom: 1.5px dashed var(--rule-strong);
+}
+:root[data-charts='lines'] .ticks {
+  align-items: stretch;
+  justify-content: normal;
+}
+:root[data-charts='lines'] .tick {
+  flex: 1 1 0;
+  aspect-ratio: auto;
+  border-radius: 2px;
+  background: var(--good-mark);
+  box-shadow: none;
+}
+:root[data-charts='lines'] .tick.down {
+  background: var(--crit-mark);
+}
+:root[data-charts='lines'] .tick.pad {
+  background: var(--track);
+}
+:root[data-charts='lines'] .bar {
+  --lit: var(--ink-2);
+  height: 6px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+:root[data-charts='lines'] .bar.warn {
+  --lit: var(--warn-mark);
+}
+:root[data-charts='lines'] .bar.crit {
+  --lit: var(--crit-mark);
+}
+:root[data-charts='lines'] .bar > span {
+  border-radius: 999px;
+  background: var(--lit);
+}
+:root[data-charts='lines'] .core {
+  border-radius: var(--radius-sm);
+  background: var(--track);
+  overflow: hidden;
+}
+:root[data-charts='lines'] .core > span {
+  background: var(--series-1);
+}
+
+/* ---------- cards: rounded, raised panels in sans, a soft light at the top ---------- */
+
+:root[data-style='cards'] {
+  --radius: 12px;
+  --radius-sm: 8px;
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 140px);
+  --glow: radial-gradient(ellipse 70% 100% at 50% 0%, rgba(255, 255, 255, 0.06), transparent 70%);
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-lift: 0 16px 44px rgba(0, 0, 0, 0.7), 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+:root[data-style='cards'][data-theme='light'] {
+  --sheen: linear-gradient(transparent, transparent);
+  --glow: radial-gradient(ellipse 70% 100% at 50% 0%, rgba(0, 0, 0, 0.035), transparent 70%);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 2px 10px rgba(0, 0, 0, 0.03);
+  --shadow-lift: 0 14px 40px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+:root[data-style='cards'] body {
+  background-image: none;
+}
+:root[data-style='cards'] .section,
+:root[data-style='cards'] .readout,
+:root[data-style='cards'] .panel,
+:root[data-style='cards'] .stats-row > div {
+  background: var(--sheen), var(--surface);
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 18px;
+}
+:root[data-style='cards'] .section::before,
+:root[data-style='cards'] .panel::before,
+:root[data-style='cards'] .section-head .label::before {
+  content: none;
+}
+:root[data-style='cards'] main > .section,
+:root[data-style='cards'] .col > .section,
+:root[data-style='cards'] main > .panel,
+:root[data-style='cards'] .settings-groups > .section {
+  margin-top: 12px;
+}
+:root[data-style='cards'] .settings-groups > .set-group {
+  padding: 0;
+}
+:root[data-style='cards'] .columns {
+  gap: 0 12px;
+}
+:root[data-style='cards'] .section-head .label,
+:root[data-style='cards'] .readout > .label,
+:root[data-style='cards'] .readout-head .label,
+:root[data-style='cards'] .stats-row .label {
+  font-family: var(--sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  color: var(--ink-2);
+}
+:root[data-style='cards'] .readouts,
+:root[data-style='cards'] .stats-row {
+  gap: 12px;
+  margin-top: 16px;
+  border: 0;
+}
+/* A reading's chart runs to its card's edges. */
+:root[data-style='cards'] .readout {
+  padding: 14px 16px 0;
+  overflow: hidden;
+}
+:root[data-style='cards'] .readout .chart,
+:root[data-style='cards'] .readout .chart-empty {
+  margin: auto -16px 0;
+  padding-top: 14px;
+  width: calc(100% + 32px);
+}
+:root[data-style='cards'] .readout-gauge {
+  margin-bottom: 18px;
+}
+:root[data-style='cards'] .stats-row > div {
+  padding: 14px 16px 16px;
+}
+:root[data-style='cards'] .readout-value,
+:root[data-style='cards'] .page-title h1 {
+  font-family: var(--sans);
+  font-weight: 650;
+  letter-spacing: -0.04em;
+}
+:root[data-style='cards'] .readout-value {
+  font-size: 38px;
+  margin-top: 6px;
+}
+:root[data-style='cards'] .stats-row .readout-value {
+  font-size: 30px;
+}
+:root[data-style='cards'] .net-pair .readout-value {
+  font-size: 24px;
+}
+:root[data-style='cards'] .page-title h1 {
+  font-weight: 700;
+  letter-spacing: -0.035em;
+}
+:root[data-style='cards'] .readout-sub,
+:root[data-style='cards'] .page-sub,
+:root[data-style='cards'] .chart .axis-text,
+:root[data-style='cards'] .tooltip,
+:root[data-style='cards'] .legend,
+:root[data-style='cards'] .core-axis {
+  font-family: var(--sans);
+}
+:root[data-style='cards'] .page-sub {
+  font-size: 13px;
+}
+:root[data-style='cards'] .health-verdict {
+  padding: 5px 12px 5px 10px;
+  border-radius: var(--radius-sm);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+:root[data-style='cards'] .health-chip {
+  padding: 5px 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--card-rule);
+  color: var(--ink-2);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+:root[data-style='cards'] .health-chip.warn,
+:root[data-style='cards'] .health-chip.crit {
+  color: var(--tone);
+  background: color-mix(in srgb, var(--tone) 13%, var(--surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 28%, transparent);
+}
+:root[data-style='cards'] .state {
+  padding: 2px 9px 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tone) 12%, transparent);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+:root[data-style='cards'] .table th,
+:root[data-style='cards'] .subtabs {
+  font-family: var(--sans);
+}
+:root[data-style='cards'] .subtabs {
+  font-size: 13.5px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+:root[data-style='cards'] .table tbody tr.link:hover td:first-child {
+  box-shadow: none;
+  border-radius: 10px 0 0 10px;
+}
+:root[data-style='cards'] .table tbody tr.link:hover td:last-child {
+  border-radius: 0 10px 10px 0;
+}
+:root[data-style='cards'] .attention {
+  padding: 14px 16px 16px;
+  border: 1px solid color-mix(in srgb, var(--crit) 22%, var(--rule));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--crit) 5%, var(--surface));
+  box-shadow: var(--shadow);
+}
+:root[data-style='cards'] .attention-icon,
+:root[data-style='cards'] .attention-chip {
+  border-radius: 999px;
+}
+:root[data-style='cards'] .attention-chip {
+  border-color: var(--rule);
+  background: var(--surface);
+}
+:root[data-style='cards'] .empty {
+  border-style: dashed;
+}
+:root[data-style='cards'] .masthead {
+  border-bottom-color: var(--card-rule);
+}
+/* The tabs sit in a pill with a raised highlight; phones keep their bottom bar. */
+@media (min-width: 761px) {
+  :root[data-style='cards'] .nav {
+    padding: 3px;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--bg-sunk) 80%, transparent);
+    box-shadow: inset 0 0 0 1px var(--card-rule);
+  }
+  :root[data-style='cards'] .nav a {
+    padding: 6px 13px;
+    border-radius: 9px;
+    font-family: var(--sans);
+    font-size: 13px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  :root[data-style='cards'] .nav-indicator {
+    top: 3px;
+    bottom: 3px;
+    height: auto;
+    border-radius: 9px;
+    background: var(--surface-2);
+    box-shadow:
+      0 0 0 1px var(--card-rule),
+      0 1px 3px rgba(0, 0, 0, 0.2),
+      inset 0 -2px 0 color-mix(in srgb, var(--accent) 75%, transparent);
+  }
+}
+@media (max-width: 760px) {
+  :root[data-style='cards'] .nav a {
+    font-family: var(--sans);
+    font-size: 11px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+}
+@media (max-width: 640px) {
+  :root[data-style='cards'] .readouts {
+    gap: 10px;
+  }
+  :root[data-style='cards'] .readout {
+    padding: 12px 14px 0;
+  }
+  :root[data-style='cards'] .readout .chart,
+  :root[data-style='cards'] .readout .chart-empty {
+    margin: auto -14px 0;
+    width: calc(100% + 28px);
+  }
+  :root[data-style='cards'] .readout-value {
+    font-size: 28px;
+  }
+  :root[data-style='cards'] .net-pair .readout-value {
+    font-size: 14px;
+  }
+}
+
+/* ---------- ruled, softened: the default keeps its rules and mono, but nothing is a hard box ---------- */
+
+/* The four readings are rounded tiles with room between them, not cells of one ruled strip. */
+:root:not([data-style='cards']) :is(.readouts, .stats-row) {
+  gap: 12px;
+  border: 0;
+}
+:root:not([data-style='cards']) :is(.readout, .stats-row > div) {
+  padding: 14px 18px 16px;
+  border: 1px solid var(--card-rule);
+  border-radius: 14px;
+  background-color: var(--surface);
+  overflow: hidden;
+}
+:root:not([data-style='cards']) .section::before,
+:root:not([data-style='cards']) .panel::before {
+  content: none;
+}
+/* Sections are soft panels like the tiles above them, not regions opened by a hard rule; they keep
+   their mono numbered titles, which is what makes this look Ruled rather than Cards. */
+:root:not([data-style='cards']) :is(.section, .panel) {
+  padding: 16px 20px 18px;
+  border: 1px solid var(--card-rule);
+  border-radius: 14px;
+  background-color: var(--surface);
+}
+:root:not([data-style='cards']) :is(main > .section, .col > .section, main > .panel, .settings-groups > .section) {
+  margin-top: 12px;
+}
+:root:not([data-style='cards']) .settings-groups > .set-group {
+  padding: 0;
+}
+:root:not([data-style='cards']) .columns {
+  gap: 0 12px;
+}
+/* Rows are parted by quiet lines, and a hovered row is a rounded band. */
+:root:not([data-style='cards']) :is(.table td, .kv dt, .kv dd) {
+  border-bottom-color: color-mix(in srgb, var(--rule) 60%, transparent);
+}
+:root:not([data-style='cards']) .table tbody tr.link:hover td:first-child {
+  box-shadow: none;
+  border-radius: 10px 0 0 10px;
+}
+:root:not([data-style='cards']) .table tbody tr.link:hover td:last-child {
+  border-radius: 0 10px 10px 0;
+}
+/* Tags are pills; banners and boxes have rounded corners. */
+:root:not([data-style='cards']) :is(.health-chip, .health-verdict, .attention-chip, .attention-icon, .inc-state, .inc-kind, .inc-hit) {
+  border-radius: 999px;
+}
+/* A stripe down one side bends with a rounded corner, so their tone tints the whole edge instead. */
+:root:not([data-style='cards']) :is(.latest-incident, .attention) {
+  border: 1px solid var(--rule-strong);
+  border-radius: 12px;
+}
+:root:not([data-style='cards']) :is(.latest-incident.ongoing, .attention) {
+  border-color: color-mix(in srgb, var(--crit) 35%, var(--rule));
+}
+:root:not([data-style='cards']) .latest-incident:hover {
+  border-color: var(--ink-3);
+}
+:root:not([data-style='cards']) :is(.repairs pre, .hb-output pre, .stream-foot, .plugin-missing, .twofa-secret, .twofa-recovery code, .unit-facts > div, .bell-quiet) {
+  border-radius: var(--radius);
+}
+/* Check results have soft corners and the disk gauge is one rounded bar. */
+:root:not([data-style='cards'])[data-charts='lines'] .tick {
+  border-radius: 4px;
+}
+:root:not([data-style='cards'])[data-charts='lines'] .readout-gauge {
+  height: 10px;
+  margin-bottom: 22px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+:root:not([data-style='cards'])[data-charts='lines'] .readout-gauge > span {
+  width: calc(var(--v) * 1%);
+  clip-path: none;
+  border-radius: 999px;
+  background: var(--lit);
+}
+@media (max-width: 640px) {
+  :root:not([data-style='cards']) :is(.readouts, .stats-row) {
+    gap: 10px;
+  }
+  :root:not([data-style='cards']) :is(.readout, .stats-row > div) {
+    padding: 12px 14px 14px;
+  }
+  :root:not([data-style='cards']) :is(.section, .panel) {
+    padding: 14px 14px 16px;
+  }
+  :root:not([data-style='cards']) .latest-incident .inc-state {
+    justify-self: start;
+  }
+}
+
+/* ---------- compact: tighter spacing and a smaller type size, for more on one screen ---------- */
+
+:root[data-density='compact'] body {
+  font-size: 13px;
+}
+:root[data-density='compact'] .page-title {
+  padding-top: 18px;
+}
+:root[data-density='compact'] .page-title h1 {
+  font-size: 24px;
+}
+:root[data-density='compact'] .section,
+:root[data-density='compact'] .panel {
+  padding-top: 10px;
+  padding-bottom: 14px;
+}
+:root[data-density='compact'] main > .section,
+:root[data-density='compact'] .col > .section,
+:root[data-density='compact'] main > .panel {
+  margin-top: 10px;
+}
+:root[data-density='compact'] .section-head {
+  margin-bottom: 8px;
+}
+:root[data-density='compact'] .readouts,
+:root[data-density='compact'] .stats-row {
+  margin-top: 12px;
+}
+:root[data-density='compact'] .readout-value {
+  font-size: 30px;
+}
+:root[data-density='compact'] .net-pair .readout-value,
+:root[data-density='compact'] .stats-row .readout-value {
+  font-size: 22px;
+}
+:root[data-density='compact'] .table td {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+:root[data-density='compact'] .kv dt,
+:root[data-density='compact'] .kv dd {
+  padding: 4px 0;
+}
+:root[data-charts='lines'] .plex-days .core > span {
+  background: var(--ink-3);
+}

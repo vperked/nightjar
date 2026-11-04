@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
-	"servermonitor/internal/cleanup"
-	"servermonitor/internal/discord"
-	"servermonitor/internal/format"
+	"nightjar/internal/cleanup"
+	"nightjar/internal/discord"
+	"nightjar/internal/format"
 )
 
 const pressureCheckInterval = 5

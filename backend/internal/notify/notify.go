@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/logx"
+	"nightjar/internal/discord"
+	"nightjar/internal/logx"
 )
 
 var log = logx.Component("Notify")
@@ -183,7 +183,7 @@ func Test(channels []Channel) []Result {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ok := c.SendEmbed("Test alert", "Alerts from server monitor reach this channel.", discord.Info,
+			ok := c.SendEmbed("Test alert", "Alerts from Nightjar reach this channel.", discord.Info,
 				[]discord.Field{{Name: "Severity colours", Value: "🔴 critical · 🟠 warning · 🟢 recovered · 🔵 info"}}, "Test")
 			results[i] = Result{Channel: c.Name(), OK: ok}
 			if !ok {

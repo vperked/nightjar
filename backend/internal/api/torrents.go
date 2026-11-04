@@ -23,7 +23,7 @@ func (s *Server) needQB(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) qbCategories(w http.ResponseWriter, r *http.Request) {
 	cats, err := s.ctx.QBittorrent.Categories()
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		writeJSON(w, statusRefused, errBody(err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"categories": cats})
@@ -43,7 +43,7 @@ func (s *Server) qbAction(w http.ResponseWriter, r *http.Request) {
 	}
 	qb := s.ctx.QBittorrent
 	if err := qb.Apply(req.Action, req.Hashes, req.DeleteFiles); err != nil {
-		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		writeJSON(w, statusRefused, errBody(err.Error()))
 		return
 	}
 	log.Info("qBittorrent action from the dashboard", "action", req.Action, "torrents", len(req.Hashes), "delete_files", req.DeleteFiles)

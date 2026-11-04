@@ -60,7 +60,7 @@ export function AddTorrents({ onClose, onAdded }: { onClose: () => void; onAdded
           />
         </span>
         <label className="check">
-          <input type="checkbox" checked={stopped} onChange={(e) => setStopped(e.target.checked)} /> add stopped
+          <input type="checkbox" checked={stopped} onChange={(e) => setStopped(e.target.checked)} /> Add stopped
         </label>
       </div>
       <div className="form-actions">
@@ -70,10 +70,10 @@ export function AddTorrents({ onClose, onAdded }: { onClose: () => void; onAdded
           </p>
         )}
         <button type="button" className="btn-quiet" onClick={onClose}>
-          cancel
+          Cancel
         </button>
         <button type="submit" className="btn" disabled={saving || !urls.trim()}>
-          {saving ? 'adding…' : 'Add'}
+          {saving ? 'Adding…' : 'Add'}
         </button>
       </div>
     </form>

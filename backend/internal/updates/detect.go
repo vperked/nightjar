@@ -201,7 +201,7 @@ func (d detector) self() (Spec, bool) {
 			if !isFile(filepath.Join(dir, "Makefile")) {
 				return Spec{}, false
 			}
-			return Spec{ID: "servermonitor", Name: "Server Monitor", Kind: KindGit, Dir: dir, Self: true, UpdateCommand: buildCommand()}, true
+			return Spec{ID: "nightjar", Name: "Nightjar", Kind: KindGit, Dir: dir, Self: true, UpdateCommand: buildCommand()}, true
 		}
 	}
 	return Spec{}, false

@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"servermonitor/internal/format"
-	"servermonitor/internal/logx"
+	"nightjar/internal/format"
+	"nightjar/internal/logx"
 )
 
 var logsLog = logx.Component("Logs")

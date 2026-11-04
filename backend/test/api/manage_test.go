@@ -11,14 +11,14 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/api"
-	"servermonitor/internal/collect"
-	"servermonitor/internal/config"
-	"servermonitor/internal/discord"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/notify"
-	"servermonitor/internal/services"
-	"servermonitor/internal/storage"
+	"nightjar/internal/api"
+	"nightjar/internal/collect"
+	"nightjar/internal/config"
+	"nightjar/internal/discord"
+	"nightjar/internal/monitor"
+	"nightjar/internal/notify"
+	"nightjar/internal/services"
+	"nightjar/internal/storage"
 )
 
 type managed struct {
@@ -175,6 +175,9 @@ func TestAlertTestEndpoint(t *testing.T) {
 	results := body["results"].([]any)
 	if code != http.StatusOK || len(results) != 1 || results[0].(map[string]any)["ok"] != true {
 		t.Fatalf("test alerts: %d %v", code, body)
+	}
+	if code, body := m.send(t, http.MethodPost, "/api/alerts/test", "{}"); code != http.StatusTooManyRequests {
+		t.Fatalf("a second test straight away should be refused, got %d %v", code, body)
 	}
 }
 

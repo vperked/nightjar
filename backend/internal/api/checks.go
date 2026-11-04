@@ -1,11 +1,12 @@
 package api
 
 import (
+	"cmp"
 	"errors"
 	"io"
 	"net/http"
 
-	"servermonitor/internal/services"
+	"nightjar/internal/services"
 )
 
 // Uptime checks: list, add, change, delete and test them.
@@ -36,6 +37,12 @@ func (s *Server) saveCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renameInDesign(oldName, spec.Name)
+	if oldName != "" && oldName != spec.Name {
+		s.cfg.Store.RenameRepairs(oldName, spec.Name)
+		s.ctx.Maintenance.Rename(oldName, spec.Name)
+	}
+	// A changed check starts any outage, and its repairs, over.
+	s.ctx.Repairs.Forget(cmp.Or(oldName, spec.Name))
 	code := http.StatusOK
 	if oldName == "" {
 		code = http.StatusCreated
@@ -60,6 +67,10 @@ func (s *Server) testCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec.Timeout = min(spec.Timeout, maxTestTimeout)
+	// A ping test sends only as many echoes as fit in that time.
+	for spec.Type == "ping" && spec.PingCount > 1 && spec.PingDuration() > maxTestTimeout {
+		spec.PingCount--
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": services.Run(spec)})
 }
 
@@ -68,6 +79,7 @@ func (s *Server) deleteCheck(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, checkErrorStatus(err), errBody(err.Error()))
 		return
 	}
+	s.ctx.Repairs.Forget(r.PathValue("name"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

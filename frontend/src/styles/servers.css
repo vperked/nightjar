@@ -1,0 +1,496 @@
+/* Servers: other machines watched through their agents, the add-server sheet and one server's page. */
+
+.host-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+.host-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px 18px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  transition:
+    border-color 0.15s,
+    transform 0.15s;
+}
+.host-card:hover {
+  border-color: color-mix(in srgb, var(--ink) 22%, var(--rule));
+  transform: translateY(-1px);
+}
+.host-card:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
+}
+.host-card.offline {
+  border-color: color-mix(in srgb, var(--crit) 40%, var(--rule));
+}
+.host-card.offline .host-metrics,
+.host-card.offline .host-disks,
+.host-card.offline .host-foot,
+.readouts.stale {
+  opacity: 0.55;
+}
+.host-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.host-head strong {
+  display: block;
+  font-size: 15.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.host-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+.host-error {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--crit);
+}
+.host-problems {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.host-problems li {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 13%, transparent);
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 500;
+}
+.host-problems.wide {
+  margin-top: 14px;
+}
+
+.host-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.host-metric {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.host-metric-value {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+.host-metric-value .unit {
+  margin-left: 2px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+.host-metric.warn .host-metric-value {
+  color: var(--warn);
+}
+
+.host-disks {
+  display: grid;
+  gap: 6px;
+}
+.host-disk {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.6fr) 38px;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.host-disk .num {
+  text-align: right;
+}
+.host-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.servers-empty {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 28px;
+}
+.servers-empty strong {
+  font-size: 16px;
+}
+.servers-empty p {
+  max-width: 62ch;
+  margin: 0 0 6px;
+  color: var(--ink-2);
+}
+
+/* ---------- adding a server ---------- */
+
+.add-steps {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+.add-steps li {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  padding-left: 32px;
+  counter-increment: step;
+}
+.add-steps li::before {
+  content: counter(step);
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--series-1) 14%, transparent);
+  color: var(--series-1);
+  font-size: 12px;
+  font-weight: 600;
+}
+.add-steps p {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+.add-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.agent-download {
+  justify-self: start;
+  display: inline-flex;
+  gap: 6px;
+  text-decoration: none;
+}
+.agent-download .num {
+  opacity: 0.7;
+  font-weight: 400;
+}
+.cmd {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.cmd code {
+  flex: 1;
+  min-width: 0;
+  padding-top: 3px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.cmd .btn-quiet {
+  flex: none;
+}
+.add-token summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+}
+.add-token[open] summary {
+  margin-bottom: 8px;
+}
+.add-server .field {
+  width: 100%;
+}
+
+/* How to watch it: two cards to choose between. */
+.add-how {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.add-how-option {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.add-how-option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.add-how-option strong {
+  font-size: 14px;
+}
+.add-how-option span {
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--ink-3);
+}
+.add-how-option.on {
+  border-color: var(--series-1);
+  background: color-mix(in srgb, var(--series-1) 7%, var(--surface));
+}
+.add-how-option:has(input:focus-visible) {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
+}
+.check-fields {
+  display: grid;
+  gap: 8px;
+}
+.check-fields p {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+.port-field .field {
+  width: 120px !important;
+}
+.add-steps .check {
+  font-size: 13px;
+}
+.host-metrics.check {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+}
+
+/* ---------- one server ---------- */
+
+.host-net {
+  display: flex;
+  flex-direction: column;
+  font-size: 19px;
+  line-height: 1.35;
+}
+.host-alert {
+  margin-top: 16px;
+}
+.host-edit {
+  display: grid;
+  gap: 12px;
+}
+.host-edit .field {
+  width: 100%;
+}
+.host-edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.host-edit .form-help {
+  margin: 0;
+}
+.remote-table td:first-child a {
+  display: block;
+  font-weight: 500;
+}
+.remote-table tr.stale td:nth-child(n + 3) {
+  color: var(--ink-3);
+}
+
+@media (max-width: 640px) {
+  .host-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .add-how {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .host-metric-value {
+    font-size: 21px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .host-card {
+    transition: none;
+  }
+  .host-card:hover {
+    transform: none;
+  }
+}
+
+/* SSH: a login Nightjar keeps for a server, and what it can do with it. */
+.ssh-new-key {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+.ssh-public {
+  display: grid;
+  gap: 6px;
+}
+.ssh-public .form-help {
+  margin: 0;
+}
+.ssh-login-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px;
+  gap: 10px;
+}
+.ssh-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.ssh-setup {
+  margin-top: 12px;
+  justify-content: flex-start;
+}
+.ssh-result {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--good-mark) 35%, var(--rule));
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+}
+.ssh-result.bad {
+  border-color: color-mix(in srgb, var(--crit-mark) 35%, var(--rule));
+}
+.ssh-result-head {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--good);
+}
+.ssh-result.bad .ssh-result-head {
+  color: var(--crit);
+}
+.ssh-result pre {
+  margin: 6px 0 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+}
+.ssh-own-key {
+  display: grid;
+  gap: 10px;
+}
+.ssh-own-key .form-help {
+  margin: 0;
+}
+.ssh-private {
+  min-height: 120px;
+  font-size: 12px;
+  line-height: 1.45;
+  resize: vertical;
+}
+.add-note {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 13px;
+}
+.add-note a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--rule-strong);
+  text-underline-offset: 3px;
+}
+.ssh-only-note {
+  margin: 14px 2px 0;
+}
+.add-ssh {
+  display: grid;
+  gap: 12px;
+}
+.agent-update {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bg-sunk);
+  color: var(--ink-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.agent-update.updated {
+  color: var(--good);
+}
+.agent-update.failed,
+.agent-update.manual {
+  color: var(--warn);
+}
+.agent-reinstall,
+.agent-reinstall-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+.agent-reinstall-hint {
+  color: var(--ink-3);
+}
+.agent-reinstall {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-decoration-color: var(--rule-strong);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.agent-reinstall:hover {
+  text-decoration-color: currentColor;
+}
+.agent-reinstall:disabled {
+  color: var(--ink-3);
+  cursor: default;
+}
+.ssh-public-line summary {
+  margin-top: 4px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.ssh-public-line .cmd {
+  margin-top: 6px;
+}

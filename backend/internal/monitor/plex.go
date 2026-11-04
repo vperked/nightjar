@@ -3,15 +3,19 @@ package monitor
 import (
 	"fmt"
 	"strings"
+	"time"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/format"
-	"servermonitor/internal/plex"
+	"nightjar/internal/discord"
+	"nightjar/internal/format"
+	"nightjar/internal/plex"
+	"nightjar/internal/plexstats"
+	"nightjar/internal/storage"
 )
 
 // plexWatcher polls Plex on its own interval and alerts on outages, transcode load and new streams.
 type plexWatcher struct {
 	handler
+	shelved float64 // when the libraries were last counted for the stats
 }
 
 func (h *plexWatcher) check(s *Snapshot) {
@@ -24,17 +28,21 @@ func (h *plexWatcher) check(s *Snapshot) {
 		switch e.Kind {
 		case plex.EventDown:
 			h.raiseAlert("plex:down", s.Now, "Plex unreachable: "+e.Detail, hook, func() bool {
-				return hook.SendEmbed("Plex Down", e.Detail, discord.Critical, []discord.Field{
-					field("Server", m.URL(), false), field("Failed checks", fmt.Sprint(m.Failures()), true),
+				return hook.SendEmbed("Plex is down", e.Detail, discord.Critical, []discord.Field{
+					field("Server", "`"+m.URL()+"`", true), field("Failed checks", fmt.Sprint(m.Failures()), true),
 				}, "Plex")
 			}, "plex_down", true)
 		case plex.EventUp:
 			h.log.Info(fmt.Sprintf("[RECOVERED] Plex reachable again after %s", format.Duration(e.Downtime)))
 			if hook != nil {
-				hook.SendEmbed("Plex Recovered", "Plex Media Server is reachable again", discord.OK, []discord.Field{
-					field("Down for", format.Duration(e.Downtime), true),
+				hook.SendEmbed("Plex is back up", "Plex Media Server answers again.", discord.OK, []discord.Field{
+					field("Down for", discord.Span(e.Downtime), true),
 				}, "Plex")
 			}
+		case plex.EventStreamEnd:
+			p := e.Play
+			h.ctx.Store.AddPlexPlay(storage.PlexPlay{Started: p.Started, Ended: p.Ended, User: p.User, Kind: p.Kind, Title: p.Title, Subtitle: p.Subtitle,
+				Player: p.Player, Decision: p.Decision, Local: p.Local, Progress: p.Progress, DurationMS: p.DurationMS, Reason: p.Reason})
 		case plex.EventStreamStart:
 			st := e.Stream
 			h.log.Info(fmt.Sprintf("Stream started: %s - %s on %s (%s)", st.User, streamName(st), st.Player, decision(st)))
@@ -47,6 +55,12 @@ func (h *plexWatcher) check(s *Snapshot) {
 			}
 		}
 	}
+	// The libraries' sizes for the stats' "added this week", and old plays dropped, each hour.
+	if s.Now-h.shelved >= 3600 && len(m.Libraries()) > 0 {
+		h.shelved = s.Now
+		plexstats.RecordLibraries(h.ctx.Store, m.Libraries(), time.Unix(int64(s.Now), 0))
+		h.ctx.Store.PrunePlexPlays(s.Now - float64(h.ctx.Cfg.HistoryRetentionDays)*86400)
+	}
 	if f := m.Failures(); f > 0 && f <= m.Retries() {
 		h.log.Info(fmt.Sprintf("Plex check failed (%s) [%d/%d]", m.Detail(), f, m.Retries()+1))
 	}
@@ -54,7 +68,7 @@ func (h *plexWatcher) check(s *Snapshot) {
 		if n := m.Transcodes(); n >= limit {
 			msg := fmt.Sprintf("Plex is transcoding %d stream(s) (alert at %d)", n, limit)
 			h.raiseAlert("plex:transcode", s.Now, msg, hook, func() bool {
-				return hook.SendEmbed("Plex Transcode Load", msg, discord.Warning, []discord.Field{
+				return hook.SendEmbed(fmt.Sprintf("Plex is transcoding %d streams", n), msg, discord.Warning, []discord.Field{
 					field("Transcodes", fmt.Sprint(n), true), field("CPU", fmt.Sprintf("%.1f%%", s.CPUPercent), true),
 				}, "Plex")
 			}, "plex_transcode", true)

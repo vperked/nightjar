@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/api"
-	"servermonitor/internal/collect"
-	"servermonitor/internal/config"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/services"
+	"nightjar/internal/api"
+	"nightjar/internal/collect"
+	"nightjar/internal/config"
+	"nightjar/internal/monitor"
+	"nightjar/internal/services"
 )
 
 func newServer(t *testing.T, token string, statusPage bool) (*api.Server, *monitor.Context) {

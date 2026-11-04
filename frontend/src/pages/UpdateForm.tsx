@@ -176,7 +176,7 @@ export function UpdateForm({
             {text('unit', 'systemd unit', 'app.service')}
             {(kind === 'git' || kind === 'release') && (
               <label className="check">
-                <input type="checkbox" checked={!!draft.restart} onChange={(e) => set('restart', e.target.checked)} /> restart it after updating
+                <input type="checkbox" checked={!!draft.restart} onChange={(e) => set('restart', e.target.checked)} /> Restart it after updating
               </label>
             )}
           </span>
@@ -184,12 +184,12 @@ export function UpdateForm({
       )}
       <Row label="Automatic" hint="Installs in the update window, then alerts">
         <label className="check">
-          <input type="checkbox" checked={draft.auto} onChange={(e) => set('auto', e.target.checked)} /> update automatically
+          <input type="checkbox" checked={draft.auto} onChange={(e) => set('auto', e.target.checked)} /> Update automatically
         </label>
       </Row>
       <Row label="Paused" hint="Not checked at all">
         <label className="check">
-          <input type="checkbox" checked={draft.paused} onChange={(e) => set('paused', e.target.checked)} /> paused
+          <input type="checkbox" checked={draft.paused} onChange={(e) => set('paused', e.target.checked)} /> Paused
         </label>
       </Row>
       {!commandsEditable && (kind === 'git' || kind === 'release' || kind === 'arr') && (
@@ -204,10 +204,10 @@ export function UpdateForm({
           </p>
         )}
         <button type="button" className="btn-quiet" onClick={onCancel}>
-          cancel
+          Cancel
         </button>
         <button type="submit" className="btn" disabled={saving}>
-          {saving ? 'saving…' : initial ? 'Save' : 'Add'}
+          {saving ? 'Saving…' : initial ? 'Save' : 'Add'}
         </button>
       </div>
     </form>

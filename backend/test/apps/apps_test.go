@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/apps"
+	"nightjar/internal/apps"
 )
 
 // fakeGitHub answers "latest release" for every repo with assets for both architectures.
@@ -157,7 +157,7 @@ func TestInstallRefusals(t *testing.T) {
 	slow := make(chan struct{})
 	m2 := apps.New(apps.Options{Arch: "amd64", GitHubAPI: fakeGitHub(t).URL, ManifestDir: t.TempDir(), LockDir: t.TempDir(),
 		Systemctl: func(...string) string { return "" }, Processes: func() []string { return nil },
-		Run:       func(context.Context, string, string, func(string)) error { <-slow; return nil }})
+		Run: func(context.Context, string, string, func(string)) error { <-slow; return nil }})
 	if _, err := m2.Install("jackett", 0, "perked", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestUnsafeDownloadAddressesNeverReachTheScript(t *testing.T) {
 	ran := false
 	m := apps.New(apps.Options{Arch: "amd64", GitHubAPI: srv.URL, ManifestDir: t.TempDir(), LockDir: t.TempDir(),
 		Systemctl: func(...string) string { return "" }, Processes: func() []string { return nil },
-		Run:       func(context.Context, string, string, func(string)) error { ran = true; return nil }})
+		Run: func(context.Context, string, string, func(string)) error { ran = true; return nil }})
 	if _, err := m.Install("ntfy", 0, "perked", nil); err != nil {
 		t.Fatal(err)
 	}

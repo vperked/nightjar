@@ -20,8 +20,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"servermonitor/internal/logx"
-	"servermonitor/internal/storage"
+	"nightjar/internal/logx"
+	"nightjar/internal/storage"
 )
 
 var log = logx.Component("Accounts")
@@ -50,6 +50,12 @@ type admin struct {
 	Username string  `json:"username"`
 	Hash     string  `json:"hash"`
 	Created  float64 `json:"created"`
+	// TOTP is the authenticator secret (base32) once two-factor sign-in is on; Recovery holds the
+	// hashes of the one-time recovery codes left, and LastStep the last code's time step, so a
+	// code cannot be used twice.
+	TOTP     string   `json:"totp,omitempty"`
+	Recovery []string `json:"recovery,omitempty"`
+	LastStep int64    `json:"last_step,omitempty"`
 }
 
 // Accounts is safe for concurrent use.
@@ -61,6 +67,7 @@ type Accounts struct {
 	admin     *admin
 	setupCode string
 	sessions  map[string]*storage.Session // by hash of the cookie value
+	pending   string                      // a TOTP secret offered, not yet confirmed
 }
 
 // New loads the admin account and sessions. Without an account it makes a setup code and logs it.

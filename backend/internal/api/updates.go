@@ -5,9 +5,9 @@ import (
 	"io"
 	"net/http"
 
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/storage"
-	"servermonitor/internal/updates"
+	"nightjar/internal/monitor"
+	"nightjar/internal/storage"
+	"nightjar/internal/updates"
 )
 
 // Update targets: list, check, install and manage them.

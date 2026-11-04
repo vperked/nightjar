@@ -13,7 +13,8 @@ function hours(h: number): string {
 }
 
 // DriveRow is one disk's verdict, temperature, age and whatever counters say it is wearing out.
-function DriveRow({ d, now }: { d: Drive; now: number }) {
+// Another server's drives have no mute of their own: its alerts are muted per server.
+export function DriveRow({ d, now, mutable = true }: { d: Drive; now: number; mutable?: boolean }) {
   const [tone, word] = d.asleep && d.health === 'unknown' ? ['idle', 'Asleep'] : HEALTH[d.health];
   const facts = [
     d.capacity ? formatBytes(d.capacity) : '',
@@ -31,7 +32,7 @@ function DriveRow({ d, now }: { d: Drive; now: number }) {
           {d.model && <span className="sub mono">{d.device}</span>}
         </span>
         <span className="drive-state">
-          <MuteButton subject={`drive:${d.serial || d.device}`} label={d.model || d.device} compact />
+          {mutable && <MuteButton subject={`drive:${d.serial || d.device}`} label={d.model || d.device} compact />}
           <span className={`state ${tone}`}>{word}</span>
         </span>
       </div>

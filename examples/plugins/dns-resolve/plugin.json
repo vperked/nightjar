@@ -1,0 +1,19 @@
+{
+  "id": "dns-resolve",
+  "name": "DNS lookup",
+  "version": "1.0.0",
+  "description": "A check that is up while a host name resolves, optionally to the address you expect.",
+  "author": "Nightjar examples",
+  "provides": ["check"],
+  "run": "run.sh",
+  "timeout": 10,
+  "check": { "argument": "Host name", "placeholder": "example.com" },
+  "settings": [
+    {
+      "key": "EXPECT",
+      "label": "Expected address",
+      "help": "Down when the name resolves to anything else. Empty accepts any address.",
+      "placeholder": "93.184.215.14"
+    }
+  ]
+}

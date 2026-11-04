@@ -6,10 +6,11 @@ package storage
 import (
 	"database/sql"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 
-	"servermonitor/internal/logx"
+	"nightjar/internal/logx"
 )
 
 var log = logx.Component("Storage")
@@ -47,6 +48,53 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS idx_notifications_ts ON notifications (ts);
 CREATE INDEX IF NOT EXISTS idx_notifications_status ON notifications (status);
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, created REAL NOT NULL, seen REAL NOT NULL, agent TEXT NOT NULL DEFAULT '');
+-- One row per server per minute, for analytics: averages, peaks and the share of checks it answered.
+CREATE TABLE IF NOT EXISTS samples (
+    host TEXT NOT NULL,
+    ts REAL NOT NULL,
+    up REAL NOT NULL,
+    cpu REAL, cpu_max REAL, mem REAL, temp REAL, temp_max REAL, disk REAL, rx REAL, tx REAL, latency REAL
+);
+CREATE INDEX IF NOT EXISTS idx_samples_host_ts ON samples (host, ts);
+-- What Nightjar did to repair a check that went down, and whether the check came back after it.
+CREATE TABLE IF NOT EXISTS repairs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    service TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT '',
+    ok INTEGER NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    output TEXT NOT NULL DEFAULT '',
+    fixed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_repairs_service_ts ON repairs (service, ts);
+-- Every Plex stream that finished, for the weekly report and the Plex page's stats.
+CREATE TABLE IF NOT EXISTS plex_plays (
+    started REAL NOT NULL,
+    ended REAL NOT NULL,
+    user TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    subtitle TEXT NOT NULL DEFAULT '',
+    player TEXT NOT NULL DEFAULT '',
+    decision TEXT NOT NULL DEFAULT '',
+    local INTEGER NOT NULL DEFAULT 0,
+    progress REAL NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_plex_plays_started ON plex_plays (started);
+-- What was done, and by whom: on the dashboard, through Discord's buttons, or by Nightjar.
+CREATE TABLE IF NOT EXISTS activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    who TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT ''
+);
 `
 
 // Point is one stored check result.
@@ -259,4 +307,40 @@ func (s *Store) Prune(olderThan float64) int64 {
 	}
 	n, _ := res.RowsAffected()
 	return n
+}
+
+// Day is one calendar day of a service's checks.
+type Day struct {
+	Start  float64 // local midnight, unix seconds
+	Checks int
+	Ups    int
+}
+
+// Days summarises a service's last `days` days, midnight to midnight in the zone `offset` seconds
+// east of UTC, oldest first. Days without checks are left out.
+func (s *Store) Days(service string, days int, offset int) []Day {
+	db, unlock := s.lock()
+	defer unlock()
+	if db == nil || days < 1 {
+		return nil
+	}
+	today := (time.Now().Unix() + int64(offset)) / 86400
+	since := (today-int64(days)+1)*86400 - int64(offset)
+	rows, err := db.Query(`SELECT CAST((ts + ?1) / 86400 AS INTEGER), COUNT(*), SUM(up) FROM checks
+		WHERE service = ?2 AND ts >= ?3 GROUP BY 1 ORDER BY 1`, offset, service, since)
+	if err != nil {
+		log.Warn("History query failed", "err", err)
+		return nil
+	}
+	defer rows.Close()
+	var out []Day
+	for rows.Next() {
+		var day int64
+		var d Day
+		if rows.Scan(&day, &d.Checks, &d.Ups) == nil {
+			d.Start = float64(day*86400 - int64(offset))
+			out = append(out, d)
+		}
+	}
+	return out
 }

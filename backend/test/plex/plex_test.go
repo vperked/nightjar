@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/plex"
+	"nightjar/internal/plex"
 )
 
 const sessionsJSON = `{"MediaContainer":{"size":3,"Metadata":[
  {"sessionKey":"1","type":"episode","title":"Pilot","grandparentTitle":"Severance","parentIndex":1,"index":1,
   "duration":3000000,"viewOffset":1500000,"User":{"title":"alex"},
-  "Player":{"title":"Living Room","product":"Plex for Roku","platform":"Roku","state":"playing","local":true},
+  "Player":{"title":"Living Room","product":"Plex for Roku","platform":"Roku","state":"playing","local":true,"address":"192.168.1.20"},
   "Session":{"id":"a","bandwidth":12000,"location":"lan"},
   "Media":[{"videoResolution":"1080","bitrate":10000}]},
  {"sessionKey":"2","type":"movie","title":"Heat","year":1995,"duration":100,"viewOffset":10,"User":{"title":"sam"},
@@ -43,6 +43,17 @@ func fakePMS(t *testing.T) *httptest.Server {
 			w.Write([]byte(`{"MediaContainer":{"Release":[{"version":"1.41.0","state":"available"}]}}`))
 		case "/status/sessions":
 			w.Write([]byte(sessionsJSON))
+		case "/status/sessions/terminate":
+			switch r.URL.Query().Get("sessionId") {
+			case "a":
+				if r.URL.Query().Get("reason") != "Bedtime" {
+					t.Errorf("reason %q", r.URL.Query().Get("reason"))
+				}
+			case "b":
+				w.WriteHeader(http.StatusUnauthorized)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
 		case "/library/sections":
 			w.Write([]byte(`{"MediaContainer":{"Directory":[{"key":"1","title":"TV","type":"show","refreshing":false},{"key":"2","title":"Movies","type":"movie"}]}}`))
 		case "/library/sections/1/all":
@@ -51,6 +62,16 @@ func fakePMS(t *testing.T) *httptest.Server {
 			} else {
 				w.Write([]byte(`{"MediaContainer":{"size":0,"totalSize":40}}`))
 			}
+		case "/status/sessions/history/all":
+			if r.URL.Query().Get("sort") != "viewedAt:desc" {
+				t.Errorf("history must come newest first: %q", r.URL.RawQuery)
+			}
+			w.Write([]byte(`{"MediaContainer":{"Metadata":[
+ {"viewedAt":2000,"accountID":1,"type":"episode","title":"The Pilot","grandparentTitle":"Severance"},
+ {"viewedAt":1500,"accountID":7,"type":"movie","title":"Heat"},
+ {"viewedAt":900,"accountID":1,"type":"movie","title":"Too old"}]}}`))
+		case "/accounts":
+			w.Write([]byte(`{"MediaContainer":{"Account":[{"id":1,"name":"sam"},{"id":7,"name":"alex"}]}}`))
 		case "/library/sections/2/all":
 			w.Write([]byte(`{"MediaContainer":{"size":0,"totalSize":350}}`))
 		default:
@@ -91,6 +112,19 @@ func TestClient(t *testing.T) {
 		t.Errorf("track %+v", track)
 	}
 
+	if ep.Address != "192.168.1.20" || ep.SessionID != "a" || movie.SessionID != "b" {
+		t.Errorf("address and session ids %+v %+v", ep, movie)
+	}
+	if err := c.Terminate("a", "Bedtime"); err != nil {
+		t.Errorf("terminate: %v", err)
+	}
+	if err := c.Terminate("b", "x"); !errors.Is(err, plex.ErrStopRefused) {
+		t.Errorf("want refused, got %v", err)
+	}
+	if err := c.Terminate("gone", "x"); !errors.Is(err, plex.ErrNoStream) {
+		t.Errorf("want no stream, got %v", err)
+	}
+
 	libs, err := c.Libraries()
 	if err != nil || len(libs) != 2 {
 		t.Fatalf("libraries %v %v", libs, err)
@@ -116,6 +150,8 @@ func TestNewRejectsBadURL(t *testing.T) {
 type fake struct {
 	streams []plex.Stream
 	err     error
+	stopped []string
+	stopErr error
 }
 
 func (f *fake) URL() string                   { return "http://pms" }
@@ -125,6 +161,10 @@ func (f *fake) Sessions() ([]plex.Stream, error) {
 	return append([]plex.Stream(nil), f.streams...), f.err
 }
 func (f *fake) Libraries() ([]plex.Library, error) { return nil, nil }
+func (f *fake) Terminate(id, reason string) error {
+	f.stopped = append(f.stopped, id+": "+reason)
+	return f.stopErr
+}
 
 func kinds(events []plex.Event) string {
 	var k []string
@@ -224,5 +264,102 @@ func TestSummarySnapshotOmitsCharts(t *testing.T) {
 	m.Poll(0)
 	if s := m.Snapshot(true); len(s.Streams) != 1 || len(s.Samples) != 0 || s.Samples == nil {
 		t.Fatalf("summary %+v", s)
+	}
+}
+
+func TestMonitorStop(t *testing.T) {
+	f := &fake{streams: []plex.Stream{
+		{ID: "1", SessionID: "s1", Title: "A", Decision: plex.DirectPlay},
+		{ID: "2", Title: "B", Decision: plex.Transcode},
+	}}
+	m := plex.NewMonitor(f, 10, 1)
+	m.Poll(0)
+
+	stopped, err := m.Stop("1", "Bedtime")
+	if err != nil || stopped.Title != "A" || strings.Join(f.stopped, ",") != "s1: Bedtime" {
+		t.Fatalf("stop: %+v %v %v", stopped, err, f.stopped)
+	}
+	if snap := m.Snapshot(false); len(snap.Streams) != 1 || snap.Streams[0].ID != "2" {
+		t.Errorf("stopped stream should leave the list: %+v", snap.Streams)
+	}
+	// The next poll no longer sees it and records it as finished.
+	f.streams = f.streams[1:]
+	m.Poll(20)
+	if snap := m.Snapshot(false); len(snap.Recent) != 1 || snap.Recent[0].Title != "A" {
+		t.Errorf("recent %+v", snap.Recent)
+	}
+
+	if _, err := m.Stop("1", "x"); !errors.Is(err, plex.ErrNoStream) {
+		t.Errorf("want no stream, got %v", err)
+	}
+	if _, err := m.Stop("2", "x"); err == nil {
+		t.Error("a stream without a session id cannot be stopped")
+	}
+	f.streams = append(f.streams, plex.Stream{ID: "3", SessionID: "s3"})
+	m.Poll(40)
+	f.stopErr = plex.ErrStopRefused
+	if _, err := m.Stop("3", "x"); !errors.Is(err, plex.ErrStopRefused) {
+		t.Errorf("want refused, got %v", err)
+	}
+	if snap := m.Snapshot(false); len(snap.Streams) != 2 {
+		t.Errorf("a refused stop keeps the stream: %+v", snap.Streams)
+	}
+}
+
+func TestHistory(t *testing.T) {
+	srv := fakePMS(t)
+	defer srv.Close()
+	c, _ := plex.New(srv.URL, "secret", true, 2*time.Second)
+	got, err := c.History(1000)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("history since 1000: %v %+v", err, got)
+	}
+	if got[0].User != "sam" || got[0].Show != "Severance" || got[1].User != "alex" || got[1].Kind != "movie" {
+		t.Fatalf("entries with their accounts' names: %+v", got)
+	}
+	// A finished stream is announced, so it can be kept.
+	f := &fake{streams: []plex.Stream{{ID: "1", Title: "A", Kind: "movie", User: "sam", Decision: plex.Transcode, DurationMS: 5400000}}}
+	m := plex.NewMonitor(f, 10, 1)
+	m.Poll(0)
+	f.streams = nil
+	e := m.Poll(20)
+	if kinds(e) != plex.EventStreamEnd || e[0].Play.User != "sam" || e[0].Play.Started != 0 || e[0].Play.Ended != 20 || e[0].Play.DurationMS != 5400000 {
+		t.Fatalf("stream end: %+v", e)
+	}
+}
+
+func TestTranscodeReasons(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"MediaContainer":{"Metadata":[
+ {"sessionKey":"1","type":"movie","title":"Subs","User":{"title":"a"},"Player":{"title":"TV","local":true},"Session":{"id":"s1"},
+  "Media":[{"height":1080,"videoCodec":"h264"}],"TranscodeSession":{"videoDecision":"transcode","audioDecision":"copy","subtitleDecision":"burn"}},
+ {"sessionKey":"2","type":"movie","title":"Remote","User":{"title":"b"},"Player":{"title":"Phone","local":false},"Session":{"id":"s2"},
+  "Media":[{"height":2160,"videoCodec":"hevc"}],"TranscodeSession":{"videoDecision":"transcode","audioDecision":"copy","sourceVideoCodec":"hevc","videoCodec":"h264","height":720}},
+ {"sessionKey":"3","type":"movie","title":"Codec","User":{"title":"c"},"Player":{"title":"Old TV","local":true},"Session":{"id":"s3"},
+  "Media":[{"height":1080,"videoCodec":"hevc"}],"TranscodeSession":{"videoDecision":"transcode","audioDecision":"copy","sourceVideoCodec":"hevc","videoCodec":"h264","height":1080}},
+ {"sessionKey":"4","type":"movie","title":"Audio","User":{"title":"d"},"Player":{"title":"TV","local":true},"Session":{"id":"s4"},
+  "Media":[{"height":1080,"audioCodec":"truehd"}],"TranscodeSession":{"videoDecision":"copy","audioDecision":"transcode"}}]}}`))
+	}))
+	defer srv.Close()
+	c, _ := plex.New(srv.URL, "secret", true, 2*time.Second)
+	streams, err := c.Sessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"Subs":   "Burning in subtitles",
+		"Remote": "Lowering the quality to 720p",
+		"Codec":  "The player cannot play HEVC video",
+		"Audio":  "The player cannot play Dolby TrueHD audio",
+	}
+	for _, s := range streams {
+		if s.Reason != want[s.Title] || s.Fix == "" {
+			t.Errorf("%s: %q (%q), want %q", s.Title, s.Reason, s.Fix, want[s.Title])
+		}
+	}
+	for _, s := range streams {
+		if s.Title == "Remote" && !strings.Contains(s.Fix, "remote quality") {
+			t.Errorf("remote fix: %q", s.Fix)
+		}
 	}
 }

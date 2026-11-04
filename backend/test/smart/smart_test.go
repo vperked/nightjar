@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"servermonitor/internal/smart"
+	"nightjar/internal/smart"
 )
 
 const hdd = `{"smartctl":{"exit_status":0},"model_name":"WDC WD80EFAX","serial_number":"S1","user_capacity":{"bytes":8001563222016},"rotation_rate":5400,

@@ -8,13 +8,16 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
-	"servermonitor/internal/services"
+	"nightjar/internal/services"
 )
 
 // The public status page is designed in the dashboard: a title and intro, an optional
 // announcement, and groups of checks shown under names of the owner's choosing. Checks not in
-// the design never appear. Without a design, every check is listed, as before.
+// the design never appear. Without a design, every check is listed, as before. The owner may add
+// their own CSS and HTML; the page takes scripts, frames and forms out of the HTML before showing it.
 
 const designKey = "statuspage.design"
 
@@ -28,7 +31,16 @@ type StatusDesign struct {
 	ShowHistory  bool          `json:"show_history"`
 	Footer       string        `json:"footer"`
 	Groups       []StatusGroup `json:"groups"`
+	CSS          string        `json:"css"`         // styles the public page
+	HeaderHTML   string        `json:"header_html"` // shown above the title
+	FooterHTML   string        `json:"footer_html"` // shown above the footer
 }
+
+// How long the owner's own code may be.
+const (
+	maxCSS  = 50000
+	maxHTML = 20000
+)
 
 // StatusGroup is a heading and the checks under it.
 type StatusGroup struct {
@@ -55,6 +67,16 @@ func (d *StatusDesign) validate() error {
 		limit int
 		what  string
 	}{{&d.Title, 80, "the title"}, {&d.Description, 600, "the intro"}, {&d.Announcement, 600, "the announcement"}, {&d.Footer, 200, "the footer"}} {
+		if err := trim(f.p, f.limit, f.what); err != nil {
+			return err
+		}
+	}
+	// The owner's code keeps its own spacing; only its ends are trimmed.
+	for _, f := range []struct {
+		p     *string
+		limit int
+		what  string
+	}{{&d.CSS, maxCSS, "the CSS"}, {&d.HeaderHTML, maxHTML, "the HTML at the top"}, {&d.FooterHTML, maxHTML, "the HTML at the bottom"}} {
 		if err := trim(f.p, f.limit, f.what); err != nil {
 			return err
 		}
@@ -144,7 +166,8 @@ func (s *Server) statusPageDesign(w http.ResponseWriter, r *http.Request) {
 			checks = append(checks, spec.Name)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": cfg.StatusPageEnabled, "designed": designed, "design": d, "checks": checks})
+	// The days let the designer preview the page's history bars as visitors will see them.
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": cfg.StatusPageEnabled, "designed": designed, "design": d, "checks": checks, "days": s.checkDays()})
 }
 
 func (s *Server) saveStatusPageDesign(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +194,82 @@ type publicService struct {
 	Status    string       `json:"status"`
 	Uptime24h *float64     `json:"uptime_24h"`
 	Uptime30d *float64     `json:"uptime_30d"`
+	Uptime90d *float64     `json:"uptime_90d"`
 	Recent    []publicBeat `json:"recent"`
+	Days      []publicDay  `json:"days"`
+}
+
+// publicDay is one day of a check: the share of its checks that passed (nil without any), and
+// about how long it was down.
+type publicDay struct {
+	T      float64  `json:"t"` // local midnight
+	Uptime *float64 `json:"uptime"`
+	DownS  float64  `json:"down_s"`
+	checks int      // how many checks ran, to weigh the day by
+}
+
+// statusDays is how many days the page shows.
+const statusDays = 90
+
+// dayCache keeps each check's days for a few minutes: visitors poll the page every 30 seconds, and
+// days change slowly.
+type dayCache struct {
+	mu   sync.Mutex
+	at   time.Time
+	days map[string][]publicDay
+}
+
+const dayCacheTTL = 5 * time.Minute
+
+// checkDays is every check's last statusDays days, by name, oldest first and with every day present.
+func (s *Server) checkDays() map[string][]publicDay {
+	c := &s.days
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.days != nil && time.Since(c.at) < dayCacheTTL {
+		return c.days
+	}
+	out := map[string][]publicDay{}
+	if s.ctx.Services != nil {
+		_, offset := time.Now().Zone()
+		today := (time.Now().Unix() + int64(offset)) / 86400
+		for _, spec := range s.ctx.Services.Specs() {
+			byDay := map[float64]publicDay{}
+			for _, d := range s.cfg.Store.Days(spec.Name, statusDays, offset) {
+				u := 100 * float64(d.Ups) / float64(d.Checks)
+				byDay[d.Start] = publicDay{T: d.Start, Uptime: &u, DownS: float64(d.Checks-d.Ups) * spec.Interval, checks: d.Checks}
+			}
+			days := make([]publicDay, 0, statusDays)
+			for i := int64(statusDays - 1); i >= 0; i-- {
+				t := float64((today-i)*86400 - int64(offset))
+				if d, ok := byDay[t]; ok {
+					days = append(days, d)
+				} else {
+					days = append(days, publicDay{T: t})
+				}
+			}
+			out[spec.Name] = days
+		}
+	}
+	c.days, c.at = out, time.Now()
+	return out
+}
+
+// uptimeOver is the share of all the days' checks that passed.
+func uptimeOver(days []publicDay) *float64 {
+	var up, all float64
+	for _, d := range days {
+		if d.Uptime == nil {
+			continue
+		}
+		up += *d.Uptime * float64(d.checks)
+		all += float64(d.checks)
+	}
+	if all == 0 {
+		return nil
+	}
+	v := up / all
+	return &v
 }
 
 type publicBeat struct {
@@ -201,9 +299,16 @@ func (s *Server) statusPage(w http.ResponseWriter, r *http.Request) {
 		"description": d.Description, "footer": d.Footer, "show_uptime": d.ShowUptime, "show_history": d.ShowHistory,
 		"groups": groups, "services": all,
 	}
+	for k, v := range map[string]string{"css": d.CSS, "header_html": d.HeaderHTML, "footer_html": d.FooterHTML} {
+		if v != "" {
+			body[k] = v
+		}
+	}
 	if d.Announcement != "" {
 		body["announcement"] = map[string]string{"text": d.Announcement, "tone": d.Tone}
 	}
+	// Planned maintenance, and the incidents the owner chose to tell visitors about.
+	body["maintenance"], body["incidents"] = s.publicMaintenance(), s.publicNotices()
 	writeJSON(w, http.StatusOK, body)
 }
 
@@ -214,8 +319,13 @@ func (s *Server) publicRows() (map[string]publicService, []string) {
 	if s.ctx.Services == nil {
 		return rows, order
 	}
+	days := s.checkDays()
 	for _, sum := range s.ctx.Services.Summaries(nowSeconds()) {
-		row := publicService{Name: sum.Name, Status: sum.Status, Uptime24h: sum.Uptime24h, Uptime30d: sum.Uptime30d, Recent: []publicBeat{}}
+		row := publicService{Name: sum.Name, Status: sum.Status, Uptime24h: sum.Uptime24h, Uptime30d: sum.Uptime30d, Recent: []publicBeat{}, Days: days[sum.Name]}
+		if row.Days == nil {
+			row.Days = []publicDay{}
+		}
+		row.Uptime90d = uptimeOver(row.Days)
 		for _, b := range sum.Recent {
 			row.Recent = append(row.Recent, publicBeat{b.TS, b.Up})
 		}
@@ -246,10 +356,10 @@ func (d *StatusDesign) lay(rows map[string]publicService) (groups []publicGroup,
 			}
 			row.Name = cmp.Or(it.Label, row.Name)
 			if !d.ShowHistory {
-				row.Recent = []publicBeat{}
+				row.Recent, row.Days = []publicBeat{}, []publicDay{}
 			}
 			if !d.ShowUptime {
-				row.Uptime24h, row.Uptime30d = nil, nil
+				row.Uptime24h, row.Uptime30d, row.Uptime90d = nil, nil, nil
 			}
 			pg.Services = append(pg.Services, row)
 			all = append(all, row)

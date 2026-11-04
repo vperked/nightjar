@@ -18,15 +18,22 @@ const PAGE: [string, string][] = [
   ['/settings', 'Settings'],
   ['/setup', 'Setup'],
   ['/status-page', 'Status page'],
+  ['/plugins', 'Plugins'],
 ];
 
 // Coloured like the dashboard's own status marks.
 const COLOR = { good: '#0ca30c', bad: '#d03b3b' };
 
+// MARK is Nightjar's crescent and star on a black tile.
+export const MARK = `<rect width='32' height='32' rx='8' fill='#0a0a0a'/><path d='M26 19.2A10.9 10.9 0 1 1 12.8 6a8.7 8.7 0 0 0 13.2 13.2z' fill='none' stroke='#fff' stroke-width='2.6' stroke-linejoin='round'/><circle cx='22.9' cy='7.6' r='1.9' fill='#fff'/>`;
+
+// favicon is the mark with a green dot while all is well, or a red badge counting the problems,
+// which reads better than the mark at tab size.
 function favicon(color: string, count: number): string {
-  const badge = count ? `<text x='16' y='21.5' font-family='system-ui,sans-serif' font-size='15' font-weight='700' text-anchor='middle' fill='white'>${count > 9 ? '9+' : count}</text>` : '';
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='${count ? 15 : 11}' fill='${color}'/>${badge}</svg>`;
-  return 'data:image/svg+xml,' + encodeURIComponent(svg);
+  const body = count
+    ? `<circle cx='16' cy='16' r='15' fill='${color}'/><text x='16' y='21.5' font-family='system-ui,sans-serif' font-size='15' font-weight='700' text-anchor='middle' fill='white'>${count > 9 ? '9+' : count}</text>`
+    : `${MARK}<circle cx='26' cy='26' r='5.2' fill='${color}' stroke='#fff' stroke-width='1.8'/>`;
+  return 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>${body}</svg>`);
 }
 
 // useProblems counts what is wrong right now: uptime checks down, and system services failed or
@@ -45,7 +52,7 @@ export function HealthInTab({ down }: { down: number }) {
 
   useEffect(() => {
     if (location.pathname === '/status') return; // the public page sets its own
-    document.title = [down ? `${down} down` : '', page, 'servermonitor'].filter(Boolean).join(' · ');
+    document.title = [down ? `${down} down` : '', page, 'Nightjar'].filter(Boolean).join(' · ');
     let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
     if (!link) {
       link = document.createElement('link');

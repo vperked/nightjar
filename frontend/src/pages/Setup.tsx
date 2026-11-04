@@ -89,7 +89,7 @@ function Buttons({ s, testLabel, onTest, saveLabel, onSave, disabled }: { s: Sav
     <div className="setup-actions">
       {onTest && (
         <button type="button" className="btn-quiet" disabled={!!s.busy || disabled} onClick={onTest}>
-          {s.busy?.startsWith('test:') ? 'testing…' : testLabel}
+          {s.busy?.startsWith('test:') ? 'Testing…' : testLabel}
         </button>
       )}
       <button type="submit" className="btn" disabled={!!s.busy || disabled} onClick={onSave}>
@@ -155,7 +155,7 @@ function PlexStep({ st, s }: { st: SetupStatus; s: Saver }) {
         </Row>
         {d.token_found && (
           <label className="check setup-check">
-            <input type="checkbox" checked={useFound} onChange={(e) => setUseFound(e.target.checked)} /> use the token this Plex server already has (read here, never shown)
+            <input type="checkbox" checked={useFound} onChange={(e) => setUseFound(e.target.checked)} /> Use the token this Plex server already has (read here, never shown)
           </label>
         )}
         {!useFound && (
@@ -277,10 +277,10 @@ function ChecksStep({ st, refresh }: { st: SetupStatus; refresh: () => void }) {
           </ul>
           <div className="setup-actions">
             <Link className="btn-quiet" to="/services#add">
-              add another
+              Add another
             </Link>
             <button className="btn" disabled={adding || picked.size === 0} onClick={add}>
-              {adding ? 'adding…' : `Add ${plural(picked.size, 'check')}`}
+              {adding ? 'Adding…' : `Add ${plural(picked.size, 'check')}`}
             </button>
           </div>
         </>
@@ -305,6 +305,9 @@ const check = (c: CheckSuggestion) => ({
   verify_tls: true,
   tls_warn_days: 14,
   paused: false,
+  retry_interval: 20,
+  ping_count: 3,
+  ping_interval: 0.2,
 });
 
 function UpdatesStep({ st, s }: { st: SetupStatus; s: Saver }) {
@@ -318,7 +321,7 @@ function UpdatesStep({ st, s }: { st: SetupStatus; s: Saver }) {
       {u.enabled ? (
         <div className="setup-actions">
           <Link className="btn-quiet" to="/updates">
-            open the Updates page →
+            Open the Updates page →
           </Link>
         </div>
       ) : (
@@ -359,7 +362,9 @@ export function SetupPage() {
       <div className="page-title">
         <div>
           <h1>Set up</h1>
-          <div className="page-sub">Any order, each step saves on its own. Everything here is also under Settings.</div>
+          <div className="page-sub">
+            Any order, each step saves on its own. Everything here is also under Settings. Not sure about a step? <Link to="/docs/getting-started#run-the-setup-guide">The docs</Link> explain each one.
+          </div>
         </div>
         {st && (
           <div className="setup-progress" aria-label={`${done} of 5 set up`}>

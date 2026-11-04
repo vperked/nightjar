@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/format"
-	"servermonitor/internal/smart"
-	"servermonitor/internal/units"
+	"nightjar/internal/discord"
+	"nightjar/internal/format"
+	"nightjar/internal/smart"
+	"nightjar/internal/units"
 )
 
 // ---------- systemd services ----------
@@ -56,16 +56,25 @@ func (h *serviceWatcher) alert(ctx context.Context, m *units.Monitor, e units.Ev
 	u := e.Unit
 	name := strings.TrimSuffix(u.Name, ".service")
 	hook := discord.About(h.ctx.Webhook, "unit:"+u.Name)
+	// logs reads the journal once, works out the likely cause from it, and returns the fields that
+	// say so: the cause and its fix first, then the last few lines as evidence.
 	logs := func() []discord.Field {
-		lines, err := m.Logs(ctx, u.Name, 12)
+		lines, err := m.Logs(ctx, u.Name, 80)
 		if err != nil || len(lines) == 0 {
 			return nil
 		}
-		text := strings.Join(lines, "\n")
+		var fields []discord.Field
+		if found := m.Diagnose(u.Name, lines); len(found) > 0 {
+			f := found[0]
+			m.SetCause(u.Name, f)
+			h.log.Warn("Likely cause", "unit", u.Name, "cause", f.Title)
+			fields = append(fields, discord.Field{Name: "Likely cause", Value: clipField(f.Title + "\n" + f.Explain + "\n\n**Fix:** " + f.Fix)})
+		}
+		text := strings.Join(lines[max(0, len(lines)-12):], "\n")
 		if len(text) > 950 {
 			text = "…" + text[len(text)-950:]
 		}
-		return []discord.Field{{Name: "Last log lines", Value: "```\n" + text + "\n```"}}
+		return append(fields, discord.Field{Name: "Last log lines", Value: "```\n" + text + "\n```"})
 	}
 	switch e.Kind {
 	case units.EventFailed:
@@ -81,7 +90,7 @@ func (h *serviceWatcher) alert(ctx context.Context, m *units.Monitor, e units.Ev
 	case units.EventRecovered:
 		h.log.Info("Service running again", "unit", u.Name, "down", e.Downtime.Round(time.Second))
 		if hook != nil {
-			hook.SendEmbed(name+" is running again", cmp.Or(u.Description, u.Name), discord.OK, []discord.Field{field("Down for", format.Duration(e.Downtime.Seconds()), true)}, "Services")
+			hook.SendEmbed(name+" is running again", cmp.Or(u.Description, u.Name), discord.OK, []discord.Field{field("Down for", discord.Span(e.Downtime.Seconds()), true)}, "Services")
 		}
 	case units.EventFlapping:
 		h.log.Warn("Service keeps restarting", "unit", u.Name, "restarts", e.Restarts)
@@ -89,6 +98,14 @@ func (h *serviceWatcher) alert(ctx context.Context, m *units.Monitor, e units.Ev
 			hook.SendEmbed(name+" keeps restarting", fmt.Sprintf("%s restarted %d times in the last ten minutes.", cmp.Or(u.Description, u.Name), e.Restarts), discord.Warning, logs(), "Services")
 		}
 	}
+}
+
+// clipField keeps a Discord field under its 1024-character limit.
+func clipField(s string) string {
+	if len(s) > 1000 {
+		return s[:1000] + "…"
+	}
+	return s
 }
 
 // ---------- drive health ----------

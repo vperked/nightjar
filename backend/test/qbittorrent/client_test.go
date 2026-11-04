@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"servermonitor/internal/qbittorrent"
+	"nightjar/internal/qbittorrent"
 )
 
 // fakeQB is a minimal qBittorrent Web API: cookie login, torrent list and torrent actions.

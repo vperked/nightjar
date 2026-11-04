@@ -9,17 +9,23 @@ import (
 	"strings"
 	"time"
 
-	"servermonitor/internal/config"
-	"servermonitor/internal/discord"
-	"servermonitor/internal/notify"
-	"servermonitor/internal/plex"
-	"servermonitor/internal/qbittorrent"
+	"nightjar/internal/config"
+	"nightjar/internal/discord"
+	"nightjar/internal/notify"
+	"nightjar/internal/plex"
+	"nightjar/internal/qbittorrent"
 )
 
 // Settings: read, save (live or with a restart), and try connections before saving.
 
 // testAlerts sends a test message to every configured channel and reports each result.
 func (s *Server) testAlerts(w http.ResponseWriter, r *http.Request) {
+	if len(s.ctx.Channels) > 0 {
+		if wait := s.allowTestAlert(); wait > 0 {
+			tooSoon(w, wait)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": notify.Test(s.ctx.Channels)})
 }
 
@@ -138,7 +144,12 @@ func (s *Server) testSettings(w http.ResponseWriter, r *http.Request) {
 	case "qbittorrent":
 		writeJSON(w, http.StatusOK, testQBittorrent(cfg))
 	case "alerts":
-		writeJSON(w, http.StatusOK, testChannels(cfg))
+		res, wait := testChannels(cfg, s.allowTestAlert)
+		if wait > 0 {
+			tooSoon(w, wait)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
 	default:
 		writeJSON(w, http.StatusBadRequest, errBody("target must be plex, qbittorrent or alerts"))
 	}
@@ -177,7 +188,8 @@ func testQBittorrent(cfg config.Settings) testResult {
 	return testResult{OK: true, Detail: fmt.Sprintf("Connected to qBittorrent %s · %d torrent(s)", c.Version(), len(list))}
 }
 
-func testChannels(cfg config.Settings) testResult {
+// testChannels sends a test alert to every channel cfg sets up, if allow lets it.
+func testChannels(cfg config.Settings, allow func() time.Duration) (testResult, time.Duration) {
 	host, _ := os.Hostname()
 	origin := discord.Origin{Host: host, DashboardURL: cfg.DashboardURL}
 	channels, problems := notify.FromSettings(cfg, origin)
@@ -190,17 +202,22 @@ func testChannels(cfg config.Settings) testResult {
 			channels = append([]notify.Channel{hook}, channels...)
 		}
 	}
+	if len(channels) > 0 {
+		if wait := allow(); wait > 0 {
+			return testResult{}, wait
+		}
+	}
 	res := testResult{Results: notify.Test(channels)}
 	for _, p := range problems {
 		res.Results = append(res.Results, notify.Result{Channel: "settings", Error: p.Error()})
 	}
 	if len(res.Results) == 0 {
 		res.Detail = "No alert channel is set up yet."
-		return res
+		return res, 0
 	}
 	res.OK = true
 	for _, r := range res.Results {
 		res.OK = res.OK && r.OK
 	}
-	return res
+	return res, 0
 }

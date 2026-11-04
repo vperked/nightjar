@@ -1,4 +1,4 @@
-// Command servermonitor watches host resources and service uptime, alerts to Discord and serves the dashboard API.
+// Command nightjar watches host resources and service uptime, alerts to Discord and serves the dashboard API.
 package main
 
 import (
@@ -18,29 +18,38 @@ import (
 	"syscall"
 	"time"
 
-	"servermonitor/internal/accounts"
-	"servermonitor/internal/alerts"
-	"servermonitor/internal/api"
-	"servermonitor/internal/apps"
-	"servermonitor/internal/cleanup"
-	"servermonitor/internal/collect"
-	"servermonitor/internal/config"
-	"servermonitor/internal/discord"
-	"servermonitor/internal/format"
-	"servermonitor/internal/kernel"
-	"servermonitor/internal/logx"
-	"servermonitor/internal/metrics"
-	"servermonitor/internal/monitor"
-	"servermonitor/internal/netload"
-	"servermonitor/internal/notify"
-	"servermonitor/internal/plex"
-	"servermonitor/internal/qbittorrent"
-	"servermonitor/internal/services"
-	"servermonitor/internal/smart"
-	"servermonitor/internal/storage"
-	"servermonitor/internal/systemd"
-	"servermonitor/internal/units"
-	"servermonitor/internal/updates"
+	"nightjar/internal/accounts"
+	"nightjar/internal/alerts"
+	"nightjar/internal/analytics"
+	"nightjar/internal/api"
+	"nightjar/internal/apps"
+	"nightjar/internal/arr"
+	"nightjar/internal/cleanup"
+	"nightjar/internal/collect"
+	"nightjar/internal/config"
+	"nightjar/internal/discord"
+	"nightjar/internal/docker"
+	"nightjar/internal/format"
+	"nightjar/internal/kernel"
+	"nightjar/internal/logx"
+	"nightjar/internal/maintenance"
+	"nightjar/internal/mediacleanup"
+	"nightjar/internal/metrics"
+	"nightjar/internal/monitor"
+	"nightjar/internal/netload"
+	"nightjar/internal/notify"
+	"nightjar/internal/plex"
+	"nightjar/internal/plugins"
+	"nightjar/internal/qbittorrent"
+	"nightjar/internal/remote"
+	"nightjar/internal/repair"
+	"nightjar/internal/report"
+	"nightjar/internal/services"
+	"nightjar/internal/smart"
+	"nightjar/internal/storage"
+	"nightjar/internal/systemd"
+	"nightjar/internal/units"
+	"nightjar/internal/updates"
 )
 
 var log = logx.Component("Core")
@@ -49,6 +58,12 @@ var log = logx.Component("Core")
 var version = "dev"
 
 func main() {
+	// ssh runs this program to ask for a password when Nightjar puts an SSH key on a server; the
+	// password comes in the environment ssh was given, so it is never on a command line or in a file.
+	if os.Getenv(remote.AskPassEnv) == "1" {
+		fmt.Println(os.Getenv(remote.PasswordEnv))
+		return
+	}
 	envFile := flag.String("env", "", "path to a .env file (default: ./.env, then ../.env)")
 	selfTest := flag.Bool("test", false, "run the self-test and exit")
 	installSystemd := flag.Bool("install-systemd", false, "install as a systemd service and exit")
@@ -57,7 +72,7 @@ func main() {
 	resetAdmin := flag.Bool("reset-admin", false, "delete the dashboard's admin account (for a forgotten password) and exit")
 	flag.Parse()
 	if *showVersion {
-		fmt.Println("servermonitor", version)
+		fmt.Println("nightjar", version)
 		return
 	}
 
@@ -96,7 +111,7 @@ func runResetAdmin(db *storage.Store) int {
 }
 
 // restartedEnv marks a process started by restart, which skips the startup and shutdown notices.
-const restartedEnv = "SERVERMONITOR_RESTARTED"
+const restartedEnv = "NIGHTJAR_RESTARTED"
 
 // restart replaces this process with a fresh copy (same PID, so systemd keeps tracking it).
 func restart(environ []string) {
@@ -175,7 +190,7 @@ func alertChannels(cfg config.Settings, origin discord.Origin) []notify.Channel 
 // and sends it on by the dashboard's rules. Until those say otherwise, Discord hears everything on
 // each category's webhook (disk, kernel and Plex fall back to the main one; qBittorrent does not)
 // and every other channel hears ALERT_CHANNELS_MIN_SEVERITY and up.
-func connectWebhooks(cfg config.Settings, db *storage.Store) webhooks {
+func connectWebhooks(cfg config.Settings, db *storage.Store, pl *plugins.Manager) webhooks {
 	host, _ := os.Hostname()
 	origin := discord.Origin{Host: host, DashboardURL: cfg.DashboardURL}
 	main := discordHook("Discord", cfg.WebhookURL, cfg, origin)
@@ -212,6 +227,22 @@ func connectWebhooks(cfg config.Settings, db *storage.Store) webhooks {
 		dests = append(dests, notify.Destination{Channel: c, Default: func(string) notify.Level { return level }})
 		w.channels = append(w.channels, c)
 	}
+	// Every plugin that delivers alerts is a channel; one turned off hears nothing until it is on.
+	for _, p := range pl.Providing(plugins.Notify) {
+		id := p.ID
+		c := notify.NewPlugin(p.Name, func(payload map[string]any) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			return pl.Send(ctx, id, payload)
+		}, origin)
+		dests = append(dests, notify.Destination{Channel: c, Default: func(string) notify.Level {
+			if !pl.Enabled(id) {
+				return notify.Off
+			}
+			return level
+		}})
+		w.channels = append(w.channels, c)
+	}
 
 	w.hub = notify.NewHub(db, dests)
 	if names := w.hub.Channels(); len(names) > 0 {
@@ -231,7 +262,19 @@ func connectWebhooks(cfg config.Settings, db *storage.Store) webhooks {
 
 func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 	log.Info("Starting monitors")
-	wh := connectWebhooks(cfg, db)
+	pl := plugins.New(cfg.PluginsDir, db)
+	if err := pl.Scan(); err != nil {
+		log.Warn("Plugins folder not readable", "dir", cfg.PluginsDir, "err", err)
+	} else if found := pl.List(); len(found) > 0 {
+		log.Info(fmt.Sprintf("Found %d plugins in %s", len(found), pl.Dir()))
+	}
+	services.PluginCheck = func(s services.Spec, id, arg string) services.Result {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Timeout*float64(time.Second)))
+		defer cancel()
+		r := pl.RunCheck(ctx, id, arg)
+		return services.Result{Up: r.Up, Detail: r.Detail, LatencyMS: r.LatencyMS}
+	}
+	wh := connectWebhooks(cfg, db, pl)
 	logs := cleanup.NewLogMonitor(cfg.LogFile, cfg.LogThresholdMB, cfg.RotatedLogRetentionDays)
 	ctx := &monitor.Context{
 		Cfg:                cfg,
@@ -256,8 +299,49 @@ func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 		Drives:       smart.NewReader(),
 		Network:      netload.New(),
 		Apps:         apps.New(apps.Options{GitHubToken: cfg.GitHubToken}),
+		Plugins:      pl,
 		Services:     services.NewMonitor(services.Stored(db, cfg.ServicesFile, func(msg string) { log.Warn(msg) }), db),
 	}
+	ctx.Docker = docker.New(cfg.DockerSocket)
+	services.DockerCheck = func(s services.Spec) services.Result {
+		c, cancel := context.WithTimeout(context.Background(), time.Duration(s.Timeout*float64(time.Second)))
+		defer cancel()
+		start := time.Now()
+		up, detail := ctx.Docker.Check(c, s.Target)
+		ms := float64(time.Since(start).Microseconds()) / 1000
+		return services.Result{Up: up, Detail: detail, LatencyMS: &ms}
+	}
+	ctx.Repairs = repair.New(ctx.Units, cfg.RepairsDir, db)
+	ctx.Repairs.Docker = ctx.Docker
+	ctx.MediaCleanup = &mediacleanup.Manager{Store: db, Config: ctx.Config, Send: ctx.PlexWebhook, Now: time.Now,
+		Connect: func(c config.Settings) mediacleanup.Sources {
+			var src mediacleanup.Sources
+			if c.PlexMonitor {
+				src.Plex, _ = plex.New(c.PlexURL, c.PlexToken, c.PlexVerifyTLS, 60*time.Second)
+			}
+			src.QB = ctx.QBittorrent
+			src.Sonarr = arr.Connect("sonarr", c.SonarrURL, c.SonarrAPIKey)
+			src.Radarr = arr.Connect("radarr", c.RadarrURL, c.RadarrAPIKey)
+			return src
+		}}
+	ctx.Maintenance = maintenance.New(db)
+	ctx.Maintenance.Prune(time.Now())
+	ctx.Services.Resting = func(name string, now float64) bool {
+		_, on := ctx.Maintenance.For(name, time.Unix(int64(now), 0))
+		return on
+	}
+	wh.hub.Maintenance = ctx.Maintenance.Holds
+	ctx.Activity = func(who, kind, target, detail string) {
+		db.AddActivity(storage.Activity{TS: float64(time.Now().Unix()), Who: who, Kind: kind, Action: detail, Target: target})
+	}
+	ctx.MediaCleanup.Record = func(action, target string) { ctx.Activity("Nightjar", "cleanup", target, action) }
+	monitor.ConnectBot(ctx)
+	ctx.Analytics = analytics.NewRecorder(db)
+	ctx.Remote = remote.New(remote.Options{Store: db, Alerts: wh.hub.Route("servers"), Analytics: ctx.Analytics, SSHDir: cfg.SSHDir, AutoUpdate: func() bool { return ctx.Config().AgentAutoUpdate }, Limits: func() remote.Limits {
+		c := ctx.Config()
+		return remote.Limits{Temp: c.TempThreshold, Memory: c.MemoryThreshold, Disk: c.DiskThreshold}
+	}})
+	ctx.Remote.MoveLegacyChecks(ctx.Services)
 	// A monitor restarting itself to apply settings already announced services that were failed.
 	ctx.Units.AnnounceExisting = os.Getenv(restartedEnv) == ""
 	monitor.LoadDrives(ctx)
@@ -349,8 +433,22 @@ func logSummary(ctx *monitor.Context) {
 	log.Info(fmt.Sprintf("Settings: Check every %.1fs | Cooldown %.1fs", cfg.CheckInterval, cfg.AlertCooldown))
 }
 
+// lifecycleGap stops a monitor that keeps crashing and restarting from announcing every start and stop.
+const lifecycleGap = 30 * time.Minute
+
+// announce reports whether a start or stop notice may go out now, and if so remembers that it did.
+func announce(db *storage.Store, kind string) bool {
+	key := "notify.last_" + kind
+	if last, err := strconv.ParseInt(db.Meta(key), 10, 64); err == nil && time.Since(time.Unix(last, 0)) < lifecycleGap {
+		log.Info(fmt.Sprintf("Not sending the %s notice: one went out less than %s ago", kind, format.Duration(lifecycleGap.Seconds())))
+		return false
+	}
+	db.SetMeta(key, strconv.FormatInt(time.Now().Unix(), 10))
+	return true
+}
+
 func sendStartup(ctx *monitor.Context) {
-	if ctx.Webhook == nil || os.Getenv(restartedEnv) != "" {
+	if ctx.Webhook == nil || os.Getenv(restartedEnv) != "" || !announce(ctx.Store, "startup") {
 		return
 	}
 	log.Info("Sending system info to Discord")
@@ -391,7 +489,7 @@ func sendStartup(ctx *monitor.Context) {
 // run monitors until a signal stops it, or until settings saved in the dashboard ask for a
 // restart, which it reports.
 func run(cfg config.Settings, db *storage.Store) (restart bool) {
-	log.Info("Starting Server Monitor " + version)
+	log.Info("Starting Nightjar " + version)
 	ctx := buildContext(cfg, db)
 	ctx.Watchdog.Start()
 
@@ -440,6 +538,14 @@ func run(cfg config.Settings, db *storage.Store) (restart bool) {
 
 	log.Info("Starting continuous monitoring (Press Ctrl+C to stop)")
 	started := time.Now()
+	remoteDone := make(chan struct{})
+	go func() {
+		defer close(remoteDone)
+		ctx.Remote.Run(stop)
+	}()
+	go ctx.Plugins.Loop(stop)
+	go report.Schedule(stop.Done(), ctx)
+	go ctx.MediaCleanup.Loop(stop.Done())
 	loop := monitor.NewLoop(ctx)
 	loop.Run(stop)
 
@@ -456,14 +562,17 @@ func run(cfg config.Settings, db *storage.Store) (restart bool) {
 		scancel()
 	}
 	loop.Wait() // running uptime checks still record their results
-	db.Close()  // after the API and the checks, which use it, have stopped
+	<-remoteDone
+	ctx.Analytics.Flush() // the minute in progress
+	announceStop := !restart && ctx.Webhook != nil && announce(db, "shutdown")
+	db.Close() // after the API and the checks, which use it, have stopped
 	elapsed := time.Since(shutdownStart).Seconds()
 	log.Info(fmt.Sprintf("Shutdown complete (%.2fs)", elapsed))
-	if !restart && ctx.Webhook != nil && discord.Shutdown(ctx.Webhook, time.Since(started).Seconds(), elapsed) {
+	if announceStop && discord.Shutdown(ctx.Webhook, time.Since(started).Seconds(), elapsed) {
 		log.Info("Shutdown notification sent")
 	}
 	if !restart {
-		log.Info("Server Monitor stopped gracefully")
+		log.Info("Nightjar stopped gracefully")
 	}
 	return restart
 }
@@ -524,7 +633,7 @@ func runSelfTest(cfg config.Settings, db *storage.Store) int {
 		}
 		report("plex", err == nil, msg)
 	}
-	for _, r := range notify.Test(connectWebhooks(cfg, nil).channels) {
+	for _, r := range notify.Test(connectWebhooks(cfg, nil, plugins.New(cfg.PluginsDir, nil)).channels) {
 		report("alerts "+r.Channel, r.OK, r.Error)
 	}
 	if ok {

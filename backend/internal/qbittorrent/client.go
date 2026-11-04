@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"servermonitor/internal/discord"
-	"servermonitor/internal/logx"
+	"nightjar/internal/discord"
+	"nightjar/internal/logx"
 )
 
 var log = logx.Component("QBittorrent")

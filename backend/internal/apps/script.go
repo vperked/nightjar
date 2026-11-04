@@ -11,7 +11,7 @@ import (
 const (
 	Root        = "/opt"
 	DataRoot    = "/var/lib"
-	ManifestDir = "/etc/servermonitor/apps"
+	ManifestDir = "/etc/nightjar/apps"
 	// DefaultUser runs store apps when the machine has no swizzin user to share files with.
 	DefaultUser = "media"
 )
@@ -50,7 +50,7 @@ func (p plan) installScript() string {
 	b.WriteString(prelude)
 
 	w(`step "Preparing"`)
-	w(`id -u %[1]s >/dev/null 2>&1 || useradd --system --user-group --create-home --home-dir %[2]s/servermonitor-apps --shell /usr/sbin/nologin %[1]s`, p.user, DataRoot)
+	w(`id -u %[1]s >/dev/null 2>&1 || useradd --system --user-group --create-home --home-dir %[2]s/nightjar-apps --shell /usr/sbin/nologin %[1]s`, p.user, DataRoot)
 	if a.dotnet {
 		w(`if ! ldconfig -p | grep libicuuc >/dev/null; then step "Installing ICU (needed by .NET apps)"; apt-get update -qq; apt-get install -y -qq --no-install-recommends libicu-dev sqlite3; fi`)
 	}
@@ -78,7 +78,7 @@ func (p plan) installScript() string {
 	w(`step "Creating the %s service"`, p.unit())
 	w(`cat > /etc/systemd/system/%s <<'UNIT'`, p.unit())
 	w(`[Unit]`)
-	w(`Description=%s (installed by server monitor)`, a.Name)
+	w(`Description=%s (installed by Nightjar)`, a.Name)
 	w(`After=network-online.target`)
 	w(`Wants=network-online.target`)
 	w(``)
