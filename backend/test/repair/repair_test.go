@@ -4,8 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"nightjar/internal/repair"
 	"nightjar/internal/services"
@@ -82,5 +85,92 @@ func TestRestartWithoutSystemd(t *testing.T) {
 	s := services.Spec{Name: "plex", Repair: &services.Repair{Action: "restart", Unit: "plexmediaserver.service", Max: 1, Wait: 30}}
 	if rec := r.Run(context.Background(), s, "", 1, false); rec.OK || rec.Target != "plexmediaserver.service" {
 		t.Fatalf("no systemd here: %+v", rec)
+	}
+}
+
+// A script that starts a program in the background, as one bringing back a program systemd does
+// not run does, finishes when the script does, not when the program does.
+func TestScriptThatStartsAProgramFinishes(t *testing.T) {
+	r, dir, _ := runner(t)
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	script(t, dir, "start.sh", "sleep 30 &\necho $! > "+pidFile+"\necho started", 0o755)
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	done := make(chan storage.Repair, 1)
+	go func() { done <- r.Run(context.Background(), spec("app", "start.sh"), "", 1, false) }()
+	select {
+	case rec := <-done:
+		if !rec.OK || !strings.Contains(rec.Output, "started") {
+			t.Fatalf("ran: %+v", rec)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the repair waited for the program the script started")
+	}
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatal("the program the script started was stopped with it")
+	}
+}
+
+// A program the script starts can go on writing after the repair is done, without being stopped
+// for it, and what it writes then is not kept.
+func TestProgramKeepsWritingAfterTheRepair(t *testing.T) {
+	r, dir, _ := runner(t)
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	script(t, dir, "start.sh", "(sleep 2; while :; do echo later; sleep 0.05; done) &\necho $! > "+pidFile+"\necho started", 0o755)
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	rec := r.Run(context.Background(), spec("app", "start.sh"), "", 1, false)
+	if !rec.OK || !strings.Contains(rec.Output, "started") || strings.Contains(rec.Output, "later") {
+		t.Fatalf("ran: %+v", rec)
+	}
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	// Its output goes to a pipe Nightjar reads, not a file that would grow for as long as it runs.
+	if fd, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/fd/1"); err == nil && !strings.HasPrefix(fd, "pipe:") {
+		t.Fatalf("the program writes to %s", fd)
+	}
+	time.Sleep(3 * time.Second)
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatal("the program the script started was stopped when it wrote after the repair")
+	}
+}
+
+// Only the end of a long output is kept.
+func TestLongOutputKeepsTheEnd(t *testing.T) {
+	r, dir, _ := runner(t)
+	script(t, dir, "loud.sh", "seq 1 20000", 0o755)
+	rec := r.Run(context.Background(), spec("x", "loud.sh"), "", 1, false)
+	if !rec.OK || len(rec.Output) > 4000 || !strings.HasSuffix(rec.Output, "\n20000\n") {
+		t.Fatalf("ran: ok=%v len=%d", rec.OK, len(rec.Output))
+	}
+}
+
+// A repair script gets the check's details but none of Nightjar's secrets.
+func TestScriptsDoNotGetNightjarsSecrets(t *testing.T) {
+	t.Setenv("WEB_AUTH_TOKEN", "secret-token")
+	t.Setenv("PLEX_URL", "http://127.0.0.1:32400")
+	r, dir, _ := runner(t)
+	script(t, dir, "env.sh", `echo "token=$WEB_AUTH_TOKEN plex=$PLEX_URL check=$NIGHTJAR_CHECK"`, 0o755)
+	rec := r.Run(context.Background(), spec("db", "env.sh"), "", 1, false)
+	if !rec.OK || !strings.Contains(rec.Output, "token= plex=http://127.0.0.1:32400 check=db") {
+		t.Fatalf("ran: %+v", rec)
 	}
 }

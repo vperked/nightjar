@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"nightjar/internal/cleanup"
@@ -21,6 +22,9 @@ const (
 type collector struct {
 	handler
 	lastStatus time.Time // when the readings were last logged at info
+	// partitioning is set while a partition read runs. One stuck on a dead mount outlives its
+	// timeout; until it returns, no other is started, so stuck reads cannot pile up cycle by cycle.
+	partitioning atomic.Bool
 }
 
 // statusEvery is how often the readings are logged at info; every cycle logs them at debug.
@@ -53,12 +57,18 @@ func (c *collector) collectCore(s *Snapshot) {
 	ctx.Metrics.EndExecution("memory")
 	ctx.Heartbeat()
 
-	s.GPU = withTimeout(20*time.Second, (*collect.GPU)(nil), "GPU data collection", ctx.GPU.Read)
+	s.GPU = withTimeout(ctx, 20*time.Second, (*collect.GPU)(nil), "GPU data collection", ctx.GPU.Read)
 
 	ctx.Metrics.StartExecution("disk")
-	s.Partitions = withTimeout(10*time.Second, []collect.Partition(nil), "disk partitions collection", func() []collect.Partition {
-		return collect.Partitions(true)
-	})
+	if c.partitioning.CompareAndSwap(false, true) {
+		s.Partitions = withTimeout(ctx, 10*time.Second, []collect.Partition(nil), "disk partitions collection", func() []collect.Partition {
+			defer c.partitioning.Store(false)
+			return collect.Partitions(true)
+		})
+	} else {
+		ctx.Metrics.RecordError("disk_monitor")
+		c.log.Warn("Disk usage unknown: an earlier read of the partitions is still stuck, likely on an unresponsive mount")
+	}
 	s.TotalDisk = collect.TotalDisk(s.Partitions)
 	s.DiskPercent = s.TotalDisk.Percent
 	ctx.Metrics.EndExecution("disk")
@@ -310,6 +320,16 @@ func (h freezeCheck) check(s *Snapshot) {
 type mediaCheck struct {
 	handler
 	counter int
+	// sizing is set while the directory is being sized. On a network share that stopped answering
+	// that can outlive its timeout; until it returns, no other is started.
+	sizing atomic.Bool
+}
+
+// mediaSize is the media directory's size; partial when the walk ran out of time, so the
+// directory is at least that big.
+type mediaSize struct {
+	size           int64
+	found, partial bool
 }
 
 func (h *mediaCheck) check(s *Snapshot) {
@@ -318,18 +338,36 @@ func (h *mediaCheck) check(s *Snapshot) {
 	if !cfg.MediaMonitorEnabled || h.counter < cfg.MediaCheckInterval {
 		return
 	}
-	if _, err := os.Stat(cfg.MediaDirectory); err != nil {
+	h.counter = 0
+	if !h.sizing.CompareAndSwap(false, true) {
+		h.log.Warn("Still sizing " + cfg.MediaDirectory + " from an earlier check; is the mount responding?")
 		return
 	}
-	h.counter = 0
-	size, _ := cleanup.DirSize(cfg.MediaDirectory, 60*time.Second)
+	// Stat and size off the loop: either can hang on a share that stopped answering.
+	m := withTimeout(h.ctx, 90*time.Second, mediaSize{}, "sizing "+cfg.MediaDirectory, func() mediaSize {
+		defer h.sizing.Store(false)
+		if _, err := os.Stat(cfg.MediaDirectory); err != nil {
+			return mediaSize{}
+		}
+		size, partial := cleanup.DirSize(cfg.MediaDirectory, 60*time.Second)
+		return mediaSize{size: size, found: true, partial: partial}
+	})
+	if !m.found {
+		return
+	}
+	size := m.size
+	if m.partial {
+		h.log.Info(fmt.Sprintf("Sizing %s ran out of time: it holds at least %s", cfg.MediaDirectory, format.Bytes(float64(size))))
+	}
 	if size < cfg.MediaDirectoryThresholdBytes {
 		return
 	}
-	h.raiseAlert("media", s.Now, fmt.Sprintf("Directory %s: %s (threshold: %s)", cfg.MediaDirectory, format.Bytes(float64(size)), format.Bytes(float64(cfg.MediaDirectoryThresholdBytes))),
+	// Looked at every MediaCheckInterval cycles, so the episode must outlast that.
+	every := float64(cfg.MediaCheckInterval) * cfg.CheckInterval
+	h.raiseAlertEvery("media", s.Now, every, fmt.Sprintf("Directory %s: %s (threshold: %s)", cfg.MediaDirectory, format.Bytes(float64(size)), format.Bytes(float64(cfg.MediaDirectoryThresholdBytes))),
 		h.ctx.DiskWebhook, func() bool {
 			var subs []discord.Subdirectory
-			for _, d := range cleanup.LargestSubdirs(cfg.MediaDirectory, 5, 30*time.Second) {
+			for _, d := range h.largest(cfg.MediaDirectory, 5, 30*time.Second) {
 				subs = append(subs, discord.Subdirectory{Path: d.Path, Size: d.Size})
 			}
 			return discord.DirectorySizeAlert(h.ctx.DiskWebhook, cfg.MediaDirectory, size, cfg.MediaDirectoryThresholdBytes, subs)

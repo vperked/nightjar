@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { api } from '../api/client';
 import { useNotifications } from '../api/NotificationsContext';
@@ -118,6 +118,7 @@ function InboxView() {
   const [error, setError] = useState('');
   const [openId, setOpenId] = useState<number>();
   const [loadingMore, setLoadingMore] = useState(false);
+  const notify = useToast();
   const now = useNow(30000);
   const latest = summary?.counts.latest;
 
@@ -128,9 +129,13 @@ function InboxView() {
   }, [query]);
 
   const filters = useMemo(() => ({ q: search, severity: SHOW[show], area, unread }), [search, show, area, unread]);
+  // shown is the filters the list is for now, so an older page asked for under others is dropped.
+  const shown = useRef(filters);
+  shown.current = filters;
 
   // The newest page reloads when the filters change and when the bell sees something new; older
-  // pages already loaded stay below it.
+  // pages already loaded stay below it when they reach up to it. If more came in than a page holds,
+  // they do not, and the list starts again from the new page so Show older fills the gap.
   useEffect(() => {
     let live = true;
     api.notifications(filters).then(
@@ -142,7 +147,8 @@ function InboxView() {
         setItems((old) => {
           const fresh = new Map(r.items.map((n) => [n.id, n]));
           const oldest = r.items.at(-1)?.id ?? 0;
-          const older = (old ?? []).filter((n) => n.id < oldest && !fresh.has(n.id));
+          const meets = !!old?.length && old[0].id >= oldest;
+          const older = meets ? old.filter((n) => n.id < oldest && !fresh.has(n.id)) : [];
           return [...r.items, ...older];
         });
       },
@@ -161,7 +167,11 @@ function InboxView() {
     setLoadingMore(true);
     try {
       const r = await api.notifications({ ...filters, before: last.id });
-      setItems((old) => [...(old ?? []), ...r.items]);
+      // Dropped if the filters changed or the list was started again meanwhile.
+      if (shown.current !== filters) return;
+      setItems((old) => (old?.at(-1)?.id === last.id ? [...old, ...r.items] : old));
+    } catch (e) {
+      if (shown.current === filters) notify({ tone: 'error', title: 'Could not load older notifications', body: (e as Error).message });
     } finally {
       setLoadingMore(false);
     }

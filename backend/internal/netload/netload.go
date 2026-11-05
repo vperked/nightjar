@@ -136,25 +136,27 @@ func New() *Meter {
 	return &Meter{ReadDev: readProcNetDev, ReadSockets: readSockets, Identify: identify, Describe: describe, DefaultIf: defaultInterface, Tick: time.Second}
 }
 
-// Watch keeps the meter sampling (starting it if needed) for a while longer.
+// Watch keeps the meter sampling (starting it if needed) for a while longer. Starting, it reads the
+// interfaces at once, so the request that woke it already has them to show rather than none.
 func (m *Meter) Watch() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.watched = time.Now()
 	if m.running {
+		m.mu.Unlock()
 		return
 	}
 	m.running = true
 	m.since = float64(time.Now().Unix())
 	m.prev, m.start, m.ifaces, m.sockPrev = nil, nil, map[string]*ifaceState{}, nil
 	m.talkers, m.hosts, m.conns, m.names = nil, nil, 0, map[int][2]string{}
+	m.mu.Unlock()
+	m.sample(time.Now(), false)
 	go m.loop()
 }
 
 func (m *Meter) loop() {
 	t := time.NewTicker(m.Tick)
 	defer t.Stop()
-	m.sample(time.Now(), true)
 	for n := 1; ; n++ {
 		now := <-t.C
 		m.mu.Lock()
@@ -166,8 +168,8 @@ func (m *Meter) loop() {
 		if idle {
 			return
 		}
-		// Sockets every other second: per-program numbers need less resolution than the graph.
-		m.sample(now, n%2 == 0)
+		// Sockets every other second, from the first: per-program numbers need less resolution than the graph.
+		m.sample(now, n%2 == 1)
 	}
 }
 
@@ -340,11 +342,18 @@ func hostOf(addr string) string {
 	return strings.TrimPrefix(addr, "::ffff:")
 }
 
+// orEmpty is a copy of a list, empty rather than nil.
+func orEmpty[T any](s []T) []T {
+	return append(make([]T, 0, len(s)), s...)
+}
+
 // View returns the state, with each interface's samples newer than since.
 func (m *Meter) View(since float64) View {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v := View{Samples: map[string][]Sample{}, Processes: slices.Clone(m.talkers), Hosts: slices.Clone(m.hosts), Connections: m.conns, Since: m.since}
+	// Lists are never null, so the dashboard can go through them: an interface with nothing newer
+	// than since has no samples, not null ones.
+	v := View{Interfaces: []Interface{}, Samples: map[string][]Sample{}, Processes: orEmpty(m.talkers), Hosts: orEmpty(m.hosts), Connections: m.conns, Since: m.since}
 	for _, st := range m.ifaces {
 		v.Interfaces = append(v.Interfaces, st.info)
 		i, _ := slices.BinarySearchFunc(st.samples, since, func(s Sample, t float64) int {
@@ -353,7 +362,7 @@ func (m *Meter) View(since float64) View {
 			}
 			return 1
 		})
-		v.Samples[st.info.Name] = slices.Clone(st.samples[i:])
+		v.Samples[st.info.Name] = orEmpty(st.samples[i:])
 	}
 	// The default route first, then real interfaces before virtual ones, then by name.
 	slices.SortFunc(v.Interfaces, func(a, b Interface) int {

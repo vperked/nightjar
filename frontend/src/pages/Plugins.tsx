@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
-import { ApiError, api } from '../api/client';
+import { ApiError, api, waitForRestart } from '../api/client';
 import type { CheckResult, Plugin, PluginCard, PluginProvides, PluginSetting, PluginsResponse } from '../api/types';
 import { PluginCardBody } from '../components/PluginCards';
 import { Select } from '../components/Select';
@@ -115,7 +115,7 @@ function PluginItem({ p, onChanged }: { p: Plugin; onChanged: (p: Plugin) => voi
       notify({
         tone: 'ok',
         title: enabled === undefined ? `${p.name}: settings saved` : `${p.name} is ${enabled ? 'on' : 'off'}`,
-        body: enabled && p.provides.includes('notify') ? 'Choose what it hears about under Notifications.' : undefined,
+        body: enabled && (p.provides ?? []).includes('notify') ? 'Choose what it hears about under Notifications.' : undefined,
       });
     } catch (err) {
       notify({ tone: 'error', title: `Could not change ${p.name}`, body: err instanceof ApiError ? err.message : String(err) });
@@ -148,7 +148,7 @@ function PluginItem({ p, onChanged }: { p: Plugin; onChanged: (p: Plugin) => voi
           </div>
           {p.description && <p className="plugin-desc">{p.description}</p>}
           <div className="plugin-provides">
-            {p.provides
+            {(p.provides ?? [])
               .filter((x) => PROVIDES[x])
               .map((x) => (
                 <span key={x} className="plugin-chip">
@@ -197,15 +197,15 @@ function PluginItem({ p, onChanged }: { p: Plugin; onChanged: (p: Plugin) => voi
             )}
           </span>
           <span className="plugin-actions">
-            {p.provides.includes('check') && p.check?.argument && (
+            {(p.provides ?? []).includes('check') && p.check?.argument && (
               <input className="field plugin-arg" aria-label={p.check.argument} placeholder={p.check.placeholder ?? p.check.argument} value={argument} onChange={(e) => setArgument(e.target.value)} />
             )}
-            {p.provides.includes('check') && (
+            {(p.provides ?? []).includes('check') && (
               <button type="button" className="btn-ghost" disabled={!!busy || dirty} onClick={() => tryIt('check')} title={dirty ? 'Save first' : undefined}>
                 {busy === 'check' ? 'Checking…' : 'Try the check'}
               </button>
             )}
-            {p.provides.includes('card') && (
+            {(p.provides ?? []).includes('card') && (
               <button type="button" className="btn-ghost" disabled={!!busy || dirty} onClick={() => tryIt('card')} title={dirty ? 'Save first' : undefined}>
                 {busy === 'card' ? 'Running…' : 'Try the card'}
               </button>
@@ -249,7 +249,7 @@ function PluginItem({ p, onChanged }: { p: Plugin; onChanged: (p: Plugin) => voi
           )}
         </div>
       )}
-      {p.enabled && p.provides.includes('check') && (
+      {p.enabled && (p.provides ?? []).includes('check') && (
         <p className="form-help plugin-hint">
           Use it in <Link to="/services">Services</Link>: add a check of type <strong>plugin</strong> with the target <code>{p.id}</code>
           {p.check?.argument ? (
@@ -282,7 +282,10 @@ export function PluginsPage() {
       const next = await api.rescanPlugins();
       const added = next.plugins.length - (data?.plugins.length ?? 0);
       setData(next);
-      notify({ tone: 'ok', title: 'Looked in the plugins folder', body: added > 0 ? `Found ${added} new.` : `${next.plugins.length} plugins.` });
+      const found = added > 0 ? `Found ${added} new.` : `${next.plugins.length} plugins.`;
+      // A plugin that delivers alerts, added, renamed or removed, gets its channel when Nightjar starts.
+      notify({ tone: 'ok', title: 'Looked in the plugins folder', body: next.restarting ? `${found} Restarting to set up its alert channel; the page reconnects by itself.` : found });
+      if (next.restarting) await waitForRestart();
     } catch (err) {
       notify({ tone: 'error', title: 'Could not read the plugins folder', body: err instanceof ApiError ? err.message : String(err) });
     } finally {

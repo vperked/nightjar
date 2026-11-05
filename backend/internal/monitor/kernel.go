@@ -22,7 +22,12 @@ type kernelChecks struct {
 	crashSent                      bool
 	lastCrashAlert                 float64
 	lastHardwareAlert              map[string]float64
+	// lastFloodAlert is when a kernel flooding its log was last reported.
+	lastFloodAlert float64
 }
+
+// floodEvery is how often a kernel that keeps flooding its log is reported again.
+const floodEvery = 6 * 3600
 
 func formatCount(n int64) string {
 	switch {
@@ -127,6 +132,10 @@ func (h *kernelChecks) checkCrashes(s *Snapshot) {
 	now := s.Now
 	r := h.ctx.Kernel.CheckCrashes(cfg.KernelCheckSinceMinutes)
 
+	if f := r.Flood; f != nil && now-h.lastFloodAlert >= floodEvery {
+		h.lastFloodAlert = now
+		h.alertFlood(*f)
+	}
 	if r.Reboot != nil && h.due(now) {
 		h.alertReboot(*r.Reboot)
 		h.mark(now)
@@ -163,6 +172,18 @@ func (h *kernelChecks) checkCrashes(s *Snapshot) {
 	}
 }
 
+// alertFlood says the kernel is writing its log far faster than it should, and what it repeats.
+func (h *kernelChecks) alertFlood(f kernel.Flood) {
+	h.log.Warn("The kernel is flooding its log", "per_second", int(f.PerSecond), "top", f.Top)
+	desc := fmt.Sprintf("It is writing about %s messages a second. That uses CPU and disk, pushes older logs out of the journal, "+
+		"and slows anything that reads it; Nightjar skips its journal checks until it stops.", formatCount(int64(f.PerSecond)))
+	var fields []discord.Field
+	if f.Top != "" {
+		fields = append(fields, field(fmt.Sprintf("Repeated most · %.0f%%", f.TopShare*100), discord.Truncate(f.Top, 300), false))
+	}
+	h.ctx.send(h.ctx.CrashWebhook, discord.Warning, "The kernel is flooding its log", desc, fields, "Kernel")
+}
+
 func bootTimeString(ts float64) string {
 	if ts == 0 {
 		return "Unknown"
@@ -171,11 +192,21 @@ func bootTimeString(ts float64) string {
 }
 
 func (h *kernelChecks) alertReboot(r kernel.Reboot) {
-	h.log.Error(fmt.Sprintf("[KERNEL] Unexpected system reboot detected! Previous boot: %s, Current boot: %s", bootTimeString(r.PreviousBootTime), bootTimeString(r.CurrentBootTime)))
-	h.ctx.send(h.ctx.CrashWebhook, discord.Critical, "The system rebooted unexpectedly", "It may have crashed, or lost power.", []discord.Field{
+	fields := []discord.Field{
 		field("Booted before", bootTimeString(r.PreviousBootTime), true),
 		field("Booted now", bootTimeString(r.CurrentBootTime), true),
-	}, "Kernel")
+	}
+	if r.Clean {
+		h.log.Info(fmt.Sprintf("[KERNEL] The system rebooted after a clean shutdown. Previous boot: %s, Current boot: %s", bootTimeString(r.PreviousBootTime), bootTimeString(r.CurrentBootTime)))
+		h.ctx.send(h.ctx.CrashWebhook, discord.OK, "The system rebooted", "It shut down cleanly first, so the reboot was asked for.", fields, "Kernel")
+		return
+	}
+	why := "Its last boot's log shows no clean shutdown: it may have crashed or lost power."
+	if !r.Known {
+		why = "Its last boot's log could not be read, so whether it crashed, lost power or was rebooted on purpose is unknown."
+	}
+	h.log.Error(fmt.Sprintf("[KERNEL] The system rebooted without a clean shutdown in the log. Previous boot: %s, Current boot: %s", bootTimeString(r.PreviousBootTime), bootTimeString(r.CurrentBootTime)))
+	h.ctx.send(h.ctx.CrashWebhook, discord.Critical, "The system rebooted unexpectedly", why, fields, "Kernel")
 }
 
 func (h *kernelChecks) alertEarlyWarnings(critical, hardware []kernel.Event, now float64) {

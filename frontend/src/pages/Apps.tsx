@@ -5,10 +5,10 @@ import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { AppsTabs } from '../components/ui';
 
-// The app store: torrent and media apps installed from their official releases, each as its own
-// systemd service. Apps swizzin or a package already installed show as installed and are left alone.
+// The app store: torrent, media and home-server apps installed from their official releases, each
+// as its own systemd service. Apps swizzin or a package already installed show as installed and are left alone.
 
-const CATEGORIES = ['All', 'Download clients', 'Indexers', 'Automation', 'Notifications'];
+const CATEGORIES = ['All', 'Download clients', 'Indexers', 'Automation', 'Media', 'Files and sync', 'Network', 'Self-hosting', 'Notifications'];
 
 // The usual torrent pipeline, left to right, shown as a strip with each app's state.
 const STACK: [string, string][] = [
@@ -370,7 +370,7 @@ export function AppsPage() {
         <div>
           <h1>App store</h1>
           <div className="page-sub">
-            Torrent and media apps from their official releases, each running as its own service. {installed} of {data.apps.length} on this machine.
+            Torrent, media and home-server apps from their official releases, each running as its own service. {installed} of {data.apps.length} on this machine.
           </div>
           <AppsTabs current="/apps" />
         </div>

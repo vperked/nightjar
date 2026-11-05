@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"nightjar/internal/agent"
+	"nightjar/internal/ddos"
+	"nightjar/internal/firewall"
 )
 
 func TestReadingsNeedTheToken(t *testing.T) {
@@ -138,4 +140,71 @@ func mustCert(t *testing.T, token string) []byte {
 		t.Fatal(err)
 	}
 	return c.Certificate[0]
+}
+
+func TestTheDashboardManagesTheFirewall(t *testing.T) {
+	const token = "a-token-that-is-long-enough-1234"
+	var ran []string
+	exec := func(_ context.Context, stdin []byte, name string, args ...string) (string, error) {
+		ran = append(ran, name+" "+strings.Join(args, " "))
+		if len(args) > 1 && args[1] == "-C" {
+			return "", errors.New("no such rule")
+		}
+		return "", nil
+	}
+	var saved []byte
+	m := &firewall.Manager{Exec: exec, Proc: t.TempDir(), Load: func() []byte { return saved }, Save: func(b []byte) error { saved = b; return nil }}
+	d := &ddos.Defender{Exec: exec}
+	d.Update(context.Background(), ddos.Situation{Attacking: true, Methods: []string{ddos.ConnectionFlood}, Sources: []ddos.Source{{Address: "203.0.113.7", Established: 500}}, Interval: 5})
+	s := agent.NewSampler("test")
+	s.UseFirewall(m, &ddos.Watcher{Defender: d}, 9101)
+	call := func(h http.Handler, method, path, body, tok string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.RemoteAddr = "45.33.1.2:50000"
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	h := agent.Handler(s, token, nil, true)
+	if rec := call(h, "GET", agent.FirewallPath, "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("without the token: %d", rec.Code)
+	}
+	rec := call(h, "GET", agent.FirewallPath, "", token)
+	var v agent.FirewallView
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &v) != nil || v.Defense == nil || len(v.Defense.Blocked) != 1 {
+		t.Fatalf("view: %d %s", rec.Code, rec.Body)
+	}
+
+	// A rule goes in; one that would cut off the dashboard asking does not.
+	if rec := call(h, "POST", agent.FirewallPath+"/rules", `{"action": "block", "port": "9101"}`, token); rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "the dashboard") {
+		t.Fatalf("cutting off the dashboard: %d %s", rec.Code, rec.Body)
+	}
+	rec = call(h, "POST", agent.FirewallPath+"/rules", `{"action": "block", "source": "198.51.100.0/24", "note": "scanners"}`, token)
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &v) != nil || len(v.Firewall.Rules) != 1 || !strings.Contains(string(saved), "scanners") {
+		t.Fatalf("add: %d %s", rec.Code, rec.Body)
+	}
+	if rec := call(h, "DELETE", agent.FirewallPath+"/rules/"+v.Firewall.Rules[0].ID, "", token); rec.Code != http.StatusOK {
+		t.Fatalf("remove: %d %s", rec.Code, rec.Body)
+	}
+
+	// Unblocking lifts the defense's block.
+	if rec := call(h, "DELETE", agent.BlockedPath+"/203.0.113.7", "", token); rec.Code != http.StatusOK || len(d.View().Blocked) != 0 {
+		t.Fatalf("unblock: %d %s", rec.Code, rec.Body)
+	}
+
+	// Over plain HTTP it shows the firewall but changes nothing.
+	plain := agent.Handler(s, token, nil, false)
+	if rec := call(plain, "GET", agent.FirewallPath, "", token); rec.Code != http.StatusOK {
+		t.Fatalf("plain view: %d", rec.Code)
+	}
+	if rec := call(plain, "POST", agent.FirewallPath+"/rules", `{"action": "block", "source": "198.51.100.9"}`, token); rec.Code != http.StatusForbidden {
+		t.Fatalf("plain change: %d", rec.Code)
+	}
+	// An agent without a firewall to manage says so.
+	if rec := call(agent.Handler(agent.NewSampler("test"), token, nil, true), "GET", agent.FirewallPath, "", token); rec.Code != http.StatusNotFound {
+		t.Fatalf("no firewall: %d", rec.Code)
+	}
 }

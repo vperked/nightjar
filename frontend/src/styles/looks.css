@@ -276,6 +276,12 @@
       inset 0 -2px 0 color-mix(in srgb, var(--accent) 75%, transparent);
   }
 }
+/* Closer on small laptops and tablets on their side, as in the other styles (frame.css). */
+@media (min-width: 761px) and (max-width: 1180px) {
+  :root[data-style='cards'] .nav a {
+    padding: 6px 10px;
+  }
+}
 @media (max-width: 760px) {
   :root[data-style='cards'] .nav a {
     font-family: var(--sans);

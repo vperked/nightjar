@@ -101,3 +101,16 @@ func TestRecentKeepsTheTailForTheDashboard(t *testing.T) {
 		t.Fatalf("the buffer keeps the newest %d, got %d ending %q", logx.RecentSize, len(got), got[len(got)-1].Message)
 	}
 }
+
+func TestURLsThatAreSecretsAreMasked(t *testing.T) {
+	for _, s := range []string{
+		`Post "https://api.telegram.org/bot123456789:AAHsecretTOKEN/sendMessage": dial tcp: i/o timeout`,
+		`Post "https://hooks.slack.com/services/T000/B000/secretTOKEN": context deadline exceeded`,
+		`Post "https://ptb.discord.com/api/v10/webhooks/123/secretTOKEN?wait=true": EOF`,
+		`Post "https://discord.com/api/webhooks/123/secretTOKEN": EOF`,
+	} {
+		if got := logx.Redact(s); strings.Contains(got, "secretTOKEN") || !strings.Contains(got, "***") {
+			t.Errorf("not masked: %s", got)
+		}
+	}
+}

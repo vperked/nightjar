@@ -4,7 +4,6 @@
 package repair
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"nightjar/internal/config"
 	"nightjar/internal/docker"
 	"nightjar/internal/services"
 	"nightjar/internal/storage"
@@ -177,20 +177,47 @@ func (r *Runner) runScript(ctx context.Context, spec services.Spec, detail strin
 	if err != nil {
 		return false, err.Error(), ""
 	}
+	// A program the script starts in the background (the usual way to bring back one systemd does
+	// not run) keeps the script's output. The output goes to a pipe Nightjar keeps reading, not one
+	// Wait copies from, so the repair finishes when the script does rather than when the program
+	// does, and the program can go on writing without filling a pipe or a file.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return false, err.Error(), ""
+	}
 	ctx, cancel := context.WithTimeout(ctx, scriptTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path)
 	cmd.Dir = filepath.Dir(path)
-	cmd.Env = append(os.Environ(),
+	// Without Nightjar's secrets (webhooks, tokens, passwords): a script has no need of them.
+	cmd.Env = append(config.Environ(),
 		"NIGHTJAR_CHECK="+spec.Name, "NIGHTJAR_TYPE="+spec.Type, "NIGHTJAR_TARGET="+spec.Target, "NIGHTJAR_DETAIL="+detail,
 		"NIGHTJAR_ATTEMPT="+strconv.Itoa(r.Attempts(spec.Name)))
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	err = cmd.Run()
-	text := out.String()
-	if len(text) > maxOutput {
-		text = text[len(text)-maxOutput:]
+	cmd.Stdout, cmd.Stderr = pw, pw
+	// A script that runs out of time is stopped with everything it started.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	err = cmd.Start()
+	pw.Close()
+	if err != nil {
+		pr.Close()
+		return false, err.Error(), ""
 	}
+	out := &outputTail{}
+	eof := make(chan struct{})
+	go func() {
+		defer close(eof)
+		defer pr.Close()
+		out.drain(pr)
+	}()
+	err = cmd.Wait()
+	// What the script wrote last may still be in the pipe. With a program still holding it, the
+	// end never comes, so the wait is short.
+	select {
+	case <-eof:
+	case <-time.After(time.Second):
+	}
+	text := out.stop()
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
 		return false, fmt.Sprintf("%s ran longer than %s and was stopped", spec.Repair.Script, scriptTimeout), text
@@ -202,6 +229,42 @@ func (r *Runner) runScript(ctx context.Context, spec services.Spec, detail strin
 		return false, err.Error(), text
 	}
 	return true, "ran " + spec.Repair.Script, text
+}
+
+// outputTail keeps the last maxOutput bytes a script writes. It goes on reading after the
+// script is done, for any program the script started, but keeps nothing more.
+type outputTail struct {
+	mu   sync.Mutex
+	buf  []byte
+	done bool
+}
+
+func (o *outputTail) drain(f *os.File) {
+	chunk := make([]byte, 32*1024)
+	for {
+		n, err := f.Read(chunk)
+		if n > 0 {
+			o.mu.Lock()
+			if !o.done {
+				o.buf = append(o.buf, chunk[:n]...)
+				if len(o.buf) > maxOutput {
+					o.buf = append(o.buf[:0], o.buf[len(o.buf)-maxOutput:]...)
+				}
+			}
+			o.mu.Unlock()
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// stop is what was kept; anything read after it is dropped.
+func (o *outputTail) stop() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.done = true
+	return string(o.buf)
 }
 
 // script is the path of a repair script, when it may run. Like plugins, and like sshd with its

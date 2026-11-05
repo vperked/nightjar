@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"nightjar/internal/arr"
-	"sort"
 	"strings"
 	"time"
 
@@ -28,13 +27,9 @@ type trackedTorrent struct {
 	recoveryAttempts                                   int
 	replaced                                           bool // handed to Sonarr or Radarr to replace
 	lastRatioAction                                    float64
-	seenAt                                             float64
 }
 
-const (
-	qbCheckInterval    = 2
-	maxTrackedTorrents = 1000
-)
+const qbCheckInterval = 2
 
 func info(t qbittorrent.Torrent) discord.TorrentInfo {
 	return discord.TorrentInfo{
@@ -67,7 +62,7 @@ func (h *torrentWatcher) check(s *Snapshot) {
 		return
 	}
 	// A nil list means the fetch failed (or timed out); an empty one, that there are no torrents.
-	torrents := withTimeout(15*time.Second, []qbittorrent.Torrent(nil), "qBittorrent torrent list", func() []qbittorrent.Torrent {
+	torrents := withTimeout(h.ctx, 15*time.Second, []qbittorrent.Torrent(nil), "qBittorrent torrent list", func() []qbittorrent.Torrent {
 		t, _ := qb.List()
 		return t
 	})
@@ -85,19 +80,11 @@ func (h *torrentWatcher) check(s *Snapshot) {
 		live[t.Hash] = true
 		h.process(t, s.Now)
 	}
+	// Forgetting what is gone keeps tracked no bigger than qBittorrent's own list. Nothing live is
+	// ever dropped: that would reset its stall clock and cooldowns on every check.
 	for hash := range h.tracked {
 		if !live[hash] {
 			delete(h.tracked, hash)
-		}
-	}
-	if over := len(h.tracked) - maxTrackedTorrents; over > 0 {
-		hashes := make([]string, 0, len(h.tracked))
-		for k := range h.tracked {
-			hashes = append(hashes, k)
-		}
-		sort.Slice(hashes, func(i, j int) bool { return h.tracked[hashes[i]].seenAt < h.tracked[hashes[j]].seenAt })
-		for _, k := range hashes[:over] {
-			delete(h.tracked, k)
 		}
 	}
 	if board != nil {
@@ -119,7 +106,7 @@ func (h *torrentWatcher) publish(board *qbittorrent.Board, qb *qbittorrent.Clien
 		}
 		entries = append(entries, e)
 	}
-	transfer := withTimeout(10*time.Second, (*qbittorrent.Transfer)(nil), "qBittorrent transfer info", func() *qbittorrent.Transfer {
+	transfer := withTimeout(h.ctx, 10*time.Second, (*qbittorrent.Transfer)(nil), "qBittorrent transfer info", func() *qbittorrent.Transfer {
 		if t, err := qb.Transfer(); err == nil {
 			return &t
 		}
@@ -133,7 +120,7 @@ func (h *torrentWatcher) process(t qbittorrent.Torrent, now float64) {
 	stalled := qbittorrent.IsDownloadStalled(t)
 	tr, ok := h.tracked[t.Hash]
 	if !ok {
-		tr = &trackedTorrent{state: t.State, name: t.Name, seenAt: now}
+		tr = &trackedTorrent{state: t.State, name: t.Name}
 		if stalled {
 			tr.stalledSince = fptr(now)
 		}
@@ -183,7 +170,7 @@ func (h *torrentWatcher) handleStall(t qbittorrent.Torrent, tr *trackedTorrent, 
 	var actions []string
 	recoveryOK := true
 	if recover && cfg.StalledAutoHandle {
-		actions = withTimeout(15*time.Second, []string(nil), "recover stalled torrent", func() []string { return ctx.QBittorrent.Recover(t.Hash) })
+		actions = withTimeout(h.ctx, 15*time.Second, []string(nil), "recover stalled torrent", func() []string { return ctx.QBittorrent.Recover(t.Hash) })
 		recoveryOK = len(actions) > 0
 		tr.recoveryAttempts++
 		if recoveryOK {
@@ -221,7 +208,7 @@ func (h *torrentWatcher) applyCleanup(t qbittorrent.Torrent, tr *trackedTorrent,
 	}
 	// Paused downloads may be partial; never delete their files.
 	deleteFiles := cfg.SeedingRatioDeleteFiles && reason == "ratio"
-	actions := withTimeout(15*time.Second, []string(nil), "torrent cleanup", func() []string { return ctx.QBittorrent.Delete(t.Hash, deleteFiles) })
+	actions := withTimeout(h.ctx, 15*time.Second, []string(nil), "torrent cleanup", func() []string { return ctx.QBittorrent.Delete(t.Hash, deleteFiles) })
 	if reason == "inactive" {
 		if len(actions) > 0 {
 			h.log.Info(fmt.Sprintf("[qBittorrent] Removing inactive torrent: %s (state=%s; actions: %s)", t.Name, t.State, strings.Join(actions, ", ")))

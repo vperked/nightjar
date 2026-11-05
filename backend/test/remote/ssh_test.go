@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
+	osexec "os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,9 +31,13 @@ type fakeSSH struct {
 	replies map[string]string
 }
 
-func (f *fakeSSH) exec(_ context.Context, stdin []byte, name string, args ...string) (string, string, error) {
+func (f *fakeSSH) exec(_ context.Context, stdin []byte, _ []string, name string, args ...string) (string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if name == "ssh-keygen" && slices.Contains(args, "-F") {
+		// Looking up a host key is not one of the calls the tests follow.
+		return "# Host " + args[slices.Index(args, "-F")+1] + " found: line 1\n127.0.0.1 ED25519 SHA256:hostkey\n", "", nil
+	}
 	f.calls = append(f.calls, append([]string{name}, args...))
 	f.stdins = append(f.stdins, stdin)
 	if r, ok := f.replies[args[len(args)-1]]; ok && name == "ssh" {
@@ -155,6 +159,15 @@ func TestSSHLoginIsCheckedSavedAndUsed(t *testing.T) {
 	if err != nil || out != "root@box\n 10:00 up 3 days" {
 		t.Fatalf("test = %q, %v", out, err)
 	}
+	check := func(what string, ok bool, as, hostKey string) {
+		t.Helper()
+		got, _ := m.Get(h.ID)
+		c := got.SSHCheck
+		if c == nil || c.OK != ok || c.As != as || c.HostKey != hostKey || c.At == 0 || (ok != (c.Error == "")) {
+			t.Fatalf("%s: the last login is %+v", what, c)
+		}
+	}
+	check("a test that worked", true, "root@box", "ED25519 SHA256:hostkey")
 	args := f.last()
 	joined := strings.Join(args, " ")
 	for _, want := range []string{"-i " + k.Path, "-p 22", "-l root", "BatchMode=yes", "StrictHostKeyChecking=accept-new", "UserKnownHostsFile=" + filepath.Join(dir, "known_hosts"), "-- 127.0.0.1"} {
@@ -167,6 +180,7 @@ func TestSSHLoginIsCheckedSavedAndUsed(t *testing.T) {
 	if out, err := m.RunSSH(ctx, h.ID, remote.SSHRestartAgent); err != nil || out != "nightjar-agent restarted" || !strings.Contains(strings.Join(f.last(), " "), "systemctl restart nightjar-agent") {
 		t.Fatalf("restart the agent: %q %v", out, err)
 	}
+	check("another action that worked", true, "root@box", "ED25519 SHA256:hostkey")
 	if _, err := m.RunSSH(ctx, h.ID, "rm -rf /"); err == nil {
 		t.Fatal("ran an action that is not one of the fixed ones")
 	}
@@ -175,15 +189,24 @@ func TestSSHLoginIsCheckedSavedAndUsed(t *testing.T) {
 	if _, err := m.RunSSH(ctx, h.ID, remote.SSHTest); err == nil || !strings.Contains(err.Error(), "authorized_keys") {
 		t.Fatalf("a refused key says what to do: %v", err)
 	}
+	check("a test that failed", false, "", "ED25519 SHA256:hostkey")
 	f.stderr = "Connection to 127.0.0.1 closed by remote host.\n"
 	if out, err := m.RunSSH(ctx, h.ID, remote.SSHReboot); err != nil || out != "rebooting" {
 		t.Fatalf("a reboot drops the connection, and that is fine: %q %v", out, err)
 	}
+	check("a reboot", true, "", "ED25519 SHA256:hostkey")
 
 	// The login survives a restart of the monitor, and can be forgotten.
 	again := remote.New(remote.Options{Store: db, Alerts: &alerts{}, SSHDir: dir, Exec: f.exec})
-	if got, _ := again.Get(h.ID); got.SSH == nil || got.SSH.Key != k.Path {
-		t.Fatalf("after a restart: %+v", got.SSH)
+	if got, _ := again.Get(h.ID); got.SSH == nil || got.SSH.Key != k.Path || got.SSHCheck == nil || !got.SSHCheck.OK {
+		t.Fatalf("after a restart: %+v %+v", got.SSH, got.SSHCheck)
+	}
+	// A changed login has not been tried; the same login saved again keeps its result.
+	if st, _ := m.SetSSH(ctx, h.ID, &remote.SSH{Key: k.Path}); st.SSHCheck == nil {
+		t.Fatal("saving the same login forgot how it went")
+	}
+	if st, _ := m.SetSSH(ctx, h.ID, &remote.SSH{Key: k.Path, User: "admin"}); st.SSHCheck != nil {
+		t.Fatalf("a new user is not tried yet: %+v", st.SSHCheck)
 	}
 	if st, err := m.SetSSH(ctx, h.ID, nil); err != nil || st.SSH != nil || st.SSHCommand != "" {
 		t.Fatalf("forget: %+v %v", st.SSH, err)
@@ -191,7 +214,7 @@ func TestSSHLoginIsCheckedSavedAndUsed(t *testing.T) {
 }
 
 func TestOwnKeysAreKeptPrivateAndPassphrasesRefused(t *testing.T) {
-	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+	if _, err := osexec.LookPath("ssh-keygen"); err != nil {
 		t.Skip("needs ssh-keygen")
 	}
 	t.Setenv("HOME", t.TempDir())
@@ -200,7 +223,7 @@ func TestOwnKeysAreKeptPrivateAndPassphrasesRefused(t *testing.T) {
 	ctx := context.Background()
 	mine := t.TempDir()
 	for _, k := range []struct{ file, pass string }{{"plain", ""}, {"locked", "hunter2"}} {
-		if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", k.pass, "-C", "me@laptop", "-f", filepath.Join(mine, k.file)).CombinedOutput(); err != nil {
+		if out, err := osexec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", k.pass, "-C", "me@laptop", "-f", filepath.Join(mine, k.file)).CombinedOutput(); err != nil {
 			t.Fatalf("ssh-keygen: %s", out)
 		}
 	}
@@ -359,5 +382,235 @@ func TestTheAgentIsReinstalledOverSSH(t *testing.T) {
 	}
 	if asked[0] != "arm64" || slices.Contains(asked, "") {
 		t.Fatalf("builds asked for: %v", asked)
+	}
+}
+
+func TestTheKeyIsPutOnTheServerWithAPasswordItDoesNotKeep(t *testing.T) {
+	m, f, _, _ := sshMonitor(t)
+	ctx := context.Background()
+	k, _ := m.NewSSHKey(ctx, "nightjar")
+	var env []string
+	var args []string
+	f.mu.Lock()
+	f.replies = nil
+	f.mu.Unlock()
+	exec := func(c context.Context, stdin []byte, e []string, name string, a ...string) (string, string, error) {
+		if name == "ssh" {
+			env, args = e, a
+		}
+		return f.exec(c, stdin, e, name, a...)
+	}
+	m2 := remote.New(remote.Options{Store: openDB(t), Alerts: &alerts{}, SSHDir: filepath.Dir(k.Path), Exec: exec, AskPass: "/usr/bin/nightjar"})
+	if _, err := m2.AuthorizeKey(ctx, "", remote.SSH{Host: "vps.example.net", Key: k.Path}, "hunter2"); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "hunter2") || !strings.Contains(joined, "PubkeyAuthentication=no") || !strings.Contains(joined, "vps.example.net") || !strings.Contains(joined, "authorized_keys") {
+		t.Fatalf("ssh args: %s", joined)
+	}
+	for _, want := range []string{"SSH_ASKPASS=/usr/bin/nightjar", "SSH_ASKPASS_REQUIRE=force", remote.AskPassEnv + "=1", remote.PasswordEnv + "=hunter2"} {
+		if !slices.Contains(env, want) {
+			t.Fatalf("env misses %q", want)
+		}
+	}
+	if _, err := m2.AuthorizeKey(ctx, "", remote.SSH{Key: k.Path}, "hunter2"); err == nil {
+		t.Fatal("no address")
+	}
+	if _, err := m2.AuthorizeKey(ctx, "", remote.SSH{Host: "vps.example.net", Key: k.Path}, ""); err == nil {
+		t.Fatal("no password")
+	}
+	f.fail, f.stderr = true, "root@vps.example.net: Permission denied (password).\n"
+	if _, err := m2.AuthorizeKey(ctx, "", remote.SSH{Host: "vps.example.net", Key: k.Path}, "wrong"); err == nil || !strings.Contains(err.Error(), "turned the password down") {
+		t.Fatalf("a wrong password: %v", err)
+	}
+}
+
+func TestTheAuthorizeCommandAddsTheKeyOnceWithSafePermissions(t *testing.T) {
+	home := t.TempDir()
+	key := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHk3 jay's laptop"
+	for range 2 {
+		cmd := osexec.Command("sh", "-c", remote.AuthorizeCommand(key))
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	got, _ := os.ReadFile(filepath.Join(home, ".ssh", "authorized_keys"))
+	if strings.TrimSpace(string(got)) != key {
+		t.Fatalf("authorized_keys: %q", got)
+	}
+	if st, _ := os.Stat(filepath.Join(home, ".ssh")); st.Mode().Perm() != 0o700 {
+		t.Fatalf(".ssh: %v", st.Mode())
+	}
+	if st, _ := os.Stat(filepath.Join(home, ".ssh", "authorized_keys")); st.Mode().Perm() != 0o600 {
+		t.Fatalf("authorized_keys: %v", st.Mode())
+	}
+}
+
+func TestAReinstallIsNotCutOffWhenItsRequestGoesAway(t *testing.T) {
+	m, f, _, _ := sshMonitor(t)
+	ctx := context.Background()
+	k, _ := m.NewSSHKey(ctx, "nightjar")
+	var mu sync.Mutex
+	alive := map[string]bool{}
+	m2 := remote.New(remote.Options{Store: openDB(t), Alerts: &alerts{}, SSHDir: filepath.Dir(k.Path), Exec: func(c context.Context, stdin []byte, e []string, name string, a ...string) (string, string, error) {
+		if name == "ssh" {
+			mu.Lock()
+			alive[a[len(a)-1]] = c.Err() == nil
+			mu.Unlock()
+		}
+		return f.exec(c, stdin, e, name, a...)
+	}, AgentBuild: func(string) ([]byte, string, error) { return []byte("BUILD"), "h", nil }})
+	a := newAgent(t)
+	st, err := m2.Add(ctx, "box", a.srv.URL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m2.SetSSH(ctx, st.ID, &remote.SSH{Key: k.Path}); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.replies = map[string]string{"uname -m": "x86_64\n"}
+	f.mu.Unlock()
+
+	// The browser gave up (or the tab closed) as the reinstall began.
+	gone, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := m2.RunSSH(gone, st.ID, remote.SSHReinstallAgent); err != nil {
+		t.Fatalf("reinstall: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(alive) == 0 {
+		t.Fatal("ssh was not run")
+	}
+	for cmd, ok := range alive {
+		if !ok {
+			t.Fatalf("%q ran on a canceled context", cmd)
+		}
+	}
+}
+
+func TestThePasswordOnlyGoesToAHostKeySomeoneConfirmed(t *testing.T) {
+	m, _, _, _ := sshMonitor(t)
+	ctx := context.Background()
+	k, _ := m.NewSSHKey(ctx, "nightjar")
+	dir := filepath.Dir(k.Path)
+	knownHosts := filepath.Join(dir, "known_hosts")
+	confirmed := filepath.Join(dir, "known_hosts.confirmed")
+	var mu sync.Mutex
+	var logins [][]string
+	exec := func(_ context.Context, stdin []byte, _ []string, name string, a ...string) (string, string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case name == "ssh-keygen" && slices.Contains(a, "-F"):
+			b, _ := os.ReadFile(a[slices.Index(a, "-f")+1])
+			out := ""
+			for line := range strings.Lines(string(b)) {
+				if f := strings.Fields(line); len(f) == 3 && f[0] == a[slices.Index(a, "-F")+1] {
+					out += "# Host found: line 1\n" + f[0] + " ED25519 SHA256:" + strings.TrimPrefix(f[2], "AAAA") + "\n"
+				}
+			}
+			if out == "" {
+				return "", "", errors.New("exit status 1")
+			}
+			return out, "", nil
+		case name == "ssh-keygen" && slices.Contains(a, "-"):
+			if strings.Contains(string(stdin), "ssh-rsa") {
+				return "3072 SHA256:rsa vps.example.net (RSA)\n", "", nil
+			}
+			return "256 SHA256:ed vps.example.net (ED25519)\n", "", nil
+		case name == "ssh-keygen" && slices.Contains(a, "-l"):
+			return "256 SHA256:abcdef nightjar@test (ED25519)\n", "", nil
+		case name == "ssh-keyscan":
+			return "vps.example.net ssh-rsa AAAArsa\nvps.example.net ssh-ed25519 AAAAed\n", "# vps.example.net:22 SSH-2.0-OpenSSH_9.6\n", nil
+		case name == "ssh":
+			logins = append(logins, a)
+		}
+		return "", "", nil
+	}
+	m2 := remote.New(remote.Options{Store: openDB(t), Alerts: &alerts{}, SSHDir: dir, Exec: exec, AskPass: "/usr/bin/nightjar"})
+	login := remote.SSH{Host: "vps.example.net", Key: k.Path}
+	const line = "vps.example.net ssh-ed25519 AAAAed\n"
+
+	// A server never seen before: its key is shown, and the password goes nowhere.
+	_, err := m2.AuthorizeKey(ctx, "", login, "hunter2")
+	var hk *remote.HostKeyError
+	if !errors.As(err, &hk) || hk.HostKey != "ED25519 SHA256:ed" || !strings.Contains(err.Error(), "ssh_host_ed25519_key.pub") {
+		t.Fatalf("first contact: %v", err)
+	}
+	if len(logins) != 0 {
+		t.Fatalf("logged in before the host key was confirmed: %v", logins)
+	}
+
+	// A key nobody confirmed is not kept.
+	if err := m2.TrustHostKey(ctx, "", login, "ED25519 SHA256:someone-elses"); err == nil {
+		t.Fatal("trusted a key the server does not present")
+	}
+	if _, err := os.Stat(knownHosts); err == nil {
+		t.Fatal("known_hosts was written for a key nobody confirmed")
+	}
+
+	// A key login that failed still had ssh keep whatever answered (accept-new): here someone on the
+	// way. That proves nothing, so the password still waits, and the real key cannot be confirmed
+	// over it.
+	if err := os.WriteFile(knownHosts, []byte("vps.example.net ssh-ed25519 AAAAevil\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m2.AuthorizeKey(ctx, "", login, "hunter2"); !errors.As(err, &hk) {
+		t.Fatalf("a key ssh kept by itself: %v", err)
+	}
+	if len(logins) != 0 {
+		t.Fatalf("the password went to a key nobody confirmed: %v", logins)
+	}
+	if err := m2.TrustHostKey(ctx, "", login, "ED25519 SHA256:ed"); err == nil || !strings.Contains(err.Error(), "not the one Nightjar saw before") {
+		t.Fatalf("confirmed a key that contradicts the one key logins keep: %v", err)
+	}
+	if _, err := os.Stat(confirmed); err == nil {
+		t.Fatal("a key was confirmed over a different one")
+	}
+	os.Remove(knownHosts)
+
+	if err := m2.TrustHostKey(ctx, "", login, hk.HostKey); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{knownHosts, confirmed} {
+		if b, _ := os.ReadFile(file); string(b) != line {
+			t.Fatalf("%s: %q", filepath.Base(file), b)
+		}
+	}
+
+	// Now the password goes, and only to that key.
+	if _, err := m2.AuthorizeKey(ctx, "", login, "hunter2"); err != nil {
+		t.Fatal(err)
+	}
+	if len(logins) != 1 {
+		t.Fatalf("logins: %v", logins)
+	}
+	joined := strings.Join(logins[0], " ")
+	if !strings.Contains(joined, "StrictHostKeyChecking=yes") || strings.Contains(joined, "accept-new") || !strings.Contains(joined, "UserKnownHostsFile="+confirmed+" ") {
+		t.Fatalf("ssh args: %s", joined)
+	}
+	if err := m2.TrustHostKey(ctx, "", login, "RSA SHA256:rsa"); err == nil {
+		t.Fatal("a second, different key replaced the one kept")
+	}
+
+	// The real key, kept by a key login before anyone confirmed it, can be confirmed without being
+	// written twice.
+	os.Remove(confirmed)
+	if _, err := m2.AuthorizeKey(ctx, "", login, "hunter2"); !errors.As(err, &hk) || len(logins) != 1 {
+		t.Fatalf("a key ssh kept by itself: %v, %d logins", err, len(logins))
+	}
+	if err := m2.TrustHostKey(ctx, "", login, hk.HostKey); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{knownHosts, confirmed} {
+		if b, _ := os.ReadFile(file); string(b) != line {
+			t.Fatalf("%s: %q", filepath.Base(file), b)
+		}
+	}
+	if _, err := m2.AuthorizeKey(ctx, "", login, "hunter2"); err != nil || len(logins) != 2 {
+		t.Fatalf("after confirming: %v, %d logins", err, len(logins))
 	}
 }

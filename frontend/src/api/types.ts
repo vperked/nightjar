@@ -643,6 +643,8 @@ export interface UpdateRun {
   ok: boolean;
   auto: boolean;
   detail?: string;
+  // log is the end of what the update did and printed.
+  log?: string[];
 }
 
 export interface UpdateTarget extends UpdateSpec {
@@ -656,6 +658,8 @@ export interface UpdateTarget extends UpdateSpec {
   api_key_set?: boolean;
   can_update: boolean;
   busy?: 'checking' | 'updating' | 'queued';
+  // live is what the update under way has done so far: each command, what it prints, and the steps.
+  live?: { started: number; lines: string[] };
 }
 
 export interface UpdatesResponse {
@@ -1030,6 +1034,8 @@ export interface AppsResponse {
 export interface RemoteReadings {
   version: number;
   agent: string;
+  // attacks is the agent's own watch for attacks on its server (agents from this version on).
+  attacks?: AttackView;
   time: number;
   system: HostInfo & { boot_time: number };
   cpu: { percent: number; cores: number[] | null; count: number; load: number[] | null; freq_mhz: number };
@@ -1068,6 +1074,8 @@ export interface RemoteHost {
   // ssh is how Nightjar logs in to it, when set up; ssh_command logs in the same way by hand.
   ssh?: HostSSH;
   ssh_command?: string;
+  // ssh_check is how the last login with it went.
+  ssh_check?: SSHCheck;
   // update is how keeping its agent on this dashboard's build is going.
   update?: AgentUpdate;
   status: 'waiting' | 'online' | 'offline';
@@ -1085,6 +1093,17 @@ export interface HostSSH {
   port: number;
   user: string;
   key: string;
+}
+
+// SSHCheck is how the last login with a server's SSH login went: a test, or any action that worked.
+export interface SSHCheck {
+  ok: boolean;
+  at: number;
+  // as is who it logged in as, user@hostname, from a test.
+  as?: string;
+  error?: string;
+  // host_key is the server's host key Nightjar trusts, as a type and fingerprint.
+  host_key?: string;
 }
 
 // AgentUpdate: "current", "updating", "updated", "failed", or "manual" for an agent that needs one
@@ -1137,12 +1156,14 @@ export interface AnalyticsPoint {
   cpu: number | null;
   cpu_max: number | null;
   mem: number | null;
+  mem_max: number | null;
   temp: number | null;
   temp_max: number | null;
   disk: number | null;
   rx: number | null;
   tx: number | null;
   latency: number | null;
+  latency_max: number | null;
   minutes: number;
 }
 
@@ -1239,6 +1260,8 @@ export interface Plugin {
 export interface PluginsResponse {
   dir: string;
   plugins: Plugin[];
+  // restarting: a rescan found the plugins that deliver alerts changed, and Nightjar is restarting to set up their channels.
+  restarting?: boolean;
 }
 
 export interface PluginCard {
@@ -1266,4 +1289,161 @@ export interface ActivityEntry {
   action: string;
   target?: string;
   detail?: string;
+}
+
+// AttackMethod is one way of attacking, as the detector names it.
+export interface AttackMethod {
+  id: string;
+  name: string;
+  how: string;
+  unit: string;
+}
+
+// AttackFinding is one method seen now: its strength, what counts as an attack, and what is normal
+// here. expected says what running on the machine explains it, so it is not counted.
+export interface AttackFinding {
+  method: string;
+  value: number;
+  threshold: number;
+  normal: number;
+  expected?: string;
+}
+
+// AttackSource is an address taking part; network names a proxy (Cloudflare) carrying many visitors.
+export interface AttackSource {
+  address: string;
+  established: number;
+  syn_recv: number;
+  requests: number;
+  network?: string;
+  // ssh is an address logged in over SSH, never limited or blocked.
+  ssh?: boolean;
+}
+
+// AttackKind is an exact type of flood ("DNS amplification", "Slowloris"), from sampled packet headers
+// and the web log, with its share of the traffic sampled.
+export interface AttackKind {
+  id: string;
+  name: string;
+  share: number;
+  detail?: string;
+  how: string;
+}
+
+// Attack is one attack, from start to end (end 0 while it goes on).
+export interface Attack {
+  id: string;
+  start: number;
+  end?: number;
+  methods: AttackFinding[];
+  kinds?: AttackKind[];
+  peak_rx_bits: number;
+  peak_rx_packets: number;
+  sources: AttackSource[];
+}
+
+// AttackView is the attack watch (GET /api/attacks, and an agent's readings.attacks).
+export interface AttackView {
+  attacking: boolean;
+  current?: Attack;
+  findings: AttackFinding[];
+  busy: { installing?: string; torrents?: string };
+  rx_bits: number;
+  rx_packets: number;
+  learning: boolean;
+  history: Attack[];
+  methods?: AttackMethod[];
+  // defense is what is being done about attacks, where the watch defends.
+  defense?: AttackDefense;
+}
+
+// AttackDefense is the firewall's answer to an attack: rules suited to it in iptables chains of
+// Nightjar's own, and the addresses it blocked. on is the switch; problem says why it cannot defend
+// here; cannot says what it cannot do about the attack under way.
+export interface AttackDefense {
+  on: boolean;
+  problem?: string;
+  active: boolean;
+  measures: { id: string; name: string; how: string }[];
+  blocked: AttackBlock[];
+  cannot?: string[];
+  error?: string;
+  // web is whether addresses coming through Cloudflare can be blocked in nginx.
+  web: boolean;
+}
+
+// AttackBlock is an address cut off until a time, in the firewall or (behind a proxy) in nginx.
+export interface AttackBlock {
+  address: string;
+  until: number;
+  why: string;
+  where: 'firewall' | 'web';
+}
+
+// FirewallRule is a rule set from the dashboard: allow, block or limit traffic to a port, ports or
+// range (none for all) over tcp, udp or both, from an address or network (none for anyone); for an
+// outgoing rule, to it. Rules are checked in order and the first that matches decides. A limit's rate
+// is for each address: "6/min", "20/sec", "100/hour".
+export interface FirewallRule {
+  id: string;
+  action: 'allow' | 'block' | 'limit';
+  direction?: 'out';
+  source?: string;
+  port?: string;
+  proto?: 'tcp' | 'udp';
+  rate?: string;
+  note?: string;
+  paused?: boolean;
+  added: number;
+}
+
+// FirewallPort is a port something listens on; local ones are open on loopback only. allowed: anyone
+// may reach it whatever the default (a rule allows everyone, or it is kept open).
+export interface FirewallPort {
+  port: number;
+  proto: 'tcp' | 'udp';
+  program?: string;
+  local?: boolean;
+  allowed?: boolean;
+}
+
+// FirewallDrop is one packet the firewall dropped, from the kernel log: rule is the rule's id, or
+// "default" for incoming traffic no rule allowed.
+export interface FirewallDrop {
+  at: number;
+  rule: string;
+  direction?: 'out';
+  source: string;
+  dest?: string;
+  proto?: string;
+  port?: number;
+}
+
+// FirewallStatus is a machine's firewall (GET /api/firewall, GET /api/hosts/{id}/firewall): which it
+// runs and what its INPUT does by default; what happens here to incoming traffic no rule decides
+// (default: '' leaves it to the machine's firewall, 'drop' drops it, with pending until it is kept);
+// the ports kept open whatever the default; the rules in order and what each caught since `since`;
+// the latest dropped packets; and the machine's own rules. full is false for an agent from before all
+// this, which has rules and open ports only.
+export interface FirewallStatus {
+  full?: boolean;
+  tool: 'ufw' | 'firewalld' | 'iptables';
+  policy?: string;
+  default?: '' | 'drop';
+  pending?: { default: '' | 'drop'; until: number };
+  open?: { port: number; what: string }[];
+  rules: FirewallRule[];
+  listening: FirewallPort[];
+  hits?: Record<string, { packets: number; bytes: number }>;
+  since?: number;
+  drops?: FirewallDrop[];
+  drops_note?: string;
+  native?: string;
+  problem?: string;
+}
+
+// AgentFirewall is what an agent says of its firewall and defense.
+export interface AgentFirewall {
+  firewall: FirewallStatus;
+  defense?: AttackDefense;
 }

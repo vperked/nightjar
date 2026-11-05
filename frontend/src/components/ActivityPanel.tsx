@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import type { ActivityEntry } from '../api/types';
 import { formatAgo } from '../format';
@@ -11,18 +11,28 @@ import { SettingsGroup } from './SettingsGroup';
 
 const when = (ts: number) => new Date(ts * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
+// merge puts lists of entries together newest first, each entry once.
+const merge = (...lists: ActivityEntry[][]) => [...new Map(lists.flat().map((a) => [a.id, a])).values()].sort((a, b) => b.id - a.id);
+
 export function ActivityPanel() {
   const fetch = useCallback(() => api.activity(), []);
   const { data } = usePoll(fetch, 30000);
-  const [older, setOlder] = useState<ActivityEntry[]>([]);
+  // kept is everything shown since older pages were loaded. The newest page keeps being polled, and
+  // what slides off its end as new entries arrive stays here instead of falling into a gap before
+  // the older pages.
+  const [kept, setKept] = useState<ActivityEntry[]>([]);
   const [end, setEnd] = useState(false);
   const now = useNow(30000);
-  const list = [...(data?.activity ?? []), ...older];
+  const newest = data?.activity;
+  useEffect(() => {
+    if (newest) setKept((k) => (k.length ? merge(newest, k) : k));
+  }, [newest]);
+  const list = kept.length ? merge(newest ?? [], kept) : (newest ?? []);
   const more = async () => {
     const last = list[list.length - 1];
     if (!last) return;
     const r = await api.activity(last.id);
-    setOlder((o) => [...o, ...r.activity]);
+    setKept((k) => merge(list, k, r.activity));
     setEnd(r.activity.length < 100);
   };
   return (

@@ -99,9 +99,10 @@ func (w Window) At(now time.Time) (Span, bool) {
 		return Span{}, false
 	}
 	from, to := minutes(w.From), minutes(w.To)
-	length := to - from
-	if length <= 0 {
-		length += 24 * 60
+	// To before From ends the next day.
+	endDay := 0
+	if to <= from {
+		endDay = 1
 	}
 	// Yesterday's may still be running past midnight; then today's and the week's after.
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
@@ -110,8 +111,10 @@ func (w Window) At(now time.Time) (Span, bool) {
 		if !slices.Contains(w.Days, int(day.Weekday())) {
 			continue
 		}
-		start := day.Add(time.Duration(from) * time.Minute)
-		end := start.Add(time.Duration(length) * time.Minute)
+		// Built from the wall clock, not as a duration after midnight, so a day that changes to or
+		// from daylight saving time still starts and ends at the times set.
+		start := time.Date(day.Year(), day.Month(), day.Day(), from/60, from%60, 0, 0, day.Location())
+		end := time.Date(day.Year(), day.Month(), day.Day()+endDay, to/60, to%60, 0, 0, day.Location())
 		if end.After(now) {
 			return Span{float64(start.Unix()), float64(end.Unix())}, true
 		}
@@ -226,7 +229,10 @@ func (m *Manager) Rename(oldName, newName string) {
 	changed := false
 	for i := range m.list {
 		if j := slices.Index(m.list[i].Checks, oldName); j >= 0 {
-			m.list[i].Checks[j] = newName
+			// A new slice: copies already handed out by List and For share the old one.
+			checks := slices.Clone(m.list[i].Checks)
+			checks[j] = newName
+			m.list[i].Checks = checks
 			changed = true
 		}
 	}

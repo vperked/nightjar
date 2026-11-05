@@ -45,7 +45,14 @@ import type {
   AnalyticsRangeName,
   HostAnalytics,
   RemoteHost,
+  Attack,
+  AttackDefense,
+  AttackView,
+  FirewallPort,
+  FirewallRule,
+  FirewallStatus,
   HostSSH,
+  SSHCheck,
   SSHKey,
   Appearance,
   MaintenanceWindow,
@@ -559,7 +566,22 @@ const INITIAL_UPDATES: UpdateTarget[] = [
     auto: true,
     available: true,
     pending: ['fwupd 1.9.34-0ubuntu1 → 2.0.20-1ubuntu2', 'linux-firmware 20240318.git3b128b60-0ubuntu2.29 → 20240318.git3b128b60.0ubuntu3.1', 'openssl 3.0.13-0ubuntu3.6 → 3.0.13-0ubuntu3.7'],
-    runs: [{ at: hoursAgo(26), ok: true, auto: true, detail: '7 package(s) upgraded with apt' }],
+    runs: [
+      {
+        at: hoursAgo(26),
+        ok: true,
+        auto: true,
+        detail: '7 package(s) upgraded with apt',
+        log: [
+          'Updating OS packages (apt): 7 packages',
+          '$ apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade',
+          '7 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.',
+          'Setting up openssl (3.0.13-0ubuntu3.6) ...',
+          'Checking the version now installed',
+          'Done',
+        ],
+      },
+    ],
   }),
   target({ id: 'snaps', name: 'Snaps', kind: 'snap' }),
   target({
@@ -649,12 +671,82 @@ function later(id: string, ms: number, change: (t: UpdateTarget) => void) {
   }, ms);
 }
 
+// demoUpdateLog is what a demo update prints, step by step, as the backend's live log shows it.
+function demoUpdateLog(t: UpdateTarget): string[] {
+  const change = `${t.installed ?? ''} → ${t.latest ?? ''}`;
+  if (t.kind === 'arr')
+    return [
+      `Updating ${t.name}: ${change}`,
+      `Asking ${t.name} to update itself to ${t.latest}`,
+      'Waiting for it to download the update and restart',
+      'It stopped answering: restarting',
+      `It answers, on ${t.latest}`,
+      'Checking it is running',
+      '$ systemctl is-active ' + (t.unit ?? t.id),
+      'active',
+      'Checking the version now installed',
+      'Done',
+    ];
+  if (t.kind === 'system')
+    return [
+      `Updating ${t.name}: ${t.pending?.length ?? 0} packages`,
+      '$ apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade',
+      'Reading package lists...',
+      'Building dependency tree...',
+      `${t.pending?.length ?? 0} upgraded, 0 newly installed, 0 to remove and 0 not upgraded.`,
+      'Get:1 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 openssl amd64 3.0.13-0ubuntu3.7 [1,005 kB]',
+      'Fetched 1,005 kB in 1s (1,370 kB/s)',
+      'Unpacking openssl (3.0.13-0ubuntu3.7) over (3.0.13-0ubuntu3.6) ...',
+      'Setting up openssl (3.0.13-0ubuntu3.7) ...',
+      'Checking the version now installed',
+      '$ apt-get -s upgrade',
+      'Done',
+    ];
+  return [
+    `Updating ${t.name}: ${change}`,
+    `$ sh -c ${t.update_command ?? 'update'}`,
+    `Downloading ${t.name} ${t.latest}`,
+    'Installed',
+    'Checking it is running',
+    'Checking the version now installed',
+    'Done',
+  ];
+}
+
+// The demo updates one at a time, as the server does: the rest wait in a queue.
+const demoQueue: string[] = [];
+
 function applyDemoUpdate(t: UpdateTarget) {
+  if (updatesList().some((u) => u.busy === 'updating')) {
+    t.busy = 'queued';
+    demoQueue.push(t.id);
+    return;
+  }
+  runDemoUpdate(t);
+}
+
+function nextDemoUpdate() {
+  const id = demoQueue.shift();
+  const t = id ? updatesList().find((u) => u.id === id) : undefined;
+  if (t) runDemoUpdate(t);
+  else if (id) nextDemoUpdate();
+}
+
+function runDemoUpdate(t: UpdateTarget) {
+  const lines = demoUpdateLog(t);
+  const step = 600;
   t.busy = 'updating';
-  later(t.id, 3500, (u) => {
+  t.live = { started: now(), lines: [] };
+  // The log fills a line at a time, as a real update's does.
+  lines.forEach((_, i) =>
+    later(t.id, step * (i + 1), (u) => {
+      if (u.live) u.live = { ...u.live, lines: lines.slice(0, i + 1) };
+    }),
+  );
+  later(t.id, step * (lines.length + 1), (u) => {
     const from = u.installed;
     u.runs = [
-      { at: now(), from, to: u.latest ?? from, ok: true, auto: false, detail: u.kind === 'system' ? `${u.pending?.length ?? 0} package(s) upgraded with apt` : undefined },
+      { at: now(), from, to: u.latest ?? from, ok: true, auto: false, detail: u.kind === 'system' ? `${u.pending?.length ?? 0} package(s) upgraded with apt` : undefined, log: lines },
       ...(u.runs ?? []),
     ].slice(0, 5);
     if (u.kind === 'release') u.installed = u.latest?.replace(/^v/, '');
@@ -662,7 +754,9 @@ function applyDemoUpdate(t: UpdateTarget) {
     u.available = false;
     u.pending = null;
     u.busy = undefined;
+    u.live = undefined;
     u.checked = now();
+    setTimeout(nextDemoUpdate, 0);
   });
 }
 
@@ -1469,6 +1563,32 @@ const demoApps: StoreApp[] = [
   storeApp('ntfy', 'ntfy', 'Notifications', '#338574', 2586, "Your own push notification server: the monitor's alerts reach your phone without a third-party service.", {
     sign_in: "In the ntfy phone app, add this server's address, then subscribe to the monitor's topic.",
   }),
+  storeApp('navidrome', 'Navidrome', 'Media', '#0d6efd', 4533, 'Your own music streaming server: plays your music library in the browser and in Subsonic apps on your phone.', {
+    sign_in: 'Create the admin account on first visit. Point MusicFolder in /var/lib/navidrome/navidrome.toml at your music, then restart it. Install ffmpeg for transcoding.',
+  }),
+  storeApp('ombi', 'Ombi', 'Media', '#e0752d', 5000, 'Lets the people you share Plex with request shows and films; requests go to Sonarr and Radarr.', {
+    sign_in: 'Run the setup wizard on first visit: create the admin account, then connect Plex, Sonarr and Radarr.',
+  }),
+  storeApp('syncthing', 'Syncthing', 'Files and sync', '#0891d1', 8384, 'Keeps folders in sync between this server, your computers and your phone, directly and privately.', {
+    installed: true,
+    running: true,
+    by: 'store',
+    version: '2.1.7',
+    sign_in: 'Open it and set a username and password under Actions → Settings → GUI; it warns until you do.',
+  }),
+  storeApp('filebrowser', 'File Browser', 'Files and sync', '#40c4ff', 8090, "Browse, upload, download and share the server's files from any browser.", {
+    sign_in: 'Username admin. A generated password is printed at the end of the install log; change it under Settings.',
+  }),
+  storeApp('adguardhome', 'AdGuard Home', 'Network', '#68bc71', 3080, 'Blocks ads and trackers for every device on your network, as its DNS server.', {
+    sign_in:
+      "Run the setup wizard on first visit. On Ubuntu, systemd-resolved already uses port 53 on 127.0.0.53: listen for DNS on this server's network address, not on all interfaces. Then point your router's DNS at this server.",
+  }),
+  storeApp('gitea', 'Gitea', 'Self-hosting', '#609926', 3000, 'Your own GitHub: git repositories, issues, pull requests and a web editor, light enough for a Raspberry Pi.', {
+    sign_in: 'Finish the install page on first visit (SQLite is fine for a home server); the first account made there is the admin.',
+  }),
+  storeApp('memos', 'Memos', 'Self-hosting', '#4b5563', 5230, 'Quick notes, like a private Twitter for your thoughts, links and to-dos, kept on your server.', {
+    sign_in: 'The first account you create is the admin.',
+  }),
 ];
 
 let demoJob: AppJob | null = null;
@@ -1618,7 +1738,177 @@ function demoHost(i: number, points: number): RemoteHost {
             ]
           : [],
       drives_error: d.name === 'nas' ? undefined : 'smartctl is not installed (apt install smartmontools)',
+      attacks: d.offlineSince ? undefined : demoAttacks(d.name === 'pi-dns'),
     },
+  };
+}
+
+// demoFirewalls are each machine's firewall, made on first look: ufw on this machine with rules set
+// from here, what they caught and dropped; plain iptables on the agents.
+const demoFirewalls: Record<string, FirewallStatus> = {};
+function demoFirewall(id: string): FirewallStatus {
+  const ports: FirewallPort[] = [
+    { port: 22, proto: 'tcp', program: 'sshd' },
+    { port: 53, proto: 'udp', program: 'systemd-resolve', local: true },
+    { port: 9101, proto: 'tcp', program: 'nightjar-agent' },
+  ];
+  const ssh = { port: 22, what: 'SSH' };
+  if (id === 'local')
+    return {
+      full: true,
+      tool: 'ufw',
+      policy: 'DROP',
+      default: '',
+      open: [ssh, { port: 80, what: 'web' }, { port: 443, what: 'web' }, { port: 8080, what: 'this dashboard' }],
+      rules: [
+        { id: 'r1', action: 'block', source: '45.142.120.0/24', note: 'kept scanning SSH', added: now() - 4 * 86400 },
+        { id: 'r2', action: 'limit', port: '22', proto: 'tcp', rate: '6/min', note: 'no password guessing', added: now() - 2 * 86400 },
+        { id: 'r3', action: 'allow', port: '32400', proto: 'tcp', note: 'Plex', added: now() - 86400 },
+        { id: 'r4', action: 'block', direction: 'out', port: '25', proto: 'tcp', note: 'no mail from here', added: now() - 3 * 86400 },
+      ],
+      listening: [
+        { port: 22, proto: 'tcp', program: 'sshd' },
+        { port: 80, proto: 'tcp', program: 'nginx' },
+        { port: 443, proto: 'tcp', program: 'nginx' },
+        { port: 8080, proto: 'tcp', program: 'nightjar', local: true },
+        { port: 32400, proto: 'tcp', program: 'Plex Media Server' },
+        { port: 51413, proto: 'udp', program: 'qbittorrent-nox' },
+      ],
+      hits: { r1: { packets: 1204, bytes: 72240 }, r2: { packets: 38, bytes: 2280 }, r3: { packets: 91822, bytes: 7_340_000 }, r4: { packets: 3, bytes: 180 } },
+      since: now() - 6 * 3600,
+      drops: [
+        ...[0, 1, 2, 3, 4].map((i) => ({ at: now() - 60 - i * 340, rule: 'r1', source: `45.142.120.${11 + (i % 2) * 26}`, dest: '192.168.1.10', proto: 'tcp', port: 22 })),
+        { at: now() - 900, rule: 'r4', direction: 'out' as const, source: '192.168.1.10', dest: '192.0.2.25', proto: 'tcp', port: 25 },
+        { at: now() - 1300, rule: 'r2', source: '203.0.113.50', dest: '192.168.1.10', proto: 'tcp', port: 22 },
+      ].sort((a, b) => b.at - a.at),
+      native: `Status: active
+Logging: on (low)
+Default: deny (incoming), allow (outgoing), deny (routed)
+New profiles: skip
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW IN    Anywhere
+80,443/tcp                 ALLOW IN    Anywhere
+32400/tcp                  ALLOW IN    Anywhere
+51413/udp                  ALLOW IN    Anywhere`,
+    };
+  return {
+    full: true,
+    tool: 'iptables',
+    policy: 'ACCEPT',
+    default: '',
+    open: [ssh, { port: 9101, what: 'this agent' }],
+    rules: [],
+    hits: {},
+    drops: [],
+    native: '-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT',
+    listening:
+      id === 'b2c3d4e5f6a1'
+        ? [ports[0], { port: 53, proto: 'tcp', program: 'pihole-FTL' }, { port: 53, proto: 'udp', program: 'pihole-FTL' }, { port: 80, proto: 'tcp', program: 'lighttpd' }, ports[2]]
+        : ports,
+  };
+}
+
+// demoAllowed marks the ports anyone may reach whatever the default, as the firewall does.
+function demoAllowed(fw: FirewallStatus) {
+  const covers = (r: FirewallRule, port: number) =>
+    !r.port ||
+    r.port.split(',').some((p) => {
+      const [a, b = a] = p.split(':').map(Number);
+      return port >= a && port <= b;
+    });
+  for (const p of fw.listening) {
+    p.allowed = (p.proto === 'tcp' && !!fw.open?.some((o) => o.port === p.port)) || undefined;
+    if (p.allowed) continue;
+    const first = fw.rules.find((r) => !r.paused && r.direction !== 'out' && !r.source && (!r.proto || r.proto === p.proto) && covers(r, p.port) && r.action !== 'limit');
+    p.allowed = first?.action === 'allow' || undefined;
+  }
+}
+
+// demoDefense is this machine's defense: on, and ready. The switch and unblocking change it.
+const demoDefense: AttackDefense = { on: true, active: false, measures: [], blocked: [], web: true };
+
+// demoAttacks is the attack watch: this machine calm, with torrents explaining their UDP and a SYN
+// flood from yesterday; pi-dns under a SYN and UDP flood right now, and defending.
+function demoAttacks(under: boolean): AttackView {
+  const past: Attack = {
+    id: 'demo1',
+    start: now() - 26 * 3600,
+    end: now() - 26 * 3600 + 252,
+    methods: [
+      { method: 'syn_flood', value: 9200, threshold: 100, normal: 0.4 },
+      { method: 'udp_flood', value: 480000, threshold: 20000, normal: 1800 },
+    ],
+    kinds: [
+      {
+        id: 'udp_reflect_53',
+        name: 'DNS amplification',
+        detail: 'from port 53',
+        share: 0.71,
+        how: 'Open DNS resolvers answering spoofed queries, often for large records, in this server\u2019s name.',
+      },
+      { id: 'tcp_SYN', name: 'SYN flood', share: 0.24, how: 'Connection requests that are never completed, to fill the queue of half-open connections.' },
+    ],
+    peak_rx_bits: 812e6,
+    peak_rx_packets: 640000,
+    sources: [
+      { address: '45.142.120.11', established: 0, syn_recv: 940, requests: 0 },
+      { address: '45.142.120.37', established: 0, syn_recv: 610, requests: 0 },
+      { address: '172.68.10.21', established: 38, syn_recv: 0, requests: 0, network: 'Cloudflare' },
+    ],
+  };
+  if (under) {
+    const current: Attack = {
+      id: 'demo2',
+      start: now() - 95,
+      methods: [
+        { method: 'syn_flood', value: 6100, threshold: 100, normal: 0.2 },
+        { method: 'udp_flood', value: 210000, threshold: 20000, normal: 600 },
+      ],
+      kinds: [
+        { id: 'udp_reflect_123', name: 'NTP amplification', detail: 'from port 123', share: 0.64, how: 'NTP servers answering spoofed monlist requests, each reply hundreds of times the request.' },
+        { id: 'tcp_ACK', name: 'ACK flood', share: 0.29, how: 'Packets acknowledging connections that do not exist, to tire out firewalls and the kernel looking them up.' },
+      ],
+      peak_rx_bits: 610e6,
+      peak_rx_packets: 410000,
+      sources: [
+        { address: '185.220.101.4', established: 0, syn_recv: 720, requests: 0 },
+        { address: '185.220.101.9', established: 0, syn_recv: 540, requests: 0 },
+        { address: '91.92.240.17', established: 210, syn_recv: 0, requests: 0 },
+      ],
+    };
+    const defense: AttackDefense = {
+      on: true,
+      active: true,
+      web: false,
+      measures: [
+        { id: 'syn_limit', name: 'SYN limit per address', how: 'New connections from one address beyond 50 a second are dropped. SYN cookies answer the rest without setting memory aside for each.' },
+        {
+          id: 'stray_tcp',
+          name: 'Drop TCP outside connections',
+          how: 'TCP packets that neither start a connection nor belong to one, such as a flood of ACKs or of replies to connections never made, are dropped before anything handles them.',
+        },
+        { id: 'reflection', name: 'Drop unasked-for replies', how: 'Replies this machine never asked for (UDP from port 123) are dropped; answers to its own requests still get through.' },
+        { id: 'udp_limit', name: 'UDP limit per address', how: 'UDP from one address beyond 10000 packets a second is dropped.' },
+        { id: 'udp_closed', name: 'Drop UDP to closed ports', how: 'UDP sent to ports nothing listens on is dropped quietly, so the server stops answering each packet with an error.' },
+      ],
+      blocked: [
+        { address: '185.220.101.4', until: now() + 14 * 60, why: '720 connections', where: 'firewall' },
+        { address: '185.220.101.9', until: now() + 13 * 60, why: '540 connections', where: 'firewall' },
+      ],
+    };
+    return { attacking: true, current, findings: current.methods, busy: {}, rx_bits: 600e6, rx_packets: 400000, learning: false, history: [], defense };
+  }
+  return {
+    attacking: false,
+    findings: [{ method: 'udp_flood', value: 42000, threshold: 20000, normal: 1800, expected: 'qbittorrent-nox is transferring (uTP is UDP)' }],
+    busy: { torrents: 'qbittorrent-nox' },
+    rx_bits: 96e6,
+    rx_packets: 42000,
+    learning: false,
+    history: [past],
+    defense: { ...demoDefense, blocked: [...demoDefense.blocked] },
   };
 }
 
@@ -1645,11 +1935,25 @@ const demoKeys: SSHKey[] = [
 ];
 const demoSSH: Record<string, HostSSH> = { a1b2c3d4e5f6: { port: 22, user: 'root', key: '/root/serverMonitor/ssh/nightjar' } };
 
+// demoChecks are how each saved login last went.
+const demoChecks: Record<string, SSHCheck> = {
+  a1b2c3d4e5f6: { ok: true, at: now() - 3 * 3600, as: 'root@nas', host_key: 'ED25519 SHA256:q7Lw2vN8fKc3RtY1mZpX4hJ9sB6dE0aGuTi5oVnWkQs' },
+  f6a1b2c3d4e5: { ok: true, at: now() - 20 * 60, as: 'root@vps', host_key: 'ED25519 SHA256:Hn3pR8sW1vKx6cYq0zT4mB9fL2jD7gEaUo5iNrXtZe' },
+};
+
 function withSSH(h: RemoteHost): RemoteHost {
   const ssh = demoSSH[h.id];
   if (!ssh) return h;
   const target = ssh.host || (h.kind === 'ssh' ? h.address : new URL(h.address).hostname);
-  return { ...h, ssh, ssh_command: `ssh -i ${ssh.key}${ssh.port !== 22 ? ` -p ${ssh.port}` : ''} ${ssh.user}@${target}` };
+  return { ...h, ssh, ssh_command: `ssh -i ${ssh.key}${ssh.port !== 22 ? ` -p ${ssh.port}` : ''} ${ssh.user}@${target}`, ssh_check: demoChecks[h.id] };
+}
+
+// noteDemoLogin keeps how a demo login went, as the monitor does.
+function noteDemoLogin(id: string, t: { ok: boolean; output?: string; error?: string }) {
+  const before = demoChecks[id];
+  const key = before?.host_key ?? `ED25519 SHA256:demo${id}hostkey0000000000000000000000`;
+  demoChecks[id] = t.ok ? { ok: true, at: now(), as: t.output?.split('\n')[0] || before?.as, host_key: key } : { ok: false, at: now(), error: t.error, host_key: before?.host_key };
+  return t;
 }
 
 // demoLoginTest is the demo's first login with a saved login: backup-box is offline, so it fails.
@@ -1713,18 +2017,22 @@ function demoHostAnalytics(id: string, name: string, kind: HostAnalytics['kind']
     const down = downAt(ago);
     const cpu = c.latency !== undefined || down ? null : round(clamp(c.cpu * (1 + 0.45 * daily(t)) + c.cpu * 0.3 * (noise(Math.floor(t / step), seed) - 0.5), 0.5, 100));
     const temp = c.temp === undefined || down || cpu === null ? null : round(c.temp + (cpu - c.cpu) * 0.25 + 2 * (noise(Math.floor(t / step), seed + 1) - 0.5));
+    const mem = c.latency !== undefined || down ? null : round(c.mem + 3 * daily(t + 7200));
+    const latency = c.latency === undefined || down ? null : round(Math.max(0.4, c.latency * (1 + 0.25 * daily(t) + 0.3 * (noise(t, seed) - 0.5))), 1);
     points.push({
       t,
       up: down ? 0 : 1,
       cpu,
       cpu_max: cpu === null ? null : round(Math.min(100, cpu * (1.6 + noise(t, seed)))),
-      mem: c.latency !== undefined || down ? null : round(c.mem + 3 * daily(t + 7200)),
+      mem,
+      mem_max: mem === null ? null : round(Math.min(100, mem + 2 + 3 * noise(t, seed + 3))),
       temp,
       temp_max: temp === null ? null : round(temp + 3 + 4 * noise(t, seed + 2)),
       disk: c.disk && !down ? round(c.disk[0] - (c.disk[1] * ago) / 86400, 2) : null,
       rx: c.latency !== undefined || down ? null : Math.max(0, c.rx * (1 + 0.6 * daily(t + 3600))),
       tx: c.latency !== undefined || down ? null : Math.max(0, c.tx * (1 + 0.6 * daily(t + 5400))),
-      latency: c.latency === undefined || down ? null : round(Math.max(0.4, c.latency * (1 + 0.25 * daily(t) + 0.3 * (noise(t, seed) - 0.5))), 1),
+      latency,
+      latency_max: latency === null ? null : round(latency * (1.5 + noise(t, seed + 4)), 1),
       minutes: step / 60,
     });
   }
@@ -1828,6 +2136,121 @@ function route(method: string, url: URL, body: unknown): Response {
     demoKeys.unshift(key);
     return json({ key });
   }
+  // Firewalls: this machine's, and each agent server's through its agent.
+  const fwMatch =
+    path === '/api/firewall' || path.startsWith('/api/firewall/') ? ['', 'local', path.slice('/api'.length)] : path.match(/^\/api\/hosts\/([0-9a-f]+)(\/(?:firewall.*|defense|blocked\/.+))$/);
+  if (fwMatch) {
+    const [, id, rest] = fwMatch;
+    const local = id === 'local';
+    const host = demoHosts.find((h) => h.id === id);
+    if (!local && !host) return error(404, 'no such server');
+    if (host?.offlineSince) return error(422, `no answer from ${host.name}: timed out`);
+    const fw = (demoFirewalls[id] ??= demoFirewall(id));
+    // A change of the default not kept in time goes back.
+    if (fw.pending && fw.pending.until < now()) {
+      fw.default = fw.default === 'drop' ? '' : 'drop';
+      fw.pending = undefined;
+    }
+    const answer = () => {
+      demoAllowed(fw);
+      return local ? json({ enabled: true, firewall: fw }) : json({ firewall: fw, defense: demoAttacks(host?.name === 'pi-dns').defense });
+    };
+    if (method === 'GET' && rest === '/firewall') return answer();
+    // check refuses a rule the way the firewall does, else puts it in one form.
+    const check = (b: Partial<FirewallRule>): FirewallRule | Response => {
+      const out = b.direction === 'out';
+      if (b.action === 'limit' && out) return error(422, 'limits are for incoming traffic; block or allow outgoing traffic instead');
+      if (b.action === 'limit' && !b.port) return error(422, 'give the port of the service to limit');
+      if (!b.source && !b.port)
+        return error(
+          422,
+          out
+            ? 'a rule for all outgoing traffic would cut this machine off, or change nothing; give an address or a port'
+            : b.action === 'allow'
+              ? 'allowing everyone to every port would open the whole machine; give an address or a port'
+              : 'blocking everyone from every port would cut this machine off; give an address or a port',
+        );
+      if (b.source && !/^[0-9a-f.:/]+$/i.test(b.source)) return error(422, `"${b.source}" is not an address or a network like 203.0.113.0/24`);
+      if (b.port && !/^[0-9 ,:-]+$/.test(b.port)) return error(422, `"${b.port}" is not a port from 1 to 65535, a range like 8000-8100, or a list like 80,443`);
+      return {
+        id: '',
+        action: b.action === 'allow' || b.action === 'limit' ? b.action : 'block',
+        direction: out ? 'out' : undefined,
+        source: b.source || undefined,
+        port: b.port?.replaceAll(' ', '').replaceAll('-', ':') || undefined,
+        proto: b.proto,
+        rate: b.action === 'limit' ? b.rate : undefined,
+        note: b.note || undefined,
+        paused: b.paused || undefined,
+        added: now(),
+      };
+    };
+    if (method === 'POST' && rest === '/firewall/rules') {
+      const r = check(body as Partial<FirewallRule>);
+      if (r instanceof Response) return r;
+      r.id = `r${fw.rules.length}${Math.round(now())}`;
+      // A block or limit goes before the allows; an allow last.
+      const at = r.action === 'allow' ? -1 : fw.rules.findIndex((o) => o.action === 'allow' && (o.direction === 'out') === (r.direction === 'out'));
+      if (at < 0) fw.rules.push(r);
+      else fw.rules.splice(at, 0, r);
+      return answer();
+    }
+    const rm = rest.match(/^\/firewall\/rules\/(.+)$/);
+    if (method === 'PUT' && rm) {
+      const i = fw.rules.findIndex((r) => r.id === decodeURIComponent(rm[1]));
+      if (i < 0) return error(404, 'no such rule');
+      const r = check(body as Partial<FirewallRule>);
+      if (r instanceof Response) return r;
+      fw.rules[i] = { ...r, id: fw.rules[i].id, added: fw.rules[i].added };
+      return answer();
+    }
+    if (method === 'DELETE' && rm) {
+      if (!fw.rules.some((r) => r.id === decodeURIComponent(rm[1]))) return error(404, 'no such rule');
+      fw.rules = fw.rules.filter((r) => r.id !== decodeURIComponent(rm[1]));
+      return answer();
+    }
+    if (method === 'PUT' && rest === '/firewall/order') {
+      const ids = (body as { ids?: string[] }).ids ?? [];
+      if (ids.length !== fw.rules.length || !fw.rules.every((r) => ids.includes(r.id))) return error(422, 'the order must name every rule once; reload and try again');
+      fw.rules = ids.map((i) => fw.rules.find((r) => r.id === i)!);
+      return answer();
+    }
+    if (method === 'PUT' && rest === '/firewall/default') {
+      const def = (body as { default?: string }).default === 'drop' ? 'drop' : '';
+      if (def !== (fw.default ?? '')) {
+        fw.default = def;
+        fw.pending = { default: def, until: now() + 60 };
+      }
+      return answer();
+    }
+    if (method === 'POST' && rest === '/firewall/default/keep') {
+      if (!fw.pending) return error(422, 'there is no change waiting; it may have gone back already');
+      if (!(body as { keep?: boolean }).keep) fw.default = fw.default === 'drop' ? '' : 'drop';
+      fw.pending = undefined;
+      return answer();
+    }
+    if (method === 'PUT' && rest === '/defense') return answer();
+    if (method === 'DELETE' && rest.startsWith('/blocked/')) return answer();
+  }
+  if (method === 'PUT' && path === '/api/attacks/defense') {
+    demoDefense.on = !!(body as { on?: boolean }).on;
+    return json({ enabled: true, attacks: demoAttacks(false) });
+  }
+  const unblockMatch = path.match(/^\/api\/attacks\/blocked\/(.+)$/);
+  if (method === 'DELETE' && unblockMatch) {
+    const address = decodeURIComponent(unblockMatch[1]);
+    if (!demoDefense.blocked.some((b) => b.address === address)) return error(404, 'That address is not blocked');
+    demoDefense.blocked = demoDefense.blocked.filter((b) => b.address !== address);
+    return json({ enabled: true, attacks: demoAttacks(false) });
+  }
+  if (method === 'POST' && path === '/api/ssh/authorize') {
+    const b = body as { password?: string };
+    if (!b.password) return error(400, 'enter the password for that user on the server');
+    // The demo has no network; a password of "wrong" shows how a refusal reads.
+    if (b.password === 'wrong') return error(422, 'the server turned the password down, or does not take passwords; add the key’s public line yourself instead');
+    return json({ ok: true, output: '' });
+  }
+  if (method === 'POST' && path === '/api/ssh/trust') return json({ ok: true });
   const sshMatch = path.match(/^\/api\/hosts\/([0-9a-f]+)\/ssh(?:\/([a-z-]+))?$/);
   if (sshMatch) {
     const [, id, action] = sshMatch;
@@ -1841,18 +2264,26 @@ function route(method: string, url: URL, body: unknown): Response {
       if (v >= 0 && !b.host?.trim()) return error(400, "enter the server's address");
       demoSSH[id] = { host: b.host?.trim() || undefined, port: b.port || 22, user: b.user?.trim() || 'root', key: b.key };
       if (v >= 0) demoSSHServers[v].address = b.host!.trim();
-      return json({ host: host(), test: demoLoginTest(id) });
+      delete demoChecks[id];
+      const test = noteDemoLogin(id, demoLoginTest(id));
+      return json({ host: host(), test });
     }
     if (!action && method === 'DELETE') {
       if (v >= 0) return error(400, 'this server is watched through its SSH login; remove the server instead');
       delete demoSSH[id];
+      delete demoChecks[id];
       return json({ host: host() });
     }
     if (action && method === 'POST') {
       if (!demoSSH[id]) return error(400, 'set up an SSH login for this server first');
       // The demo has no network; backup-box is the one that is offline, so it does not answer.
-      if (i >= 0 && demoHosts[i].offlineSince) return error(422, 'the server did not answer SSH in time');
+      if (i >= 0 && demoHosts[i].offlineSince) {
+        if (action === 'test') noteDemoLogin(id, { ok: false, error: 'the server did not answer SSH in time' });
+        return error(422, 'the server did not answer SSH in time');
+      }
       const who = `${demoSSH[id].user}@${i >= 0 ? demoHosts[i].name : demoSSHServers[v].name}`;
+      if (['test', 'restart-agent', 'reinstall-agent', 'reboot'].includes(action) && (action === 'test' || i >= 0 || action === 'reboot'))
+        noteDemoLogin(id, { ok: true, output: action === 'test' ? who : undefined });
       if (action === 'test') return json({ output: `${who}\n ${new Date(now() * 1000).toTimeString().slice(0, 8)} up 15 days,  2:41,  0 users,  load average: 0.21, 0.18, 0.12` });
       if (action === 'restart-agent') return i >= 0 ? json({ output: 'nightjar-agent restarted' }) : error(400, 'this server has no agent');
       if (action === 'reinstall-agent')
@@ -1873,7 +2304,8 @@ function route(method: string, url: URL, body: unknown): Response {
     const address = b.ssh.host.trim();
     demoSSHServers.push({ id, name: b.name?.trim() || address, address });
     demoSSH[id] = { host: address, port: b.ssh.port || 22, user: b.ssh.user?.trim() || 'root', key: b.ssh.key };
-    return json({ host: withSSH(demoSSHServer(demoSSHServers.length - 1)), test: demoLoginTest(id) });
+    const test = noteDemoLogin(id, demoLoginTest(id));
+    return json({ host: withSSH(demoSSHServer(demoSSHServers.length - 1)), test });
   }
   if (method === 'PUT' && hostID && sshIndex >= 0) {
     const b = body as { name?: string };
@@ -1931,6 +2363,8 @@ function route(method: string, url: URL, body: unknown): Response {
         return json(qbittorrent());
       case '/api/units':
         return json({ enabled: true, self: 'nightjar.service', units: demoUnits });
+      case '/api/attacks':
+        return json({ enabled: true, attacks: demoAttacks(false) });
       case '/api/network':
         return json(network(url.searchParams.has('since') ? Number(url.searchParams.get('since')) : undefined));
       case '/api/drives':

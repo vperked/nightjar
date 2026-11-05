@@ -198,6 +198,9 @@ export function MaintenancePage() {
       </div>
       {editing && (
         <WindowForm
+          // Keyed so Edit on another window while the form is open starts it afresh;
+          // the form holds its own copy and would otherwise save over the first one.
+          key={editing.id || 'new'}
           initial={editing}
           onDone={(saved) => {
             setEditing(undefined);

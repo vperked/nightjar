@@ -82,6 +82,9 @@ func New(store *storage.Store) *Accounts {
 	for _, s := range store.Sessions() {
 		a.sessions[s.Hash] = &s
 	}
+	a.mu.Lock()
+	a.pruneLocked()
+	a.mu.Unlock()
 	if a.admin == nil {
 		a.setupCode = newSetupCode()
 		log.Warn("No admin account yet. Open the dashboard to create one with this setup code", "setup_code", a.setupCode)
@@ -198,10 +201,16 @@ func (a *Accounts) ChangePassword(current, next, keepToken string) error {
 	if err := validate(ad.Username, next); err != nil {
 		return err
 	}
-	updated := *ad
-	updated.Hash = hashPassword(next)
+	hash := hashPassword(next)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// The account may have changed while the passwords were hashed (two-factor turned on, a recovery
+	// code used up): the change goes onto it as it is now, unless the password itself changed.
+	if a.admin == nil || a.admin.Hash != ad.Hash {
+		return ErrWrongCurrent
+	}
+	updated := *a.admin
+	updated.Hash = hash
 	if err := a.saveLocked(&updated); err != nil {
 		return err
 	}
@@ -242,8 +251,25 @@ func (a *Accounts) NewSession(agent string) (string, error) {
 	}
 	a.mu.Lock()
 	a.sessions[s.Hash] = s
+	a.pruneLocked()
 	a.mu.Unlock()
 	return token, nil
+}
+
+// pruneLocked forgets the sessions unused for longer than SessionLife. Valid forgets one when its
+// cookie comes back; this catches the browsers that never come back.
+func (a *Accounts) pruneLocked() {
+	now := float64(a.now().Unix())
+	var gone []string
+	for h, s := range a.sessions {
+		if now-s.Seen > SessionLife.Seconds() {
+			gone = append(gone, h)
+			delete(a.sessions, h)
+		}
+	}
+	if len(gone) > 0 {
+		a.store.DeleteSessions(gone...)
+	}
 }
 
 // Valid reports whether a cookie value is a live session, and keeps it alive.
@@ -265,16 +291,13 @@ func (a *Accounts) Valid(token string) bool {
 		a.store.DeleteSessions(h)
 		return false
 	}
-	// Written back at most hourly, not on every request.
-	touch := now-s.Seen > 3600
-	if touch {
+	// Written back at most hourly, not on every request. The write is made holding the lock, so a
+	// sign-out or password change cannot delete the session in between and have it saved back.
+	if now-s.Seen > 3600 {
 		s.Seen = now
+		a.store.SaveSession(*s)
 	}
-	copied := *s
 	a.mu.Unlock()
-	if touch {
-		a.store.SaveSession(copied)
-	}
 	return true
 }
 

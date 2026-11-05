@@ -167,6 +167,18 @@ func TestFreezeMonitorFlagsStalls(t *testing.T) {
 	}
 }
 
+func TestFreezeMonitorIgnoresASlowCycle(t *testing.T) {
+	f := &monitor.FreezeMonitor{Threshold: 0.05, HeartbeatTimeout: 10}
+	f.Heartbeat()
+	f.UpdateMetrics(50, 40, &collect.IO{ReadBytes: 1}, nil)
+	// The rest of the cycle (cleanups, directory sizing) runs long before the freeze check.
+	time.Sleep(100 * time.Millisecond)
+	f.Heartbeat()
+	if st := f.Check(); st.Frozen {
+		t.Fatalf("a slow cycle with fresh readings is not a freeze: %v", st.Reasons)
+	}
+}
+
 // fakeQB is a qBittorrent Web API serving a mutable torrent list and recording actions.
 type fakeQB struct {
 	*httptest.Server

@@ -5,6 +5,8 @@ import type { AgentBuild, AgentUpdate, AnalyticsPoint, AnalyticsRangeName, HostP
 import { useServices } from '../api/ServicesContext';
 import { State } from '../components/ui';
 import { Select } from '../components/Select';
+import { AttackWatch } from '../components/Attacks';
+import { FirewallSummary } from '../components/FirewallSummary';
 import { MuteButton } from '../components/MuteButton';
 import { HOST_STATUS as STATUS, HostStatus as StatusTag } from '../components/RemoteSummary';
 import { Skeleton } from '../components/Skeleton';
@@ -16,6 +18,7 @@ import { useNow } from '../hooks/useNow';
 import { usePoll } from '../hooks/usePoll';
 import { Readout } from './Overview';
 import { DriveRow } from './overview/Drives';
+import { BulkBar, BulkResults, useBulk } from './servers/Bulk';
 
 // Other servers, watched through the small agent installed on each, for its readings. Whether
 // something merely answers (a router's page, a port, a ping) is an uptime check, under Services; a
@@ -84,7 +87,7 @@ interface Kept {
 function useStored(id: string, range: AnalyticsRangeName): Kept | undefined {
   const fetchRange = useCallback(() => (range === '1h' ? Promise.resolve(null) : api.hostAnalytics(id, range)), [id, range]);
   const { data } = usePoll(fetchRange, 60000);
-  return range === '1h' || !data ? undefined : { points: data.host.points, step: data.step };
+  return range === '1h' || !data ? undefined : { points: data.host.points ?? [], step: data.step };
 }
 
 // stored is one metric of the kept points, with a gap wherever buckets are missing.
@@ -108,14 +111,16 @@ function RangeBar({ range, setRange }: { range: AnalyticsRangeName; setRange: (r
 // shownProblems leaves out "offline" when the page already says so with the error.
 const shownProblems = (h: RemoteHost) => (h.status === 'offline' ? h.problems.filter((p) => !p.startsWith('Offline')) : h.problems);
 
-function HostCard({ h, now }: { h: RemoteHost; now: number }) {
+// HostCard is one server in the list: a link to its page, or while choosing servers, a box to tick.
+function HostCard({ h, now, select }: { h: RemoteHost; now: number; select?: { on: boolean; toggle: () => void } }) {
   const r = h.readings;
   const problems = shownProblems(h);
   const disks = r ? [...r.disks].sort((a, b) => b.percent - a.percent).slice(0, 3) : [];
   const drive = r ? hottestDrive(r) : undefined;
-  return (
-    <Link to={`/servers/${h.id}`} className={`host-card ${h.status}`} aria-label={`${h.name}: ${STATUS[h.status][1]}`}>
+  const body = (
+    <>
       <div className="host-head">
+        {select && <span className={`select-box host-select ${select.on ? 'on' : ''}`} aria-hidden="true" />}
         <span className="min0">
           <strong className="truncate">{h.name}</strong>
           <span className="host-sub truncate">{h.kind === 'ssh' && h.ssh ? `SSH · ${h.ssh.user}@${h.address}${h.ssh.port !== 22 ? `:${h.ssh.port}` : ''}` : r ? osLine(r) : h.address}</span>
@@ -166,6 +171,30 @@ function HostCard({ h, now }: { h: RemoteHost; now: number }) {
       ) : (
         h.status === 'waiting' && <p className="host-sub">Waiting for the first answer…</p>
       )}
+    </>
+  );
+  if (select)
+    return (
+      <div
+        className={`host-card selectable ${h.status} ${select.on ? 'picked' : ''}`}
+        role="checkbox"
+        aria-checked={select.on}
+        aria-label={`${h.name}: ${STATUS[h.status][1]}`}
+        tabIndex={0}
+        onClick={select.toggle}
+        onKeyDown={(e) => {
+          if (e.key === ' ' || e.key === 'Enter') {
+            e.preventDefault();
+            select.toggle();
+          }
+        }}
+      >
+        {body}
+      </div>
+    );
+  return (
+    <Link to={`/servers/${h.id}`} className={`host-card ${h.status}`} aria-label={`${h.name}: ${STATUS[h.status][1]}`}>
+      {body}
     </Link>
   );
 }
@@ -173,11 +202,29 @@ function HostCard({ h, now }: { h: RemoteHost; now: number }) {
 export function ServersPage() {
   const { data, error, refresh } = usePoll(api.hosts, 10000);
   const [adding, setAdding] = useState(false);
+  // selected is the servers ticked while choosing; null when not choosing.
+  const [selected, setSelected] = useState<Set<string> | null>(null);
+  const bulk = useBulk(refresh);
   const now = useNow(10000);
+  useEffect(() => {
+    if (!selected) return;
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && !bulk.busy && setSelected(null);
+    window.addEventListener('keydown', esc);
+    return () => window.removeEventListener('keydown', esc);
+  }, [selected, bulk.busy]);
   if (!data) return error ? <main className="alert">{error.message}</main> : <Skeleton kind="dashboard" />;
   const down = data.hosts.filter((h) => h.status === 'offline').length;
+  // Selections only hold servers that are still watched.
+  const picked = selected ? data.hosts.filter((h) => selected.has(h.id)) : [];
+  const allPicked = picked.length === data.hosts.length;
+  const toggle = (id: string) =>
+    setSelected((s) => {
+      const next = new Set(s);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
   return (
-    <main>
+    <main className={selected ? 'choosing-servers' : undefined}>
       <div className="page-title">
         <div>
           <h1>Servers</h1>
@@ -189,11 +236,32 @@ export function ServersPage() {
           <ServersTabs current="/servers" />
         </div>
         {data.hosts.length > 0 && (
-          <button className="btn" onClick={() => setAdding(true)}>
-            Add a server
-          </button>
+          <div className="page-actions">
+            {selected ? (
+              <>
+                <button className="btn-quiet" onClick={() => setSelected(allPicked ? new Set() : new Set(data.hosts.map((h) => h.id)))}>
+                  {allPicked ? 'Select none' : 'Select all'}
+                </button>
+                <button className="btn" onClick={() => setSelected(null)} disabled={bulk.busy}>
+                  Done
+                </button>
+              </>
+            ) : (
+              <>
+                {data.hosts.length > 1 && (
+                  <button className="btn-quiet" onClick={() => setSelected(new Set())}>
+                    Select
+                  </button>
+                )}
+                <button className="btn" onClick={() => setAdding(true)}>
+                  Add a server
+                </button>
+              </>
+            )}
+          </div>
         )}
       </div>
+      {bulk.run && <BulkResults run={bulk.run} onDismiss={bulk.dismiss} />}
       {data.hosts.length === 0 ? (
         <section className="section servers-empty">
           <strong>No other servers yet</strong>
@@ -208,9 +276,22 @@ export function ServersPage() {
       ) : (
         <div className="host-grid">
           {data.hosts.map((h) => (
-            <HostCard key={h.id} h={h} now={now} />
+            <HostCard key={h.id} h={h} now={now} select={selected ? { on: selected.has(h.id), toggle: () => toggle(h.id) } : undefined} />
           ))}
         </div>
+      )}
+      {selected && picked.length === 0 && <p className="bulk-hint note">Tick the servers to act on, then choose what to do.</p>}
+      {picked.length > 0 && (
+        <BulkBar
+          picked={picked}
+          busy={bulk.busy}
+          onRun={(action, minutes) =>
+            bulk.start(action, picked, minutes).then(() => {
+              if (action === 'remove') setSelected(new Set());
+            })
+          }
+          onClear={() => setSelected(new Set())}
+        />
       )}
       {adding && (
         <AddServerSheet
@@ -278,6 +359,10 @@ function AddServerSheet({ port, builds, onClose, onAdded }: { port: number; buil
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // hostKey is the server's host key, waiting to be checked before the password goes to it.
+  const [hostKey, setHostKey] = useState('');
+  // A key shown for one login is not the one to confirm for another.
+  useEffect(() => setHostKey(''), [login, address]);
 
   useEffect(() => {
     api.hostToken().then(
@@ -298,11 +383,12 @@ function AddServerSheet({ port, builds, onClose, onAdded }: { port: number; buil
   // An address typed without a scheme gets the one the agent will serve.
   const agentAddress = /^https?:\/\//.test(address.trim()) ? address.trim() : `${https ? 'https' : 'http'}://${address.trim()}`;
 
-  const connect = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const connect = async (trusted = '') => {
     setBusy(true);
     setError('');
     try {
+      if (how === 'ssh') await placeKey(login, { target: address }, trusted);
+      setHostKey('');
       const { host, test } = await api.addHost(
         how === 'agent' ? { kind: 'agent', name, address: agentAddress, token } : { kind: 'ssh', name, ssh: { ...sshBody(login), host: login.host.trim() || address.trim() } },
       );
@@ -311,7 +397,8 @@ function AddServerSheet({ port, builds, onClose, onAdded }: { port: number; buil
       else notify({ tone: 'error', title: `${host.name} added, but the login did not work`, body: test?.error });
       onAdded(host);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      if (err instanceof ApiError && err.hostKey) setHostKey(err.hostKey);
+      else setError(err instanceof ApiError || err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -319,7 +406,17 @@ function AddServerSheet({ port, builds, onClose, onAdded }: { port: number; buil
 
   return (
     <div className="sheet-backdrop" onMouseDown={() => !busy && onClose()}>
-      <form className="sheet add-server" role="dialog" aria-modal="true" aria-label="Add a server" onMouseDown={(e) => e.stopPropagation()} onSubmit={connect}>
+      <form
+        className="sheet add-server"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add a server"
+        onMouseDown={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault();
+          connect();
+        }}
+      >
         <div className="sheet-head">
           <div className="min0">
             <h2>Add a server</h2>
@@ -359,6 +456,7 @@ function AddServerSheet({ port, builds, onClose, onAdded }: { port: number; buil
         {how === 'ssh' ? (
           <div className="add-ssh">
             <SSHLoginFields login={login} onChange={setLogin} onReady={setKeyReady} serverName="the server" showHost={false} />
+            {hostKey && <HostKeyCheck hostKey={hostKey} serverName="the server" busy={busy} onConfirm={() => connect(hostKey)} onCancel={() => setHostKey('')} />}
           </div>
         ) : (
           <ol className="add-steps">
@@ -433,13 +531,23 @@ function AddServerSheet({ port, builds, onClose, onAdded }: { port: number; buil
           {how === 'agent' && (
             <details className="add-token">
               <summary>Token</summary>
-              <input className="field mono" value={token} onChange={(e) => setToken(e.target.value)} aria-label="Token" spellCheck={false} />
+              <input className="field mono" value={token} onChange={(e) => setToken(e.target.value)} aria-label="Token" spellCheck={false} autoComplete="off" />
               <p className="form-help">Made for this server and shown only here; the dashboard keeps it to itself. An agent you installed before keeps the token it was given.</p>
             </details>
           )}
           {error && <p className="form-error">{error}</p>}
-          <button className="btn" type="submit" disabled={busy || !address.trim() || (how === 'agent' ? !token : !keyReady)}>
-            {busy ? (how === 'agent' ? 'Connecting…' : 'Checking…') : how === 'agent' ? 'Connect' : 'Add server'}
+          <button className="btn" type="submit" disabled={busy || !address.trim() || (how === 'agent' ? !token : !loginReady(login, keyReady))}>
+            {busy
+              ? how === 'agent'
+                ? 'Connecting…'
+                : login.place === 'password'
+                  ? 'Adding the key…'
+                  : 'Logging in…'
+              : how === 'agent'
+                ? 'Connect'
+                : login.place === 'password'
+                  ? 'Add key and server'
+                  : 'Add server'}
           </button>
         </div>
       </form>
@@ -498,7 +606,16 @@ function EditServer({ h, onSaved, onRemoved }: { h: RemoteHost; onSaved: () => v
             </label>
             <label className="install-field">
               <span>New token</span>
-              <input className="field mono" value={token} onChange={(e) => setToken(e.target.value)} placeholder="keep the saved one" aria-label="New token" spellCheck={false} />
+              <input
+                className="field mono"
+                type="password"
+                autoComplete="new-password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="keep the saved one"
+                aria-label="New token"
+                spellCheck={false}
+              />
             </label>
           </>
         )}
@@ -586,19 +703,69 @@ const OWN_KEY = '\u0000own';
 
 const SSH_DONE: Record<SSHAction, string> = { test: 'Logged in', 'restart-agent': 'Agent restarted', 'reinstall-agent': 'Agent reinstalled', reboot: 'Rebooting' };
 
+// KeyPlace is how a login's key gets onto the server: it is there already, Nightjar adds it by logging
+// in once with the password, or you add its public line yourself.
+type KeyPlace = 'there' | 'password' | 'self';
+
 // Login is an SSH login as typed: which key (by path), user, port, and the host when it differs from
-// the server's own address.
+// the server's own address; and how its key gets onto the server.
 interface Login {
   key: string;
   user: string;
   port: string;
   host: string;
+  place: KeyPlace;
+  password: string;
 }
 
-const loginOf = (h?: RemoteHost): Login => ({ key: h?.ssh?.key ?? '', user: h?.ssh?.user ?? 'root', port: String(h?.ssh?.port ?? 22), host: h?.ssh?.host ?? '' });
+const loginOf = (h?: RemoteHost): Login => ({ key: h?.ssh?.key ?? '', user: h?.ssh?.user ?? 'root', port: String(h?.ssh?.port ?? 22), host: h?.ssh?.host ?? '', place: 'there', password: '' });
 
-// SSHLoginFields picks a key (one on this machine, your own pasted in, or a new one) and the user,
-// port and host to log in with. It shows the key's public line to put on the server.
+// loginReady says whether a login can be saved: a key chosen, and the password when Nightjar is to add it.
+const loginReady = (l: Login, keyReady: boolean) => keyReady && (l.place !== 'password' || !!l.password);
+
+// placeKey adds the login's key on the server first, when the password was given for that; the
+// password is used for that one login and kept nowhere. It throws when the server turns it down, and
+// throws the ApiError itself, with its hostKey, while nobody has confirmed the server's host key.
+// trusted is the host key someone just checked on the server: it is kept before the password goes.
+async function placeKey(l: Login, where: { id?: string; target?: string }, trusted = '') {
+  if (l.place !== 'password') return;
+  const login = { ...sshBody(l), host: l.host.trim() || where.target?.trim() || undefined };
+  try {
+    if (trusted) await api.trustSSHHostKey({ id: where.id, login, host_key: trusted });
+    await api.authorizeSSHKey({ id: where.id, login, password: l.password });
+  } catch (err) {
+    if (err instanceof ApiError && err.hostKey) throw err;
+    throw new Error(`Could not add the key: ${err instanceof ApiError ? err.message : String(err)}`);
+  }
+}
+
+// HostKeyCheck shows the host key a server presents before the password goes to it: only once it
+// matches the key on the server itself is it kept, and the key added.
+function HostKeyCheck({ hostKey, serverName, busy, onConfirm, onCancel }: { hostKey: string; serverName: string; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
+  const kind = hostKey.split(' ')[0].toLowerCase();
+  return (
+    <div className="ssh-place ssh-host-key" role="alert">
+      <span className="ssh-place-head">Is this {serverName}’s host key?</span>
+      <p className="mono">{hostKey}</p>
+      <p className="form-help">Nightjar has not seen this server before. Before the password goes, compare the key with what this shows on the server:</p>
+      <Command text={`ssh-keygen -lf /etc/ssh/ssh_host_${kind}_key.pub`} />
+      <span className="confirm">
+        <button type="button" className="btn" onClick={onConfirm} disabled={busy}>
+          {busy ? 'Adding the key…' : 'It matches, add the key'}
+        </button>
+        <button type="button" className="btn-quiet" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+      </span>
+    </div>
+  );
+}
+
+// saveLabel names what saving a login does.
+const saveLabel = (l: Login, busy: boolean) => (busy ? (l.place === 'password' ? 'Adding the key…' : 'Logging in…') : l.place === 'password' ? 'Add key, save and test' : 'Save and test');
+
+// SSHLoginFields picks a key (one on this machine, your own pasted in, or a new one), the user, port
+// and host to log in with, and how the key gets onto the server.
 function SSHLoginFields({
   login,
   onChange,
@@ -609,7 +776,9 @@ function SSHLoginFields({
   onReady,
 }: {
   login: Login;
-  onChange: (l: Login) => void;
+  // onChange takes an update to the latest login, as a state setter does, so one made after a
+  // request returns keeps what was typed meanwhile.
+  onChange: (update: (l: Login) => Login) => void;
   serverName: string;
   hostLabel?: string;
   hostPlaceholder?: string;
@@ -625,13 +794,13 @@ function SSHLoginFields({
   const [ownKey, setOwnKey] = useState('');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
-  const set = (patch: Partial<Login>) => onChange({ ...login, ...patch });
+  const set = (patch: Partial<Login>) => onChange((l) => ({ ...l, ...patch }));
 
   useEffect(() => {
     api.sshKeys().then(
       ({ keys }) => {
         setKeys(keys);
-        if (!login.key) onChange({ ...login, key: keys[0]?.path || OWN_KEY });
+        onChange((l) => (l.key ? l : { ...l, key: keys[0]?.path || OWN_KEY }));
       },
       (err) => setError(err instanceof ApiError ? err.message : String(err)),
     );
@@ -641,9 +810,10 @@ function SSHLoginFields({
   const chosen = keys?.find((k) => k.path === login.key);
   useEffect(() => onReady(!!chosen), [chosen, onReady]);
 
+  // A key just made or added is on no server yet, so it is put there with the password.
   const added = (k: SSHKey, title: string, body: string) => {
     setKeys((ks) => [k, ...(ks ?? [])]);
-    set({ key: k.path });
+    set({ key: k.path, place: 'password' });
     notify({ tone: 'ok', title, body });
   };
   const makeKey = async () => {
@@ -651,7 +821,7 @@ function SSHLoginFields({
     setError('');
     try {
       const { key: k } = await api.newSSHKey(newName.trim());
-      added(k, `Key ${k.name} made`, 'Add its public line to the server, then save.');
+      added(k, `Key ${k.name} made`, `Now put it on ${serverName}.`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
     } finally {
@@ -677,6 +847,7 @@ function SSHLoginFields({
     { value: OWN_KEY, label: 'Add a key you have…', text: 'add', hint: 'Paste a private key the server already accepts' },
     { value: NEW_KEY, label: 'Make a new key…', text: 'new', hint: 'An ed25519 key with no passphrase, kept in Nightjar’s SSH folder' },
   ];
+  const user = login.user.trim() || 'root';
 
   return (
     <>
@@ -729,18 +900,6 @@ function SSHLoginFields({
           </div>
         </div>
       )}
-      {chosen && (
-        <div className="ssh-public">
-          <p className="form-help">
-            On {serverName}, logged in as <span className="mono">{login.user.trim() || 'root'}</span>, run this once to let the key in (it does nothing if the key is there already):
-          </p>
-          <Command text={authorizeCommand(chosen.public)} />
-          <details className="ssh-public-line">
-            <summary>Just the public key</summary>
-            <Command text={chosen.public} />
-          </details>
-        </div>
-      )}
       {error && <p className="form-error">{error}</p>}
       <div className="ssh-login-fields">
         <label className="install-field">
@@ -758,18 +917,94 @@ function SSHLoginFields({
           <input className="field mono" value={login.host} onChange={(e) => set({ host: e.target.value })} placeholder={hostPlaceholder} aria-label={hostLabel} spellCheck={false} />
         </label>
       )}
+      {chosen && (
+        <div className="ssh-place">
+          <span className="ssh-place-head">
+            Is {chosen.name} on {serverName} already?
+          </span>
+          <Seg
+            label="How the key gets onto the server"
+            value={login.place}
+            onChange={(place) => set({ place })}
+            options={[
+              { value: 'there', label: 'Yes' },
+              { value: 'password', label: 'Add it with a password' },
+              { value: 'self', label: 'I’ll add it' },
+            ]}
+          />
+          {login.place === 'there' && <p className="form-help">Nightjar logs in with it as {user} when you save, to check it works.</p>}
+          {login.place === 'password' && (
+            <>
+              <input
+                type="password"
+                className="field"
+                value={login.password}
+                onChange={(e) => set({ password: e.target.value })}
+                placeholder={`password for ${user}`}
+                aria-label="Password on the server"
+                autoComplete="new-password"
+              />
+              <p className="form-help">Nightjar logs in once with the password to add the key, then uses the key. The password is not kept.</p>
+            </>
+          )}
+          {login.place === 'self' && (
+            <>
+              <p className="form-help">
+                Add this line to <span className="mono">~/.ssh/authorized_keys</span> for {user} on {serverName}, then save.
+              </p>
+              <Command text={chosen.public} />
+            </>
+          )}
+        </div>
+      )}
     </>
   );
 }
 
-// authorizeCommand lets a public key log in as whoever runs it: it makes ~/.ssh and authorized_keys
-// with the permissions sshd insists on, and adds the key unless it is there already.
-export function authorizeCommand(publicKey: string): string {
-  const key = `'${publicKey.trim().replace(/'/g, `'\\''`)}'`;
-  return `mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF ${key} ~/.ssh/authorized_keys || echo ${key} >> ~/.ssh/authorized_keys)`;
-}
-
 const sshBody = (l: Login) => ({ key: l.key, user: l.user.trim(), port: Number(l.port) || 22, host: l.host.trim() || undefined });
+
+// LoginStatus says whether a server's saved login works, from the last time Nightjar used it, and
+// which host key it trusts.
+function LoginStatus({ h, busy }: { h: RemoteHost; busy: boolean }) {
+  const now = useNow(30000);
+  const c = h.ssh_check;
+  const tone = busy ? 'busy' : !c ? 'none' : c.ok ? 'ok' : 'bad';
+  return (
+    <div className={`ssh-status ${tone}`} role="status">
+      <div className="ssh-status-line">
+        <span className="ssh-status-mark" aria-hidden="true" />
+        <span className="ssh-status-word">
+          {busy ? (
+            'Logging in…'
+          ) : !c ? (
+            'Not tried yet'
+          ) : c.ok ? (
+            c.as ? (
+              <>
+                Logs in as <span className="mono">{c.as}</span>
+              </>
+            ) : (
+              'Logs in'
+            )
+          ) : (
+            'Can’t log in'
+          )}
+        </span>
+        {c && !busy && (
+          <span className="ssh-status-when">
+            {c.ok ? 'worked' : 'tried'} {formatAgo(c.at, now)}
+          </span>
+        )}
+      </div>
+      {c && !c.ok && !busy && c.error && <p className="ssh-status-why">{c.error}</p>}
+      {c?.host_key && (
+        <p className="ssh-status-key" title="The server’s host key Nightjar trusts. If it changes, Nightjar refuses to log in.">
+          Host key <span className="mono">{c.host_key}</span>
+        </p>
+      )}
+    </div>
+  );
+}
 
 // SSHAccess is the way in when the agent cannot help: a login Nightjar keeps for the server (a key on
 // this machine, a user and a port), with which it can test the login, restart the agent or reboot.
@@ -785,6 +1020,10 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
   const [result, setResult] = useState<{ action: SSHAction; ok: boolean; text: string } | null>(null);
   const [confirmReboot, setConfirmReboot] = useState(false);
   const [confirmForget, setConfirmForget] = useState(false);
+  // hostKey is the server's host key, waiting to be checked before the password goes to it.
+  const [hostKey, setHostKey] = useState('');
+  // A key shown for one login is not the one to confirm for another.
+  useEffect(() => setHostKey(''), [login]);
 
   const open = () => {
     setLogin(loginOf(h));
@@ -792,19 +1031,21 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
     setEditing(true);
   };
 
-  const save = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const save = async (trusted = '') => {
     setBusy('save');
     setError('');
     try {
+      await placeKey(login, { id: h.id }, trusted);
+      setHostKey('');
       const { test } = await api.setHostSSH(h.id, sshBody(login));
-      if (test?.ok) notify({ tone: 'ok', title: 'SSH login saved', body: 'Nightjar logged in with it.' });
+      if (test?.ok) notify({ tone: 'ok', title: 'SSH login saved', body: `Logged in as ${test.output?.split('\n')[0] ?? login.user}.` });
       else notify({ tone: 'error', title: 'Saved, but the login did not work', body: test?.error });
       setEditing(false);
-      setResult(test ? { action: 'test', ok: test.ok, text: test.ok ? (test.output ?? '') : (test.error ?? '') } : null);
+      setResult(null);
       refresh();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      if (err instanceof ApiError && err.hostKey) setHostKey(err.hostKey);
+      else setError(err instanceof ApiError || err instanceof Error ? err.message : String(err));
     } finally {
       setBusy('');
     }
@@ -832,12 +1073,14 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
     setResult(null);
     try {
       const { output } = await api.runHostSSH(h.id, action);
-      setResult({ action, ok: true, text: output });
-      notify({ tone: 'ok', title: `${SSH_DONE[action]} · ${h.name}` });
+      // A test speaks through the status above; the others show what the server said.
+      setResult(action === 'test' ? null : { action, ok: true, text: output });
+      if (action !== 'test') notify({ tone: 'ok', title: `${SSH_DONE[action]} · ${h.name}` });
     } catch (err) {
-      setResult({ action, ok: false, text: err instanceof ApiError ? err.message : String(err) });
+      if (action !== 'test') setResult({ action, ok: false, text: err instanceof ApiError ? err.message : String(err) });
     } finally {
       setBusy('');
+      refresh();
     }
   };
 
@@ -845,7 +1088,13 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
   if (editing)
     return (
       <Section label="SSH" aside={<span className="small ink-3">{aside}</span>}>
-        <form className="host-edit" onSubmit={save}>
+        <form
+          className="host-edit"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save();
+          }}
+        >
           <SSHLoginFields
             login={login}
             onChange={setLogin}
@@ -854,11 +1103,12 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
             hostLabel={sshOnly ? 'Address' : 'Host'}
             hostPlaceholder={sshOnly ? 'vps.example.net' : sshTarget(h)}
           />
+          {hostKey && <HostKeyCheck hostKey={hostKey} serverName={h.name} busy={busy === 'save'} onConfirm={() => save(hostKey)} onCancel={() => setHostKey('')} />}
           {error && <p className="form-error">{error}</p>}
           <div className="host-edit-actions">
             <span className="confirm">
-              <button className="btn" type="submit" disabled={!!busy || !ready || (sshOnly && !login.host.trim())}>
-                {busy === 'save' ? 'Saving…' : 'Save'}
+              <button className="btn" type="submit" disabled={!!busy || !loginReady(login, ready) || (sshOnly && !login.host.trim())}>
+                {saveLabel(login, busy === 'save')}
               </button>
               <button type="button" className="btn-quiet" onClick={() => setEditing(false)} disabled={!!busy}>
                 Cancel
@@ -878,7 +1128,7 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
       <Section label="SSH" aside={<span className="small ink-3">not set up</span>}>
         <p className="note">Give Nightjar an SSH login for {h.name} to restart its agent or reboot it from here when the agent stops answering.</p>
         <div className="host-edit-actions ssh-setup">
-          <button type="button" className="btn-quiet" onClick={open}>
+          <button type="button" className="btn" onClick={open}>
             Set up SSH…
           </button>
         </div>
@@ -889,10 +1139,10 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
   return (
     <Section label="SSH" aside={<span className="small ink-3 mono">{keyName}</span>}>
       <div className="host-edit">
-        {h.ssh_command && <Command text={h.ssh_command} />}
+        <LoginStatus h={h} busy={busy === 'test'} />
         <div className="ssh-actions">
-          <button type="button" className="btn" onClick={() => run('test')} disabled={!!busy}>
-            {busy === 'test' ? 'Logging in…' : 'Test login'}
+          <button type="button" className={h.ssh_check?.ok ? 'btn-quiet' : 'btn'} onClick={() => run('test')} disabled={!!busy}>
+            {busy === 'test' ? 'Logging in…' : h.ssh_check ? 'Test again' : 'Test login'}
           </button>
           {h.kind === 'agent' && (
             <>
@@ -932,9 +1182,15 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
             {result.text && <pre>{result.text}</pre>}
           </div>
         )}
+        {h.ssh_command && (
+          <details className="ssh-by-hand">
+            <summary>Log in yourself</summary>
+            <Command text={h.ssh_command} />
+          </details>
+        )}
         <div className="host-edit-actions">
           <button type="button" className="btn-quiet" onClick={open} disabled={!!busy}>
-            Change…
+            Change login…
           </button>
           {!sshOnly &&
             (confirmForget ? (
@@ -1035,7 +1291,31 @@ function SSHServerDetail({ h, refresh }: { h: RemoteHost; refresh: () => void })
 
 function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
   const navigate = useNavigate();
+  const notify = useToast();
   const now = useNow(10000);
+  // Its defense is managed through its agent; its firewall on the Firewall page.
+  const toggleDefense = async (on: boolean) => {
+    try {
+      await api.setHostDefense(h.id, on);
+      notify({
+        tone: 'ok',
+        title: on ? `Defending ${h.name}` : `Defense off · ${h.name}`,
+        body: on ? 'Its agent answers the next attack in the firewall.' : 'Attacks are still watched and announced.',
+      });
+      refresh();
+    } catch (e) {
+      notify({ tone: 'error', title: 'Could not change the defense', body: e instanceof ApiError ? e.message : String(e) });
+    }
+  };
+  const unblock = async (address: string) => {
+    try {
+      await api.unblockHost(h.id, address);
+      notify({ tone: 'ok', title: `${address} unblocked · ${h.name}`, body: 'Left alone for an hour.' });
+      refresh();
+    } catch (e) {
+      notify({ tone: 'error', title: `Could not unblock ${address}`, body: e instanceof ApiError ? e.message : String(e) });
+    }
+  };
   const r = h.readings;
   const cores = r?.cpu.cores ?? [];
   const [range, setRange] = useState<AnalyticsRangeName>('1h');
@@ -1225,6 +1505,8 @@ function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
             </Section>
           )}
           <ServicesOn h={h} />
+          {r?.attacks && <AttackWatch view={r.attacks} now={now} onToggle={toggleDefense} onUnblock={unblock} />}
+          {h.kind === 'agent' && <FirewallSummary h={h} />}
           <EditServer h={h} onSaved={refresh} onRemoved={() => navigate('/servers')} />
           <SSHAccess h={h} refresh={refresh} />
         </div>

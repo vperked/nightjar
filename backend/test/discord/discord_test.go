@@ -47,7 +47,47 @@ func newTestWebhook(t *testing.T, url string) (*discord.Webhook, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	w.RetryWaits = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	return w, logPath
+}
+
+// An alert sent while the network is not up yet, or while Discord fails for a moment, gets
+// through on a later try; a refusal (4xx) is not tried again.
+func TestAFailedDeliveryIsTriedAgain(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	w, _ := newTestWebhook(t, srv.URL)
+	if !w.SendEmbed("CPU", "high", discord.Critical, nil, "") || calls.Load() != 3 {
+		t.Fatalf("5xx twice, then delivered: %d calls, %q", calls.Load(), w.LastError())
+	}
+
+	// Nothing listening yet: the connection is refused at once, so it is tried again, and still fails.
+	ln := httptest.NewServer(http.NotFoundHandler())
+	gone := ln.URL
+	ln.Close()
+	w2, _ := newTestWebhook(t, gone)
+	start := time.Now()
+	if w2.SendEmbed("CPU", "high", discord.Critical, nil, "") || time.Since(start) > 5*time.Second {
+		t.Fatalf("refused: should fail, and fast")
+	}
+
+	var refused atomic.Int32
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refused.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer bad.Close()
+	w3, _ := newTestWebhook(t, bad.URL)
+	if w3.SendEmbed("CPU", "high", discord.Critical, nil, "") || refused.Load() != 1 {
+		t.Fatalf("a 401 is not tried again: %d calls", refused.Load())
+	}
 }
 
 func TestSendEmbedDelivers(t *testing.T) {
@@ -165,8 +205,9 @@ func TestBreakerStopsCallingAFailingWebhook(t *testing.T) {
 	for range 8 {
 		w.SendMessage("down")
 	}
-	if got := d.calls.Load(); got != 5 {
-		t.Fatalf("breaker should open after 5 failures, server saw %d calls", got)
+	// Each delivery is tried 4 times (a 5xx may pass), and counts once: 5 deliveries, then none.
+	if got := d.calls.Load(); got != 5*4 {
+		t.Fatalf("breaker should open after 5 failed deliveries of 4 tries, server saw %d calls", got)
 	}
 	data, _ := os.ReadFile(logPath)
 	if strings.Count(string(data), "down") != 8 {
@@ -217,14 +258,59 @@ func TestBreakerHalfOpenRecovery(t *testing.T) {
 func TestBuildEmbedLimits(t *testing.T) {
 	fields := make([]discord.Field, 30)
 	for i := range fields {
-		fields[i] = discord.Field{Name: strings.Repeat("n", 300), Value: strings.Repeat("é", 2000)}
+		fields[i] = discord.Field{Name: strings.Repeat("n", 300), Value: "v"}
 	}
-	e := discord.BuildEmbed(strings.Repeat("t", 300), strings.Repeat("d", 5000), 1, fields, "")
-	if len(e.Title) != 256 || len(e.Description) != 4096 || len(e.Fields) != 25 || e.Footer != nil {
-		t.Fatalf("limits not applied: title=%d desc=%d fields=%d", len(e.Title), len(e.Description), len(e.Fields))
+	fields[0].Value = strings.Repeat("é", 2000)
+	e := discord.BuildEmbed(strings.Repeat("t", 300), strings.Repeat("d", 1000), 1, fields, "")
+	if len(e.Title) != 256 || len(e.Fields) != 14 || len(e.Fields[1].Name) != 256 || e.Footer != nil {
+		t.Fatalf("limits not applied: title=%d fields=%d", len(e.Title), len(e.Fields))
 	}
 	if n := len([]rune(e.Fields[0].Value)); n != 1024 {
 		t.Fatalf("field value should be cut by runes, got %d", n)
+	}
+	if e = discord.BuildEmbed("t", strings.Repeat("d", 5000), 1, nil, ""); len(e.Description) != 4096 {
+		t.Fatalf("description should be cut to 4096, got %d", len(e.Description))
+	}
+}
+
+// Discord refuses an embed over 6000 characters in all; the description gives way first, then
+// the last fields.
+func TestBuildEmbedKeepsWithinTheTotal(t *testing.T) {
+	total := func(e discord.Embed) int {
+		n := len([]rune(e.Title)) + len([]rune(e.Description))
+		for _, f := range e.Fields {
+			n += len([]rune(f.Name)) + len([]rune(f.Value))
+		}
+		if e.Footer != nil {
+			n += len([]rune(e.Footer.Text))
+		}
+		return n
+	}
+	fields := []discord.Field{{Name: "Logs", Value: strings.Repeat("l", 1024)}, {Name: "Packages", Value: strings.Repeat("p", 1024)}}
+	e := discord.BuildEmbed("Updates", strings.Repeat("d", 4000), 1, fields, "nas · Updates")
+	if total(e) > 6000 || len(e.Fields) != 2 || len([]rune(e.Description)) < 1024 {
+		t.Fatalf("the description should shrink to fit, keeping the fields: total=%d desc=%d fields=%d", total(e), len(e.Description), len(e.Fields))
+	}
+	many := make([]discord.Field, 25)
+	for i := range many {
+		many[i] = discord.Field{Name: "f", Value: strings.Repeat("v", 1024)}
+	}
+	e = discord.BuildEmbed(strings.Repeat("t", 300), strings.Repeat("d", 5000), 1, many, strings.Repeat("f", 3000))
+	if total(e) > 6000 || len(e.Fields) == 0 || len(e.Description) != 1024 {
+		t.Fatalf("over the total: %d, desc=%d fields=%d", total(e), len(e.Description), len(e.Fields))
+	}
+}
+
+// A webhook's URL holds its token; a network failure's error never carries it.
+func TestNetworkErrorsHideTheWebhookToken(t *testing.T) {
+	d := newFakeDiscord(t)
+	d.Close()
+	w, _ := newTestWebhook(t, d.URL+"/api/webhooks/1/SECRETTOKEN")
+	if w.SendEmbed("Disk", "full", discord.Warning, nil, "") {
+		t.Fatal("a closed server should fail")
+	}
+	if e := w.LastError(); e == "" || strings.Contains(e, "SECRETTOKEN") {
+		t.Fatalf("error %q", e)
 	}
 }
 

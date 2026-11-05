@@ -39,6 +39,7 @@ type State struct {
 	LastResult          *Result
 	runNow              bool // set when the check changed, so it runs on the next cycle
 	running             bool // claimed by a check that has not reported back
+	stale               bool // the running check was for a type or target since changed: its result is dropped
 	history             []beat
 	slots               slotRing
 }
@@ -52,6 +53,9 @@ type Monitor struct {
 	store  *storage.Store
 	// heartbeats are what each heartbeat check has heard, by token.
 	heartbeats map[string]*Pings
+	// renamed is the new name of a check renamed while it ran, by its old name, so the result
+	// reported under the old name still lands (and frees the check to run again).
+	renamed map[string]string
 	// Resting, when set, says whether a check is in planned maintenance at now: it does not run,
 	// so it neither alerts nor counts against uptime, and shows as "maintenance".
 	Resting func(name string, now float64) bool
@@ -145,16 +149,32 @@ func (m *Monitor) Claim(now float64) []Spec {
 // Record folds a result into the service's state. A service goes down only after
 // Retries consecutive failures beyond the first, so one dropped request does not alert.
 // It returns "down" or "up" when the status changed (the first result only reports "down").
-// Results for a check deleted or paused while it ran are dropped.
+// Results for a check deleted or paused while it ran, or whose type or target changed, are
+// dropped; one renamed while it ran is recorded under its new name.
 func (m *Monitor) Record(name string, r Result, now float64) string {
+	_, change := m.RecordAs(name, r, now)
+	return change
+}
+
+// RecordAs is Record, also saying the name the result went to: the new one, for a check renamed
+// while it ran.
+func (m *Monitor) RecordAs(name string, r Result, now float64) (recorded, change string) {
 	m.mu.Lock()
 	st, ok := m.states[name]
-	if ok {
-		st.running = false
+	// A check of this name that is not running has no result coming: this one is for the check
+	// renamed away from it.
+	if to, moved := m.renamed[name]; moved && (!ok || !st.running) {
+		delete(m.renamed, name)
+		name = to
+		st, ok = m.states[name]
 	}
-	if !ok || st.Spec.Paused {
+	stale := false
+	if ok {
+		st.running, stale, st.stale = false, st.stale, false
+	}
+	if !ok || st.Spec.Paused || stale {
 		m.mu.Unlock()
-		return ""
+		return name, ""
 	}
 	st.LastCheck, st.runNow = now, false
 	st.LastResult = &r
@@ -173,7 +193,6 @@ func (m *Monitor) Record(name string, r Result, now float64) string {
 			st.Status = StatusDown
 		}
 	}
-	change := ""
 	if st.Status != previous {
 		st.LastChange = &now
 		if st.Status == StatusDown {
@@ -187,7 +206,7 @@ func (m *Monitor) Record(name string, r Result, now float64) string {
 	if m.store != nil {
 		m.store.Record(name, now, r.Up, r.LatencyMS, r.Detail)
 	}
-	return change
+	return name, change
 }
 
 // Uptime is the percent up since `since` (at 5-minute resolution, up to 30 days back).

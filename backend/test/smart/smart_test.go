@@ -111,3 +111,36 @@ func TestMissingSmartctl(t *testing.T) {
 		t.Fatalf("the reason is kept for the dashboard: %q", problem)
 	}
 }
+
+func TestADriveThatStopsAnsweringIsNotAsleep(t *testing.T) {
+	f := &fake{sda: hdd, nvme: nvme}
+	r := smart.NewReader()
+	r.Run = f.run
+	r.Read(context.Background(), time.Unix(1000, 0), limits)
+	// Exit bit 2 is also "device open failed"; only a standby message means asleep.
+	f.sda = `{"smartctl":{"exit_status":2,"messages":[{"string":"Smartctl open device: /dev/sda [SAT] failed: No such device","severity":"error"}]}}`
+	drives, _ := r.Read(context.Background(), time.Unix(2000, 0), limits)
+	sda := drives[0]
+	if sda.Asleep || !strings.Contains(sda.Error, "open device") || sda.Health == "good" {
+		t.Fatalf("an unreadable drive must show as such: %+v", sda)
+	}
+	if sda.Model != "WDC WD80EFAX" || sda.Serial != "S1" || sda.Checked != 1000 {
+		t.Fatalf("it keeps its identity and its last check time: %+v", sda)
+	}
+}
+
+func TestDrivesBehindARaidControllerAreKeptApart(t *testing.T) {
+	r := smart.NewReader()
+	r.Run = func(_ context.Context, args ...string) ([]byte, error) {
+		if args[len(args)-1] == "--json" {
+			return []byte(`{"devices":[{"name":"/dev/bus/0","type":"megaraid,0"},{"name":"/dev/bus/0","type":"megaraid,1"}]}`), nil
+		}
+		serial := map[string]string{"--device=megaraid,0": "A", "--device=megaraid,1": "B"}[args[len(args)-2]]
+		return []byte(`{"smartctl":{"exit_status":0},"model_name":"HGST","serial_number":"` + serial + `","smart_status":{"passed":true}}`), nil
+	}
+	r.Read(context.Background(), time.Now(), limits)
+	drives, _ := r.Drives()
+	if len(drives) != 2 || drives[0].Serial != "A" || drives[1].Serial != "B" {
+		t.Fatalf("got %+v", drives)
+	}
+}

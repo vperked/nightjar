@@ -5,6 +5,61 @@
   color: var(--ink-2);
   white-space: nowrap;
 }
+/* On a phone each stream is two lines: the title with its bandwidth, then who and how it is delivered. */
+@media (max-width: 560px) {
+  .table.np-table thead {
+    display: none;
+  }
+  .table.np-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'title bw' 'user stream';
+    gap: 4px 14px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .table.np-table tbody tr:last-child {
+    border-bottom: 0;
+    padding-bottom: 2px;
+  }
+  .table.np-table tbody td,
+  .table.np-table tbody tr:last-child td,
+  .table.np-table tbody tr.link td {
+    display: block;
+    min-width: 0;
+    width: auto;
+    max-width: none;
+    padding: 0;
+    border: 0;
+  }
+  .table.np-table tbody tr td.hide-sm {
+    display: none;
+  }
+  .table.np-table .np-title {
+    grid-area: title;
+    min-width: 0;
+  }
+  .table.np-table .np-bw {
+    grid-area: bw;
+  }
+  .table.np-table .np-user {
+    grid-area: user;
+    min-width: 0;
+    white-space: normal;
+  }
+  .table.np-table .np-user > div {
+    display: inline;
+  }
+  .table.np-table .np-user .sub::before {
+    content: ' · ';
+  }
+  .table.np-table .np-stream {
+    grid-area: stream;
+    max-width: 22ch;
+    text-align: right;
+    white-space: normal;
+  }
+}
 .decision.transcode {
   color: var(--ink);
   font-weight: 600;
@@ -578,4 +633,8 @@
   font-size: 11.5px;
   line-height: 1.35;
   white-space: normal;
+}
+.cleanup-when-sm {
+  margin-top: 4px;
+  font-size: 12.5px;
 }

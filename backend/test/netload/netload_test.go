@@ -2,6 +2,8 @@ package netload_test
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,5 +122,38 @@ func TestFirstSocketReadingHasNoRates(t *testing.T) {
 	m.Sample(time.Unix(100, 0), true)
 	if p := m.View(0).Processes[0]; p.TX != 0 {
 		t.Fatalf("a total is not a rate: %+v", p)
+	}
+}
+
+func TestAWokenMeterAnswersWithItsInterfacesAtOnce(t *testing.T) {
+	f := &fakeMachine{}
+	m := meter(f)
+	m.Tick = time.Hour // only the reading Watch takes itself
+	m.Watch()
+	v := m.View(0)
+	if len(v.Interfaces) == 0 || v.Interfaces[0].Name != "eth0" {
+		t.Fatalf("the first answer after waking has no interfaces: %+v", v.Interfaces)
+	}
+	if len(v.Samples["eth0"]) != 0 {
+		t.Fatalf("one reading has no rate yet: %v", v.Samples["eth0"])
+	}
+}
+
+// An interface with nothing newer than since, and a meter with no talkers yet, answer with empty
+// lists, never null: the dashboard goes through each.
+func TestTheViewNeverHasNullLists(t *testing.T) {
+	f := &fakeMachine{}
+	m := meter(f)
+	m.Sample(time.Unix(1_800_000_000, 0), true)
+	b, err := json.Marshal(m.View(1_900_000_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "null") {
+		t.Fatalf("null in %s", b)
+	}
+	b, _ = json.Marshal(meter(&fakeMachine{}).View(0))
+	if strings.Contains(string(b), "null") {
+		t.Fatalf("a meter that has not sampled: %s", b)
 	}
 }

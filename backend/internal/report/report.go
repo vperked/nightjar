@@ -299,6 +299,9 @@ func plural(n int, w string) string {
 
 const sentKey = "report.sent"
 
+// retryEvery is how long after a weekly report that did not get through it is tried again.
+const retryEvery = 30 * time.Minute
+
 // When is a weekday and time, "Mon 09:00".
 type When struct {
 	Day    time.Weekday
@@ -343,6 +346,9 @@ func Schedule(stop <-chan struct{}, c *monitor.Context) {
 	}
 	tick := time.NewTicker(time.Minute)
 	defer tick.Stop()
+	// tried is when a report that did not get through was last tried; it is tried again every
+	// retryEvery while it is due.
+	var tried time.Time
 	for {
 		select {
 		case <-stop:
@@ -360,12 +366,18 @@ func Schedule(stop <-chan struct{}, c *monitor.Context) {
 		now := time.Now()
 		due := when.Last(now)
 		sent, _ := strconv.ParseInt(c.Store.Meta(sentKey), 10, 64)
-		if sent >= due.Unix() || now.Sub(due) > 24*time.Hour {
+		if sent >= due.Unix() || now.Sub(due) > 24*time.Hour || now.Sub(tried) < retryEvery {
 			continue
 		}
-		c.Store.SetMeta(sentKey, strconv.FormatInt(now.Unix(), 10))
-		if Send(c, Make(c, now)) {
-			log.Info("Weekly report sent")
+		// It is marked sent only once it got through, so a moment without a connection does not
+		// lose the week's report.
+		if !Send(c, Make(c, now)) {
+			tried = now
+			log.Warn("Weekly report not delivered; trying again later", "in", retryEvery)
+			continue
 		}
+		tried = time.Time{}
+		c.Store.SetMeta(sentKey, strconv.FormatInt(now.Unix(), 10))
+		log.Info("Weekly report sent")
 	}
 }

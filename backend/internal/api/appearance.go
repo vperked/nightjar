@@ -74,9 +74,9 @@ func (s *Server) appearance() Appearance {
 }
 
 // publicAppearance is the look for the config: without a sign-in, the style but not the owner's CSS.
-func (s *Server) publicAppearance(r *http.Request) Appearance {
+func (s *Server) publicAppearance(signedIn bool) Appearance {
 	a := s.appearance()
-	if !s.authorized(r) {
+	if !signedIn {
 		a.CSS = ""
 	}
 	return a

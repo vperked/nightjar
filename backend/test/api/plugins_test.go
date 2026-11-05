@@ -75,3 +75,26 @@ func TestPluginsAPI(t *testing.T) {
 		t.Fatalf("cross-site change: %d", code)
 	}
 }
+
+// Finding a plugin that delivers alerts restarts Nightjar to set up its channel; the answer says so,
+// for the dashboard to wait for it.
+func TestRescanSaysWhenItRestarts(t *testing.T) {
+	m := newManaged(t)
+	root := t.TempDir()
+	os.Chmod(root, 0o755)
+	pl := plugins.New(root, m.store)
+	pl.Scan()
+	restarts := 0
+	pl.NotifyChanged = func() { restarts++ }
+	m.ctx.Plugins = pl
+	if code, body := m.send(t, http.MethodPost, "/api/plugins/rescan", ""); code != http.StatusOK || body["restarting"] != false {
+		t.Fatalf("nothing new: %d %v", code, body)
+	}
+	dir := filepath.Join(root, "pager")
+	os.Mkdir(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "plugin.json"), []byte(`{"id":"pager","name":"Pager","provides":["notify"],"run":"run.sh"}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "run.sh"), []byte("#!/bin/sh\ntrue\n"), 0o755)
+	if code, body := m.send(t, http.MethodPost, "/api/plugins/rescan", ""); code != http.StatusOK || body["restarting"] != true || restarts != 1 {
+		t.Fatalf("a new alert channel: %d %v, %d restarts", code, body, restarts)
+	}
+}

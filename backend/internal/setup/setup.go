@@ -159,60 +159,65 @@ var arrApps = []string{"Sonarr", "Radarr", "Prowlarr", "Lidarr", "Readarr"}
 func SuggestChecks(qb QBittorrent) []Suggestion {
 	var out []Suggestion
 	seen := map[int]bool{}
-	add := func(name string, port int, path string) {
-		if seen[port] || !listening(port) {
+	add := func(name, host string, port int, path string) {
+		if seen[port] || !Probe(host, port) {
 			return
 		}
 		seen[port] = true
-		out = append(out, Suggestion{Name: name, Type: "http", Target: fmt.Sprintf("http://127.0.0.1:%d%s", port, path)})
+		out = append(out, Suggestion{Name: name, Type: "http", Target: "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + path})
 	}
 	for _, app := range arrApps {
 		for _, home := range HomeDirs() {
-			if port, base, ok := arrConfig(filepath.Join(home, ".config", app, "config.xml")); ok {
+			if host, port, base, ok := arrConfig(filepath.Join(home, ".config", app, "config.xml")); ok {
 				// /ping answers without the API key.
-				add(app, port, base+"/ping")
+				add(app, host, port, base+"/ping")
 				break
 			}
 		}
 	}
 	if qb.Answering {
-		add("qBittorrent", qb.Port, "/")
+		add("qBittorrent", "127.0.0.1", qb.Port, "/")
 	}
 	for _, k := range known {
-		add(k.name, k.port, k.path)
+		add(k.name, "127.0.0.1", k.port, k.path)
 	}
 	return out
 }
 
-func arrConfig(path string) (port int, base string, ok bool) {
+// arrConfig reads where a *arr app listens from its config.xml: the address, port and URL base.
+func arrConfig(path string) (host string, port int, base string, ok bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, "", false
+		return "", 0, "", false
 	}
 	var c struct {
-		Port    int    `xml:"Port"`
-		URLBase string `xml:"UrlBase"`
+		Port        int    `xml:"Port"`
+		URLBase     string `xml:"UrlBase"`
+		BindAddress string `xml:"BindAddress"`
 	}
 	if xml.Unmarshal(data, &c) != nil || c.Port == 0 {
-		return 0, "", false
+		return "", 0, "", false
 	}
 	if base = strings.Trim(c.URLBase, "/"); base != "" {
 		base = "/" + base
 	}
-	return c.Port, base, true
+	// An app bound to one address listens only there; bound to all ("*"), on loopback too.
+	host = "127.0.0.1"
+	if ip := net.ParseIP(strings.TrimSpace(c.BindAddress)); ip != nil && !ip.IsUnspecified() {
+		host = ip.String()
+	}
+	return host, c.Port, base, true
 }
 
 // Probe lets tests stand in for the network.
-var Probe = func(port int) bool {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 400*time.Millisecond)
+var Probe = func(host string, port int) bool {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 400*time.Millisecond)
 	if err != nil {
 		return false
 	}
 	conn.Close()
 	return true
 }
-
-func listening(port int) bool { return Probe(port) }
 
 // IsQBittorrent reports whether qBittorrent's Web API answers on port: without a login it refuses
 // /api/v2/app/version with 403 (or answers it, when localhost needs no login). Another program

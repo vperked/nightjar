@@ -195,6 +195,17 @@ textarea.sd-code.over {
   color: var(--ink-3);
 }
 @media (max-width: 560px) {
+  /* A check's name sits over its row, so the public-name box gets the whole width beside the arrows. */
+  .sd-items {
+    gap: 10px;
+  }
+  .sd-items li {
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    row-gap: 2px;
+  }
+  .sd-check {
+    grid-column: 1 / -1;
+  }
   .sd-classes dl div {
     grid-template-columns: minmax(0, 1fr);
     gap: 0;

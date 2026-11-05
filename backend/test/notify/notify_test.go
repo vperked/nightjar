@@ -3,12 +3,22 @@ package notify_test
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
+	"html"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
+	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"nightjar/internal/discord"
 	"nightjar/internal/notify"
@@ -140,7 +150,7 @@ func fakeSMTP(t *testing.T) (port int, data <-chan string) {
 					reply("250 queued")
 					continue
 				}
-				body.WriteString(line)
+				body.WriteString(strings.TrimPrefix(line, "."))
 				continue
 			}
 			switch cmd := strings.ToUpper(strings.Fields(line + " x")[0]); cmd {
@@ -166,7 +176,13 @@ func TestEmail(t *testing.T) {
 	if err != nil || !send(ch, discord.Critical) {
 		t.Fatalf("email failed: %v %s", err, ch.LastError())
 	}
-	msg := <-data
+	raw := <-data
+	for _, l := range strings.Split(raw, "\r\n") {
+		if len(l) > 998 {
+			t.Fatalf("a line of %d octets is over SMTP's limit", len(l))
+		}
+	}
+	msg := decodeEmail(t, raw)
 	for _, want := range []string{"Subject: =?utf-8?q?", "To: me@example.com", "Content-Type: text/html", "Service Down: api", "<b>failed</b>", "Open the dashboard", "#D03B3B"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("email lacks %q", want)
@@ -174,5 +190,141 @@ func TestEmail(t *testing.T) {
 	}
 	if _, err := notify.NewEmail(notify.SMTP{Host: "x"}, origin); err == nil {
 		t.Fatal("missing addresses should be rejected")
+	}
+}
+
+// decodeEmail is a message's headers and its parts' headers and decoded bodies, as one text.
+func decodeEmail(t *testing.T, raw string) string {
+	t.Helper()
+	m, err := mail.ReadMessage(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for k, v := range m.Header {
+		fmt.Fprintf(&b, "%s: %s\n", k, strings.Join(v, ", "))
+	}
+	_, params, _ := mime.ParseMediaType(m.Header.Get("Content-Type"))
+	r := multipart.NewReader(m.Body, params["boundary"])
+	for {
+		p, err := r.NextPart()
+		if err != nil {
+			break
+		}
+		body, _ := io.ReadAll(p) // the reader undoes quoted-printable
+		fmt.Fprintf(&b, "Content-Type: %s\n%s\n", p.Header.Get("Content-Type"), body)
+	}
+	return b.String()
+}
+
+func TestLongEmailsKeepShortLines(t *testing.T) {
+	port, data := fakeSMTP(t)
+	ch, _ := notify.NewEmail(notify.SMTP{Host: "127.0.0.1", Port: port, From: "monitor@nas", To: []string{"me@example.com"}}, origin)
+	var fields []discord.Field
+	for i := range 6 {
+		fields = append(fields, discord.Field{Name: fmt.Sprint("Field ", i), Value: strings.Repeat("word ", 200)})
+	}
+	if !ch.SendEmbed("Updates installed", strings.Repeat("a long description ", 100), discord.Info, fields, "Updates") {
+		t.Fatal(ch.LastError())
+	}
+	raw := <-data
+	for _, l := range strings.Split(raw, "\r\n") {
+		if len(l) > 998 {
+			t.Fatalf("a line of %d octets is over SMTP's limit", len(l))
+		}
+	}
+	if !strings.Contains(raw, "Content-Transfer-Encoding: quoted-printable") || !strings.Contains(decodeEmail(t, raw), strings.Repeat("word ", 200)) {
+		t.Fatal("the parts should be quoted-printable and decode to the whole alert")
+	}
+}
+
+// A Telegram message cut to its limit is still well-formed HTML.
+func TestLongTelegramMessagesStayWellFormed(t *testing.T) {
+	srv := newCapture(t)
+	defer func(api string) { notify.TelegramAPI = api }(notify.TelegramAPI)
+	notify.TelegramAPI = srv.URL
+	ch, _ := notify.NewTelegram("123:abc", "-100", origin)
+	var fields []discord.Field
+	for i := range 8 {
+		fields = append(fields, discord.Field{Name: fmt.Sprint("Logs ", i), Value: strings.Repeat("**a** & `b` <c> ", 80)})
+	}
+	ch.SendEmbed("Cleanup", strings.Repeat("x & y ", 300), discord.Warning, fields, "Monitor")
+	text := srv.body["text"].(string)
+	if !strings.HasSuffix(text, "<i>nas · Nightjar</i>") {
+		t.Fatalf("the footer should survive the cut: %q", text[max(0, len(text)-80):])
+	}
+	visible := html.UnescapeString(regexp.MustCompile(`<[^>]+>`).ReplaceAllString(text, ""))
+	if n := utf8.RuneCountInString(visible); n > 4096 {
+		t.Fatalf("the message is %d characters, over Telegram's 4096", n)
+	}
+	for _, tag := range []string{"b", "i", "code", "a"} {
+		if open, closed := strings.Count(text, "<"+tag+">")+strings.Count(text, "<"+tag+" "), strings.Count(text, "</"+tag+">"); open != closed {
+			t.Fatalf("<%s> opened %d times, closed %d", tag, open, closed)
+		}
+	}
+	if regexp.MustCompile(`&[a-z]*[^a-z;]`).MatchString(strings.ReplaceAll(text, "&amp;", "")) {
+		t.Fatal("an entity was cut in half")
+	}
+}
+
+func TestSlackTextCannotMentionOrLink(t *testing.T) {
+	slack := newCapture(t)
+	ch, _ := notify.NewSlack(slack.URL, origin)
+	ch.SendEmbed("Downloaded: <!channel> <https://evil.example|Plex login>", "a & <b>", discord.Info,
+		[]discord.Field{{Name: "Name", Value: "<@U123>"}}, "qBittorrent")
+	payload, _ := json.Marshal(slack.body)
+	for _, bad := range []string{"<!channel>", "<https://evil", "<@U123>"} {
+		if strings.Contains(string(payload), bad) {
+			t.Fatalf("%q reached Slack unescaped: %s", bad, payload)
+		}
+	}
+	att := slack.body["attachments"].([]any)[0].(map[string]any)
+	if att["text"] != "a &amp; &lt;b&gt;" {
+		t.Fatalf("slack text %q", att["text"])
+	}
+}
+
+// A failed request's URL holds the secret (Telegram's bot token, a webhook's URL); it never reaches
+// the error that is kept and shown.
+func TestNetworkErrorsHideTheURL(t *testing.T) {
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	dead := "http://" + ln.Addr().String()
+	ln.Close()
+	defer func(api string) { notify.TelegramAPI = api }(notify.TelegramAPI)
+	notify.TelegramAPI = dead
+	tg, _ := notify.NewTelegram("123456:SECRETTOKEN", "-100", origin)
+	hook, _ := notify.NewWebhook(dead+"/hooks/SECRETPATH", origin)
+	for _, c := range []notify.Channel{tg, hook} {
+		if send(c, discord.Critical) {
+			t.Fatalf("%s should fail against a closed port", c.Name())
+		}
+		if e := c.LastError(); e == "" || strings.Contains(e, "SECRET") {
+			t.Fatalf("%s error %q", c.Name(), e)
+		}
+	}
+}
+
+func TestAHungPluginDoesNotHoldUpAlerts(t *testing.T) {
+	defer func(d time.Duration) { notify.PluginWait = d }(notify.PluginWait)
+	notify.PluginWait = 20 * time.Millisecond
+	var runs atomic.Int32
+	release := make(chan struct{})
+	defer close(release)
+	ch := notify.NewPlugin("Pager", func(map[string]any) error {
+		runs.Add(1)
+		<-release
+		return nil
+	}, origin)
+	start := time.Now()
+	for range 8 {
+		if send(ch, discord.Critical) {
+			t.Fatal("a plugin that does not answer has not delivered")
+		}
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("eight alerts took %s waiting on a hung plugin", took)
+	}
+	if n := runs.Load(); n != 5 {
+		t.Fatalf("the breaker should stop running the plugin after 5 failures, it ran %d times", n)
 	}
 }

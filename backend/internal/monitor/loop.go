@@ -55,7 +55,7 @@ func NewLoop(ctx *Context) *Loop {
 		freeze:     freezeCheck{newHandler(ctx, "Freeze")},
 		media:      &mediaCheck{handler: newHandler(ctx, "Disk")},
 		torrents:   &torrentWatcher{handler: newHandler(ctx, "QBittorrent"), tracked: map[string]*trackedTorrent{}},
-		logs:       &logCleanup{handler: newHandler(ctx, "Logs"), lastAlert: map[string]float64{}, cleaned: map[string]bool{}},
+		logs:       &logCleanup{handler: newHandler(ctx, "Logs"), lastAlert: map[string]float64{}, cleaned: map[string]int64{}},
 		kernel:     &kernelChecks{handler: newHandler(ctx, "Kernel"), lastHardwareAlert: map[string]float64{}},
 		updates:    &updateScheduler{handler: newHandler(ctx, "Updates")},
 		services:   &serviceChecks{handler: newHandler(ctx, "Services"), slots: make(chan struct{}, maxParallelChecks)},
@@ -65,8 +65,10 @@ func NewLoop(ctx *Context) *Loop {
 	}
 }
 
-// Wait blocks until background work started by earlier cycles (uptime checks, and for up to a
-// minute a running update) has finished; call it before closing what that work writes to.
+// Wait blocks until background work started by earlier cycles has finished; call it before closing
+// what that work writes to. That is the uptime checks, and update jobs: none starts after this, a
+// check under way gets a minute, and an update under way is waited for until it ends (up to
+// SYSTEM_UPDATE_TIMEOUT and some), since apt or dpkg cut off halfway breaks the machine's packages.
 func (l *Loop) Wait() {
 	l.services.wait()
 	l.units.wg.Wait()
@@ -179,7 +181,7 @@ func (l *Loop) reportMetrics(now float64) {
 	ok := discord.MetricsReport(ctx.Webhook, ctx.Metrics.Summary())
 	ctx.Metrics.RecordWebhookResult(ok)
 	if ok {
-		log.Info("Metrics report sent to Discord")
+		log.Info("Metrics report sent", "to", ctx.AlertDestinations())
 		l.lastMetricsReport = now
 	} else {
 		// Retry in 5 minutes rather than every cycle while Discord is unreachable.

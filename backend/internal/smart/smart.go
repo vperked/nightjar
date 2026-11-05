@@ -74,10 +74,14 @@ type Reader struct {
 	Run Runner
 
 	mu     sync.Mutex
-	drives map[string]Drive
+	drives map[string]Drive // by key
 	order  []string
 	err    string
 }
+
+// key names one drive: its device and type, since the disks behind a RAID controller share one
+// device ("/dev/bus/0") and differ only in type ("megaraid,0", "megaraid,1"…).
+func key(device, typ string) string { return device + "|" + typ }
 
 func NewReader() *Reader { return &Reader{Run: execRunner, drives: map[string]Drive{}} }
 
@@ -111,8 +115,8 @@ func (r *Reader) Read(ctx context.Context, now time.Time, limits Limits) ([]Driv
 	r.err = ""
 	r.order = r.order[:0]
 	for _, d := range drives {
-		r.drives[d.Device] = d
-		r.order = append(r.order, d.Device)
+		r.drives[key(d.Device, d.Type)] = d
+		r.order = append(r.order, key(d.Device, d.Type))
 	}
 	r.mu.Unlock()
 	return drives, nil
@@ -126,7 +130,7 @@ func (r *Reader) setErr(err error) {
 
 func (r *Reader) readOne(ctx context.Context, device, typ string, now time.Time) Drive {
 	r.mu.Lock()
-	prev, known := r.drives[device]
+	prev, known := r.drives[key(device, typ)]
 	r.mu.Unlock()
 	// -n standby: a sleeping disk answers "in standby" instead of spinning up.
 	out, err := r.Run(ctx, "--all", "--json", "--nocheck=standby", "--device="+typ, device)
@@ -147,10 +151,15 @@ func (r *Reader) readOne(ctx context.Context, device, typ string, now time.Time)
 		return prev
 	}
 	d := raw.drive(device, typ)
-	d.Checked = float64(now.Unix())
 	if d.Model == "" && d.Passed == nil {
-		d.Error = raw.message()
+		// Nothing came back: the drive could not be opened or did not identify itself, which is
+		// how a dying disk often looks. Say so rather than show its last verdict; the reading
+		// stays unchecked, so what was already announced about it is left as it was.
+		d.Model, d.Serial, d.Capacity, d.Rotational = prev.Model, prev.Serial, prev.Capacity, prev.Rotational
+		d.Checked, d.Error = prev.Checked, raw.message()
+		return d
 	}
+	d.Checked = float64(now.Unix())
 	return d
 }
 
@@ -159,9 +168,10 @@ func (r *Reader) Restore(drives []Drive) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, d := range drives {
-		if _, ok := r.drives[d.Device]; !ok {
-			r.drives[d.Device] = d
-			r.order = append(r.order, d.Device)
+		k := key(d.Device, d.Type)
+		if _, ok := r.drives[k]; !ok {
+			r.drives[k] = d
+			r.order = append(r.order, k)
 		}
 	}
 }
@@ -171,8 +181,8 @@ func (r *Reader) Drives() ([]Drive, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]Drive, 0, len(r.order))
-	for _, dev := range r.order {
-		out = append(out, r.drives[dev])
+	for _, k := range r.order {
+		out = append(out, r.drives[k])
 	}
 	return out, r.err
 }
@@ -291,16 +301,16 @@ type report struct {
 	} `json:"nvme_smart_health_information_log"`
 }
 
-// standbyBit is smartctl's exit-status bit for "device is in a low-power mode and was not checked".
-const standbyBit = 1 << 1
-
+// asleep is smartctl saying the drive is in standby or asleep and was not checked. Its exit-status
+// bit for that (2) also means "device open failed" or "no IDENTIFY", so only the message tells a
+// sleeping disk from one that has stopped answering.
 func (r report) asleep() bool {
 	for _, m := range r.Smartctl.Messages {
 		if msg := strings.ToLower(m.String); strings.Contains(msg, "standby") || strings.Contains(msg, "sleep") {
 			return true
 		}
 	}
-	return r.ModelName == "" && r.Smartctl.ExitStatus&standbyBit != 0 && r.SmartStatus == nil
+	return false
 }
 
 func (r report) message() string {

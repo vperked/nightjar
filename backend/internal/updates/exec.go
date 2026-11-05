@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
 	"slices"
+	"syscall"
 	"time"
 )
 
@@ -21,6 +23,8 @@ type Command struct {
 	// Root marks commands that need root; they go through passwordless sudo when the monitor is not root.
 	Root    bool
 	Timeout time.Duration
+	// Output, when set, also gets what the command prints as it prints it.
+	Output io.Writer
 }
 
 // Output is what a command printed and how it exited.
@@ -68,6 +72,13 @@ func Exec(ctx context.Context, c Command) (Output, error) {
 	}
 	argv := c.Argv
 	root := os.Geteuid() == 0
+	// sudo clears the environment it is given, so what the command needs goes through env instead.
+	sudo := func(args ...string) []string {
+		if len(c.Env) > 0 {
+			args = append(append(args, "env"), c.Env...)
+		}
+		return append(args, c.Argv...)
+	}
 	switch {
 	case c.User != "" && !isCurrentUser(c.User):
 		if u, err := user.Lookup(c.User); err == nil {
@@ -76,20 +87,33 @@ func Exec(ctx context.Context, c Command) (Output, error) {
 		if root {
 			argv = append([]string{"runuser", "-u", c.User, "--"}, argv...)
 		} else {
-			argv = append([]string{"sudo", "-n", "-u", c.User, "--"}, argv...)
+			argv = sudo("sudo", "-n", "-u", c.User, "--")
 		}
 	case c.Root && !root:
-		argv = append([]string{"sudo", "-n", "--"}, argv...)
+		argv = sudo("sudo", "-n", "--")
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = c.Dir
 	cmd.Env = append(env, c.Env...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if c.Output != nil {
+		cmd.Stdout, cmd.Stderr = io.MultiWriter(&stdout, c.Output), io.MultiWriter(&stderr, c.Output)
+	}
+	// Out of time, the whole group goes: runuser, sudo and sh -c start the real work as a child,
+	// which killing only them would leave running. Whatever still holds the output open after
+	// that is not waited for.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 5 * time.Second
 	err := cmd.Run()
 	out := Output{Stdout: stdout.String(), Stderr: stderr.String()}
 	if ctx.Err() != nil {
 		return out, ctx.Err()
+	}
+	// It finished, but left something running in the background that kept its output open.
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {

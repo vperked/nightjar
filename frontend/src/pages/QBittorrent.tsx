@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useLocation, useSearchParams } from 'react-router';
 import { api } from '../api/client';
 import type { QBState } from '../api/types';
 import { Num } from '../components/Num';
@@ -23,7 +23,13 @@ function Body({ q, refresh }: { q: QBState; refresh: () => void }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<string>();
   const [params] = useSearchParams();
-  const [adding, setAdding] = useState(() => params.get('add') === '1');
+  const location = useLocation();
+  const add = params.get('add') === '1';
+  const [adding, setAdding] = useState(add);
+  // ?add=1 opens the form when it is followed while already here too (the Finder's "Add a torrent").
+  useEffect(() => {
+    if (add) setAdding(true);
+  }, [add, location.key]);
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
   const counts = useMemo(() => {
@@ -148,14 +154,14 @@ function Body({ q, refresh }: { q: QBState; refresh: () => void }) {
           />
         )}
         {picked.length > 0 && (
-          <div className="qb-bulk" role="toolbar" aria-label="Selected torrents">
-            <span className="qb-bulk-count">
+          <div className="bulk-bar" role="toolbar" aria-label="Selected torrents">
+            <span className="bulk-bar-count">
               <strong>{picked.length}</strong> selected
             </span>
-            <span className="qb-bulk-rule" aria-hidden="true" />
+            <span className="bulk-bar-rule" aria-hidden="true" />
             <Actions key={picked.map((t) => t.hash).join()} torrents={picked} run={actions.run} busy={actions.busy} onDone={() => setSelected(new Set())} />
-            <span className="qb-bulk-rule" aria-hidden="true" />
-            <button className="qb-bulk-close" aria-label="Clear selection" title="Clear selection" onClick={() => setSelected(new Set())}>
+            <span className="bulk-bar-rule" aria-hidden="true" />
+            <button className="bulk-bar-close" aria-label="Clear selection" title="Clear selection" onClick={() => setSelected(new Set())}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
                 <path d="M6 6l12 12M18 6L6 18" />
               </svg>

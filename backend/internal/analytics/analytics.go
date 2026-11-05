@@ -4,6 +4,7 @@
 package analytics
 
 import (
+	"cmp"
 	"math"
 	"slices"
 	"sync"
@@ -40,7 +41,7 @@ type minute struct {
 	ts                                    float64
 	n, ups                                int
 	cpu, mem, temp, disk, rx, tx, latency mean
-	cpuMax, tempMax                       *float64
+	cpuMax, memMax, tempMax, latencyMax   *float64
 }
 
 type mean struct {
@@ -99,7 +100,7 @@ func (r *Recorder) Add(host string, x Reading) {
 	m.rx.add(x.Rx)
 	m.tx.add(x.Tx)
 	m.latency.add(x.Latency)
-	m.cpuMax, m.tempMax = maxOf(m.cpuMax, x.CPU), maxOf(m.tempMax, x.Temp)
+	m.cpuMax, m.memMax, m.tempMax, m.latencyMax = maxOf(m.cpuMax, x.CPU), maxOf(m.memMax, x.Mem), maxOf(m.tempMax, x.Temp), maxOf(m.latencyMax, x.Latency)
 	r.mu.Unlock()
 	if done != nil {
 		r.store.AddSamples([]storage.Sample{*done})
@@ -107,8 +108,8 @@ func (r *Recorder) Add(host string, x Reading) {
 }
 
 func (m *minute) sample(host string) storage.Sample {
-	return storage.Sample{Host: host, TS: m.ts, Up: float64(m.ups) / float64(m.n), CPU: m.cpu.value(), CPUMax: m.cpuMax, Mem: m.mem.value(),
-		Temp: m.temp.value(), TempMax: m.tempMax, Disk: m.disk.value(), Rx: m.rx.value(), Tx: m.tx.value(), Latency: m.latency.value()}
+	return storage.Sample{Host: host, TS: m.ts, Up: float64(m.ups) / float64(m.n), CPU: m.cpu.value(), CPUMax: m.cpuMax, Mem: m.mem.value(), MemMax: m.memMax,
+		Temp: m.temp.value(), TempMax: m.tempMax, Disk: m.disk.value(), Rx: m.rx.value(), Tx: m.tx.value(), Latency: m.latency.value(), LatencyMax: m.latencyMax}
 }
 
 // Flush stores every minute in progress, on shutdown.
@@ -254,7 +255,7 @@ func summarize(points []storage.Sample, rng Range) Summary {
 		weigh(&mem, p.Mem)
 		weigh(&temp, p.Temp)
 		weigh(&latency, p.Latency)
-		cpuPeak, memPeak, tempPeak, latencyPeak = maxOf(cpuPeak, p.CPUMax), maxOf(memPeak, p.Mem), maxOf(tempPeak, p.TempMax), maxOf(latencyPeak, p.Latency)
+		cpuPeak, memPeak, tempPeak, latencyPeak = maxOf(cpuPeak, p.CPUMax), maxOf(memPeak, cmp.Or(p.MemMax, p.Mem)), maxOf(tempPeak, p.TempMax), maxOf(latencyPeak, cmp.Or(p.LatencyMax, p.Latency))
 		if p.Rx != nil {
 			s.RxBytes += *p.Rx * m * 60
 		}

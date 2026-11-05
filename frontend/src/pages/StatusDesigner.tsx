@@ -7,6 +7,7 @@ import { Select } from '../components/Select';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { Seg } from '../components/ui';
+import { useUnsaved } from '../freshness';
 import { StatusView, uptimeOf } from './StatusPage';
 
 // The status page designer: everything on the public page, edited on the left and previewed live
@@ -249,6 +250,8 @@ export function StatusDesignerPage() {
     return plain(a) === plain(b);
   };
   const dirty = !!loaded && !same(design, loaded.design);
+  // The design is edited with buttons and pickers: hold off reloading onto a new build.
+  useUnsaved(dirty);
   const used = useMemo(() => new Set(design?.groups.flatMap((g) => g.items.map((i) => i.check)) ?? []), [design]);
   const available = (loaded?.checks ?? []).filter((c) => !used.has(c));
 

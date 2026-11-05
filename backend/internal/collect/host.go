@@ -2,8 +2,10 @@
 package collect
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -15,7 +17,11 @@ import (
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
+
+	"nightjar/internal/logx"
 )
+
+var diskLog = logx.Component("Disk")
 
 // CPUFreq is in MHz.
 type CPUFreq struct {
@@ -145,7 +151,18 @@ func (p Partition) ShouldMonitor() bool {
 	return !(p.Total > 0 && p.Total < 100*1024*1024)
 }
 
-// Partitions lists mounted filesystems with usage, optionally only the monitorable ones.
+// filesystemKey names the filesystem behind a mount: its block device, which a btrfs subvolume
+// or a bind mount shares with the mount it comes from, else (tmpfs, network shares) the mount point.
+func filesystemKey(p disk.PartitionStat) string {
+	if strings.HasPrefix(p.Device, "/dev/") {
+		return p.Device
+	}
+	return p.Mountpoint
+}
+
+// Partitions lists mounted filesystems with usage, optionally only the monitorable ones. A
+// filesystem mounted twice (btrfs subvolumes, bind mounts) is listed once, at its first mount, so
+// totals do not count it twice.
 func Partitions(onlyMonitorable bool) []Partition {
 	parts, err := disk.Partitions(false)
 	if err != nil {
@@ -154,10 +171,11 @@ func Partitions(onlyMonitorable bool) []Partition {
 	seen := map[string]bool{}
 	var out []Partition
 	for _, p := range parts {
-		if seen[p.Mountpoint] {
+		key := filesystemKey(p)
+		if seen[key] || seen[p.Mountpoint] {
 			continue
 		}
-		usage, err := disk.Usage(p.Mountpoint)
+		usage, err := usageOf(p.Mountpoint)
 		if err != nil {
 			continue
 		}
@@ -169,10 +187,62 @@ func Partitions(onlyMonitorable bool) []Partition {
 		if onlyMonitorable && !part.ShouldMonitor() {
 			continue
 		}
-		seen[p.Mountpoint] = true
+		seen[key], seen[p.Mountpoint] = true, true
 		out = append(out, part)
 	}
 	return out
+}
+
+// usageTimeout is how long one filesystem may take to say how full it is.
+const usageTimeout = 5 * time.Second
+
+var (
+	stuckMu sync.Mutex
+	// stuck are mounts whose last usage read has not come back: a hung NFS server or fuse mount.
+	// They are left out, and not asked again, until it does.
+	stuck = map[string]bool{}
+
+	errStuck = errors.New("the filesystem did not answer")
+)
+
+// usageOf reads one filesystem's usage within usageTimeout, so one hung mount does not lose every
+// partition's reading for the cycle.
+func usageOf(mount string) (*disk.UsageStat, error) {
+	stuckMu.Lock()
+	if stuck[mount] {
+		stuckMu.Unlock()
+		return nil, errStuck
+	}
+	stuckMu.Unlock()
+	type result struct {
+		usage *disk.UsageStat
+		err   error
+	}
+	ch := make(chan result, 1)
+	done := false
+	go func() {
+		u, err := disk.Usage(mount)
+		stuckMu.Lock()
+		done = true
+		if stuck[mount] {
+			delete(stuck, mount)
+			diskLog.Info("A filesystem answers again", "mount", mount)
+		}
+		stuckMu.Unlock()
+		ch <- result{u, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.usage, r.err
+	case <-time.After(usageTimeout):
+		stuckMu.Lock()
+		if !done {
+			stuck[mount] = true
+			diskLog.Warn("A filesystem did not say how full it is; leaving it out until it does", "mount", mount)
+		}
+		stuckMu.Unlock()
+		return nil, errStuck
+	}
 }
 
 // DiskTotal sums usage across partitions.
@@ -214,25 +284,93 @@ type IO struct {
 	BytesRecv  uint64 `json:"bytes_recv"`
 }
 
+// physicalDisk is a whole hardware disk (sda, nvme0n1, vda): not a partition, which /sys/block
+// does not list, nor a device-mapper, md, loop or zram device, which has no hardware behind it. Each
+// of those passes its I/O on to a disk, so counting them too counts the same bytes again.
+func physicalDisk(name string) bool {
+	_, err := os.Stat(filepath.Join("/sys/block", strings.ReplaceAll(name, "/", "!"), "device"))
+	return err == nil
+}
+
+// DiskIO sums the physical disks' counters (every device's where none can be told apart).
 func DiskIO() (IO, error) {
 	counters, err := disk.IOCounters()
 	if err != nil {
 		return IO{}, err
 	}
-	var io IO
-	for _, c := range counters {
-		io.ReadBytes += c.ReadBytes
-		io.WriteBytes += c.WriteBytes
+	var all, physical IO
+	found := false
+	for name, c := range counters {
+		all.ReadBytes += c.ReadBytes
+		all.WriteBytes += c.WriteBytes
+		if physicalDisk(name) {
+			found = true
+			physical.ReadBytes += c.ReadBytes
+			physical.WriteBytes += c.WriteBytes
+		}
 	}
-	return io, nil
+	if found {
+		return physical, nil
+	}
+	return all, nil
 }
 
+// physicalInterface is a network interface with hardware behind it: not loopback, a bridge, a
+// container's veth, a VLAN or a tunnel, which carry the same traffic again or none that leaves.
+func physicalInterface(name string) bool {
+	_, err := os.Stat(filepath.Join("/sys/class/net", name, "device"))
+	return err == nil
+}
+
+// defaultRouteInterface is the interface of the IPv4 default route.
+func defaultRouteInterface() string {
+	data, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n")[1:] {
+		if f := strings.Fields(line); len(f) > 2 && f[1] == "00000000" {
+			return f[0]
+		}
+	}
+	return ""
+}
+
+// NetworkIO is the host's traffic in and out: the physical interfaces' counters, or the default
+// route's interface where there is none (a container or some VMs), or else every interface but
+// loopback.
 func NetworkIO() (IO, error) {
-	counters, err := net.IOCounters(false)
+	counters, err := net.IOCounters(true)
 	if err != nil || len(counters) == 0 {
 		return IO{}, err
 	}
-	return IO{BytesSent: counters[0].BytesSent, BytesRecv: counters[0].BytesRecv}, nil
+	var physical, uplink, rest IO
+	foundPhysical, foundUplink := false, false
+	def := defaultRouteInterface()
+	add := func(io *IO, c net.IOCountersStat) {
+		io.BytesSent += c.BytesSent
+		io.BytesRecv += c.BytesRecv
+	}
+	for _, c := range counters {
+		switch {
+		case c.Name == "lo":
+			continue
+		case physicalInterface(c.Name):
+			foundPhysical = true
+			add(&physical, c)
+		case c.Name == def:
+			foundUplink = true
+			add(&uplink, c)
+		}
+		add(&rest, c)
+	}
+	switch {
+	case foundPhysical:
+		return physical, nil
+	case foundUplink:
+		return uplink, nil
+	}
+	return rest, nil
 }
 
 // Bandwidth is the current transfer rate.
@@ -304,7 +442,7 @@ func Interfaces() []Interface {
 		if loopback {
 			continue
 		}
-		iface := Interface{Name: i.Name, IsUp: up}
+		iface := Interface{Name: i.Name, IsUp: up, Addresses: []string{}}
 		for _, a := range i.Addrs {
 			iface.Addresses = append(iface.Addresses, a.Addr)
 		}

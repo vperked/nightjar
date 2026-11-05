@@ -36,7 +36,7 @@ func fakeMachine(t *testing.T, open ...int) string {
 	for _, p := range open {
 		ports[p] = true
 	}
-	setup.Probe = func(port int) bool { return ports[port] }
+	setup.Probe = func(_ string, port int) bool { return ports[port] }
 	setup.IsQBittorrent = func(port int) bool { return ports[port] && port != 8080 }
 	return root
 }
@@ -109,5 +109,22 @@ func TestNothingFound(t *testing.T) {
 	setup.HomeDirs = func() []string { return []string{filepath.Join(root, "empty")} }
 	if setup.PlexToken() != "" || setup.DetectQBittorrent().Found || len(setup.SuggestChecks(setup.QBittorrent{})) != 0 {
 		t.Fatal("an empty machine has nothing to offer")
+	}
+}
+
+// A *arr app bound to one address listens only there, so its check goes to that address.
+func TestSuggestsAnArrAppAtTheAddressItIsBoundTo(t *testing.T) {
+	root := fakeMachine(t, 7878)
+	cfg := filepath.Join(root, "home", "media", ".config/Radarr/config.xml")
+	os.MkdirAll(filepath.Dir(cfg), 0o755)
+	os.WriteFile(cfg, []byte("<Config><Port>7878</Port><BindAddress>192.168.1.20</BindAddress></Config>"), 0o600)
+	var asked []string
+	setup.Probe = func(host string, port int) bool {
+		asked = append(asked, host)
+		return port == 7878
+	}
+	got := setup.SuggestChecks(setup.QBittorrent{})
+	if len(got) != 1 || got[0].Target != "http://192.168.1.20:7878/ping" {
+		t.Fatalf("suggestions %+v (asked %v)", got, asked)
 	}
 }

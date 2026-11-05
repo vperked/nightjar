@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { ApiError, api } from '../api/client';
 import type { UpdateTarget, UpdatesResponse } from '../api/types';
@@ -115,6 +115,12 @@ function Details({ t, data, onEdit, now }: { t: UpdateTarget; data: UpdatesRespo
                     {r.auto ? 'auto' : 'manual'} · {formatAgo(r.at, now)}
                   </span>
                   {r.detail && <span className="run-detail">{r.detail}</span>}
+                  {!!r.log?.length && (
+                    <details className="upd-run-log">
+                      <summary>Log</summary>
+                      <LogLines lines={r.log} />
+                    </details>
+                  )}
                 </li>
               ))}
             </ul>
@@ -160,7 +166,206 @@ function Details({ t, data, onEdit, now }: { t: UpdateTarget; data: UpdatesRespo
   );
 }
 
-function TargetRow({ t, data, now, onEdit }: { t: UpdateTarget; data: UpdatesResponse; now: number; onEdit: () => void }) {
+// LogLines shows an update's commands, their output and its steps, a command and a step each marked.
+function LogLines({ lines, follow }: { lines: string[]; follow?: boolean }) {
+  const box = useRef<HTMLPreElement>(null);
+  // While it runs, the newest line stays in view, unless you scrolled up to read.
+  useEffect(() => {
+    const el = box.current;
+    if (follow && el && el.scrollHeight - el.scrollTop - el.clientHeight < 60) el.scrollTop = el.scrollHeight;
+  }, [lines, follow]);
+  return (
+    <pre className="upd-log" ref={box}>
+      {lines.map((l, i) => (
+        <span key={i} className={l.startsWith('$ ') ? 'log-cmd' : /^(Updating |Checking |Asking |Waiting |It |Done$|Failed: )/.test(l) ? 'log-step' : undefined}>
+          {l}
+          {'\n'}
+        </span>
+      ))}
+    </pre>
+  );
+}
+
+// majorOf is a version's first number; isMajor an update to a new one, which can change how an app
+// works and so is worth a look before it goes in.
+const majorOf = (v?: string) => v?.replace(/^v/, '').match(/^(\d+)\./)?.[1];
+export const isMajor = (t: UpdateTarget) => t.kind !== 'git' && !!majorOf(t.installed) && !!majorOf(t.latest) && majorOf(t.installed) !== majorOf(t.latest);
+
+// A Batch is one Update all: what it was asked to update, and when. It is kept in this browser, so
+// the page still follows it after a reload; the updates themselves run on the server either way.
+// before is each target's newest run when the batch began, by the server's clock: a later run is
+// this batch's. started is this browser's clock and only stands in for a batch saved without it.
+interface Batch {
+  started: number;
+  ids: string[];
+  before?: Record<string, number>;
+}
+const BATCH_KEY = 'nightjar.updateAll';
+const loadBatch = (): Batch | null => {
+  try {
+    return JSON.parse(localStorage.getItem(BATCH_KEY) ?? 'null');
+  } catch {
+    return null;
+  }
+};
+const saveBatch = (b: Batch | null) => {
+  try {
+    if (b) localStorage.setItem(BATCH_KEY, JSON.stringify(b));
+    else localStorage.removeItem(BATCH_KEY);
+  } catch {
+    // Only following it after a reload is lost.
+  }
+};
+
+type ItemState = 'waiting' | 'running' | 'updated' | 'failed' | 'skipped';
+
+// itemState is where one update of a batch is, from the target as the server reports it. A run
+// after since (a server time: its newest run when the batch began) is the batch's.
+export function itemState(t: UpdateTarget | undefined, since: number): ItemState {
+  if (!t) return 'skipped';
+  if (t.busy === 'updating') return 'running';
+  if (t.busy === 'queued' || t.busy === 'checking') return 'waiting';
+  const run = t.runs?.[0];
+  if (run && run.at > since) return run.ok ? 'updated' : 'failed';
+  return t.available ? 'waiting' : 'skipped';
+}
+
+const ITEM_WORD: Record<ItemState, string> = { waiting: 'Waiting', running: 'Updating…', updated: 'Updated', failed: 'Failed', skipped: 'Nothing to install' };
+const ITEM_TONE: Record<ItemState, Tone> = { waiting: 'idle', running: 'busy', updated: 'good', failed: 'crit', skipped: 'idle' };
+
+// UpdateAllSheet lists what Update all would install, each ticked, a major version marked, before
+// anything starts.
+function UpdateAllSheet({ ready, onClose, onStart }: { ready: UpdateTarget[]; onClose: () => void; onStart: (ids: string[]) => void }) {
+  const [picked, setPicked] = useState(() => new Set(ready.map((t) => t.id)));
+  const chosen = ready.filter((t) => picked.has(t.id));
+  const majors = chosen.filter(isMajor).length;
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', esc);
+    return () => window.removeEventListener('keydown', esc);
+  }, [onClose]);
+  return (
+    <div className="sheet-backdrop" onMouseDown={onClose}>
+      <div className="sheet upd-all-sheet" role="dialog" aria-modal="true" aria-label="Update all" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="sheet-head">
+          <div className="min0">
+            <h2>Update all</h2>
+            <span className="page-sub">One at a time, in this order. You can leave the page; this one follows along.</span>
+          </div>
+          <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <ul className="upd-all-list">
+          {ready.map((t) => (
+            <li key={t.id}>
+              <label className="upd-all-item">
+                <input
+                  type="checkbox"
+                  className="select-box"
+                  checked={picked.has(t.id)}
+                  onChange={(e) =>
+                    setPicked((p) => {
+                      const next = new Set(p);
+                      if (e.target.checked) next.add(t.id);
+                      else next.delete(t.id);
+                      return next;
+                    })
+                  }
+                />
+                <span className="min0">
+                  <strong>{t.name}</strong>
+                  <span className="upd-all-change num">{change(t)}</span>
+                </span>
+                {isMajor(t) && <span className="upd-major">Major version</span>}
+                {t.self && <span className="small ink-3">restarts the monitor, so goes last</span>}
+              </label>
+            </li>
+          ))}
+        </ul>
+        {majors > 0 && <p className="form-help">A major version can change how an app works or what it needs. Its release notes say what; untick it to leave it for later.</p>}
+        <div className="sheet-actions">
+          <button type="button" className="btn-quiet" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="button" className="btn" disabled={chosen.length === 0} onClick={() => onStart(chosen.map((t) => t.id))}>
+            Update {plural(chosen.length, 'item')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// UpdateAllRun follows an Update all: how far it has got, the one running with its log as it goes,
+// those still waiting, and how each went, with its log.
+function UpdateAllRun({ batch, targets, onDismiss }: { batch: Batch; targets: UpdateTarget[]; onDismiss: () => void }) {
+  const items = batch.ids.map((id) => {
+    const t = targets.find((x) => x.id === id);
+    return { id, t, state: itemState(t, batch.before?.[id] ?? batch.started - 5) };
+  });
+  const finished = items.filter((i) => i.state === 'updated' || i.state === 'failed' || i.state === 'skipped').length;
+  const done = finished === items.length;
+  const updated = items.filter((i) => i.state === 'updated').length;
+  const failed = items.filter((i) => i.state === 'failed').length;
+  const title = done ? `Update all finished · ${updated} updated${failed ? ` · ${failed} failed` : ''}` : `Updating all · ${finished} of ${items.length} done`;
+  return (
+    <section className={`section upd-batch ${done ? (failed ? 'bad' : 'good') : ''}`} aria-label="Update all">
+      <div className="section-head">
+        <span className="label">{title}</span>
+        {done && (
+          <button type="button" className="btn-quiet" onClick={onDismiss}>
+            Dismiss
+          </button>
+        )}
+      </div>
+      <div className="upd-batch-bar" role="progressbar" aria-valuemin={0} aria-valuemax={items.length} aria-valuenow={finished}>
+        <span style={{ width: `${(100 * finished) / Math.max(1, items.length)}%` }} />
+      </div>
+      <ul className="upd-batch-list">
+        {items.map(({ id, t, state }) => {
+          const run = t?.runs?.[0];
+          return (
+            <li key={id} className={`upd-batch-item ${state}`}>
+              <div className="upd-batch-row">
+                <span className={`state ${ITEM_TONE[state]}`}>{ITEM_WORD[state]}</span>
+                <strong className="truncate">{t?.name ?? id}</strong>
+                {t && state !== 'updated' && state !== 'skipped' && <span className="small ink-3 num truncate">{change(t)}</span>}
+                {state === 'updated' && run && <span className="small ink-3 num truncate">{run.to ? `now ${version(t!, run.to)}` : run.detail}</span>}
+              </div>
+              {state === 'running' && t?.live && <LogLines lines={t.live.lines} follow />}
+              {state === 'failed' && run?.detail && <p className="upd-batch-why">{run.detail}</p>}
+              {(state === 'updated' || state === 'failed') && !!run?.log?.length && (
+                <details className="upd-run-log">
+                  <summary>Log</summary>
+                  <LogLines lines={run.log} />
+                </details>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+// LiveUpdate is the update under way: how long it has run, and what it is doing.
+function LiveUpdate({ t }: { t: UpdateTarget }) {
+  const now = useNow(1000);
+  const live = t.live!;
+  const secs = Math.max(0, Math.round(now - live.started));
+  return (
+    <div className="upd-live" role="status" aria-live="polite">
+      <div className="upd-live-head">
+        <span className="state busy">Updating {t.name}</span>
+        <span className="small ink-3 num">{secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`} so far</span>
+      </div>
+      {live.lines.length ? <LogLines lines={live.lines} follow /> : <p className="small ink-3">Starting…</p>}
+    </div>
+  );
+}
+
+function TargetRow({ t, data, now, onEdit, followed }: { t: UpdateTarget; data: UpdatesResponse; now: number; onEdit: () => void; followed?: boolean }) {
   const { refresh } = useUpdates();
   const notify = useToast();
   const [open, setOpen] = useState(false);
@@ -210,6 +415,8 @@ function TargetRow({ t, data, now, onEdit }: { t: UpdateTarget; data: UpdatesRes
           )}
         </div>
       </div>
+      {/* During Update all, its panel shows the log. */}
+      {t.busy === 'updating' && t.live && !followed && <LiveUpdate t={t} />}
       {open && <Details t={t} data={data} now={now} onEdit={onEdit} />}
     </li>
   );
@@ -227,19 +434,28 @@ export function UpdatesPage() {
 
   // Everything with an update that can install from here; the monitor itself goes last, since it restarts.
   const ready = list.filter((t) => t.available && t.can_update && !t.busy && !t.paused).sort((a, b) => Number(!!a.self) - Number(!!b.self));
-  const [confirmAll, setConfirmAll] = useState(false);
-  const updateAll = async () => {
-    setConfirmAll(false);
+  const [choosing, setChoosing] = useState(false);
+  const [batch, setBatch] = useState<Batch | null>(loadBatch);
+  const updateAll = async (ids: string[]) => {
+    setChoosing(false);
+    const before = Object.fromEntries(ids.map((id) => [id, list.find((t) => t.id === id)?.runs?.[0]?.at ?? 0]));
+    const b = { started: Date.now() / 1000, ids, before };
+    setBatch(b);
+    saveBatch(b);
     let failed = 0;
-    for (const t of ready) {
+    for (const id of ids) {
       try {
-        await api.applyUpdate(t.id);
+        await api.applyUpdate(id);
       } catch {
         failed++;
       }
     }
-    notify(failed ? { tone: 'error', title: `${failed} update(s) could not start` } : { tone: 'info', title: `Updating ${ready.length} items`, body: 'One at a time; you can leave this page.' });
+    if (failed) notify({ tone: 'error', title: `${failed} update(s) could not start` });
     refresh();
+  };
+  const dismissBatch = () => {
+    setBatch(null);
+    saveBatch(null);
   };
 
   const checkAll = async () => {
@@ -290,28 +506,18 @@ export function UpdatesPage() {
           <button className="btn-quiet" onClick={() => setEditing('new')}>
             Add
           </button>
-          {ready.length > 1 &&
-            (confirmAll ? (
-              <span className="confirm">
-                Update {ready.length}
-                {ready.some((t) => t.self) ? ' (the monitor restarts last)' : ''}?{' '}
-                <button className="btn-quiet" onClick={updateAll}>
-                  Yes, update all
-                </button>
-                <button className="btn-quiet" onClick={() => setConfirmAll(false)}>
-                  Cancel
-                </button>
-              </span>
-            ) : (
-              <button className="btn-quiet" onClick={() => setConfirmAll(true)}>
-                Update all ({ready.length})
-              </button>
-            ))}
+          {ready.length > 1 && (
+            <button className="btn-quiet" onClick={() => setChoosing(true)}>
+              Update all ({ready.length})
+            </button>
+          )}
           <button className="btn" onClick={checkAll} disabled={!data || data.checking}>
             {data?.checking ? 'Checking…' : 'Check now'}
           </button>
         </div>
       </div>
+      {choosing && <UpdateAllSheet ready={ready} onClose={() => setChoosing(false)} onStart={updateAll} />}
+      {batch && data && <UpdateAllRun batch={batch} targets={list} onDismiss={dismissBatch} />}
       {data && !data.enabled && (
         <p className="notice">
           Scheduled checks are off, so nothing updates automatically. Turn on <strong>Check for updates</strong> in <Link to="/settings#updates">Settings → Updates</Link>. Check now and Update still
@@ -348,7 +554,7 @@ export function UpdatesPage() {
       ) : (
         <ul className="upd-list">
           {shown.map((t) => (
-            <TargetRow key={t.id} t={t} data={data!} now={now} onEdit={() => setEditing(t)} />
+            <TargetRow key={t.id} t={t} data={data!} now={now} onEdit={() => setEditing(t)} followed={!!batch?.ids.includes(t.id)} />
           ))}
         </ul>
       )}

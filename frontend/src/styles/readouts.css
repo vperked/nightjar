@@ -151,3 +151,25 @@
   clip-path: inset(0 calc(100% - round(down, calc(var(--v) * 1%), 2.5%)) 0 0);
   background: repeating-linear-gradient(90deg, var(--lit) 0 calc(2.5% - 3px), transparent calc(2.5% - 3px) 2.5%);
 }
+
+/* Two cards a row on the narrowest phones: big numbers shrink so "10.0 MB/s" fits its card. */
+@media (max-width: 400px) {
+  .readout-value {
+    font-size: 28px;
+  }
+}
+
+/* At 320px a card is ~110px inside, narrower than "753.8 GB" at 28px: the number shrinks with its
+   card, in every style and density (hence the attributes, to outrank looks.css). */
+@media (max-width: 400px) {
+  .readout,
+  .stats-row > * {
+    container-type: inline-size;
+  }
+  :root[data-style][data-density] :is(.readout, .stats-row > *) > .readout-value:not(.host-net) {
+    font-size: min(28px, 22cqi);
+  }
+  :root[data-style][data-density] .readout > .host-net {
+    font-size: min(19px, 15cqi);
+  }
+}

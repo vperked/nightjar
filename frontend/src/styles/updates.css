@@ -23,7 +23,7 @@
   flex: 1;
   min-width: 0;
   display: grid;
-  grid-template-columns: 128px minmax(0, 1fr) minmax(0, auto) 16px;
+  grid-template-columns: 144px minmax(0, 1fr) minmax(0, auto) 16px;
   align-items: center;
   gap: 14px;
   padding: 13px 4px 13px 18px;
@@ -196,5 +196,172 @@
   }
   .upd-detail-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* An update under way: what it is doing, as it does it. */
+.upd-live {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+}
+.upd-live-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+.upd-log {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+}
+.upd-log .log-cmd {
+  color: var(--ink);
+}
+.upd-log .log-step {
+  color: var(--series-1);
+  font-weight: 600;
+}
+.upd-run-log {
+  flex-basis: 100%;
+}
+.upd-run-log summary {
+  cursor: pointer;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+.upd-run-log .upd-log {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunk);
+}
+
+/* Update all: choosing what goes in, then following it. */
+.upd-all-sheet {
+  display: grid;
+  gap: 14px;
+}
+.upd-all-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--rule);
+}
+.upd-all-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+}
+.upd-all-item > .min0 {
+  display: grid;
+  flex: 1;
+  gap: 1px;
+}
+.upd-all-change {
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+.upd-major {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.sheet-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.upd-batch {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.upd-batch.good {
+  border-color: color-mix(in srgb, var(--good-mark) 40%, var(--rule));
+}
+.upd-batch.bad {
+  border-color: color-mix(in srgb, var(--crit-mark) 40%, var(--rule));
+}
+.upd-batch-bar {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--rule);
+}
+.upd-batch-bar span {
+  display: block;
+  height: 100%;
+  background: var(--series-1);
+  transition: width 0.3s ease;
+}
+.upd-batch-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.upd-batch-item {
+  display: grid;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px solid var(--rule);
+}
+.upd-batch-item:first-child {
+  border-top: 0;
+}
+.upd-batch-row {
+  display: grid;
+  grid-template-columns: 9.5em minmax(0, max-content) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 12px;
+  font-size: 13.5px;
+}
+.upd-batch-item.skipped,
+.upd-batch-item.waiting {
+  color: var(--ink-2);
+}
+.upd-batch-why {
+  margin: 0;
+  color: var(--crit);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 560px) {
+  .upd-batch-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .upd-batch-row .state {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .upd-batch-row > :nth-child(3) {
+    grid-column: 1 / -1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .upd-batch-bar span {
+    transition: none;
   }
 }

@@ -2,11 +2,13 @@ package api
 
 import (
 	"cmp"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 
+	"nightjar/internal/ddos"
 	"nightjar/internal/monitor"
 	"nightjar/internal/netload"
 )
@@ -55,4 +57,51 @@ func withQBittorrent(list []netload.Talker, down, up int64) []netload.Talker {
 	out = append(out, row)
 	slices.SortStableFunc(out, func(a, b netload.Talker) int { return cmp.Compare(b.RX+b.TX, a.RX+a.TX) })
 	return out
+}
+
+// attacks is the attack watcher's view: calm or under attack, how, from where, and the attacks seen.
+func (s *Server) attacks(w http.ResponseWriter, r *http.Request) {
+	if s.ctx.Attacks == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "attacks": s.ctx.Attacks.View()})
+}
+
+// setDefense switches defending against attacks on or off: {"on": true}.
+func (s *Server) setDefense(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		On *bool `json:"on"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.On == nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`Expected {"on": true} or {"on": false}`))
+		return
+	}
+	if s.ctx.Attacks == nil || s.ctx.Attacks.Defender == nil || s.cfg.Store == nil {
+		writeJSON(w, http.StatusConflict, errBody("This dashboard does not watch for attacks"))
+		return
+	}
+	value := "on"
+	if !*body.On {
+		value = "off"
+	}
+	if err := s.cfg.Store.SetMeta(ddos.DefendKey, value); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	// The next sample puts its rules in place or takes them away.
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "attacks": s.ctx.Attacks.View()})
+}
+
+// unblock lifts the defender's block on an address, and leaves it alone for an hour.
+func (s *Server) unblock(w http.ResponseWriter, r *http.Request) {
+	if s.ctx.Attacks == nil || s.ctx.Attacks.Defender == nil {
+		writeJSON(w, http.StatusConflict, errBody("This dashboard does not watch for attacks"))
+		return
+	}
+	if !s.ctx.Attacks.Defender.Unblock(r.Context(), r.PathValue("address")) {
+		writeJSON(w, http.StatusNotFound, errBody("That address is not blocked"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "attacks": s.ctx.Attacks.View()})
 }

@@ -22,10 +22,17 @@ export function Select({ value, options, onChange, label, className = '' }: { va
   const menu = useRef<HTMLUListElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const id = useId();
-  const selected = Math.max(
-    0,
-    options.findIndex((o) => o.value === value),
-  );
+  // -1 when value is not among the options: the button then shows the value itself and no option
+  // is marked chosen, rather than claiming the first one.
+  const selected = options.findIndex((o) => o.value === value);
+
+  // The options can change while the menu is open (a list rebuilt from a poll); keep the active
+  // one inside it, and close a menu left with nothing to pick.
+  useEffect(() => {
+    if (!open) return;
+    if (options.length === 0) setOpen(false);
+    else if (active > options.length - 1) setActive(options.length - 1);
+  }, [open, active, options.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -49,15 +56,18 @@ export function Select({ value, options, onChange, label, className = '' }: { va
   }, [open, active, id]);
 
   const show = () => {
+    if (options.length === 0) return;
     const rect = button.current?.getBoundingClientRect();
     // Open upwards when there is no room below (the save bar sits along the bottom).
     const tall = options.length * (options.some((o) => o.hint) ? 50 : 36) + 16;
     setAbove(!!rect && window.innerHeight - rect.bottom < Math.min(300, tall) && rect.top > window.innerHeight - rect.bottom);
-    setActive(selected);
+    setActive(Math.max(0, selected));
     setOpen(true);
   };
   const pick = (i: number) => {
-    onChange(options[i].value);
+    const o = options[i];
+    if (!o) return;
+    onChange(o.value);
     setOpen(false);
     button.current?.focus();
   };
@@ -70,9 +80,9 @@ export function Select({ value, options, onChange, label, className = '' }: { va
     };
     switch (e.key) {
       case 'ArrowDown':
-        return move(open ? active + 1 : selected);
+        return move(open ? active + 1 : Math.max(0, selected));
       case 'ArrowUp':
-        return move(open ? active - 1 : selected);
+        return move(open ? active - 1 : Math.max(0, selected));
       case 'Home':
         return open && move(0);
       case 'End':

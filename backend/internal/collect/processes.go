@@ -82,10 +82,19 @@ func (s *ProcessScanner) scan(limit int) ProcessOverview {
 	var all []Process
 	for _, pid := range pids {
 		h, ok := s.handles[pid]
+		// A handle caches its process's name and CPU times, so a PID taken by a new process since
+		// the last scan needs a new one, or the newcomer is shown under the old name.
+		if ok {
+			if same, err := h.IsRunning(); err != nil || !same {
+				ok = false
+			}
+		}
 		if !ok {
 			if h, err = process.NewProcess(pid); err != nil {
 				continue
 			}
+			// Read now, while it is this process's, for IsRunning to compare against next scan.
+			h.CreateTime()
 		}
 		live[pid] = h
 		name, err := h.Name()

@@ -50,10 +50,20 @@ Only this machine needs to reach the agent's port. Over a LAN that usually just 
 
 1. Press **Add a server** and choose **SSH only**.
 2. Enter its address and a name.
-3. Choose a key, the user and the port, as under [SSH, just in case](/docs/servers#ssh-just-in-case). **Add a key you have…** takes a private key the server already accepts.
-4. Press **Add server**. Nightjar checks that the SSH port answers before saving it, then logs in once and says whether the key worked.
+3. Choose a key, the user and the port, and say whether the key is on the server already, as under [SSH, just in case](/docs/servers#ssh-just-in-case). **Add a key you have…** takes a private key the server already accepts.
+4. Press **Add server** (or **Add key and server**, with a password). Nightjar checks that the SSH port answers before saving it, then logs in once and says whether the key worked.
 
 Then add [uptime checks](/docs/uptime-checks) for what it runs, with this server picked under **Server**, so they show on its page and alert when they go down.
+
+## Several servers at once
+
+On **Servers**, press **Select**, then tick servers (or **Select all**). A bar at the bottom offers what can be done to all of them:
+
+- **Test SSH**, **Restart agents** and **Reinstall agents**, over each server's [SSH login](/docs/servers#ssh-just-in-case).
+- **Mute…** silences their alerts for 1, 4 or 24 hours, or unmutes them.
+- **Reboot…** and **Remove…** ask first.
+
+An action is done only to the servers it suits: one without an SSH login is left out of a test or a reboot, and the button counts the servers it will act on, such as **Reboot (2)**. Up to four servers are worked on at a time. Each server's answer is listed above the servers as it comes in: done, didn't work and why, or left out. **Done** or Esc stops choosing.
 
 ## A server's page
 
@@ -70,21 +80,25 @@ When the agent stops answering or the server misbehaves, Nightjar can log in ove
 1. **Choose a key.** Nightjar lists the key pairs it finds in its own SSH folder (`SSH_DIR`, `ssh` beside the database unless you change it) and in `~/.ssh` of the user it runs as. Or:
    - **Add a key you have…**: paste a private key the server already accepts, such as your laptop's `~/.ssh/id_ed25519` (the file without `.pub`). It must have no passphrase, since Nightjar logs in with nobody there to type one. Nightjar keeps it in its SSH folder, readable only by itself, and never shows it again.
    - **Make a new key…**: an ed25519 key with no passphrase, made in that folder.
-2. **Put the key on the server**, unless it's already there. The page gives one command to run on the server as the user you'll log in as: it adds the key to `~/.ssh/authorized_keys` with the permissions SSH wants, and does nothing if it is there already. **Just the public key** shows the line on its own.
-3. **Enter the user and port**, `root` and 22 unless you change them. **Host** is left empty to use the server's own address.
-4. **Save**. Nightjar logs in with it at once and shows how that went; **Test login** tries again any time.
+2. **Enter the user and port**, `root` and 22 unless you change them. **Host** is left empty to use the server's own address.
+3. **Say whether the key is on the server already**:
+   - **Yes**: it's in `~/.ssh/authorized_keys` for that user.
+   - **Add it with a password**: type the user's password. Nightjar logs in once with it, adds the key to `~/.ssh/authorized_keys`, and keeps the password nowhere. A key you just made or added starts here. The first time, Nightjar first shows the server's host-key fingerprint: check it on the server with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` and confirm it, and only then does the password go.
+   - **I'll add it**: shows the key's public line to add to that file yourself, for a server that refuses password logins.
+4. **Save and test** (**Add key, save and test** with a password). It's one step: Nightjar adds the key if asked, saves the login, and logs in with it at once. If the password is turned down, nothing is saved.
 
-Once it's set up, the section has:
+Once it's set up, the section shows whether the login works: **Logs in as root@nas** and when it last worked, or **Can't log in** with why and when it was tried. It's updated whenever Nightjar uses the login, and kept across restarts. Under it is the server's **host key**, the fingerprint Nightjar trusts for it. Then:
 
-- **Test login**: logs in and shows who it logged in as, and the server's uptime.
+- **Test login** (**Test again** once it has been tried): logs in and updates the status.
 - **Restart agent** (servers with the agent): `systemctl restart nightjar-agent`.
 - **Reinstall agent** (servers with the agent): sends this dashboard's build of the agent over SSH and installs it with the token and settings already on the server, so nothing secret goes on a command line. It works while the agent is down, too.
 - **Reboot…**: asks first, then `systemctl reboot`.
-- The `ssh` command that logs in the same way, to copy into a terminal.
+- **Log in yourself**: the `ssh` command that logs in the same way, to copy into a terminal.
+- **Change login…** and **Forget…**. A changed login shows **Not tried yet** until Nightjar uses it.
 
 Restarting, reinstalling and rebooting need root, or a user that may run them with `sudo` and no password. Nightjar runs only these actions, never a command typed into the page. Restarts, reinstalls, reboots and changes to a login go in the [activity log](/docs/security#the-activity-log).
 
-The private key stays a file on this machine: Nightjar saves only its path and never reads it or shows it. The first login trusts the server's host key and remembers it in `known_hosts` in Nightjar's SSH folder; if the server is reinstalled and its key changes, logins are refused until you remove its line there. A [backup](/docs/settings) keeps each server's login but not the key files, so copy the SSH folder too if you move Nightjar to another machine.
+The private key stays a file on this machine: Nightjar saves only its path and never reads it or shows it. The first login trusts the server's host key and remembers it in `known_hosts` in Nightjar's SSH folder; a key you confirmed before sending a password is also kept in `known_hosts.confirmed` there. A key that only a key login saved does not count as confirmed, so a password is never sent to it. If the server is reinstalled and its key changes, logins are refused until you remove its lines from `known_hosts` and `known_hosts.confirmed`. A [backup](/docs/settings) keeps each server's login but not the key files, so copy the SSH folder too if you move Nightjar to another machine.
 
 ## Alerts
 
@@ -118,6 +132,6 @@ The sheet says why:
 For SSH, **Test login** says why it didn't work:
 
 - **The server refused the key**: the key's public line isn't in `~/.ssh/authorized_keys` for that user.
-- **The server's host key is not the one Nightjar saw before**: the server was reinstalled, or something else answers on its address. If you expected it, remove the server's line from `known_hosts` in Nightjar's SSH folder.
+- **The server's host key is not the one Nightjar saw before**: the server was reinstalled, or something else answers on its address. If you expected it, remove the server's lines from `known_hosts` and `known_hosts.confirmed` in Nightjar's SSH folder, then confirm the new key when you next add a key with a password.
 - **That user needs a password for sudo**: log in as root, or allow the user to run `systemctl` with `sudo` and no password.
 - **Nothing answered SSH on that port** or **did not answer in time**: SSH isn't running there, or a firewall blocks the port.

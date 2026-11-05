@@ -28,7 +28,7 @@ Copy them into the plugins folder to try them.
 
 - **Checks:** in **[Services](/services)**, add a check of type **plugin**. Its target is the plugin's id, such as `dns-resolve`. A plugin that takes an argument has it after a colon, as `dns-resolve:example.com`.
 - **Cards:** they show on the **[Overview](/)** once the plugin is on.
-- **Alert channels:** a channel appears in **[Notifications](/notifications)** with the plugin's name, where you choose what it hears about. Nightjar finds alert channels when it starts, so restart it after adding one. A channel that is off hears nothing.
+- **Alert channels:** a channel appears in **[Notifications](/notifications)** with the plugin's name, where you choose what it hears about. Nightjar sets alert channels up when it starts, so when **Look again** finds one added, renamed or removed, it restarts by itself, and the page reconnects. A channel that is off hears nothing.
 
 ## Safety
 

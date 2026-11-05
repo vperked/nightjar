@@ -25,7 +25,7 @@ func TestASavedLoginIsTriedAtOnce(t *testing.T) {
 	db := storage.Open(filepath.Join(t.TempDir(), "s.db"))
 	t.Cleanup(db.Close)
 	refuse := false
-	exec := func(_ context.Context, _ []byte, name string, args ...string) (string, string, error) {
+	exec := func(_ context.Context, _ []byte, _ []string, name string, args ...string) (string, string, error) {
 		switch {
 		case name == "ssh-keygen" && len(args) > 0 && args[0] == "-l":
 			return "256 SHA256:abc test (ED25519)\n", "", nil
@@ -69,6 +69,9 @@ func TestASavedLoginIsTriedAtOnce(t *testing.T) {
 		t.Fatalf("add: %d %v", code, out)
 	}
 	id := out["host"].(map[string]any)["id"].(string)
+	if c, _ := out["host"].(map[string]any)["ssh_check"].(map[string]any); c["ok"] != true || c["as"] != "root@vps" {
+		t.Fatalf("the server comes back with how the login went: %v", out["host"])
+	}
 
 	// So does changing its login; a refused key says why, and the login is still saved.
 	refuse = true
@@ -77,6 +80,9 @@ func TestASavedLoginIsTriedAtOnce(t *testing.T) {
 	test, _ = out["test"].(map[string]any)
 	if code != http.StatusOK || test["ok"] != false || !strings.Contains(test["error"].(string), "authorized_keys") {
 		t.Fatalf("change: %d %v", code, out)
+	}
+	if c, _ := out["host"].(map[string]any)["ssh_check"].(map[string]any); c["ok"] != false || !strings.Contains(c["error"].(string), "authorized_keys") {
+		t.Fatalf("and that it failed: %v", out["host"])
 	}
 	if got, _ := rm.Get(id); got.SSH == nil || got.SSH.User != "admin" {
 		t.Fatalf("the login is saved even when the test fails: %+v", got.SSH)

@@ -3,6 +3,8 @@ package monitor_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -124,4 +126,85 @@ func TestFailedServiceAlertCarriesItsLogs(t *testing.T) {
 	mu.Unlock()
 	eval(monitor.Snapshot{Now: 160})
 	expectTitles(t, &wh.fakeSender, "sonarr failed", "sonarr is running again")
+}
+
+// A drive that was read before and stops answering is announced once per outage: that is how a
+// dying disk often looks.
+func TestADriveThatStopsAnsweringIsAnnouncedOnce(t *testing.T) {
+	store := storage.Open(":memory:")
+	defer store.Close()
+	var mu sync.Mutex
+	gone := false
+	reader := smart.NewReader()
+	reader.Run = func(_ context.Context, args ...string) ([]byte, error) {
+		if args[0] == "--scan" {
+			return []byte(`{"devices":[{"name":"/dev/sda","type":"sat"}]}`), nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if gone {
+			return nil, errors.New("exit status 2")
+		}
+		out, _ := json.Marshal(map[string]any{"model_name": "WDC WD80EFAX", "serial_number": "S1", "rotation_rate": 5400, "smart_status": map[string]bool{"passed": true}})
+		return out, nil
+	}
+	set := func(v bool) {
+		mu.Lock()
+		gone = v
+		mu.Unlock()
+	}
+	wh := &bodySender{}
+	ctx := testContext(&wh.fakeSender)
+	ctx.Webhook, ctx.Store, ctx.Drives = wh, store, reader
+	ctx.Cfg.SmartMonitorEnabled, ctx.Cfg.SmartCheckInterval = true, 60
+	eval := evaluator(ctx)
+
+	eval(monitor.Snapshot{Now: 1000})
+	expectTitles(t, &wh.fakeSender)
+	set(true)
+	eval(monitor.Snapshot{Now: 1100})
+	expectTitles(t, &wh.fakeSender, "Drive not answering: WDC WD80EFAX (/dev/sda)")
+	if !strings.Contains(wh.bodies[0], "exit status 2") {
+		t.Fatalf("body %q", wh.bodies[0])
+	}
+	eval(monitor.Snapshot{Now: 1200})
+	expectTitles(t, &wh.fakeSender, "Drive not answering")
+
+	// Once it answers again, the next outage is news.
+	set(false)
+	eval(monitor.Snapshot{Now: 1300})
+	set(true)
+	eval(monitor.Snapshot{Now: 1400})
+	expectTitles(t, &wh.fakeSender, "Drive not answering", "Drive not answering")
+}
+
+// Drives behind a RAID controller share one device and differ by their slot; with no serial, each
+// still has its own name and baseline.
+func TestDrivesBehindARAIDControllerAreToldApart(t *testing.T) {
+	store := storage.Open(":memory:")
+	defer store.Close()
+	reader := smart.NewReader()
+	reader.Run = func(_ context.Context, args ...string) ([]byte, error) {
+		if args[0] == "--scan" {
+			return []byte(`{"devices":[{"name":"/dev/bus/0","type":"megaraid,0"},{"name":"/dev/bus/0","type":"megaraid,1"}]}`), nil
+		}
+		n := 0
+		if slices.Contains(args, "--device=megaraid,1") {
+			n = 4
+		}
+		out, _ := json.Marshal(map[string]any{
+			"model_name": "ST4000", "rotation_rate": 7200, "smart_status": map[string]bool{"passed": true},
+			"ata_smart_attributes": map[string]any{"table": []map[string]any{{"id": 5, "name": "Reallocated_Sector_Ct", "raw": map[string]int{"value": n}}}},
+		})
+		return out, nil
+	}
+	wh := &bodySender{}
+	ctx := testContext(&wh.fakeSender)
+	ctx.Webhook, ctx.Store, ctx.Drives = wh, store, reader
+	ctx.Cfg.SmartMonitorEnabled, ctx.Cfg.SmartCheckInterval = true, 60
+	eval := evaluator(ctx)
+	eval(monitor.Snapshot{Now: 1000})
+	eval(monitor.Snapshot{Now: 1100})
+	// Sharing a baseline, the two would announce the counter going up and down on every read.
+	expectTitles(t, &wh.fakeSender, "Drive health warning: ST4000 (/dev/bus/0 megaraid,1)")
 }

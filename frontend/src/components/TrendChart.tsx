@@ -340,11 +340,15 @@ export function TrendChart({ series, height = 180, compact = false, raw = false,
             </text>
           </g>
         ))}
-        {time.ticks.map((t) => (
-          <text key={t} className="axis-text" x={x(t)} y={height - 6} textAnchor="middle">
-            {formatTick(t, time.step)}
-          </text>
-        ))}
+        {/* A tick by the right edge ends there, so "5:00 PM" isn't cut in half on a phone. */}
+        {time.ticks.map((t) => {
+          const end = x(t) > width - 28;
+          return (
+            <text key={t} className="axis-text" x={end ? width - 1 : x(t)} y={height - 6} textAnchor={end ? 'end' : 'middle'}>
+              {formatTick(t, time.step)}
+            </text>
+          );
+        })}
         {/* The plot draws itself in from the left the first time it appears. */}
         <g className="plot">
           {paths.map((p, i) => (

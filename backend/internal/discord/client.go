@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -91,8 +94,40 @@ func BuildEmbed(title, description string, color int, fields []Field, footer str
 			Text string `json:"text"`
 		}{Truncate(footer, 2048)}
 	}
+	fit(&e)
 	e.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	return e
+}
+
+// embedLimit is the most characters Discord takes across an embed's title, description, field
+// names and values, and footer.
+const embedLimit = 6000
+
+// fit keeps an embed within embedLimit: the description gives way first (down to 1024
+// characters), then the last fields, then the rest of the description.
+func fit(e *Embed) {
+	n := utf8.RuneCountInString
+	total := n(e.Title) + n(e.Description)
+	for _, f := range e.Fields {
+		total += n(f.Name) + n(f.Value)
+	}
+	if e.Footer != nil {
+		total += n(e.Footer.Text)
+	}
+	cut := func(keep int) {
+		if over := total - embedLimit; over > 0 && n(e.Description) > keep {
+			d := n(e.Description)
+			e.Description = Truncate(e.Description, max(keep, d-over))
+			total -= d - n(e.Description)
+		}
+	}
+	cut(1024)
+	for total > embedLimit && len(e.Fields) > 0 {
+		last := e.Fields[len(e.Fields)-1]
+		total -= n(last.Name) + n(last.Value)
+		e.Fields = e.Fields[:len(e.Fields)-1]
+	}
+	cut(0)
 }
 
 // tidy drops fields with nothing to say, so an embed shows only what it knows.
@@ -165,6 +200,9 @@ type Webhook struct {
 	mu           sync.Mutex
 	lastErr      string
 	classic      atomic.Bool // the webhook refused components, so alerts go as embeds
+	// RetryWaits are the pauses before trying a delivery again that failed fast on the network,
+	// as when the machine has just booted and its DNS is not up yet, or Discord answered 5xx.
+	RetryWaits []time.Duration
 }
 
 func (w *Webhook) Name() string { return "Discord" }
@@ -192,8 +230,23 @@ func NewWebhook(url, alertLogPath string) (*Webhook, error) {
 		AlertLogPath: alertLogPath,
 		client:       &http.Client{Timeout: 10 * time.Second},
 		limiter:      &rateLimiter{max: 30, period: 60 * time.Second},
-		breaker:      NewCircuitBreaker(5, 60*time.Second, 2),
+		breaker:      NewCircuitBreaker(5, 60*time.Second, 2).Named("Discord"),
+		RetryWaits:   []time.Duration{time.Second, 3 * time.Second, 6 * time.Second},
 	}, nil
+}
+
+// retryable is a failure worth trying again at once: the network not up yet (no DNS, refused,
+// reset, unreachable) or Discord failing for a moment (5xx). A timeout is not: trying again would
+// hold up the caller for as long again.
+func retryable(status int, err error) bool {
+	if status >= 500 {
+		return true
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return !dns.IsTimeout
+	}
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH)
 }
 
 // SendEmbed sends one alert. It never blocks on a saturated rate limit or open breaker: the alert
@@ -241,7 +294,7 @@ func (w *Webhook) post(payload any, fallback string) bool {
 
 // failed notes why a delivery failed and keeps the alert in the fallback log.
 func (w *Webhook) failed(err error, fallback string) {
-	w.setError(err.Error())
+	w.setError(logx.Redact(err.Error()))
 	w.logFallback(fallback)
 }
 
@@ -261,10 +314,27 @@ func (w *Webhook) send(target string, payload any) (int, error) {
 		return 0, err
 	}
 	status := 0
+	// One delivery is one call through the breaker, however many tries it takes.
 	err = w.breaker.Call(func() error {
-		resp, err := w.client.Post(target, "application/json", bytes.NewReader(body))
+		var resp *http.Response
+		var err error
+		for try := 0; ; try++ {
+			status = 0
+			resp, err = w.client.Post(target, "application/json", bytes.NewReader(body))
+			if err == nil {
+				status = resp.StatusCode
+			}
+			if try >= len(w.RetryWaits) || !retryable(status, err) {
+				break
+			}
+			if resp != nil {
+				resp.Body.Close()
+			}
+			log.Debug("Delivery failed; trying again", "status", status, "err", err, "in", w.RetryWaits[try])
+			time.Sleep(w.RetryWaits[try])
+		}
 		if err != nil {
-			return err
+			return withoutURL(err)
 		}
 		defer resp.Body.Close()
 		status = resp.StatusCode
@@ -286,6 +356,16 @@ func (w *Webhook) send(target string, payload any) (int, error) {
 		log.Warn("Webhook request failed", "err", err)
 	}
 	return status, err
+}
+
+// withoutURL drops the request URL from a network error: a webhook's URL holds its token, and the
+// error is kept and shown in the dashboard.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
 
 func (w *Webhook) logFallback(message string) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"mime"
+	"mime/quotedprintable"
 	"net"
 	"net/http"
 	"net/smtp"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"nightjar/internal/config"
 	"nightjar/internal/discord"
@@ -62,24 +64,54 @@ func NewTelegram(botToken, chatID string, origin discord.Origin) (Channel, error
 		return nil, errors.New("telegram needs both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
 	}
 	return newBase("Telegram", func(a Alert) (*http.Request, error) {
-		title := "<b>" + a.Severity.Emoji() + " " + html.EscapeString(a.Title) + "</b>"
-		if origin.DashboardURL != "" {
-			title = `<a href="` + html.EscapeString(origin.DashboardURL) + `">` + title + "</a>"
-		}
-		text := joinNonEmpty("\n\n",
-			title,
-			htmlText(a.Description),
-			lines(a.Fields, func(n, v string) string { return "<b>" + html.EscapeString(n) + ":</b> " + htmlText(v) }),
-			"<i>"+html.EscapeString(origin.Footer(a.Category))+"</i>",
-		)
 		return jsonRequest(TelegramAPI+"/bot"+botToken+"/sendMessage", map[string]any{
 			"chat_id":                  chatID,
-			"text":                     discord.Truncate(text, 4096),
+			"text":                     telegramText(a, origin),
 			"parse_mode":               "HTML",
 			"disable_web_page_preview": true,
 			"disable_notification":     a.Severity == discord.Info,
 		})
 	}), nil
+}
+
+// telegramLimit is how many characters a Telegram message may have, counted after its HTML is parsed.
+const telegramLimit = 4096
+
+// telegramText renders an alert as Telegram HTML within telegramLimit. The description and field
+// values are cut before they are escaped and marked up, so no tag or entity is ever cut in half.
+func telegramText(a Alert, origin discord.Origin) string {
+	runes := utf8.RuneCountInString
+	title := discord.Truncate(a.Title, 256)
+	footer := origin.Footer(a.Category)
+	// What is left for the description and fields, counting their raw text: markup only shortens it.
+	room := telegramLimit - runes(title) - runes(footer) - 16
+	desc := discord.Truncate(a.Description, max(0, room))
+	room -= runes(desc) + 2
+	var fields []discord.Field
+	for _, f := range a.Fields {
+		if f.Value == "" {
+			continue
+		}
+		name := discord.Truncate(f.Name, 256)
+		left := room - runes(name) - 3
+		if left < 20 {
+			break
+		}
+		f.Name, f.Value = name, discord.Truncate(f.Value, left)
+		fields = append(fields, f)
+		room = left - runes(f.Value)
+	}
+
+	head := "<b>" + a.Severity.Emoji() + " " + html.EscapeString(title) + "</b>"
+	if origin.DashboardURL != "" {
+		head = `<a href="` + html.EscapeString(origin.DashboardURL) + `">` + head + "</a>"
+	}
+	return joinNonEmpty("\n\n",
+		head,
+		htmlText(desc),
+		lines(fields, func(n, v string) string { return "<b>" + html.EscapeString(n) + ":</b> " + htmlText(v) }),
+		"<i>"+html.EscapeString(footer)+"</i>",
+	)
 }
 
 // ---------- Slack ----------
@@ -89,21 +121,24 @@ func NewSlack(webhookURL string, origin discord.Origin) (Channel, error) {
 	if u, err := url.Parse(webhookURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, errors.New("SLACK_WEBHOOK must be an incoming webhook URL (https://hooks.slack.com/…)")
 	}
-	mrkdwn := func(s string) string { return boldRE.ReplaceAllString(s, "*$1*") }
+	// Slack reads <!channel>, <@user> and <url|label> in text as commands, so alert text (which
+	// can hold a torrent's or container's name) has &, < and > escaped before anything else.
+	escape := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace
+	mrkdwn := func(s string) string { return boldRE.ReplaceAllString(escape(s), "*$1*") }
 	return newBase("Slack", func(a Alert) (*http.Request, error) {
 		var fields []map[string]any
 		for _, f := range a.Fields {
-			fields = append(fields, map[string]any{"title": f.Name, "value": mrkdwn(f.Value), "short": f.Inline})
+			fields = append(fields, map[string]any{"title": escape(f.Name), "value": mrkdwn(f.Value), "short": f.Inline})
 		}
 		return jsonRequest(webhookURL, map[string]any{
-			"text": a.Severity.Emoji() + " " + a.Title, // shown in notifications
+			"text": a.Severity.Emoji() + " " + escape(a.Title), // shown in notifications
 			"attachments": []map[string]any{{
 				"color":      fmt.Sprintf("#%06X", a.Severity.Color()),
-				"title":      a.Title,
+				"title":      escape(a.Title),
 				"title_link": origin.DashboardURL,
 				"text":       mrkdwn(a.Description),
 				"fields":     fields,
-				"footer":     origin.Footer(a.Category),
+				"footer":     escape(origin.Footer(a.Category)),
 				"ts":         a.Time.Unix(),
 			}},
 		})
@@ -162,7 +197,7 @@ func NewEmail(cfg SMTP, origin discord.Origin) (Channel, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 587
 	}
-	return &email{cfg: cfg, origin: origin, breaker: discord.NewCircuitBreaker(5, time.Minute, 2)}, nil
+	return &email{cfg: cfg, origin: origin, breaker: discord.NewCircuitBreaker(5, time.Minute, 2).Named("Email")}, nil
 }
 
 func (e *email) Name() string { return "Email" }
@@ -179,8 +214,16 @@ func (e *email) message(a Alert) []byte {
 	fmt.Fprintf(&b, "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\n", e.cfg.From, strings.Join(e.cfg.To, ", "), subject, a.Time.Format(time.RFC1123Z))
 	fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", boundary)
 
+	// Both parts are quoted-printable, which keeps every line well under SMTP's 998-octet limit.
+	part := func(contentType, body string) {
+		fmt.Fprintf(&b, "--%s\r\nContent-Type: %s; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n", boundary, contentType)
+		qp := quotedprintable.NewWriter(&b)
+		qp.Write([]byte(body))
+		qp.Close()
+		b.WriteString("\r\n")
+	}
 	text := joinNonEmpty("\n\n", a.Title, plain(a.Description), lines(a.Fields, func(n, v string) string { return n + ": " + plain(v) }), e.origin.Footer(a.Category), e.origin.DashboardURL)
-	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", boundary, strings.ReplaceAll(text, "\n", "\r\n"))
+	part("text/plain", text)
 
 	var rows strings.Builder
 	for _, f := range a.Fields {
@@ -191,13 +234,12 @@ func (e *email) message(a Alert) []byte {
 	if e.origin.DashboardURL != "" {
 		link = fmt.Sprintf(` · <a href="%s" style="color:#2a78d6">Open the dashboard</a>`, html.EscapeString(e.origin.DashboardURL))
 	}
-	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n", boundary)
-	fmt.Fprintf(&b, `<div style="font-family:system-ui,sans-serif;font-size:14px;color:#1a1915;background:#f6f5f1;padding:24px">`+
+	part("text/html", fmt.Sprintf(`<div style="font-family:system-ui,sans-serif;font-size:14px;color:#1a1915;background:#f6f5f1;padding:24px">`+
 		`<div style="max-width:560px;margin:0 auto;background:#fcfbf8;border:1px solid #e3e0d8;border-left:4px solid #%06X;border-radius:12px;padding:20px 24px">`+
 		`<h2 style="margin:0 0 8px;font-size:18px">%s %s</h2><p style="margin:0 0 14px;color:#4a4740">%s</p>`+
 		`<table style="border-collapse:collapse;font-size:13px">%s</table>`+
-		`<p style="margin:16px 0 0;font-size:12px;color:#6f6b62">%s%s</p></div></div>`+"\r\n",
-		a.Severity.Color(), a.Severity.Emoji(), html.EscapeString(a.Title), htmlText(a.Description), rows.String(), html.EscapeString(e.origin.Footer(a.Category)), link)
+		`<p style="margin:16px 0 0;font-size:12px;color:#6f6b62">%s%s</p></div></div>`,
+		a.Severity.Color(), a.Severity.Emoji(), html.EscapeString(a.Title), htmlText(a.Description), rows.String(), html.EscapeString(e.origin.Footer(a.Category)), link))
 	fmt.Fprintf(&b, "--%s--\r\n", boundary)
 	return b.Bytes()
 }
@@ -294,17 +336,23 @@ func FromSettings(cfg config.Settings, origin discord.Origin) (channels []Channe
 
 // ---------- plugins ----------
 
+// PluginWait is how long an alert waits for a plugin's program before giving up on it (the program
+// may run on to its own timeout); tests shorten it. Alerts are sent from the monitoring loop, which
+// a slow plugin must not hold up.
+var PluginWait = 20 * time.Second
+
 // plugin hands each alert to a plugin's program, which delivers it however it likes.
 type plugin struct {
 	delivery
-	name   string
-	origin discord.Origin
-	send   func(payload map[string]any) error
+	name    string
+	origin  discord.Origin
+	send    func(payload map[string]any) error
+	breaker *discord.CircuitBreaker
 }
 
 // NewPlugin is a channel for a plugin that provides notify. send runs the plugin with the alert.
 func NewPlugin(name string, send func(payload map[string]any) error, origin discord.Origin) Channel {
-	return &plugin{name: name, send: send, origin: origin}
+	return &plugin{name: name, send: send, origin: origin, breaker: discord.NewCircuitBreaker(5, time.Minute, 2).Named(name)}
 }
 
 func (p *plugin) Name() string { return p.name }
@@ -315,7 +363,7 @@ func (p *plugin) SendEmbed(title, description string, sev discord.Severity, fiel
 	for _, f := range a.Fields {
 		list = append(list, map[string]string{"name": f.Name, "value": plain(f.Value)})
 	}
-	return p.record(p.name, p.send(map[string]any{
+	payload := map[string]any{
 		"title":         a.Title,
 		"description":   plain(a.Description),
 		"severity":      a.Severity.String(),
@@ -324,5 +372,15 @@ func (p *plugin) SendEmbed(title, description string, sev discord.Severity, fiel
 		"category":      a.Category,
 		"dashboard_url": p.origin.DashboardURL,
 		"time":          a.Time.UTC().Format(time.RFC3339),
+	}
+	return p.record(p.name, p.breaker.Call(func() error {
+		done := make(chan error, 1)
+		go func() { done <- p.send(payload) }()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(PluginWait):
+			return fmt.Errorf("no answer after %s", PluginWait)
+		}
 	}))
 }

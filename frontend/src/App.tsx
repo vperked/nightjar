@@ -16,6 +16,7 @@ import { HealthInTab, useProblems } from './components/HealthInTab';
 import { Skeleton } from './components/Skeleton';
 import { ToastProvider } from './components/Toasts';
 import { DemoBanner } from './components/ui';
+import { useNewBuild } from './freshness';
 import { formatAgo } from './format';
 import { useNow } from './hooks/useNow';
 import { Overview } from './pages/Overview';
@@ -32,6 +33,7 @@ const pages = {
   plex: () => import('./pages/Plex'),
   logs: () => import('./pages/Logs'),
   network: () => import('./pages/Network'),
+  firewall: () => import('./pages/Firewall'),
   notifications: () => import('./pages/Notifications'),
   qbittorrent: () => import('./pages/QBittorrent'),
   servers: () => import('./pages/Servers'),
@@ -51,6 +53,7 @@ const pages = {
 };
 const PlexPage = lazy(() => pages.plex().then((m) => ({ default: m.PlexPage })));
 const NetworkPage = lazy(() => pages.network().then((m) => ({ default: m.NetworkPage })));
+const FirewallPage = lazy(() => pages.firewall().then((m) => ({ default: m.FirewallPage })));
 const AppsPage = lazy(() => pages.apps().then((m) => ({ default: m.AppsPage })));
 const LogsPage = lazy(() => pages.logs().then((m) => ({ default: m.LogsPage })));
 const NotificationsPage = lazy(() => pages.notifications().then((m) => ({ default: m.NotificationsPage })));
@@ -316,18 +319,32 @@ function Shell() {
   const [authKey, setAuthKey] = useState(0);
   const [configKey, setConfigKey] = useState(0);
   const location = useLocation();
+  const newBuild = useNewBuild(location.pathname);
   const navRef = useNavIndicator([location.pathname, signedOut, config]);
   useEdgeLight();
   useTitleDecode(location.pathname);
 
+  // A config that does not come (the monitor still starting after a restart, say) is asked for
+  // again, less often each time, so the tab does not run the whole session without it.
   useEffect(() => {
-    api
-      .config()
-      .then((c) => {
-        setConfig(c);
-        setSignedOut(c.auth_required && !c.authorized);
-      })
-      .catch(() => undefined);
+    let done = false;
+    let timer = 0;
+    const load = (tries: number) =>
+      api
+        .config()
+        .then((c) => {
+          if (done) return;
+          setConfig(c);
+          setSignedOut(c.auth_required && !c.authorized);
+        })
+        .catch(() => {
+          if (!done) timer = window.setTimeout(() => load(tries + 1), Math.min(30000, 1000 * 2 ** tries));
+        });
+    void load(0);
+    return () => {
+      done = true;
+      window.clearTimeout(timer);
+    };
   }, [authKey, configKey]);
   // Settings that change what the dashboard shows (sections) ask for the config again.
   useEffect(() => {
@@ -359,7 +376,8 @@ function Shell() {
     t.media && !config?.plex_enabled ? { ...t, to: '/qbittorrent', also: ['/plex'] } : t,
   );
   // A fresh install shows nothing until the admin account exists; after that, nothing until signed in.
-  const gate = config?.account && !config.account.configured ? <CreateAdmin onDone={signedIn} /> : <SignIn onDone={signedIn} />;
+  // Which of the two only the config says, so until it comes the gate waits for it.
+  const gate = !config ? <Loading /> : config.account && !config.account.configured ? <CreateAdmin onDone={signedIn} /> : <SignIn onDone={signedIn} />;
   const gated = (el: JSX.Element) => (signedOut ? gate : el);
   // A page whose section is off says so, with a way to turn it back on.
   const section = (id: SectionID, el: JSX.Element) => gated(shown(id) ? el : <SectionOff id={id} />);
@@ -426,6 +444,16 @@ function Shell() {
             </header>
             {!signedOut && <Finder onToggleTheme={toggleTheme} />}
             <DemoBanner />
+            {newBuild && (
+              <div className="setup-banner update-banner" role="status">
+                <span>
+                  <strong>Nightjar was updated.</strong> This tab still runs the earlier version; it switches by itself on your next page, or reload now.
+                </span>
+                <button type="button" className="btn" onClick={() => window.location.reload()}>
+                  Reload
+                </button>
+              </div>
+            )}
             {!signedOut && config?.needs_setup && location.pathname === '/' && <SetupBanner />}
             <div className="app" id="content" tabIndex={-1}>
               <Suspense fallback={<Loading />}>
@@ -440,6 +468,7 @@ function Shell() {
                     <Route path="/plex" element={section('media', <PlexPage />)} />
                     <Route path="/plex/cleanup" element={section('media', <CleanupPage />)} />
                     <Route path="/network" element={section('network', <NetworkPage />)} />
+                    <Route path="/network/firewall" element={section('network', <FirewallPage />)} />
                     <Route path="/servers" element={section('servers', <ServersPage />)} />
                     <Route path="/servers/analytics" element={section('servers', <AnalyticsPage />)} />
                     <Route path="/servers/:id" element={section('servers', <ServerDetail />)} />

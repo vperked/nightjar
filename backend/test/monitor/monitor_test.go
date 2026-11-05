@@ -123,6 +123,31 @@ func TestServiceDownAndRecoveryAlerts(t *testing.T) {
 	}
 }
 
+func TestServiceDownAgainAfterRecoveryAlertsAtOnce(t *testing.T) {
+	var failing atomic.Bool
+	failing.Store(true)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failing.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+		}
+	}))
+	defer upstream.Close()
+	wh := &fakeSender{}
+	ctx := testContext(wh)
+	ctx.Services = services.NewMonitor([]services.Spec{{Name: "api", Type: "http", Target: upstream.URL, Timeout: 2, Interval: 5}}, nil)
+	eval := evaluator(ctx)
+
+	eval(monitor.Snapshot{Now: 1000})
+	expectTitles(t, wh, "api is down")
+	failing.Store(false)
+	eval(monitor.Snapshot{Now: 1010})
+	expectTitles(t, wh, "api is down", "api is back up")
+	// Down again well inside the old episode's cooldown: the recovery ended that episode.
+	failing.Store(true)
+	eval(monitor.Snapshot{Now: 1020})
+	expectTitles(t, wh, "api is down", "api is back up", "api is down")
+}
+
 func TestTemperatureReasonFallsBackWhenNothingStandsOut(t *testing.T) {
 	got := monitor.AnalyzeTemperatureReason(monitor.TemperatureInputs{CPUPercent: 5})
 	if !strings.Contains(got, "cooling system failure") {

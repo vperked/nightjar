@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -104,7 +105,8 @@ func number(dst *float64, key string, def float64, b ...float64) Field {
 			return nil
 		}
 		v, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
+		// ParseFloat takes "NaN" and "Inf", which slip past any bounds and break what uses them.
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 			return fmt.Errorf("%q is not a number", raw)
 		}
 		if err := bounds(f.Min, f.Max, v); err != nil {
@@ -172,17 +174,18 @@ func choice(dst *string, key, def string, options []string, aliases map[string]s
 	f := text(dst, key, def)
 	f.Options = options
 	f.parse = func(raw string) error {
-		raw = strings.ToUpper(raw)
 		if raw == "" {
 			raw = def
 		}
-		if a, ok := aliases[raw]; ok {
+		if a, ok := aliases[strings.ToUpper(raw)]; ok {
 			raw = a
 		}
-		if !slices.Contains(options, raw) {
+		// The option's own spelling is kept, whichever case it was given in.
+		i := slices.IndexFunc(options, func(o string) bool { return strings.EqualFold(o, raw) })
+		if i < 0 {
 			return fmt.Errorf("must be one of %s", strings.Join(options, ", "))
 		}
-		*dst = raw
+		*dst = options[i]
 		return nil
 	}
 	return f

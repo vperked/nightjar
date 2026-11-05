@@ -27,6 +27,9 @@ const secondsPerDay = 86400.0
 var (
 	rotatedLogRE  = regexp.MustCompile(`(?i)(?:\.\d+(?:\.(?:gz|bz2|xz|zst|zip))?$)|(?:\.(?:gz|bz2|xz|zst)$)|(?:\.old$)|(?:-\d{8}$)`)
 	databaseLogRE = regexp.MustCompile(`(?i)(?:-bin|-relay-bin|binlog)\.\d+$`)
+	// ipSuffixRE is a name ending in an IPv4 address, as Samba names its live per-client logs
+	// (log.192.168.1.10); the trailing ".10" is no rotation number.
+	ipSuffixRE    = regexp.MustCompile(`(?:^|\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`)
 	protectedLogs = map[string]bool{"auth.log": true, "secure": true, "audit.log": true, "btmp": true, "wtmp": true, "lastlog": true, "faillog": true}
 )
 
@@ -39,15 +42,40 @@ type LogInfo struct {
 	OriginalSize int64
 }
 
-// IsRotatedLog matches syslog.1, kern.log.2.gz, daemon.log.old, syslog-20240115 and bare archives,
-// but never database binlogs (mysql-bin.000123).
-func IsRotatedLog(path string) bool {
-	name := filepath.Base(path)
-	return !databaseLogRE.MatchString(name) && rotatedLogRE.MatchString(name)
+// rotatedBase is a rotated log's name without its rotation suffix: kern.log for kern.log.2.gz.
+func rotatedBase(name string) string { return rotatedLogRE.ReplaceAllString(name, "") }
+
+// looksLikeLog says whether a file name reads as a log rather than, say, a library (libc.so.6) or
+// a kernel module (*.ko.zst) that happens to end the way a rotated log does.
+func looksLikeLog(name string) bool {
+	lower := strings.ToLower(name)
+	if strings.Contains(lower, ".so.") || strings.HasSuffix(lower, ".so") || strings.HasSuffix(lower, ".ko") {
+		return false
+	}
+	for _, kw := range append([]string{"dmesg", "debug"}, logKeywords...) {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return protectedLogs[lower]
 }
 
+// IsRotatedLog matches syslog.1, kern.log.2.gz, daemon.log.old, syslog-20240115 and bare archives,
+// but never database binlogs (mysql-bin.000123), nor a file whose name, rotation suffix aside, is
+// not a log's.
+func IsRotatedLog(path string) bool {
+	name := filepath.Base(path)
+	if databaseLogRE.MatchString(name) || ipSuffixRE.MatchString(name) || !rotatedLogRE.MatchString(name) {
+		return false
+	}
+	return looksLikeLog(rotatedBase(name))
+}
+
+// isProtectedLog is a security or audit log, live or rotated (auth.log, auth.log.2.gz, wtmp.1,
+// anything under an audit directory): those are only ever trimmed, never emptied or deleted.
 func isProtectedLog(path string) bool {
-	if protectedLogs[filepath.Base(path)] {
+	name := filepath.Base(path)
+	if protectedLogs[name] || protectedLogs[rotatedBase(name)] {
 		return true
 	}
 	return slices.Contains(strings.Split(filepath.ToSlash(path), "/"), "audit")
@@ -110,7 +138,8 @@ func (m *LogMonitor) JournalSize() (LogInfo, bool) {
 	return LogInfo{Path: m.JournalPath, Size: total}, found
 }
 
-// RotatedLogs lists rotated archives under the log directory.
+// RotatedLogs lists rotated archives under the log directory. Security and audit archives are
+// left out: they are the trail an intrusion is traced by.
 func (m *LogMonitor) RotatedLogs() []LogInfo {
 	var out []LogInfo
 	now := time.Now()
@@ -119,12 +148,12 @@ func (m *LogMonitor) RotatedLogs() []LogInfo {
 			return nil
 		}
 		if d.IsDir() {
-			if path != m.LogDir && (d.Name() == "journal" || d.Name() == "private") {
+			if path != m.LogDir && (d.Name() == "journal" || d.Name() == "private" || d.Name() == "audit") {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() || !IsRotatedLog(d.Name()) {
+		if !d.Type().IsRegular() || !IsRotatedLog(d.Name()) || isProtectedLog(path) {
 			return nil
 		}
 		if info, ok := m.Size(path); ok {
@@ -166,7 +195,7 @@ func (m *LogMonitor) CleanupRotated(force bool) Stats {
 		if !m.shouldDeleteRotated(info, force) {
 			continue
 		}
-		if err := os.Remove(info.Path); err != nil && !os.IsNotExist(err) {
+		if err := m.removeLog(info.Path); err != nil && !os.IsNotExist(err) {
 			logsLog.Error("could not remove rotated log", "path", info.Path, "err", err)
 			st.Errors = append(st.Errors, "could not remove rotated log "+info.Path)
 			continue
@@ -281,15 +310,15 @@ func LargestPerPath(logs []LogInfo) []LogInfo {
 }
 
 // Clean trims one log to its most recent ThresholdBytes, or empties it when forced
-// (protected security logs are only ever trimmed). Rotated archives are deleted, and the
-// journal is vacuumed with journalctl.
+// (protected security logs are only ever trimmed). Rotated archives are deleted, except
+// protected ones, which are kept whole, and the journal is vacuumed with journalctl.
 func (m *LogMonitor) Clean(info LogInfo, force bool) bool {
 	if IsRotatedLog(info.Path) {
 		info.AgeDays = time.Since(info.ModTime).Seconds() / secondsPerDay
-		if !m.shouldDeleteRotated(info, force) {
+		if isProtectedLog(info.Path) || !m.shouldDeleteRotated(info, force) {
 			return true
 		}
-		err := os.Remove(info.Path)
+		err := m.removeLog(info.Path)
 		return err == nil || os.IsNotExist(err)
 	}
 	if !force && info.Size <= m.ThresholdBytes {
@@ -301,8 +330,45 @@ func (m *LogMonitor) Clean(info LogInfo, force bool) bool {
 	return m.cleanRegular(info.Path, force)
 }
 
-func openRegular(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+// rootFor opens the directory a log is acted on through: the log directory when the log is inside
+// it, else the log's own directory. Every delete and open then goes through os.Root, as CleanTree's
+// do, so a directory swapped for a symlink after the walk listed it cannot send a delete or a
+// truncate outside (to /usr/lib, say).
+func (m *LogMonitor) rootFor(path string) (*os.Root, string, error) {
+	if m.LogDir != "" {
+		if rel, err := filepath.Rel(m.LogDir, path); err == nil && rel != "." && filepath.IsLocal(rel) {
+			r, err := os.OpenRoot(m.LogDir)
+			return r, rel, err
+		}
+	}
+	r, err := os.OpenRoot(filepath.Dir(path))
+	return r, filepath.Base(path), err
+}
+
+// removeLog deletes one regular log file without following links on the way to it.
+func (m *LogMonitor) removeLog(path string) error {
+	r, name, err := m.rootFor(path)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	st, err := r.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	return r.Remove(name)
+}
+
+func (m *LogMonitor) openRegular(path string) (*os.File, error) {
+	r, name, err := m.rootFor(path)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	f, err := r.OpenFile(name, os.O_RDWR|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +381,7 @@ func openRegular(path string) (*os.File, error) {
 }
 
 func (m *LogMonitor) cleanRegular(path string, force bool) bool {
-	f, err := openRegular(path)
+	f, err := m.openRegular(path)
 	if err != nil {
 		logsLog.Error("could not open log", "path", path, "err", err)
 		return false
@@ -366,11 +432,14 @@ func (m *LogMonitor) cleanRegular(path string, force bool) bool {
 	return true
 }
 
+// vacuumJournal shrinks the journal to the log threshold, or, when forced, to at most 100M: never
+// less aggressive than a routine pass, and never below 1M.
 func (m *LogMonitor) vacuumJournal(force bool) bool {
-	size := fmt.Sprintf("%.0fM", float64(m.ThresholdBytes)/(1024*1024))
+	mb := m.ThresholdBytes / (1024 * 1024)
 	if force {
-		size = "100M"
+		mb = min(mb, 100)
 	}
+	size := fmt.Sprintf("%dM", max(1, mb))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	if err := exec.CommandContext(ctx, "journalctl", "--vacuum-size", size).Run(); err != nil {

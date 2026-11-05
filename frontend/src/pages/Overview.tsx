@@ -144,7 +144,7 @@ function ServicesSection() {
       <table className="table">
         <thead>
           <tr>
-            <th className="shrink">State</th>
+            <th className="shrink hide-sm">State</th>
             <th>Service</th>
             <th className="hide-sm">Last 30 checks</th>
             <th className="r hide-sm">Resp.</th>
@@ -153,15 +153,16 @@ function ServicesSection() {
         </thead>
         <tbody>
           {list.slice(0, 8).map((s) => (
-            <tr key={s.name} className="link" onClick={() => navigate(`/services/${encodeURIComponent(s.name)}`)}>
-              <td className="shrink">
+            <tr key={s.name} className="link" onClick={(e) => !(e.target as Element).closest('a') && navigate(`/services/${encodeURIComponent(s.name)}`)}>
+              <td className="shrink hide-sm">
                 <State status={s.status} />
               </td>
               <td className="name-cell">
                 <Link to={`/services/${encodeURIComponent(s.name)}`} className="svc-name truncate" style={{ display: 'block' }}>
                   {s.name}
                 </Link>
-                <div className="show-sm">
+                <div className="show-sm svc-sm">
+                  <State status={s.status} />
                   <Ticks beats={s.recent} slots={30} />
                 </div>
               </td>

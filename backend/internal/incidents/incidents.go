@@ -137,14 +137,25 @@ var rank = map[string]int{"info": 0, "ok": 0, "warning": 1, "critical": 2}
 func Build(notes []storage.Notification, samples []storage.Sample, now float64, learned Learned) []Incident {
 	var out []*Incident
 	var cur *Incident
-	open := map[string]bool{}
+	// open is what is still down, and the incident it went down in. It outlives that incident: a
+	// check that stays down past Join keeps its incident open until it recovers, and a re-alert
+	// about it while it is down belongs to that incident.
+	open := map[string]*Incident{}
+	holds := func(inc *Incident) bool {
+		for _, o := range open {
+			if o == inc {
+				return true
+			}
+		}
+		return false
+	}
 	last := 0.0
 	used := map[int64]bool{}
 	finish := func() {
 		if cur == nil {
 			return
 		}
-		if len(open) > 0 {
+		if holds(cur) {
 			cur.Ended = nil
 		} else if cur.Ended == nil {
 			// Problems with nothing to recover from (a memory warning) end where they were raised.
@@ -152,36 +163,46 @@ func Build(notes []storage.Notification, samples []storage.Sample, now float64, 
 			cur.Ended = &end
 		}
 		out = append(out, cur)
-		cur, open = nil, map[string]bool{}
+		cur = nil
 	}
 	for _, n := range notes {
 		switch {
 		case problem(n):
-			if cur != nil && n.TS-last > Join {
-				finish()
+			inc := open[n.Subject]
+			if n.Subject == "" || inc == nil {
+				if cur != nil && n.TS-last > Join {
+					finish()
+				}
+				if cur == nil {
+					cur = &Incident{ID: n.ID, Started: n.TS, Severity: n.Severity}
+				}
+				inc = cur
 			}
-			if cur == nil {
-				cur = &Incident{ID: n.ID, Started: n.TS, Severity: n.Severity}
-			}
-			cur.Events = append(cur.Events, event(n, "problem"))
-			if rank[n.Severity] > rank[cur.Severity] {
-				cur.Severity = n.Severity
+			inc.Events = append(inc.Events, event(n, "problem"))
+			if rank[n.Severity] > rank[inc.Severity] {
+				inc.Severity = n.Severity
 			}
 			if n.Subject != "" {
-				open[n.Subject] = true
+				open[n.Subject] = inc
 			}
-			cur.Ended, last = nil, n.TS
+			inc.Ended = nil
+			if inc == cur {
+				last = n.TS
+			}
 			used[n.ID] = true
-		case cur != nil && n.Severity == "ok" && open[n.Subject]:
-			cur.Events = append(cur.Events, event(n, "recovery"))
+		case n.Severity == "ok" && open[n.Subject] != nil:
+			inc := open[n.Subject]
+			inc.Events = append(inc.Events, event(n, "recovery"))
 			delete(open, n.Subject)
-			last = n.TS
-			if len(open) == 0 {
+			if inc == cur {
+				last = n.TS
+			}
+			if !holds(inc) {
 				end := n.TS
-				cur.Ended = &end
+				inc.Ended = &end
 			}
 			used[n.ID] = true
-		case cur != nil && (len(open) > 0 || n.TS-last <= Join):
+		case cur != nil && (holds(cur) || n.TS-last <= Join):
 			cur.Events = append(cur.Events, event(n, role(n)))
 			used[n.ID] = true
 		}

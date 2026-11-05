@@ -306,9 +306,10 @@ function TwoFactor({ on, left }: { on: boolean; left: number }) {
   const begin = () => run(async () => setSetup(await api.twoFactorBegin()));
   const enable = () =>
     run(async () => {
-      const r = await api.twoFactorEnable(code.trim());
+      const r = await api.twoFactorEnable(password, code.trim());
       setRecovery(r.recovery);
       setSetup(undefined);
+      setPassword('');
       setCode('');
       configChanged();
       notify({ tone: 'ok', title: 'Two-factor sign-in is on' });
@@ -352,6 +353,7 @@ function TwoFactor({ on, left }: { on: boolean; left: number }) {
           </span>
           <code className="twofa-secret">{setup.secret.replace(/(.{4})/g, '$1 ').trim()}</code>
           <span className="inline-fields">
+            <Password label="Password" value={password} onChange={setPassword} autoComplete="current-password" />
             <input
               className="field short mono"
               aria-label="Code from the app"
@@ -361,7 +363,7 @@ function TwoFactor({ on, left }: { on: boolean; left: number }) {
               value={code}
               onChange={(e) => setCode(e.target.value)}
             />
-            <button type="button" className="btn" onClick={enable} disabled={code.trim().length !== 6}>
+            <button type="button" className="btn" onClick={enable} disabled={!password || code.trim().length !== 6}>
               Turn on
             </button>
           </span>

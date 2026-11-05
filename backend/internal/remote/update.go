@@ -15,6 +15,8 @@ import (
 
 	"nightjar/internal/agent"
 	"nightjar/internal/agentbin"
+	"nightjar/internal/ddos"
+	"nightjar/internal/discord"
 )
 
 // updateEvery is how often an agent that is behind is offered the dashboard's build.
@@ -37,6 +39,15 @@ func (m *Monitor) loadBuild(arch string) ([]byte, string, error) {
 	return agentbin.Load(arch)
 }
 
+// buildHash is just the hash of that build, which is all checking an agent needs.
+func (m *Monitor) buildHash(arch string) (string, error) {
+	if m.opt.AgentBuild != nil {
+		_, h, err := m.opt.AgentBuild(arch)
+		return h, err
+	}
+	return agentbin.Hash(arch)
+}
+
 // considerUpdate looks at a poll's readings and, when the agent is behind, sends it the dashboard's
 // build in the background. Called with m.mu held.
 func (m *Monitor) considerUpdateLocked(e *entry, r *agent.Readings) {
@@ -47,7 +58,7 @@ func (m *Monitor) considerUpdateLocked(e *entry, r *agent.Readings) {
 	if arch == "" {
 		return // an agent too old to say which processor it has
 	}
-	_, hash, err := m.loadBuild(arch)
+	hash, err := m.buildHash(arch)
 	if err != nil {
 		return // this dashboard carries no build for it
 	}
@@ -114,4 +125,31 @@ func (m *Monitor) sendBuild(h Host, arch string) error {
 		return fmt.Errorf("the agent turned the update down: %s", strings.TrimSpace(string(msg)))
 	}
 	return nil
+}
+
+// attackLocked alerts once when an agent reports its server under attack, and again when it is over.
+// They go to the Attacks area, wherever the server's other alerts go.
+func (m *Monitor) attackLocked(e *entry, a *ddos.View) {
+	const key = "attack"
+	_, known := e.problems[key]
+	switch {
+	case a != nil && a.Attacking && a.Current != nil:
+		words := "Under attack: " + ddos.Describe(*a.Current)
+		e.problems[key] = words
+		if !known {
+			m.saveLocked()
+			log.Warn("Server under attack", "server", e.host.Name, "methods", ddos.Describe(*a.Current))
+			m.sendAs(e, "Under attack: "+e.host.Name, "The agent sees "+ddos.Describe(*a.Current)+" aimed at this server.", discord.Critical, "Attacks")
+		}
+	case known:
+		delete(e.problems, key)
+		m.saveLocked()
+		desc := "It is over."
+		if a != nil && len(a.History) > 0 {
+			last := a.History[0]
+			desc = fmt.Sprintf("%s lasted %s.", ddos.Describe(last), (time.Duration(last.End-last.Start) * time.Second).String())
+		}
+		log.Info("Server attack over", "server", e.host.Name)
+		m.sendAs(e, "Attack over: "+e.host.Name, desc, discord.OK, "Attacks")
+	}
 }

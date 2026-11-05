@@ -53,8 +53,10 @@ type Host struct {
 	Token   string `json:"token,omitempty"`
 	Check   *Check `json:"check,omitempty"`
 	// SSH is how to log in to it, when set up.
-	SSH   *SSH    `json:"ssh,omitempty"`
-	Added float64 `json:"added"`
+	SSH *SSH `json:"ssh,omitempty"`
+	// SSHCheck is how the last login with it went.
+	SSHCheck *SSHCheck `json:"ssh_check,omitempty"`
+	Added    float64   `json:"added"`
 	// Alerts are the problems already announced, so a restart does not announce them again.
 	Alerts []string `json:"alerts,omitempty"`
 }
@@ -88,8 +90,9 @@ type State struct {
 	Added   float64 `json:"added"`
 	Kind    string  `json:"kind"`
 	// SSH is the saved login, and SSHCommand the command to log in the same way by hand.
-	SSH        *SSH   `json:"ssh,omitempty"`
-	SSHCommand string `json:"ssh_command,omitempty"`
+	SSH        *SSH      `json:"ssh,omitempty"`
+	SSHCommand string    `json:"ssh_command,omitempty"`
+	SSHCheck   *SSHCheck `json:"ssh_check,omitempty"`
 	// Update is how keeping its agent on this dashboard's build is going.
 	Update *AgentUpdate `json:"update,omitempty"`
 	// Status is "waiting" before the first answer, then "online" or "offline".
@@ -281,7 +284,7 @@ func (m *Monitor) Get(id string) (State, bool) {
 }
 
 func (e *entry) state(points int) State {
-	s := State{ID: e.host.ID, Name: e.host.Name, Address: e.host.Address, Added: e.host.Added, Kind: e.host.Kind, SSH: e.host.SSH, SSHCommand: SSHCommand(e.host), Status: e.status, Error: e.err,
+	s := State{ID: e.host.ID, Name: e.host.Name, Address: e.host.Address, Added: e.host.Added, Kind: e.host.Kind, SSH: e.host.SSH, SSHCommand: SSHCommand(e.host), SSHCheck: e.host.SSHCheck, Status: e.status, Error: e.err,
 		Readings: e.readings, History: slices.Clone(e.history[max(0, len(e.history)-points):]), Problems: []string{}}
 	if s.History == nil {
 		s.History = []Point{}
@@ -348,10 +351,12 @@ func (m *Monitor) Add(ctx context.Context, name, address, token string) (State, 
 	m.mu.Unlock()
 	r, err := m.fetch(ctx, address, token)
 	if err != nil {
+		m.forgetUnusedClient(token)
 		return State{}, err
 	}
 	h := Host{ID: newID(), Name: cmp.Or(name, r.System.Hostname, address), Kind: KindAgent, Address: address, Token: token, Added: float64(m.opt.Now().Unix())}
 	if err := validName(h.Name); err != nil {
+		m.forgetUnusedClient(token)
 		return State{}, err
 	}
 	e := newEntry(h)
@@ -401,16 +406,22 @@ func (m *Monitor) Update(ctx context.Context, id, name, address, token string) (
 	var r *agent.Readings
 	if moved {
 		if r, err = m.fetch(ctx, address, token); err != nil {
+			m.forgetUnusedClient(token)
 			return State{}, err
 		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.find(id) != e {
+		m.forgetUnusedClientLocked(token)
 		return State{}, ErrNotFound
 	}
 	if token != e.host.Token {
 		m.forgetClient(e.host.Token)
+	}
+	if e.host.SSH != nil && e.host.SSH.Host == "" && address != e.host.Address {
+		// Its SSH login follows the address, to a server it has not tried yet.
+		e.host.SSHCheck = nil
 	}
 	e.host.Name, e.host.Address, e.host.Token = name, address, token
 	if r != nil {
@@ -602,6 +613,20 @@ func (m *Monitor) forgetClient(token string) {
 	}
 }
 
+// forgetUnusedClient drops the client made for a token no saved host has, as after an Add or Update
+// whose check failed; otherwise every mistyped token would keep one for good.
+func (m *Monitor) forgetUnusedClient(token string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.forgetUnusedClientLocked(token)
+}
+
+func (m *Monitor) forgetUnusedClientLocked(token string) {
+	if !slices.ContainsFunc(m.hosts, func(e *entry) bool { return e.host.Token == token }) {
+		m.forgetClient(token)
+	}
+}
+
 // plainError drops Go's request framing ("Get \"http://…\": ") from a network error.
 func plainError(err error) string {
 	var ue *url.Error
@@ -650,6 +675,7 @@ func (m *Monitor) recordLocked(e *entry, r *agent.Readings, err error) {
 	e.fails, e.err, e.status, e.lastSeen, e.readings = 0, "", "online", now, r
 	m.clear(e, "offline", "Server back online: "+e.host.Name, e.host.Name+" is answering again.")
 	m.considerUpdateLocked(e, r)
+	m.attackLocked(e, r.Attacks)
 	e.addPoint(Point{T: r.Time, CPU: &r.CPU.Percent, Mem: &r.Memory.Percent, Temp: r.Temperature})
 
 	lim := m.opt.Limits()
@@ -772,13 +798,18 @@ func (m *Monitor) clear(e *entry, key, title, desc string) {
 
 // send queues an alert: a slow channel must not hold up the polls, which hold the lock.
 func (m *Monitor) send(e *entry, title, desc string, sev discord.Severity) {
+	m.sendAs(e, title, desc, sev, "Servers")
+}
+
+// sendAs is send with the alert's category, which picks its area in the notification rules.
+func (m *Monitor) sendAs(e *entry, title, desc string, sev discord.Severity, category string) {
 	if m.opt.Alerts == nil {
 		return
 	}
 	s := discord.About(m.opt.Alerts, "host:"+e.host.ID)
 	fields := []discord.Field{{Name: "Server", Value: e.host.Name, Inline: true}, {Name: "Address", Value: e.host.Address, Inline: true}}
 	select {
-	case m.outbox <- func() { s.SendEmbed(title, desc, sev, fields, "Servers") }:
+	case m.outbox <- func() { s.SendEmbed(title, desc, sev, fields, category) }:
 	default:
 		log.Warn("Too many alerts waiting to be sent; dropped one", "title", title)
 	}

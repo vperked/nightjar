@@ -375,7 +375,7 @@ func (s *Settings) declare() []Field {
 			boolean(&s.SeedingRatioDeleteFiles, "SEEDING_RATIO_DELETE_FILES", false).describe("Delete files with it", "", ""),
 			number(&s.SeedingRatioActionCooldown, "SEEDING_RATIO_ACTION_COOLDOWN", 1800, 60, 86400).describe("Between removals", "s", ""),
 			number(&s.SeedingRatioRetryBackoff, "SEEDING_RATIO_RETRY_BACKOFF", 60, 5, 3600).describe("Retry a failed removal after", "s", ""),
-			boolean(&s.InactiveTorrentAutoRemove, "INACTIVE_TORRENT_AUTO_REMOVE", false).describe("Remove paused torrents", "", "Their files are kept."),
+			boolean(&s.InactiveTorrentAutoRemove, "INACTIVE_TORRENT_AUTO_REMOVE", false).describe("Remove paused torrents that finished downloading", "", "Their files are kept. Stopped or paused downloads are left alone."),
 		),
 		group("Plex",
 			boolean(&s.PlexMonitor, "PLEX_MONITOR", false).describe("Watch Plex", "", "Server state, streams, transcodes and libraries."),

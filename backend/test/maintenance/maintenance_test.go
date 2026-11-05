@@ -69,3 +69,45 @@ func TestManager(t *testing.T) {
 		t.Fatal("windows are kept in the store")
 	}
 }
+
+func TestWeeklyWindowKeepsItsWallClockOnDaylightSavingDays(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("no time zone data:", err)
+	}
+	w := maintenance.Window{Title: "Backups", Days: []int{0}, From: "04:00", To: "04:30"}
+	if err := w.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	// Clocks went forward at 2:00 on Sunday 8 March 2026 and back at 2:00 on Sunday 1 November 2026.
+	for _, day := range []time.Time{time.Date(2026, 3, 8, 0, 30, 0, 0, ny), time.Date(2026, 11, 1, 0, 30, 0, 0, ny)} {
+		s, ok := w.At(day)
+		start, end := time.Unix(int64(s.Start), 0).In(ny), time.Unix(int64(s.End), 0).In(ny)
+		if !ok || start.Hour() != 4 || start.Minute() != 0 || end.Hour() != 4 || end.Minute() != 30 || start.Day() != day.Day() {
+			t.Fatalf("%s: window ran %s to %s, want 04:00 to 04:30", day.Format("Jan 2"), start, end)
+		}
+	}
+	overnight := maintenance.Window{Title: "Night", Days: []int{6}, From: "23:00", To: "05:00"}
+	overnight.Validate()
+	s, _ := overnight.At(time.Date(2026, 3, 7, 12, 0, 0, 0, ny))
+	if end := time.Unix(int64(s.End), 0).In(ny); end.Day() != 8 || end.Hour() != 5 {
+		t.Fatalf("a window past midnight into the change ends at 05:00 the next day, got %s", end)
+	}
+}
+
+func TestRenameLeavesCopiesAlone(t *testing.T) {
+	store := storage.Open(":memory:")
+	defer store.Close()
+	m := maintenance.New(store)
+	if _, err := m.Save(maintenance.Window{Title: "NAS", Checks: []string{"nas", "plex"}, Start: 100, End: 200}); err != nil {
+		t.Fatal(err)
+	}
+	before := m.List()
+	m.Rename("nas", "storage")
+	if got := before[0].Checks[0]; got != "nas" {
+		t.Fatalf("a list taken before the rename changed under its holder: %q", got)
+	}
+	if got := m.List()[0].Checks[0]; got != "storage" {
+		t.Fatalf("renamed check: %q", got)
+	}
+}

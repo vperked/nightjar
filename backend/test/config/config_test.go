@@ -70,6 +70,16 @@ func TestParsingFallsBackToDefaults(t *testing.T) {
 			t.Errorf("LOG_LEVEL=%q: got %v, want %v", raw, got, want)
 		}
 	}
+	for raw, want := range map[string]string{"": "text", "json": "json", "JSON": "json", " Text ": "text", "xml": "text"} {
+		if got := load(map[string]string{"LOG_FORMAT": raw}).LogFormat; got != want {
+			t.Errorf("LOG_FORMAT=%q: got %v, want %v", raw, got, want)
+		}
+	}
+	for _, raw := range []string{"NaN", "nan", "Inf", "+Inf", "-Inf", "infinity"} {
+		if got := load(map[string]string{"CHECK_INTERVAL": raw, "ALERT_COOLDOWN": raw, "CPU_THRESHOLD": raw}); got.CPUThreshold != 80 || got.CheckInterval != load(nil).CheckInterval || got.AlertCooldown != load(nil).AlertCooldown {
+			t.Errorf("%q should fall back to the defaults: %+v", raw, got)
+		}
+	}
 	if got := load(map[string]string{"STATUS_PAGE_TITLE": strings.Repeat("x", 10_001)}).StatusPageTitle; got != "Service Status" {
 		t.Error("over-long values should fall back to the default")
 	}
@@ -91,8 +101,9 @@ func TestDashboardSettingsOverrideEnvironment(t *testing.T) {
 func TestValidate(t *testing.T) {
 	problems := config.Validate(map[string]string{
 		"CPU_THRESHOLD": "abc", "WEB_HOST": "0.0.0.0", "NOPE": "1", "MEMORY_THRESHOLD": "", "PLEX_TOKEN": "secret",
+		"CHECK_INTERVAL": "NaN", "ALERT_COOLDOWN": "+Inf",
 	})
-	for _, key := range []string{"CPU_THRESHOLD", "WEB_HOST", "NOPE"} {
+	for _, key := range []string{"CPU_THRESHOLD", "WEB_HOST", "NOPE", "CHECK_INTERVAL", "ALERT_COOLDOWN"} {
 		if problems[key] == "" {
 			t.Errorf("%s should be rejected", key)
 		}
@@ -204,5 +215,15 @@ func TestLiveAndEssentialFlags(t *testing.T) {
 	}
 	if live < 40 || advanced < 50 || advanced > len(keys)-30 {
 		t.Errorf("live %d, advanced %d of %d", live, advanced, len(keys))
+	}
+}
+
+func TestEnvironLeavesOutSecrets(t *testing.T) {
+	t.Setenv("WEB_AUTH_TOKEN", "t0ken")
+	t.Setenv("SMTP_PASSWORD", "pw")
+	t.Setenv("CPU_THRESHOLD", "70")
+	env := strings.Join(config.Environ(), "\n")
+	if strings.Contains(env, "WEB_AUTH_TOKEN=") || strings.Contains(env, "SMTP_PASSWORD=") || !strings.Contains(env, "CPU_THRESHOLD=70") {
+		t.Fatalf("environment for scripts: %s", env)
 	}
 }

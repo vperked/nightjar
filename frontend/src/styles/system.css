@@ -25,7 +25,7 @@
 /* System services list: the shared .upd row, with its columns placed by hand so a muted tag
    (present only on muted services) never pushes the others out of line. */
 .unit .upd-toggle {
-  grid-template-columns: 120px minmax(0, 1fr) auto minmax(0, auto) 16px;
+  grid-template-columns: 144px minmax(0, 1fr) auto minmax(0, auto) 16px;
 }
 .unit .upd-toggle > * {
   grid-row: 1;

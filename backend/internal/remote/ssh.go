@@ -44,6 +44,19 @@ type SSHKey struct {
 	Own bool `json:"own"`
 }
 
+// SSHCheck is how the last login with a host's SSH login went, so the dashboard can say whether it
+// works without logging in again.
+type SSHCheck struct {
+	OK bool    `json:"ok"`
+	At float64 `json:"at"`
+	// As is who it logged in as, user@hostname, from a test.
+	As    string `json:"as,omitempty"`
+	Error string `json:"error,omitempty"`
+	// HostKey is the server's host key Nightjar trusts, as a type and fingerprint
+	// ("ED25519 SHA256:…"); a different key later is refused.
+	HostKey string `json:"host_key,omitempty"`
+}
+
 // SSH actions a host can be asked for.
 const (
 	SSHTest           = "test"
@@ -230,7 +243,7 @@ func (m *Monitor) newKeyPath(name string) (dir, path string, err error) {
 		return "", "", errors.New("no folder is set for Nightjar's SSH keys")
 	}
 	name = cmp.Or(strings.TrimSpace(name), "nightjar")
-	if !keyNameRe.MatchString(name) || name == "known_hosts" || name == "authorized_keys" || name == "config" {
+	if !keyNameRe.MatchString(name) || name == "known_hosts" || name == "known_hosts.confirmed" || name == "authorized_keys" || name == "config" {
 		return "", "", errors.New("name the key with letters, numbers, dots, dashes or underscores")
 	}
 	if dir, err = filepath.Abs(m.opt.SSHDir); err != nil {
@@ -291,6 +304,10 @@ func (m *Monitor) SetSSH(ctx context.Context, id string, c *SSH) (State, error) 
 	if e == nil {
 		return State{}, ErrNotFound
 	}
+	if c == nil || e.host.SSH == nil || *c != *e.host.SSH {
+		// A different login has not been tried yet.
+		e.host.SSHCheck = nil
+	}
 	e.host.SSH = c
 	if sshOnly {
 		e.host.Address = c.Host
@@ -346,6 +363,12 @@ func (m *Monitor) RunSSH(ctx context.Context, id, action string) (string, error)
 	if (action == SSHRestartAgent || action == SSHReinstallAgent) && h.isSSHOnly() {
 		return "", errors.New("this server has no agent")
 	}
+	if action != SSHTest {
+		// An action that changes the server runs to its end even when whoever asked goes away (a
+		// closed tab, a request that timed out): a reinstall cut off halfway can leave the agent
+		// stopped. Its own timeouts still bound it.
+		ctx = context.WithoutCancel(ctx)
+	}
 	var stdin []byte
 	if action == SSHReinstallAgent {
 		arch := ""
@@ -377,12 +400,22 @@ func (m *Monitor) RunSSH(ctx context.Context, id, action string) (string, error)
 		// A reboot drops the connection it was asked over; that is it working.
 		if action == SSHReboot && strings.Contains(stderr, "closed by remote host") {
 			log.Info("Server rebooted over SSH", "name", h.Name)
+			m.noteLogin(ctx, id, h, SSHCheck{OK: true})
 			return "rebooting", nil
 		}
-		log.Warn("SSH action failed", "name", h.Name, "action", action, "err", sshError(stderr, err))
-		return out, sshError(stderr, err)
+		err = sshError(stderr, err)
+		log.Warn("SSH action failed", "name", h.Name, "action", action, "err", err)
+		if action == SSHTest {
+			m.noteLogin(ctx, id, h, SSHCheck{Error: err.Error()})
+		}
+		return out, err
 	}
 	log.Info("SSH action", "name", h.Name, "action", action)
+	check := SSHCheck{OK: true}
+	if action == SSHTest {
+		check.As, _, _ = strings.Cut(strings.TrimSpace(out), "\n")
+	}
+	m.noteLogin(ctx, id, h, check)
 	if action == SSHReinstallAgent {
 		// It restarts on the dashboard's build; the next poll says how it stands.
 		m.mu.Lock()
@@ -394,32 +427,135 @@ func (m *Monitor) RunSSH(ctx context.Context, id, action string) (string, error)
 	return strings.TrimSpace(out), nil
 }
 
+// noteLogin keeps how a login with h's SSH login went, unless the login was changed meanwhile. Any
+// action that worked shows the login works; only a test that failed is kept as not working, since
+// other actions can fail after logging in (a sudo that wants a password).
+func (m *Monitor) noteLogin(ctx context.Context, id string, h Host, c SSHCheck) {
+	c.At = float64(m.opt.Now().Unix())
+	if c.OK {
+		c.HostKey = m.hostKey(ctx, h)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.find(id)
+	if e == nil || e.host.SSH == nil || *e.host.SSH != *h.SSH {
+		return
+	}
+	if c.OK && c.As == "" && e.host.SSHCheck != nil {
+		c.As = e.host.SSHCheck.As
+	}
+	if !c.OK && e.host.SSHCheck != nil {
+		c.HostKey = e.host.SSHCheck.HostKey
+	}
+	e.host.SSHCheck = &c
+	if err := m.saveLocked(); err != nil {
+		log.Warn("Could not save how an SSH login went", "name", h.Name, "err", err)
+	}
+}
+
+// hostKey is the type and fingerprint of the host key Nightjar keeps for h, from its known_hosts.
+func (m *Monitor) hostKey(ctx context.Context, h Host) string {
+	if keys := m.hostKeysIn(ctx, h, m.knownHosts()); len(keys) > 0 {
+		return keys[0]
+	}
+	return ""
+}
+
+// hostKeysIn are the types and fingerprints of the host keys file keeps for h.
+func (m *Monitor) hostKeysIn(ctx context.Context, h Host, file string) []string {
+	if file == "" {
+		return nil
+	}
+	name := sshTarget(h)
+	if h.SSH.Port != 22 {
+		name = "[" + name + "]:" + strconv.Itoa(h.SSH.Port)
+	}
+	out, _, err := m.execIn(ctx, 10*time.Second, nil, nil, "ssh-keygen", "-l", "-F", name, "-f", file)
+	if err != nil {
+		return nil
+	}
+	return parseHostKeys(out)
+}
+
+// knownHosts is the file of host keys logins check: Nightjar's own, else the monitor user's.
+func (m *Monitor) knownHosts() string {
+	if m.opt.SSHDir != "" {
+		if dir, err := filepath.Abs(m.opt.SSHDir); err == nil {
+			return filepath.Join(dir, "known_hosts")
+		}
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".ssh", "known_hosts")
+	}
+	return ""
+}
+
+// confirmedHosts is the file of host keys someone checked and confirmed (TrustHostKey), the only ones
+// a password goes to. A first login with a key adds whatever key answers to knownHosts by itself, so
+// a key there proves nothing about who answered.
+func (m *Monitor) confirmedHosts() string {
+	file := m.knownHosts()
+	switch {
+	case file == "":
+		return ""
+	case m.opt.SSHDir != "":
+		return file + ".confirmed"
+	}
+	return file + ".nightjar-confirmed"
+}
+
+// parseHostKeys reads the fingerprints ssh-keygen -l -F prints ("host ED25519 SHA256:…"), in order.
+func parseHostKeys(out string) []string {
+	var keys []string
+	for line := range strings.Lines(out) {
+		f := strings.Fields(line)
+		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+			continue
+		}
+		for i, field := range f {
+			if strings.HasPrefix(field, "SHA256:") {
+				if i == 2 {
+					field = f[1] + " " + field
+				}
+				keys = append(keys, field)
+				break
+			}
+		}
+	}
+	return keys
+}
+
 // ssh logs in to a host and runs command, with stdin when given.
 func (m *Monitor) ssh(ctx context.Context, h Host, command string, stdin []byte, timeout time.Duration) (string, string, error) {
 	target := sshTarget(h)
 	if !sshHostRe.MatchString(target) {
 		return "", "", fmt.Errorf("%q is not an address SSH can use; set the SSH host", target)
 	}
-	args := append(m.sshArgs(*h.SSH), "-i", h.SSH.Key, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "--", target, command)
+	// The first login with a key trusts and remembers the server's host key; a different key later is
+	// refused.
+	args := append(m.sshArgs(*h.SSH, "accept-new", ""), "-i", h.SSH.Key, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "--", target, command)
 	return m.execIn(ctx, timeout, stdin, nil, "ssh", args...)
 }
 
-// sshArgs are the options every login uses: its port and user, short timeouts, and Nightjar's own
-// record of host keys.
-func (m *Monitor) sshArgs(c SSH) []string {
+// sshArgs are the options every login uses: its port and user, short timeouts, and the record of host
+// keys in knownHosts (Nightjar's own when empty), checked as hostKeys says (ssh's StrictHostKeyChecking).
+func (m *Monitor) sshArgs(c SSH, hostKeys, knownHosts string) []string {
 	args := []string{
 		"-p", strconv.Itoa(c.Port),
 		"-l", c.User,
 		"-o", "ConnectTimeout=10",
 		"-o", "ServerAliveInterval=5",
 		"-o", "ServerAliveCountMax=2",
-		// The first login trusts and remembers the server's host key; a different key later is refused.
-		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "StrictHostKeyChecking=" + hostKeys,
 	}
-	if m.opt.SSHDir != "" {
+	if knownHosts == "" && m.opt.SSHDir != "" {
 		if dir, err := filepath.Abs(m.opt.SSHDir); err == nil && os.MkdirAll(dir, 0o700) == nil {
-			args = append(args, "-o", "UserKnownHostsFile="+filepath.Join(dir, "known_hosts"))
+			knownHosts = filepath.Join(dir, "known_hosts")
 		}
+	}
+	if knownHosts != "" {
+		args = append(args, "-o", "UserKnownHostsFile="+knownHosts)
 	}
 	return args
 }
@@ -444,6 +580,9 @@ const (
 // AuthorizeKey puts a login's key on its server: it logs in once with the account's password and adds
 // the key's public line to its authorized_keys. The password is used for that one login and kept
 // nowhere. id, when given, is the server the login is for, whose address it uses if the login has none.
+// The password only goes to a server whose host key someone confirmed: for any other, it answers a
+// *HostKeyError naming the key the server presents, to check and TrustHostKey. A key a key login
+// remembered by itself does not count, since that login trusted whatever answered first.
 func (m *Monitor) AuthorizeKey(ctx context.Context, id string, login SSH, password string) (string, error) {
 	c, err := m.NormalizeSSH(ctx, login)
 	if err != nil {
@@ -452,26 +591,22 @@ func (m *Monitor) AuthorizeKey(ctx context.Context, id string, login SSH, passwo
 	if password == "" || len(password) > maxPassword || strings.ContainsAny(password, "\n\r\x00") {
 		return "", errors.New("enter the password for that user on the server")
 	}
-	h := Host{SSH: &c}
-	if id != "" {
-		m.mu.Lock()
-		e := m.find(id)
-		if e != nil {
-			h = e.host
-			h.SSH = &c
-		}
-		m.mu.Unlock()
-		if e == nil {
-			return "", ErrNotFound
-		}
-	}
-	target := sshTarget(h)
-	if target == "" || !sshHostRe.MatchString(target) {
-		return "", errors.New("enter the server's address")
+	h, target, err := m.loginTarget(id, c)
+	if err != nil {
+		return "", err
 	}
 	public, err := os.ReadFile(c.Key + ".pub")
 	if err != nil {
 		return "", errors.New("the key's public half is missing")
+	}
+	confirmed := m.confirmedHosts()
+	if len(m.hostKeysIn(ctx, h, confirmed)) == 0 {
+		// Trusting whatever answers first would hand the password to anyone on the way.
+		keys, err := m.scanHostKeys(ctx, target, c.Port)
+		if err != nil {
+			return "", err
+		}
+		return "", &HostKeyError{HostKey: keys[0].fingerprint}
 	}
 	askpass := m.opt.AskPass
 	if askpass == "" {
@@ -479,7 +614,7 @@ func (m *Monitor) AuthorizeKey(ctx context.Context, id string, login SSH, passwo
 			return "", err
 		}
 	}
-	args := append(m.sshArgs(c),
+	args := append(m.sshArgs(c, "yes", confirmed),
 		"-o", "BatchMode=no",
 		"-o", "PubkeyAuthentication=no",
 		"-o", "PreferredAuthentications=password,keyboard-interactive",
@@ -498,6 +633,157 @@ func (m *Monitor) AuthorizeKey(ctx context.Context, id string, login SSH, passwo
 	}
 	log.Info("SSH key put on a server", "target", target, "user", c.User, "key", filepath.Base(c.Key))
 	return strings.TrimSpace(out), nil
+}
+
+// loginTarget is the server a login is for, and the address it connects to: id's, when given, unless
+// the login names its own host.
+func (m *Monitor) loginTarget(id string, c SSH) (Host, string, error) {
+	h := Host{SSH: &c}
+	if id != "" {
+		m.mu.Lock()
+		e := m.find(id)
+		if e != nil {
+			h = e.host
+			h.SSH = &c
+		}
+		m.mu.Unlock()
+		if e == nil {
+			return h, "", ErrNotFound
+		}
+	}
+	target := sshTarget(h)
+	if target == "" || !sshHostRe.MatchString(target) {
+		return h, "", errors.New("enter the server's address")
+	}
+	return h, target, nil
+}
+
+// HostKeyError is AuthorizeKey declining to send a password to a server whose host key nobody has
+// confirmed. HostKey is the key the server presents now ("ED25519 SHA256:…"): once someone has
+// checked on the server that it is its own, TrustHostKey keeps it and the password can go.
+type HostKeyError struct {
+	HostKey string
+}
+
+func (e *HostKeyError) Error() string {
+	kind, _, _ := strings.Cut(e.HostKey, " ")
+	return fmt.Sprintf("Nobody has confirmed this server's host key yet; check that it is %s (on the server: ssh-keygen -lf /etc/ssh/ssh_host_%s_key.pub) and confirm it before the password is sent",
+		e.HostKey, strings.ToLower(kind))
+}
+
+// TrustHostKey keeps a server's host key once someone has checked it: hostKey is the fingerprint a
+// HostKeyError showed them, and the server must still present it. It must not contradict a key Nightjar
+// already keeps for the server; logins then refuse any other key.
+func (m *Monitor) TrustHostKey(ctx context.Context, id string, login SSH, hostKey string) error {
+	c, err := m.NormalizeSSH(ctx, login)
+	if err != nil {
+		return err
+	}
+	h, target, err := m.loginTarget(id, c)
+	if err != nil {
+		return err
+	}
+	hostKey = strings.TrimSpace(hostKey)
+	if hostKey == "" {
+		return errors.New("confirm the server's host key")
+	}
+	file, confirmed := m.knownHosts(), m.confirmedHosts()
+	if file == "" || confirmed == "" {
+		return errors.New("there is nowhere to keep host keys")
+	}
+	trusted := m.hostKeysIn(ctx, h, confirmed)
+	if slices.Contains(trusted, hostKey) {
+		return nil
+	}
+	// A key login may have kept a key already (without anyone checking it); the confirmed one must be
+	// that key, or key logins and the password login would each trust a different server.
+	known := m.hostKeysIn(ctx, h, file)
+	if len(trusted) > 0 || len(known) > 0 && !slices.Contains(known, hostKey) {
+		return fmt.Errorf("the server's host key is not the one Nightjar saw before; if it was reinstalled, remove its lines from %s and %s", file, confirmed)
+	}
+	keys, err := m.scanHostKeys(ctx, target, c.Port)
+	if err != nil {
+		return err
+	}
+	i := slices.IndexFunc(keys, func(k scannedKey) bool { return k.fingerprint == hostKey })
+	if i < 0 {
+		log.Warn("An SSH host key was not the one confirmed", "target", target, "confirmed", hostKey, "presented", keys[0].fingerprint)
+		return fmt.Errorf("the server now presents %s, not the key you confirmed; check it again on the server", keys[0].fingerprint)
+	}
+	// Key logins check known_hosts too, so they refuse any other key from now on.
+	if len(known) == 0 {
+		if err := appendHostKey(file, keys[i].line); err != nil {
+			return err
+		}
+	}
+	if err := appendHostKey(confirmed, keys[i].line); err != nil {
+		return err
+	}
+	log.Info("SSH host key trusted", "target", target, "key", hostKey)
+	return nil
+}
+
+// appendHostKey adds a known_hosts line to file, making it (readable only by its owner) if need be.
+func appendHostKey(file, line string) error {
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// scannedKey is a host key a server presents: its known_hosts line, and its type and fingerprint.
+type scannedKey struct {
+	line, fingerprint string
+}
+
+// hostKeyTypes are the host key types asked for, in the order ssh prefers them.
+var hostKeyTypes = []string{"ED25519", "ECDSA", "RSA"}
+
+// scanHostKeys asks a server for its host keys without logging in, the one ssh would use first.
+func (m *Monitor) scanHostKeys(ctx context.Context, target string, port int) ([]scannedKey, error) {
+	out, stderr, err := m.exec(ctx, 20*time.Second, "ssh-keyscan", "-T", "10", "-p", strconv.Itoa(port), "-t", "ed25519,ecdsa,rsa", target)
+	keys := []scannedKey{}
+	for line := range strings.Lines(out) {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// "256 SHA256:abc… host (ED25519)"
+		fp, _, err := m.execIn(ctx, 5*time.Second, []byte(line+"\n"), nil, "ssh-keygen", "-l", "-f", "-")
+		if f := strings.Fields(fp); err == nil && len(f) >= 3 && strings.HasPrefix(f[1], "SHA256:") {
+			keys = append(keys, scannedKey{line: line, fingerprint: strings.Trim(f[len(f)-1], "()") + " " + f[1]})
+		}
+	}
+	if len(keys) == 0 {
+		// ssh-keyscan notes each server it reached as a comment; what is left is what went wrong.
+		var problems []string
+		for line := range strings.Lines(stderr) {
+			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+				problems = append(problems, line)
+			}
+		}
+		if err == nil || len(problems) == 0 {
+			err = errors.New("the server showed no SSH host key; check its address and SSH port")
+		}
+		return nil, sshError(strings.Join(problems, "\n"), err)
+	}
+	rank := func(k scannedKey) int {
+		kind, _, _ := strings.Cut(k.fingerprint, " ")
+		if i := slices.Index(hostKeyTypes, kind); i >= 0 {
+			return i
+		}
+		return len(hostKeyTypes)
+	}
+	slices.SortStableFunc(keys, func(a, b scannedKey) int { return rank(a) - rank(b) })
+	return keys, nil
 }
 
 // sshError turns ssh's complaint into what to do about it.
@@ -554,7 +840,11 @@ func (m *Monitor) execIn(ctx context.Context, timeout time.Duration, stdin []byt
 	}
 	err := cmd.Run()
 	if ctx.Err() != nil {
-		return stdout.String(), stderr.String() + "\ntimed out", ctx.Err()
+		// Only running out of time is a timeout; a request given up on is not the server's doing.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return stdout.String(), stderr.String() + "\ntimed out", ctx.Err()
+		}
+		return stdout.String(), stderr.String(), ctx.Err()
 	}
 	return stdout.String(), stderr.String(), err
 }

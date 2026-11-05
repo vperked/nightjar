@@ -1,9 +1,12 @@
 package plex_test
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +139,41 @@ func TestClient(t *testing.T) {
 	bad, _ := plex.New(srv.URL, "wrong", true, 2*time.Second)
 	if _, err := bad.Sessions(); !errors.Is(err, plex.ErrUnauthorized) {
 		t.Errorf("want unauthorized, got %v", err)
+	}
+}
+
+// Plex sends an item's own id as "guid", a string, beside its "Guid" list; Go matches keys regardless of
+// case, so the string must not fail the library (it did: "cannot unmarshal string into ... guid").
+func TestItemsWithBothGuidKeys(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/library/sections/2/all" || r.URL.Query().Get("includeGuids") != "1" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Write([]byte(`{"MediaContainer":{"Metadata":[
+ {"ratingKey":"10","type":"movie","title":"Heat","year":1995,"guid":"plex://movie/5d776825","Guid":[{"id":"imdb://tt0113277"},{"id":"tmdb://949"}],
+  "Media":[{"Part":[{"file":"/mnt/media/Heat.mkv","size":1000}]}]},
+ {"ratingKey":"11","type":"movie","title":"Alien","Guid":[{"id":"tmdb://348"}],"guid":"plex://movie/5d77682a"},
+ {"ratingKey":"12","type":"movie","title":"Local video","guid":"local://12"}]}}`))
+	}))
+	defer srv.Close()
+	c, err := plex.New(srv.URL, "", true, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := c.Items(plex.Library{Key: "2", Title: "Movies"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, it := range items {
+		got = append(got, it.Title+"="+strings.Join(it.Guids, ","))
+	}
+	if want := "Heat=imdb://tt0113277,tmdb://949|Alien=tmdb://348|Local video="; strings.Join(got, "|") != want {
+		t.Errorf("got %q, want %q", strings.Join(got, "|"), want)
+	}
+	if items[0].Size != 1000 || len(items[0].Files) != 1 {
+		t.Errorf("files and size lost: %+v", items[0])
 	}
 }
 
@@ -361,5 +399,99 @@ func TestTranscodeReasons(t *testing.T) {
 		if s.Title == "Remote" && !strings.Contains(s.Fix, "remote quality") {
 			t.Errorf("remote fix: %q", s.Fix)
 		}
+	}
+}
+
+// A library too big for one answer is read in pages; one that changes while it is read is an
+// error, not a list missing an item.
+func TestItemsArePaged(t *testing.T) {
+	const n = 1234
+	total, grow := n, true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Start"))
+		size, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Size"))
+		if size == 0 || size > 1000 {
+			t.Errorf("not paged: %q", r.URL.RawQuery)
+		}
+		var items []string
+		for i := start; i < min(start+size, n); i++ {
+			items = append(items, fmt.Sprintf(`{"ratingKey":"%d","type":"movie","title":"M%d"}`, i, i))
+		}
+		fmt.Fprintf(w, `{"MediaContainer":{"totalSize":%d,"Metadata":[%s]}}`, total, strings.Join(items, ","))
+		if grow && start > 0 {
+			total = n + 1 // an item added after the first page
+		}
+	}))
+	defer srv.Close()
+	c, _ := plex.New(srv.URL, "", true, 2*time.Second)
+	if _, err := c.Items(plex.Library{Key: "1", Title: "Movies"}); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("a library that changed while read: %v", err)
+	}
+	total, grow = n, false
+	items, err := c.Items(plex.Library{Key: "1", Title: "Movies"})
+	if err != nil || len(items) != n || items[n-1].Key != fmt.Sprint(n-1) {
+		t.Fatalf("all %d items: %v %d", n, err, len(items))
+	}
+}
+
+// A server that ignores the paging and sends the whole library each time is read once, not
+// asked again forever, whether or not it says how many items there are.
+func TestItemsUnpagedServer(t *testing.T) {
+	const n = 700
+	for _, total := range []int{n, 0} {
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			var items []string
+			for i := range n {
+				items = append(items, fmt.Sprintf(`{"ratingKey":"%d","type":"movie","title":"M%d"}`, i, i))
+			}
+			fmt.Fprintf(w, `{"MediaContainer":{"totalSize":%d,"Metadata":[%s]}}`, total, strings.Join(items, ","))
+		}))
+		c, _ := plex.New(srv.URL, "", true, 2*time.Second)
+		items, err := c.Items(plex.Library{Key: "1", Title: "Movies"})
+		srv.Close()
+		if err != nil || len(items) != n || requests > 2 {
+			t.Fatalf("totalSize %d: all %d items in a request or two: %v %d items, %d requests", total, n, err, len(items), requests)
+		}
+	}
+}
+
+// An answer over the limit is refused as too large, not parsed cut short.
+func TestOversizedAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"MediaContainer":{"Directory":[{"title":"`))
+		w.Write(bytes.Repeat([]byte("x"), 9<<20))
+		w.Write([]byte(`"}]}}`))
+	}))
+	defer srv.Close()
+	c, _ := plex.New(srv.URL, "", true, 5*time.Second)
+	if _, err := c.Sections(); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("too large: %v", err)
+	}
+}
+
+// Watch history that could not be read in full is an error: the media cleanup would take what is
+// missing as never watched.
+func TestEverWatchedReadsAllOrFails(t *testing.T) {
+	entries, total := 2500, 2500
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Start"))
+		size, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Size"))
+		var rows []string
+		for i := start; i < min(start+size, entries); i++ {
+			rows = append(rows, fmt.Sprintf(`{"ratingKey":"%d"}`, i))
+		}
+		fmt.Fprintf(w, `{"MediaContainer":{"totalSize":%d,"Metadata":[%s]}}`, total, strings.Join(rows, ","))
+	}))
+	defer srv.Close()
+	c, _ := plex.New(srv.URL, "", true, 2*time.Second)
+	seen, err := c.EverWatched()
+	if err != nil || len(seen) != entries || !seen["2499"] {
+		t.Fatalf("the whole history: %v %d", err, len(seen))
+	}
+	entries = 1800 // deleted while it was read
+	if _, err := c.EverWatched(); err == nil {
+		t.Fatal("history read short should fail")
 	}
 }

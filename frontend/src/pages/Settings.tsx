@@ -12,6 +12,7 @@ import { Select } from '../components/Select';
 import { Skeleton, Working } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { noun } from '../format';
+import { useUnsaved } from '../freshness';
 
 const SOURCE: Record<SettingField['source'], string> = { dashboard: 'set here', environment: 'from .env', default: '' };
 
@@ -252,6 +253,8 @@ export function SettingsPage() {
 
   const restartNames = needsRestart.map((k) => fieldsByKey.get(k)?.label ?? k).join(', ');
   const changes = Object.keys(draft).length;
+  // Many fields are custom pickers outside a form's inputs: hold off reloading onto a new build.
+  useUnsaved(changes > 0);
   useEffect(() => {
     try {
       const kept = Object.fromEntries(Object.entries(draft).filter(([k]) => fieldsByKey.get(k)?.kind !== 'secret'));

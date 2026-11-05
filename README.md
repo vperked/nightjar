@@ -225,7 +225,10 @@ The dashboard signs in with the admin account and keeps an HttpOnly, SameSite=St
 (Secure over HTTPS, including behind a proxy that sends `X-Forwarded-Proto: https`). Scripts can skip
 signing in with `WEB_AUTH_TOKEN`, sent as `Authorization: Bearer <token>` or `X-Auth-Token`. Ten wrong
 passwords, setup codes or tokens a minute lock that client out for a minute; behind a reverse proxy on the
-same machine, the client is taken from `X-Real-IP` or `X-Forwarded-For`. Changes must be JSON and, when the
+same machine, the client is taken from `X-Real-IP` or the last `X-Forwarded-For` hop. Have the proxy set
+`X-Real-IP`, or overwrite or append to `X-Forwarded-For` (nginx: `proxy_set_header X-Real-IP $remote_addr;`
+and `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`), so a client cannot choose its own
+address for those limits. Changes must be JSON and, when the
 browser sends an `Origin`, come from the dashboard's own origin, so another site cannot make them.
 
 | Route | Auth | Purpose |

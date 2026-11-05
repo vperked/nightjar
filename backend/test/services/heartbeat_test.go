@@ -117,3 +117,20 @@ func TestRepairSpec(t *testing.T) {
 		}
 	}
 }
+
+// A heartbeat that never pings goes late though Nightjar restarts more often than its schedule:
+// when it began listening is kept, not started over on each restart.
+func TestHeartbeatNeverPingedAcrossRestarts(t *testing.T) {
+	store := storage.Open(":memory:")
+	defer store.Close()
+	spec, err := services.ParseSpec([]byte(`{"name":"backup","type":"heartbeat","schedule":"every 1d","grace":600}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := at(2, 12, 0)
+	services.NewMonitor([]services.Spec{spec}, store).Heartbeat(spec, start)
+	services.NewMonitor([]services.Spec{spec}, store).Heartbeat(spec, start+12*3600)
+	if r := services.NewMonitor([]services.Spec{spec}, store).Heartbeat(spec, start+86400+601); r.Up || !strings.Contains(r.Detail, "late") {
+		t.Fatalf("late a day after it was added, restarts or not: %+v", r)
+	}
+}

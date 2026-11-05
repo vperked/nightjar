@@ -14,14 +14,18 @@ import (
 )
 
 var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(https://(?:discord|discordapp)\.com/api/webhooks/\d+/)[A-Za-z0-9_\-]+`),
+	// Discord webhooks (and ptb., canary., versioned API paths), Telegram bot tokens and Slack
+	// webhooks carry their secret in the URL.
+	regexp.MustCompile(`(https?://(?:[a-z]+\.)?(?:discord|discordapp)\.com/api/(?:v\d+/)?webhooks/\d+/)[A-Za-z0-9_\-]+`),
+	regexp.MustCompile(`(/bot\d+:)[A-Za-z0-9_\-]+`),
+	regexp.MustCompile(`(hooks\.slack\.com/(?:services|workflows|triggers)/)[^\s"'<>]+`),
 	regexp.MustCompile(`(?i)((?:password|token|secret|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s"',]+`),
 }
 
 // secretKey names attributes whose whole value is a secret.
 var secretKey = regexp.MustCompile(`(?i)(password|passwd|token|secret|api[_-]?key|webhook)$`)
 
-// Redact masks webhook tokens and key=value secrets.
+// Redact masks webhook URLs, bot tokens and key=value secrets.
 func Redact(s string) string {
 	for _, re := range secretPatterns {
 		s = re.ReplaceAllString(s, "${1}***")

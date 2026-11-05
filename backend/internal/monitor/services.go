@@ -3,6 +3,8 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -46,7 +48,14 @@ func (h *serviceChecks) check(s *Snapshot) {
 				r = services.Run(spec)
 			}
 			<-h.slots
-			h.report(spec, r, m.Record(spec.Name, r, now), now)
+			// A check renamed while it ran is reported under its new name.
+			name, change := m.RecordAs(spec.Name, r, now)
+			if name != spec.Name {
+				if st := m.State(name); st.Spec.Name == name {
+					spec = st.Spec
+				}
+			}
+			h.report(spec, r, change, now)
 		}()
 	}
 	if s.Now-h.lastPrune >= pruneInterval {
@@ -68,6 +77,8 @@ func (h *serviceChecks) report(spec services.Spec, r services.Result, change str
 		h.log.Debug(fmt.Sprintf("%s: up (%s)", spec.Name, r.Detail))
 		if change == services.StatusUp {
 			h.log.Info(fmt.Sprintf("[RECOVERED] Service up: %s (%s)", spec.Name, r.Detail))
+			// The outage is over, so the next one alerts at once whatever the cooldown had reached.
+			h.ctx.Gates.Clear("service:" + spec.Name)
 			var extra []discord.Field
 			if fix := h.ctx.Repairs.Recovered(spec.Name); fix != nil {
 				extra = append(extra, field("Fixed by", "Nightjar: "+fix.Detail+", "+discord.Span(now-fix.TS)+" before", false))
@@ -82,7 +93,8 @@ func (h *serviceChecks) report(spec services.Spec, r services.Result, change str
 	if st.Status != services.StatusDown {
 		return
 	}
-	h.raiseAlert("service:"+spec.Name, now, fmt.Sprintf("Service down: %s (%s)", spec.Name, r.Detail), h.ctx.Webhook,
+	// A down check is looked at every Interval, which may be far longer than a cycle.
+	h.raiseAlertEvery("service:"+spec.Name, now, spec.Interval, fmt.Sprintf("Service down: %s (%s)", spec.Name, r.Detail), h.ctx.Webhook,
 		func() bool { return h.send(spec, "is down", r, discord.Critical, now) }, "service_down", true)
 	if h.ctx.Repairs.Due(spec, now) {
 		h.running.Add(1)
@@ -132,8 +144,11 @@ func (h *serviceChecks) send(spec services.Spec, title string, r services.Result
 	if desc != "" {
 		desc = strings.ToUpper(desc[:1]) + desc[1:]
 	}
-	// A long address gets its own line rather than squeezing the numbers beside it.
-	fields := []discord.Field{field("Target", "`"+spec.Target+"`", len(spec.Target) <= 28)}
+	var fields []discord.Field
+	if target := alertTarget(spec); target != "" {
+		// A long address gets its own line rather than squeezing the numbers beside it.
+		fields = append(fields, field("Target", "`"+target+"`", len(target) <= 28))
+	}
 	if r.LatencyMS != nil && r.Up {
 		fields = append(fields, field("Response", fmt.Sprintf("%.0f ms", *r.LatencyMS), true))
 	}
@@ -151,4 +166,48 @@ func (h *serviceChecks) send(spec services.Spec, title string, r services.Result
 	}
 	fields = append(fields, extra...)
 	return discord.About(h.ctx.Webhook, "check:"+spec.Name).SendEmbed(spec.Name+" "+title, desc, sev, fields, "Uptime")
+}
+
+// sensitiveParam matches query parameters that usually carry a credential.
+var sensitiveParam = regexp.MustCompile(`(?i)key|token|secret|pass|pwd|auth|sig|session|credential`)
+
+// alertTarget is what an alert may show of a check's target. Alerts reach chat channels and the
+// notification history, read by people who are not the dashboard's admins, so it never carries a
+// secret: a heartbeat's target is the token that alone authenticates its pings, so it is left out,
+// and an address loses its user and password and the values of credential-like query parameters.
+func alertTarget(spec services.Spec) string {
+	if spec.Type == "heartbeat" {
+		return ""
+	}
+	u, err := url.Parse(spec.Target)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return withoutPassword(spec.Target)
+	}
+	u.User = nil
+	if u.RawQuery != "" {
+		q := u.Query()
+		for k := range q {
+			if sensitiveParam.MatchString(k) {
+				q[k] = []string{"REDACTED"}
+			}
+		}
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+// withoutPassword drops a "user:password@" from a target that is not a well-formed URL.
+func withoutPassword(target string) string {
+	at := strings.LastIndex(target, "@")
+	if at < 0 {
+		return target
+	}
+	start := 0
+	if i := strings.Index(target, "://"); i >= 0 && i < at {
+		start = i + 3
+	}
+	if userinfo := target[start:at]; !strings.Contains(userinfo, ":") || strings.Contains(userinfo, "/") {
+		return target
+	}
+	return target[:start] + target[at+1:]
 }

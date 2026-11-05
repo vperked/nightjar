@@ -20,8 +20,9 @@ import (
 // one every 30 seconds) after the password. Ten one-time recovery codes stand in for a lost phone.
 
 var (
-	ErrCode      = errors.New("that code is not right; use the current one from your authenticator app")
-	ErrNoPending = errors.New("start setting up two-factor sign-in first")
+	ErrCode        = errors.New("that code is not right; use the current one from your authenticator app")
+	ErrNoPending   = errors.New("start setting up two-factor sign-in first")
+	ErrTwoFactorOn = errors.New("two-factor sign-in is already on; turn it off first to use another authenticator")
 )
 
 const (
@@ -87,12 +88,16 @@ func (a *Accounts) RecoveryLeft() int {
 }
 
 // BeginTwoFactor makes a new secret to add to an authenticator: as text, and as the otpauth://
-// link authenticator apps open or read from a QR code.
+// link authenticator apps open or read from a QR code. While two-factor sign-in is on, the
+// authenticator can only be replaced by turning it off first, which takes the password and a code.
 func (a *Accounts) BeginTwoFactor() (secret, link string, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.admin == nil {
 		return "", "", ErrNoAdmin
+	}
+	if a.admin.TOTP != "" {
+		return "", "", ErrTwoFactorOn
 	}
 	raw := make([]byte, 20)
 	rand.Read(raw)
@@ -102,13 +107,28 @@ func (a *Accounts) BeginTwoFactor() (secret, link string, err error) {
 	return a.pending, link, nil
 }
 
-// EnableTwoFactor turns it on once a code from the new secret proves the authenticator has it,
-// and returns the recovery codes, shown this once.
-func (a *Accounts) EnableTwoFactor(code string) ([]string, error) {
+// EnableTwoFactor turns it on with the password, so a session left open cannot tie the account to
+// someone else's authenticator, once a code from the new secret proves the authenticator has it. It
+// returns the recovery codes, shown this once.
+func (a *Accounts) EnableTwoFactor(password, code string) ([]string, error) {
+	a.mu.Lock()
+	ad := a.admin
+	a.mu.Unlock()
+	if ad == nil {
+		return nil, ErrNoAdmin
+	}
+	if !checkPassword(ad.Hash, password) {
+		return nil, ErrWrongCurrent
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.admin == nil {
+	switch {
+	case a.admin == nil:
 		return nil, ErrNoAdmin
+	case a.admin.Hash != ad.Hash: // changed while it was checked
+		return nil, ErrWrongCurrent
+	case a.admin.TOTP != "":
+		return nil, ErrTwoFactorOn
 	}
 	if a.pending == "" {
 		return nil, ErrNoPending

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -95,7 +96,7 @@ func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
 	case body.Kind == remote.KindSSH:
 		st, err = s.ctx.Remote.AddSSHServer(r.Context(), body.Name, *body.SSH)
 		if err == nil {
-			writeJSON(w, http.StatusOK, map[string]any{"host": st, "test": s.testLogin(r, st.ID)})
+			s.savedLogin(w, r, st)
 			return
 		}
 	case id != "":
@@ -157,9 +158,18 @@ func (s *Server) setHostSSH(w http.ResponseWriter, r *http.Request) {
 	case c == nil:
 		writeJSON(w, http.StatusOK, map[string]any{"host": st})
 	default:
-		// A login just saved is tried at once, so a key the server refuses shows now, not later.
-		writeJSON(w, http.StatusOK, map[string]any{"host": st, "test": s.testLogin(r, st.ID)})
+		s.savedLogin(w, r, st)
 	}
+}
+
+// savedLogin answers a login just saved: it is tried at once, so a key the server refuses shows now,
+// not later, and the server comes back with how that went.
+func (s *Server) savedLogin(w http.ResponseWriter, r *http.Request, st remote.State) {
+	test := s.testLogin(r, st.ID)
+	if now, ok := s.ctx.Remote.Get(st.ID); ok {
+		st = now
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"host": st, "test": test})
 }
 
 // loginTest is how trying a server's SSH login went.
@@ -178,9 +188,11 @@ func (s *Server) testLogin(r *http.Request, id string) loginTest {
 	return loginTest{OK: true, Output: out}
 }
 
-// runHostSSH logs in to a server and runs test, restart-agent or reboot.
+// runHostSSH logs in to a server and runs test, restart-agent or reboot. The action runs to its end
+// (it has its own time limit) even if the browser goes away: cut off halfway, a reinstall could leave
+// the agent stopped.
 func (s *Server) runHostSSH(w http.ResponseWriter, r *http.Request) {
-	out, err := s.ctx.Remote.RunSSH(r.Context(), r.PathValue("id"), r.PathValue("action"))
+	out, err := s.ctx.Remote.RunSSH(context.WithoutCancel(r.Context()), r.PathValue("id"), r.PathValue("action"))
 	switch {
 	case errors.Is(err, remote.ErrNotFound):
 		writeJSON(w, http.StatusNotFound, errBody(err.Error()))
@@ -233,13 +245,41 @@ func (s *Server) authorizeSSHKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("Expected a login and a password"))
 		return
 	}
-	out, err := s.ctx.Remote.AuthorizeKey(r.Context(), body.ID, body.Login, body.Password)
+	// Like runHostSSH, it finishes even if the browser goes away, within its own time limit.
+	out, err := s.ctx.Remote.AuthorizeKey(context.WithoutCancel(r.Context()), body.ID, body.Login, body.Password)
+	var hk *remote.HostKeyError
+	switch {
+	case errors.Is(err, remote.ErrNotFound):
+		writeJSON(w, http.StatusNotFound, errBody(err.Error()))
+	case errors.As(err, &hk):
+		// Nobody has confirmed the server's host key: the browser shows it, to check and trust.
+		writeJSON(w, statusRefused, map[string]string{"error": err.Error(), "host_key": hk.HostKey})
+	case err != nil:
+		writeJSON(w, statusRefused, errBody(err.Error()))
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "output": out})
+	}
+}
+
+// trustSSHHostKey keeps a server's host key once the admin has checked the fingerprint that
+// authorizeSSHKey showed them, so the password can go to that server.
+func (s *Server) trustSSHHostKey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID      string     `json:"id"`
+		Login   remote.SSH `json:"login"`
+		HostKey string     `json:"host_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("Expected a login and a host key"))
+		return
+	}
+	err := s.ctx.Remote.TrustHostKey(r.Context(), body.ID, body.Login, body.HostKey)
 	switch {
 	case errors.Is(err, remote.ErrNotFound):
 		writeJSON(w, http.StatusNotFound, errBody(err.Error()))
 	case err != nil:
 		writeJSON(w, statusRefused, errBody(err.Error()))
 	default:
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "output": out})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
 }

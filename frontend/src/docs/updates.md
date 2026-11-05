@@ -23,6 +23,30 @@ Press **Update** on a row to update it now. Switch on **auto** to let it update 
 
 After an update, the app's service must be running again, or you get an alert that it is down. Successful updates send a 🟢 alert and failures a 🟠 one.
 
+## Update all
+
+**Update all** lists everything with an update, each ticked; untick what you want to leave. A **Major version** is marked: it can change how an app works or what it needs, so read its release notes first. Nightjar itself goes last, since updating it restarts the monitor.
+
+Then a panel at the top follows the run, one update at a time: how many are done, the one running with its log as it goes, those waiting, and how each went, with its log. It keeps following after a reload, and **Dismiss** clears it once everything is through.
+
+Sonarr, Radarr, Prowlarr and Lidarr install a major version only when asked to, as their own **Install** button does. Nightjar asks when you press **Update** or **Update all**; automatic updates leave major versions to you.
+
+## Apps swizzin installed
+
+- **qBittorrent**: swizzin builds it from source and only up to 5.1, so Nightjar updates it with the official static build instead: it downloads the newest, checks it runs, and swaps it in for `/usr/bin/qbittorrent-nox` before restarting it. swizzin's package record keeps its old version, and running `box upgrade qbittorrent` later puts swizzin's own build back.
+- **Seerr** in a git checkout: an update checks out the new release's tag, installs its packages and builds it with the Node its service runs (a few minutes), then restarts it.
+- **Bazarr** updates itself, with its own updater, unless you turned that off in its settings.
+
+Targets found before Nightjar knew these get their update command when it next starts. A command you set up yourself is never replaced.
+
+## Watching an update
+
+While something updates, its row shows what the update is doing as it does it, without opening anything: each command it runs and what that prints, and the steps between, such as asking Sonarr to update itself, waiting while it restarts, and checking it's running again. A progress bar shows only its latest state. The page refreshes every two seconds while an update runs.
+
+Once it's done, the update's **History** keeps the last 200 lines under **Log**, for a failure as much as a success, so you can see why it failed.
+
+If an update or a check says Nightjar **lost the right to switch users (CAP_SETUID)**, restart Nightjar. apt and git need that right, and Nightjar watches its own permissions, logs the moment it loses one and alerts you.
+
 ## Adding your own
 
 **Add** a target with a version command, an update command and, optionally, the systemd service to watch afterwards. Commands run as root, so only the signed-in admin can change them.

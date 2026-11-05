@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
 import type { CleanupItem, CleanupView } from '../api/types';
@@ -40,6 +40,8 @@ export function CleanupPage() {
   const [view, setView] = useState<CleanupView>();
   const notify = useToast();
   const now = useNow(30000);
+  // view is the reply to Check now or Keep, shown until the next poll lands with newer news.
+  useEffect(() => setView(undefined), [data]);
   const v = view ?? data;
   const scan = async () => {
     setScanning(true);
@@ -96,7 +98,11 @@ export function CleanupPage() {
               <strong>Off.</strong> This is a preview of what would be listed; nothing is removed. Turn it on under <Link to="/settings?find=cleanup">Settings → Media cleanup</Link>.
             </p>
           )}
-          {v.error && <p className="alert">The last check stopped: {v.error}</p>}
+          {v.error && (
+            <p className="alert">
+              The last check{v.scanned ? `, ${formatAgo(v.scanned, now)},` : ''} stopped: {v.error}. Check now to try again.
+            </p>
+          )}
           {(v.found ?? []).length > 0 && <p className="form-help cleanup-found">Found on this machine: {v.found!.join('; ')}. Set them under Settings → Media cleanup to use others.</p>}
           <div className="stats-row">
             <div>
@@ -133,7 +139,7 @@ export function CleanupPage() {
                     <th className="hide-sm">Added</th>
                     <th className="r hide-sm">Size</th>
                     <th className="hide-sm">Torrent</th>
-                    <th>Leaves</th>
+                    <th className="hide-sm">Leaves</th>
                     <th className="shrink" />
                   </tr>
                 </thead>
@@ -148,6 +154,10 @@ export function CleanupPage() {
                           {it.library} · removed by {BY[it.manager]}
                         </span>
                         {it.reason && <span className="sub cleanup-reason">{it.reason}</span>}
+                        {/* On a phone, when it leaves goes under the title, to leave the title the room. */}
+                        <span className="show-sm cleanup-when-sm num">
+                          <When it={it} now={now} />
+                        </span>
                       </td>
                       <td className="hide-sm ink-3 num">{formatAgo(it.added, now)}</td>
                       <td className="r num hide-sm">{it.size ? formatBytes(it.size) : '—'}</td>
@@ -162,7 +172,7 @@ export function CleanupPage() {
                           <span className="ink-3">none</span>
                         )}
                       </td>
-                      <td className="num">
+                      <td className="num hide-sm">
                         <When it={it} now={now} />
                       </td>
                       <td className="shrink">

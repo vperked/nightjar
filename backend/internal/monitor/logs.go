@@ -16,7 +16,9 @@ type logCleanup struct {
 	handler
 	counter   int
 	lastAlert map[string]float64
-	cleaned   map[string]bool
+	// cleaned is each log trimmed while it stays a candidate, with its size just after. Under
+	// pressure every log stays a candidate, so one that grows past that size is trimmed again.
+	cleaned map[string]int64
 }
 
 func (h *logCleanup) check(s *Snapshot) {
@@ -42,14 +44,14 @@ func (h *logCleanup) check(s *Snapshot) {
 
 func (h *logCleanup) checkLogs(s *Snapshot, aggressive bool) {
 	logs := h.ctx.Logs
-	rotated := withTimeout(60*time.Second, cleanup.Stats{}, "rotated log cleanup", func() cleanup.Stats { return logs.CleanupRotated(aggressive) })
+	rotated := withTimeout(h.ctx, 60*time.Second, cleanup.Stats{}, "rotated log cleanup", func() cleanup.Stats { return logs.CleanupRotated(aggressive) })
 	if rotated.FilesRemoved > 0 {
 		h.log.Warn(fmt.Sprintf("[CLEANUP] Removed %d rotated log archive(s), freed %s", rotated.FilesRemoved, format.Bytes(float64(rotated.BytesCleared))))
 	}
-	sizes := withTimeout(10*time.Second, cleanup.Sizes{}, "log survey", logs.Survey)
+	sizes := withTimeout(h.ctx, 10*time.Second, cleanup.Sizes{}, "log survey", logs.Survey)
 	candidates := sizes.Exceeded
 	if aggressive {
-		all := withTimeout(30*time.Second, []cleanup.LogInfo(nil), "log listing", logs.AllLogFiles)
+		all := withTimeout(h.ctx, 30*time.Second, []cleanup.LogInfo(nil), "log listing", logs.AllLogFiles)
 		if sizes.App != nil {
 			all = append(all, *sizes.App)
 		}
@@ -83,14 +85,16 @@ func (h *logCleanup) checkLogs(s *Snapshot, aggressive bool) {
 
 func (h *logCleanup) cleanOne(path string, s *Snapshot, aggressive bool) (discord.CleanedLog, bool) {
 	logs := h.ctx.Logs
-	if h.cleaned[path] {
-		return discord.CleanedLog{}, false
-	}
 	current, ok := logs.Size(path)
 	if path == logs.JournalPath {
 		current, ok = logs.JournalSize()
 	}
 	if !ok || (!aggressive && current.Size <= logs.ThresholdBytes) {
+		return discord.CleanedLog{}, false
+	}
+	// Outside pressure a log still over the threshold after its trim (a journal's active files
+	// cannot be vacuumed) is left alone; under pressure one that regrows is trimmed again.
+	if after, done := h.cleaned[path]; done && (!aggressive || current.Size <= after) {
 		return discord.CleanedLog{}, false
 	}
 	if s.Now-h.lastAlert[path] < h.ctx.Cfg.AlertCooldown {
@@ -102,17 +106,22 @@ func (h *logCleanup) cleanOne(path string, s *Snapshot, aggressive bool) (discor
 	} else {
 		h.log.Info(fmt.Sprintf("    Cleaning %s: %s > %s", path, size, logs.ThresholdFormatted()))
 	}
-	ok = withTimeout(30*time.Second, false, "cleanup log "+path, func() bool { return logs.Clean(current, aggressive) })
+	ok = withTimeout(h.ctx, 30*time.Second, false, "cleanup log "+path, func() bool { return logs.Clean(current, aggressive) })
 	h.lastAlert[path] = s.Now
 	if !ok {
 		h.log.Error(fmt.Sprintf("    Log cleanup failed for %s - check permissions (may need root/sudo)", path))
 		return discord.CleanedLog{}, false
 	}
-	h.cleaned[path] = true
 	after := current
 	if a, ok := logs.Size(path); ok {
 		after = a
 	}
+	if path == logs.JournalPath {
+		if a, ok := logs.JournalSize(); ok {
+			after = a
+		}
+	}
+	h.cleaned[path] = after.Size
 	h.log.Info(fmt.Sprintf("    Log cleanup successful for %s (was %s, now %s)", path, size, format.Bytes(float64(after.Size))))
 	return discord.CleanedLog{Path: path, OriginalSize: size, CurrentSize: format.Bytes(float64(after.Size))}, true
 }

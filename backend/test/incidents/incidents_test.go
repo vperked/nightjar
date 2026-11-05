@@ -1,7 +1,9 @@
 package incidents_test
 
 import (
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"nightjar/internal/incidents"
@@ -170,5 +172,71 @@ func TestDraftForVisitors(t *testing.T) {
 	}
 	if _, ok := incidents.Draft(inc, map[string]string{"website": "Website"}, 2000); ok {
 		t.Fatal("nothing on the page was affected, so there is nothing to tell")
+	}
+}
+
+// A check that stays down past Join is re-alerted with growing gaps; its incident stays one and
+// closes when it recovers, rather than leaving the first half open for ever.
+func TestALongOutageClosesWhenItRecovers(t *testing.T) {
+	notes := []note{
+		n(0, "uptime", "critical", "plex is down", "timed out", "check:plex"),
+		n(300, "uptime", "critical", "plex is down", "timed out", "check:plex"),
+		n(900, "uptime", "critical", "plex is down", "timed out", "check:plex"),
+		n(2100, "uptime", "critical", "plex is down", "timed out", "check:plex"),
+		n(3000, "uptime", "ok", "plex is back up", "", "check:plex"),
+	}
+	list := incidents.Build(notes, nil, 10000, nil)
+	if len(list) != 1 || list[0].Ended == nil || *list[0].Ended != 3000 || list[0].Started != 0 {
+		t.Fatalf("one incident from 0 to the recovery at 3000, got %+v", list)
+	}
+
+	// Something else going wrong long after is its own incident; the first still ends when its
+	// check recovers, even though that comes during the second.
+	notes = []note{
+		n(0, "uptime", "critical", "plex is down", "timed out", "check:plex"),
+		n(5000, "services", "critical", "bazarr failed", "", "unit:bazarr.service"),
+		n(5100, "uptime", "ok", "plex is back up", "", "check:plex"),
+		n(5200, "services", "ok", "bazarr recovered", "", "unit:bazarr.service"),
+	}
+	list = incidents.Build(notes, nil, 10000, nil)
+	if len(list) != 2 {
+		t.Fatalf("want 2 incidents, got %+v", list)
+	}
+	bazarr, plex := list[0], list[1]
+	if plex.Ended == nil || *plex.Ended != 5100 || bazarr.Ended == nil || *bazarr.Ended != 5200 {
+		t.Fatalf("both incidents end with their recoveries: plex %+v bazarr %+v", plex.Ended, bazarr.Ended)
+	}
+	if roles := len(bazarr.Events); roles != 2 {
+		t.Fatalf("plex's recovery belongs to plex's incident, bazarr's events: %+v", bazarr.Events)
+	}
+}
+
+func TestSavingOneEntryNeverLosesTheOthers(t *testing.T) {
+	db := storage.Open(filepath.Join(t.TempDir(), "i.db"))
+	t.Cleanup(db.Close)
+
+	// Saves at the same moment each keep their own entry.
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := incidents.SetNotice(db, int64(i), &incidents.Notice{ID: int64(i), Title: "x"}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := len(incidents.AllNotices(db)); got != 20 {
+		t.Fatalf("every concurrent save should be kept, got %d of 20", got)
+	}
+
+	// What cannot be read is not overwritten with the one entry being saved.
+	db.SetMeta("incidents.feedback", "{not json")
+	if err := incidents.SetFeedback(db, 1, &incidents.Feedback{Verdict: "right"}); err == nil {
+		t.Fatal("saving over unreadable feedback should fail")
+	}
+	if raw := db.Meta("incidents.feedback"); raw != "{not json" {
+		t.Fatalf("the stored feedback should be left alone, got %q", raw)
 	}
 }

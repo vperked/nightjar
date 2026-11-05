@@ -50,6 +50,10 @@ type Torrent struct {
 	Name  string  `json:"name"`
 	Ratio float64 `json:"ratio"`
 	Size  int64   `json:"size"`
+
+	// withFiles is whether its files go with it: a torrent Sonarr or Radarr imported the item
+	// from, or one found by name that holds the item and nothing else.
+	withFiles bool
 }
 
 // Item is one movie or show on the list.
@@ -113,6 +117,9 @@ type Manager struct {
 
 	mu      sync.Mutex
 	running sync.Mutex
+	// removing is what the running pass is removing, or removed and has not saved yet, by key
+	// (under mu). Keep is refused for it: it would not stop the removal, only hide it.
+	removing map[string]bool
 }
 
 func (m *Manager) load() state {
@@ -200,6 +207,9 @@ func (m *Manager) Keep(key string, keep bool) error {
 		}
 		if it.Status == Removed {
 			return errors.New("it was already removed")
+		}
+		if m.removing[key] {
+			return errors.New("it is being removed right now")
 		}
 		st.Kept[key] = Kept{Key: key, Title: it.Title, At: float64(m.Now().Unix())}
 		delete(st.Items, key)
@@ -307,7 +317,8 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 			it.Status, it.Listed, it.LeavingAt = Leaving, t, t+notice
 			newly = append(newly, it)
 		}
-		if !cfg.MediaCleanup && (it.Status == Leaving || it.Status == Waiting) {
+		// Failed too: turned back on, it is listed again with a fresh notice, not removed at once.
+		if !cfg.MediaCleanup && (it.Status == Leaving || it.Status == Waiting || it.Status == Failed) {
 			it.Status, it.LeavingAt, it.Reason = Preview, 0, ""
 		}
 	}
@@ -329,6 +340,8 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 			return fmt.Errorf("could not list qBittorrent's torrents: %v", err)
 		}
 	}
+	// Items whose torrents could not be told this pass: they are not removed until they can.
+	unsure := map[string]string{}
 	for _, it := range st.Items {
 		if it.Status == Removed {
 			continue
@@ -348,12 +361,22 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 				if e.Size > 0 && it.Size == 0 {
 					it.Size = e.Size
 				}
-				hashes, _ = c.Downloads(ctx, e.ID)
+				// Without its download history, going by name could take a pack that holds other titles.
+				h, err := c.Downloads(ctx, e.ID)
+				if err != nil {
+					unsure[it.Key] = fmt.Sprintf("could not read %s's download history (%v); it is tried again on the next pass", c.Name(), err)
+					log.Warn("Could not read the download history of "+it.Title, "err", err)
+					continue
+				}
+				hashes = h
 			}
 		}
 		for _, tr := range torrents {
-			if slices.Contains(hashes, strings.ToLower(tr.Hash)) || (len(hashes) == 0 && sameTitle(tr.Name, it.Title, it.Year)) {
-				it.Torrents = append(it.Torrents, Torrent{Hash: tr.Hash, Name: tr.Name, Ratio: tr.Ratio, Size: tr.Size})
+			switch {
+			case slices.Contains(hashes, strings.ToLower(tr.Hash)):
+				it.Torrents = append(it.Torrents, Torrent{Hash: tr.Hash, Name: tr.Name, Ratio: tr.Ratio, Size: tr.Size, withFiles: true})
+			case len(hashes) == 0 && sameTitle(tr.Name, it.Title, it.Year):
+				it.Torrents = append(it.Torrents, Torrent{Hash: tr.Hash, Name: tr.Name, Ratio: tr.Ratio, Size: tr.Size, withFiles: holdsOnly(tr, it)})
 			}
 		}
 	}
@@ -381,6 +404,10 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 			if len(gone) >= maxRemovals {
 				break
 			}
+			if why, ok := unsure[it.Key]; ok {
+				it.Reason = why
+				continue
+			}
 			low := slices.IndexFunc(it.Torrents, func(tr Torrent) bool { return tr.Ratio < cfg.MediaCleanupRatio })
 			if low >= 0 && t < it.LeavingAt+giveUp {
 				tr := it.Torrents[low]
@@ -388,9 +415,25 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 				it.Reason = fmt.Sprintf("seeding to ratio %.2f: at %.2f; removed anyway on %s", cfg.MediaCleanupRatio, tr.Ratio, time.Unix(int64(it.LeavingAt+giveUp), 0).Format("Mon 2 Jan"))
 				continue
 			}
+			// Kept since the pass began: it stays. Otherwise Keep is refused from here on.
+			m.mu.Lock()
+			_, kept := m.load().Kept[it.Key]
+			if !kept {
+				if m.removing == nil {
+					m.removing = map[string]bool{}
+				}
+				m.removing[it.Key] = true
+			}
+			m.mu.Unlock()
+			if kept {
+				continue
+			}
 			if err := m.remove(ctx, src, it, entries); err != nil {
 				it.Status, it.Reason = Failed, err.Error()
 				log.Warn("Could not remove "+it.Title, "err", err)
+				m.mu.Lock()
+				delete(m.removing, it.Key)
+				m.mu.Unlock()
 				continue
 			}
 			it.Status, it.Reason, it.RemovedAt = Removed, "", t
@@ -411,6 +454,7 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 	}
 	st.Kept = latest.Kept
 	m.save(st)
+	m.removing = nil
 	m.mu.Unlock()
 	m.announce(newly, gone, cfg)
 	return nil
@@ -434,10 +478,11 @@ func sortedDue(items map[string]*Item, t float64) []*Item {
 	return due
 }
 
-// remove deletes the torrents with their files, then the media through whoever manages it.
+// remove deletes the torrents (with their files, when they are the item's alone), then the media
+// through whoever manages it.
 func (m *Manager) remove(ctx context.Context, src Sources, it *Item, entries map[string][]arr.Entry) error {
 	for _, tr := range it.Torrents {
-		if src.QB == nil || src.QB.Delete(tr.Hash, true) == nil {
+		if src.QB == nil || src.QB.Delete(tr.Hash, tr.withFiles) == nil {
 			return fmt.Errorf("qBittorrent did not remove the torrent %s", tr.Name)
 		}
 	}
@@ -467,6 +512,24 @@ func sameTitle(name, title string, year int) bool {
 		return false
 	}
 	return year == 0 || strings.Contains(n, fmt.Sprintf(" %d ", year))
+}
+
+// holdsOnly reports whether a torrent found by name holds the item and little else, so its files
+// can go with it: its content is the item's file, or a folder holding all of its files, and it is
+// not much bigger than the item. A pack or collection holding other titles never is; nor is a
+// torrent whose content path qBittorrent does not give (before 4.3.2) or that is somewhere else.
+// The others are removed with their files kept, and the item's own files go with the media.
+func holdsOnly(tr qbittorrent.Torrent, it *Item) bool {
+	content := strings.TrimRight(tr.ContentPath, "/")
+	if content == "" || len(it.files) == 0 || it.Size <= 0 || float64(tr.Size) > float64(it.Size)*1.1 {
+		return false
+	}
+	for _, f := range it.files {
+		if f != content && !strings.HasPrefix(f, content+"/") {
+			return false
+		}
+	}
+	return true
 }
 
 func describe(it *Item) string {
@@ -526,9 +589,22 @@ func noun(n int) string {
 	return "titles"
 }
 
-// Loop runs a pass an hour after starting and every six hours after, until stop closes.
+// FirstWait is how long Loop waits before its first pass: an hour, so a restart does not hit Plex
+// straight away, unless the last pass failed. Then its error would stay on the page for that hour
+// although the fault (often fixed by the update that restarted the monitor) may be gone.
+func (m *Manager) FirstWait() time.Duration {
+	m.mu.Lock()
+	failed := m.load().Error != ""
+	m.mu.Unlock()
+	if failed {
+		return 2 * time.Minute
+	}
+	return time.Hour
+}
+
+// Loop runs a pass after FirstWait and every six hours after, until stop closes.
 func (m *Manager) Loop(stop <-chan struct{}) {
-	wait := time.Hour
+	wait := m.FirstWait()
 	for {
 		select {
 		case <-stop:

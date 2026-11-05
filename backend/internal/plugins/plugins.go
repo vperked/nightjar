@@ -112,6 +112,11 @@ type Store interface {
 	SetMeta(key, value string) error
 }
 
+// metaReader is a Store that tells a value it could not read from one never set.
+type metaReader interface {
+	MetaValue(key string) (string, error)
+}
+
 const stateKey = "plugins.state"
 
 var (
@@ -138,21 +143,45 @@ type Manager struct {
 	store Store
 	now   func() time.Time
 
+	// NotifyChanged, when set, is called after a Scan finds the plugins that deliver alerts changed
+	// (one added, removed or renamed): alert channels are set up when Nightjar starts.
+	NotifyChanged func()
+
 	mu      sync.Mutex
 	plugins map[string]*Plugin
 	state   map[string]State
 	cards   map[string]CardData
 	last    map[string]LastRun
 	due     map[string]time.Time
+	// stateRead is set once the owner's choices are read; until then none are saved over them.
+	stateRead bool
 }
 
 // New is a manager for the plugins in dir. Call Scan to find them.
 func New(dir string, store Store) *Manager {
 	m := &Manager{dir: dir, store: store, now: time.Now, plugins: map[string]*Plugin{}, state: map[string]State{}, cards: map[string]CardData{}, last: map[string]LastRun{}, due: map[string]time.Time{}}
 	if store != nil {
-		_ = json.Unmarshal([]byte(store.Meta(stateKey)), &m.state)
+		_ = m.loadState()
 	}
 	return m
+}
+
+// loadState reads the owner's choices from the store.
+func (m *Manager) loadState() error {
+	var raw string
+	if r, ok := m.store.(metaReader); ok {
+		v, err := r.MetaValue(stateKey)
+		if err != nil {
+			return err
+		}
+		raw = v
+	} else {
+		raw = m.store.Meta(stateKey)
+	}
+	state := map[string]State{}
+	_ = json.Unmarshal([]byte(raw), &state)
+	m.state, m.stateRead = state, true
+	return nil
 }
 
 // Dir is the plugins folder, absolute when it can be.
@@ -175,20 +204,40 @@ func (m *Manager) Scan() error {
 			continue
 		}
 		p := load(filepath.Join(m.dir, e.Name()))
+		if p.Provides == nil {
+			p.Provides = []string{} // listed with its problem, and never as null
+		}
 		if other, ok := found[p.ID]; ok {
 			p.Problem = "another plugin, in " + other.Dir + ", has the same id"
 		}
 		found[p.ID] = p
 	}
 	m.mu.Lock()
+	before := notifiers(m.plugins)
 	m.plugins = found
 	for id := range m.cards {
 		if found[id] == nil {
 			delete(m.cards, id)
 		}
 	}
+	changed := before != notifiers(found)
 	m.mu.Unlock()
+	if changed && m.NotifyChanged != nil {
+		m.NotifyChanged()
+	}
 	return nil
+}
+
+// notifiers names the plugins that deliver alerts, by id and name, to tell when they change.
+func notifiers(plugins map[string]*Plugin) string {
+	var out []string
+	for _, p := range plugins {
+		if p.provides(Notify) {
+			out = append(out, p.ID+"\x00"+p.Name)
+		}
+	}
+	slices.Sort(out)
+	return strings.Join(out, "\x01")
 }
 
 // load reads one plugin's folder. A plugin that cannot run still loads, with its problem.
@@ -244,27 +293,63 @@ func (p *Plugin) problem() string {
 	if p.Run == "" {
 		return `"run" must name the program to run`
 	}
-	prog, err := p.program()
-	if err != nil {
+	if err := owned(filepath.Join(p.Dir, "plugin.json")); err != nil {
 		return err.Error()
 	}
-	// Like sshd: a plugin others could change is not run, since it runs as Nightjar.
-	for _, path := range []string{p.Dir, filepath.Join(p.Dir, "plugin.json"), prog} {
-		info, err := os.Stat(path)
-		if err != nil {
-			return err.Error()
-		}
-		if info.Mode().Perm()&0o022 != 0 {
-			return filepath.Base(path) + " can be changed by other users; run chmod go-w on it"
-		}
-		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != 0 && int(st.Uid) != os.Geteuid() {
-			return filepath.Base(path) + " belongs to another user; it must belong to root or to the user Nightjar runs as"
-		}
+	prog, err := p.runnable()
+	if err != nil {
+		return err.Error()
 	}
 	if info, _ := os.Stat(prog); info != nil && info.Mode().Perm()&0o111 == 0 {
 		return p.Run + " is not executable; run chmod +x on it"
 	}
 	return ""
+}
+
+// runnable is the plugin's program, once nobody but root and the user Nightjar runs as could change
+// it or swap it for another: like sshd, a plugin others could change is not run, since it runs as
+// Nightjar. That takes the program and every folder it is reached through, from the plugins folder
+// down. It is asked again before every run, since what was safe when the folder was read may not be.
+func (p *Plugin) runnable() (string, error) {
+	prog, err := p.program()
+	if err != nil {
+		return "", err
+	}
+	dir, err := filepath.EvalSymlinks(p.Dir)
+	if err != nil {
+		return "", err
+	}
+	paths := []string{filepath.Dir(dir), dir, prog}
+	// The folders on the way, as written in "run" and as they really are.
+	for _, path := range []string{filepath.Join(dir, p.Run), prog} {
+		for d := filepath.Dir(path); ; d = filepath.Dir(d) {
+			if rel, err := filepath.Rel(dir, d); err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+				break
+			}
+			paths = append(paths, d)
+		}
+	}
+	for _, path := range paths {
+		if err := owned(path); err != nil {
+			return "", err
+		}
+	}
+	return prog, nil
+}
+
+// owned says why path could be changed by someone other than root and the user Nightjar runs as.
+func owned(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return errors.New(filepath.Base(path) + " can be changed by other users; run chmod go-w on it")
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != 0 && int(st.Uid) != os.Geteuid() {
+		return errors.New(filepath.Base(path) + " belongs to another user; it must belong to root or to the user Nightjar runs as")
+	}
+	return nil
 }
 
 // program is the plugin's program, which must be inside its folder.
@@ -384,6 +469,12 @@ func (m *Manager) Configure(id string, c Change) error {
 	if !ok {
 		return ErrUnknown
 	}
+	// Saving over choices that could not be read would lose every other plugin's.
+	if m.store != nil && !m.stateRead {
+		if err := m.loadState(); err != nil {
+			return fmt.Errorf("the plugins' settings could not be read: %w", err)
+		}
+	}
 	st := m.state[id]
 	next := map[string]string{}
 	for k, v := range st.Settings {
@@ -487,7 +578,7 @@ func (m *Manager) run(ctx context.Context, id, mode string, in input) ([]byte, e
 	case !plugin.provides(mode):
 		return nil, fmt.Errorf("%s has no %s", plugin.Name, mode)
 	}
-	prog, err := plugin.program()
+	prog, err := plugin.runnable()
 	if err != nil {
 		return nil, err
 	}

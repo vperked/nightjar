@@ -1,12 +1,13 @@
 import { fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { api, onUnauthorized, UnauthorizedError } from '../src/api/client';
 import { ConfigContext } from '../src/api/ConfigContext';
 import { NotificationsProvider } from '../src/api/NotificationsContext';
 import { ServicesProvider, useServices } from '../src/api/ServicesContext';
 import type { Notification, PlexStream, QBState, QBTorrent, Service, SettingField, SetupStatus, Unit, UpdateTarget, UpdatesResponse } from '../src/api/types';
 import { UpdatesProvider } from '../src/api/UpdatesContext';
+import { buildIn, useNewBuild } from '../src/freshness';
 import { AccountSection, CreateAdmin, SignIn } from '../src/components/Account';
 import { AccountMenu } from '../src/components/AccountMenu';
 import { SectionsPanel } from '../src/components/Sections';
@@ -21,6 +22,9 @@ import { NowPlaying } from '../src/components/PlexNow';
 import { PlexStreamSheet } from '../src/components/PlexStreamSheet';
 import { Diagnosis } from '../src/components/Diagnosis';
 import { Select } from '../src/components/Select';
+import { AttackWatch } from '../src/components/Attacks';
+import { FirewallManager, within as inNetwork, type FirewallTarget } from '../src/components/Firewall';
+import type { FirewallRule, FirewallStatus } from '../src/api/types';
 import { ToastProvider } from '../src/components/Toasts';
 import { TrendChart, withGaps } from '../src/components/TrendChart';
 import { State, Ticks } from '../src/components/ui';
@@ -38,7 +42,7 @@ import { NetworkPage } from '../src/pages/Network';
 import { AppsPage } from '../src/pages/Apps';
 import { LogsPage } from '../src/pages/Logs';
 import { NotificationsPage } from '../src/pages/Notifications';
-import { authorizeCommand, ServerDetail } from '../src/pages/Servers';
+import { ServerDetail } from '../src/pages/Servers';
 import { QBittorrentPage } from '../src/pages/QBittorrent';
 import { group } from '../src/pages/qbittorrent/states';
 import { ServiceRow, ServicesPage } from '../src/pages/Services';
@@ -55,7 +59,7 @@ import { PluginCardBody } from '../src/components/PluginCards';
 import { StatusPage, StatusView } from '../src/pages/StatusPage';
 import { sanitizeHTML, scopeCSS } from '../src/customCode';
 import { SystemServicesPage } from '../src/pages/SystemServices';
-import { UpdatesPage, verdict } from '../src/pages/Updates';
+import { UpdatesPage, isMajor, itemState, verdict } from '../src/pages/Updates';
 
 const svc = (over: Partial<Service>): Service => ({
   name: 'api',
@@ -451,6 +455,12 @@ describe('SettingsPage', () => {
 
 describe('demo data', () => {
   it('answers the API and keeps edits', async () => {
+    // At midday: from 03:00 to 03:30 the demo's nightly backup window puts nas-backup in maintenance.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-05T12:00:00'));
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     const { demoFetch } = await import('../src/api/demo');
     const get = async (path: string) => (await demoFetch(path)).json();
     const { services } = await get('/api/services');
@@ -540,6 +550,109 @@ describe('updates', () => {
     expect(verdict(t({}))).toEqual(['good', 'Up to date']);
   });
 
+  it('tells where each update of an Update all is, and which are major versions', () => {
+    const started = 100;
+    expect(itemState(t({ busy: 'queued' }), started)).toBe('waiting');
+    expect(itemState(t({ busy: 'updating' }), started)).toBe('running');
+    expect(itemState(t({ runs: [{ at: 150, ok: true, auto: false }] }), started)).toBe('updated');
+    expect(itemState(t({ available: true, runs: [{ at: 150, ok: false, auto: false }] }), started)).toBe('failed');
+    expect(itemState(t({ available: true, runs: [{ at: 50, ok: true, auto: false }] }), started)).toBe('waiting'); // an older run is not this one
+    expect(itemState(t({ available: false }), started)).toBe('skipped');
+    expect(itemState(undefined, started)).toBe('skipped');
+    expect(isMajor(t({ installed: '2.3.7.5365', latest: '3.0.0.5737' }))).toBe(true);
+    expect(isMajor(t({ installed: '4.0.14', latest: 'v4.0.15' }))).toBe(false);
+    expect(isMajor(t({ kind: 'git', installed: 'v1.2', latest: 'v2.0' }))).toBe(false);
+  });
+
+  it('lets you choose what Update all installs, then follows it', async () => {
+    localStorage.removeItem('nightjar.updateAll');
+    const prowlarr = t({ id: 'prowlarr', name: 'Prowlarr', installed: '2.3.7.5365', latest: '3.0.0.5737', available: true });
+    const adguard = t({ id: 'adguard', name: 'AdGuard Home', kind: 'release', installed: '0.107.79', latest: '0.107.80', available: true });
+    const applied: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      const m = url.match(/^\/api\/updates\/([a-z]+)\/update$/);
+      if (m && init?.method === 'POST') {
+        applied.push(m[1]);
+        return json({ queued: true }, 202);
+      }
+      const busy = applied.includes('prowlarr');
+      return json(
+        page([
+          { ...prowlarr, busy: busy ? 'updating' : undefined, live: busy ? { started: Date.now() / 1000, lines: ['Asking Prowlarr to update itself to 3.0.0.5737 (a major update)'] } : undefined },
+          adguard,
+        ]),
+      );
+    });
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <UpdatesProvider enabled>
+            <UpdatesPage />
+          </UpdatesProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Update all (2)' }));
+    const sheet = screen.getByRole('dialog', { name: 'Update all' });
+    // A major version is marked, and anything can be left out.
+    expect(within(sheet).getByText('Major version')).toBeInTheDocument();
+    fireEvent.click(within(sheet).getAllByRole('checkbox')[1]);
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Update 1 item' }));
+    await waitFor(() => expect(applied).toEqual(['prowlarr']));
+    // The page follows it: how far it is, and the running one's log, shown once.
+    const run = await screen.findByRole('region', { name: 'Update all' });
+    expect(within(run).getByText(/Updating all · 0 of 1 done/)).toBeInTheDocument();
+    expect(await within(run).findByText(/\(a major update\)/)).toBeInTheDocument();
+    expect(screen.getAllByText(/\(a major update\)/)).toHaveLength(1);
+    expect(JSON.parse(localStorage.getItem('nightjar.updateAll')!).ids).toEqual(['prowlarr']);
+    localStorage.removeItem('nightjar.updateAll');
+  });
+
+  it('shows what an update is doing as it does it, and keeps its log', async () => {
+    const started = Date.now() / 1000 - 75;
+    const running = t({
+      installed: '4.0.14',
+      latest: '4.0.15',
+      available: true,
+      busy: 'updating',
+      live: { started, lines: ['Updating Sonarr: 4.0.14 → 4.0.15', 'Asking Sonarr to update itself to 4.0.15', 'It stopped answering: restarting'] },
+    });
+    const done = t({
+      id: 'os',
+      name: 'OS packages (apt)',
+      kind: 'system',
+      runs: [
+        {
+          at: 2,
+          ok: false,
+          auto: true,
+          detail: 'apt-get failed (exit 100)',
+          log: ['Updating OS packages (apt): 3 packages', '$ apt-get -y upgrade', 'E: Could not get lock /var/lib/dpkg/lock-frontend', 'Failed: apt-get failed (exit 100)'],
+        },
+      ],
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => json(page([running, done])));
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <UpdatesProvider enabled>
+            <UpdatesPage />
+          </UpdatesProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    // While it runs, its log shows under it without opening anything, with how long it has taken.
+    expect(await screen.findByText('Asking Sonarr to update itself to 4.0.15')).toBeInTheDocument();
+    expect(screen.getByText('It stopped answering: restarting')).toBeInTheDocument();
+    expect(screen.getByText(/1m 1\ds so far/)).toBeInTheDocument();
+    // A finished run keeps its log, which says why it failed.
+    fireEvent.click(screen.getByText('OS packages (apt)'));
+    fireEvent.click(await screen.findByText('Log'));
+    expect(screen.getByText('E: Could not get lock /var/lib/dpkg/lock-frontend')).toBeInTheDocument();
+    expect(screen.getByText('$ apt-get -y upgrade')).toHaveClass('log-cmd');
+  });
+
   it('lists targets, installs an update and turns on auto-update', async () => {
     const sonarr = t({ installed: '4.0.14', latest: '4.0.15', available: true });
     const qb = t({ id: 'qb', name: 'qBittorrent', kind: 'release', repo: 'qbittorrent/qBittorrent', can_update: false, installed: '5.1.4', latest: '5.1.4' });
@@ -581,10 +694,17 @@ describe('updates', () => {
     const adguard = (await get()).targets.find((x) => x.id === 'adguard-home')!;
     expect(adguard.available).toBe(true);
     expect((await demoFetch('/api/updates/adguard-home/update', { method: 'POST', body: '{}' })).status).toBe(202);
-    await vi.advanceTimersByTimeAsync(4000);
+    // Its log fills a line at a time while it runs.
+    await vi.advanceTimersByTimeAsync(1500);
+    const midway = (await get()).targets.find((x) => x.id === 'adguard-home')!;
+    expect(midway.busy).toBe('updating');
+    expect(midway.live?.lines[0]).toMatch(/^Updating AdGuard Home/);
+    await vi.advanceTimersByTimeAsync(10000);
     const after = (await get()).targets.find((x) => x.id === 'adguard-home')!;
     expect(after.available).toBe(false);
     expect(after.runs?.[0]).toMatchObject({ ok: true, to: 'v0.107.80' });
+    expect(after.runs?.[0].log?.at(-1)).toBe('Done');
+    expect(after.live).toBeUndefined();
     vi.useRealTimers();
   });
 });
@@ -1084,11 +1204,13 @@ describe('easy to use', () => {
         </ToastProvider>
       </MemoryRouter>,
     );
+    localStorage.removeItem('nightjar.updateAll');
     fireEvent.click(await screen.findByText('Update all (2)'));
-    expect(screen.getByText(/the monitor restarts last/)).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Yes, update all'));
+    expect(screen.getByText(/restarts the monitor, so goes last/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Update 2 items' }));
     await waitFor(() => expect(fetchMock.mock.calls.filter(([, i]) => i?.method === 'POST')).toHaveLength(2));
     expect(fetchMock.mock.calls.filter(([, i]) => i?.method === 'POST').map(([u]) => u)).toEqual(['/api/updates/sonarr/update', '/api/updates/nightjar/update']);
+    localStorage.removeItem('nightjar.updateAll');
   });
 
   it('Escape closes a form', () => {
@@ -1153,12 +1275,106 @@ describe('network', () => {
     expect(screen.getAllByText('10% of link')).toHaveLength(1);
     expect(screen.getByText(/speeds from qBittorrent \(includes uTP\)/)).toBeInTheDocument();
     expect(screen.getByText('198.51.100.7')).toBeInTheDocument();
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(1), { timeout: 2500 });
-    expect(String(fetchMock.mock.calls[1][0])).toBe('/api/network?since=101');
+    // The page also asks for the attack watch; the meter's own polls ask only for new samples.
+    const meter = () => fetchMock.mock.calls.map(([u]) => String(u)).filter((u) => u.startsWith('/api/network'));
+    await waitFor(() => expect(meter().length).toBeGreaterThan(1), { timeout: 2500 });
+    expect(meter()[1]).toBe('/api/network?since=101');
     fireEvent.click(screen.getByRole('button', { name: /^wg0/ }));
     expect(screen.getByRole('button', { name: /^wg0/ })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText(/wg0/, { selector: '.page-sub span' })).toBeInTheDocument();
   });
+
+  it('shows the page when a list comes back null, as a monitor before the fix sent', async () => {
+    const nic = {
+      name: 'eth0',
+      up: true,
+      default: true,
+      virtual: false,
+      speed_mbps: 1000,
+      rx_bps: 12_500_000,
+      tx_bps: 0,
+      rx_pps: 0,
+      tx_pps: 0,
+      rx_peak: 0,
+      tx_peak: 0,
+      rx_avg: 0,
+      tx_avg: 0,
+      rx_total: 0,
+      tx_total: 0,
+      errors: 0,
+      drops: 0,
+    };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ enabled: true, history: [], network: { interfaces: [nic], samples: { eth0: null }, processes: null, hosts: null, connections: 0, since: 90 } }), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    );
+    render(
+      <MemoryRouter>
+        <NetworkPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('100 Mbit/s')).toBeInTheDocument();
+    expect(screen.queryByText(/Can't reach the monitor/)).not.toBeInTheDocument();
+  });
+
+  it('rides out a dropped poll, and says so only once the monitor stays out of reach', async () => {
+    let calls = 0;
+    const answer = () =>
+      new Response(
+        JSON.stringify({
+          enabled: true,
+          history: [],
+          network: {
+            interfaces: [
+              {
+                name: 'eth0',
+                up: true,
+                default: true,
+                virtual: false,
+                rx_bps: 1000,
+                tx_bps: 0,
+                rx_pps: 0,
+                tx_pps: 0,
+                rx_peak: 0,
+                tx_peak: 0,
+                rx_avg: 0,
+                tx_avg: 0,
+                rx_total: 0,
+                tx_total: 0,
+                errors: 0,
+                drops: 0,
+              },
+            ],
+            samples: { eth0: [{ ts: 100, rx: 1, tx: 2 }] },
+            processes: [],
+            hosts: [],
+            connections: 0,
+            since: 90,
+          },
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      );
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      calls++;
+      if (calls === 1 || calls === 3) return answer();
+      throw new TypeError('Failed to fetch');
+    });
+    render(
+      <MemoryRouter>
+        <NetworkPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('eth0', { selector: '.page-sub span' })).toBeInTheDocument();
+    // One dropped poll, then an answer: no alarm.
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(3), { timeout: 4000 });
+    expect(screen.queryByText(/Can't reach the monitor/)).not.toBeInTheDocument();
+    // Three in a row: now it says so, and the last reading stays.
+    expect(await screen.findByText(/Can't reach the monitor/, {}, { timeout: 5000 })).toBeInTheDocument();
+    expect(calls).toBeGreaterThanOrEqual(6);
+    expect(screen.getByText('eth0', { selector: '.page-sub span' })).toBeInTheDocument();
+  }, 15000);
 });
 
 describe('status page design', () => {
@@ -1248,7 +1464,10 @@ describe('status page design', () => {
       '@import url("https://fonts.example/a.css");\nbody { background: #111 }\n:root{--x:1}\n.status-row { color: red; content: "}" }\n@keyframes glow { to { opacity: 1 } }\n@media (max-width: 600px) { html .status-top { display: none } }',
       '.sd-frame',
     );
-    expect(css.startsWith('@import url("https://fonts.example/a.css");\n@keyframes glow')).toBe(true);
+    // An imported sheet would style the whole dashboard, so the preview goes without it; its own
+    // animations are renamed so they cannot replace the dashboard's.
+    expect(css.startsWith('@keyframes nj-preview-glow')).toBe(true);
+    expect(css).not.toContain('@import');
     expect(css).toContain('@scope (.sd-frame) {\n:scope { background: #111 }\n:scope{--x:1}\n.status-row { color: red; content: "}" }\n@media (max-width: 600px) { :scope .status-top');
   });
 
@@ -1832,7 +2051,23 @@ describe('servers', () => {
 
 describe('analytics', () => {
   const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
-  const point = (t: number, over = {}) => ({ t, up: 1, cpu: 20, cpu_max: 40, mem: 50, temp: 55, temp_max: 60, disk: 80, rx: 1000, tx: 500, latency: null, minutes: 5, ...over });
+  const point = (t: number, over = {}) => ({
+    t,
+    up: 1,
+    cpu: 20,
+    cpu_max: 40,
+    mem: 50,
+    mem_max: 60,
+    temp: 55,
+    temp_max: 60,
+    disk: 80,
+    rx: 1000,
+    tx: 500,
+    latency: null,
+    latency_max: null,
+    minutes: 5,
+    ...over,
+  });
   const summary = (over = {}) => ({
     coverage: 1,
     uptime: 100,
@@ -1977,6 +2212,7 @@ describe('docs', () => {
       '/servers',
       '/servers/analytics',
       '/network',
+      '/network/firewall',
       '/plex',
       '/qbittorrent',
       '/apps',
@@ -2052,7 +2288,7 @@ describe('docs', () => {
       </MemoryRouter>,
     );
     expect(screen.getByRole('heading', { level: 1, name: 'Watching other servers' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /Next →\s*Analytics/ })).toHaveAttribute('href', '/docs/analytics');
+    expect(screen.getByRole('link', { name: /Next →\s*Attacks/ })).toHaveAttribute('href', '/docs/attacks');
     expect(screen.getByText(/\d+ min read/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Search the docs'), { target: { value: 'quiet hours' } });
     const hit = await screen.findAllByRole('link', { name: /Quiet hours/ });
@@ -2239,9 +2475,11 @@ describe('two-factor and backups', () => {
   });
 
   it('sets up two-factor sign-in and shows the recovery codes once', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) =>
-      String(input).endsWith('/begin') ? json({ secret: 'JBSWY3DPEHPK3PXP', link: 'otpauth://totp/Nightjar:jay?secret=JBSWY3DPEHPK3PXP' }) : json({ recovery: ['aaaaa-bbbbb', 'ccccc-ddddd'] }),
-    );
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) =>
+        String(input).endsWith('/begin') ? json({ secret: 'JBSWY3DPEHPK3PXP', link: 'otpauth://totp/Nightjar:jay?secret=JBSWY3DPEHPK3PXP' }) : json({ recovery: ['aaaaa-bbbbb', 'ccccc-ddddd'] }),
+      );
     render(
       <ToastProvider>
         <ConfigContext.Provider value={account}>
@@ -2252,9 +2490,13 @@ describe('two-factor and backups', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Set it up' }));
     expect(await screen.findByText('JBSW Y3DP EHPK 3PXP')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Code from the app'), { target: { value: '654321' } });
+    // Turning it on asks for the password too.
+    expect(screen.getByRole('button', { name: 'Turn on' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'correct horse battery' } });
     fireEvent.click(screen.getByRole('button', { name: 'Turn on' }));
     expect(await screen.findByText(/aaaaa-bbbbb/)).toBeInTheDocument();
     expect(screen.getByText(/not shown again/)).toBeInTheDocument();
+    expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toEqual({ password: 'correct horse battery', code: '654321' });
   });
 
   it('restores a backup once confirmed', async () => {
@@ -2474,16 +2716,18 @@ describe('SSH for a watched server', () => {
         return json({
           keys: [{ path: '/srv/nightjar/ssh/nightjar', name: 'nightjar', type: 'ED25519', fingerprint: 'SHA256:abc', public: 'ssh-ed25519 AAAATEST nightjar@box', own: true }],
         });
+      const saved = () => ({
+        ...host,
+        ssh: { port: 22, user: 'admin', key: '/srv/nightjar/ssh/nightjar' },
+        ssh_command: 'ssh -i /srv/nightjar/ssh/nightjar admin@vps.example.net',
+        ssh_check: { ok: true, at: Date.now() / 1000 - 120, as: 'admin@vps', host_key: 'ED25519 SHA256:hostkey' },
+      });
       if (url === '/api/hosts/h1/ssh' && method === 'PUT') {
         ssh = JSON.parse(String(init?.body));
-        return json({
-          host: { ...host, ssh: { port: 22, user: 'root', key: '/srv/nightjar/ssh/nightjar' }, ssh_command: 'ssh -i /srv/nightjar/ssh/nightjar root@vps.example.net' },
-          test: { ok: true, output: 'root@vps\n first login' },
-        });
+        return json({ host: saved(), test: { ok: true, output: 'admin@vps\n first login' } });
       }
-      if (url === '/api/hosts/h1/ssh/test') return json({ output: 'root@vps\n up 3 days' });
-      if (url === '/api/hosts/h1')
-        return json({ host: ssh ? { ...host, ssh: { port: 22, user: 'root', key: '/srv/nightjar/ssh/nightjar' }, ssh_command: 'ssh -i /srv/nightjar/ssh/nightjar root@vps.example.net' } : host });
+      if (url === '/api/hosts/h1/ssh/test') return json({ output: 'admin@vps\n up 3 days' });
+      if (url === '/api/hosts/h1') return json({ host: ssh ? saved() : host });
       return json({}, 404);
     });
     render(
@@ -2498,21 +2742,26 @@ describe('SSH for a watched server', () => {
       </MemoryRouter>,
     );
     fireEvent.click(await screen.findByRole('button', { name: 'Set up SSH…' }));
-    // The key's public half is shown to copy; the host defaults to the server's own address.
-    expect(await screen.findByText('ssh-ed25519 AAAATEST nightjar@box')).toBeInTheDocument();
+    // It asks whether the key is on the server; the host defaults to the server's own address.
+    expect(await screen.findByText('Is nightjar on vps already?')).toBeInTheDocument();
     expect(screen.getByLabelText('Host')).toHaveAttribute('placeholder', 'vps.example.net');
+    // Adding it by hand shows the public line to add, and nothing else to run.
+    expect(screen.queryByText('ssh-ed25519 AAAATEST nightjar@box')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'I’ll add it' }));
+    expect(screen.getByText('ssh-ed25519 AAAATEST nightjar@box')).toBeInTheDocument();
+    expect(screen.queryByText(/mkdir/)).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('User'), { target: { value: 'admin' } });
-    const sshSection = screen.getByText('ssh-ed25519 AAAATEST nightjar@box').closest('section') as HTMLElement;
-    fireEvent.click(within(sshSection).getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save and test' }));
     await waitFor(() => expect(ssh).toEqual({ key: '/srv/nightjar/ssh/nightjar', user: 'admin', port: 22 }));
-    // Saved: the command to log in by hand, and the actions.
-    expect(await screen.findByText('ssh -i /srv/nightjar/ssh/nightjar root@vps.example.net')).toBeInTheDocument();
+    // Saved and tried at once: whether it logs in, when, and the host key it trusts.
+    expect(await screen.findByText('admin@vps')).toBeInTheDocument();
+    expect(screen.getByText(/Logs in as/)).toBeInTheDocument();
+    expect(screen.getByText('worked 2m ago')).toBeInTheDocument();
+    expect(screen.getByText('ED25519 SHA256:hostkey')).toBeInTheDocument();
+    expect(screen.getByText('ssh -i /srv/nightjar/ssh/nightjar admin@vps.example.net')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Restart agent' })).toBeInTheDocument();
-    // Saving tried the login at once.
-    expect(await screen.findByText(/first login/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Test login' }));
-    expect(await screen.findByText(/up 3 days/)).toBeInTheDocument();
-    expect(calls).toContain('POST /api/hosts/h1/ssh/test');
+    fireEvent.click(screen.getByRole('button', { name: 'Test again' }));
+    await waitFor(() => expect(calls).toContain('POST /api/hosts/h1/ssh/test'));
     // Rebooting asks first.
     fireEvent.click(screen.getByRole('button', { name: 'Reboot…' }));
     expect(screen.getByText('Reboot vps?')).toBeInTheDocument();
@@ -2550,7 +2799,11 @@ describe('SSH for a watched server', () => {
     fireEvent.change(screen.getByLabelText('Name for the key'), { target: { value: 'laptop' } });
     fireEvent.change(box, { target: { value: '-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n-----END OPENSSH PRIVATE KEY-----' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add key' }));
-    expect(await screen.findByText('ssh-ed25519 AAAAMINE laptop@nightjar')).toBeInTheDocument();
+    // A key just added is on no server yet, so the password is asked for to put it there.
+    expect(await screen.findByLabelText('Password on the server')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add key, save and test' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'I’ll add it' }));
+    expect(screen.getByText('ssh-ed25519 AAAAMINE laptop@nightjar')).toBeInTheDocument();
     expect(posted).toEqual([{ name: 'laptop', private: '-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n-----END OPENSSH PRIVATE KEY-----' }]);
     expect(screen.queryByText(/SECRET/)).not.toBeInTheDocument();
   });
@@ -2598,7 +2851,7 @@ describe('SSH for a watched server', () => {
     expect(within(sheet).queryByText(/Download nightjar-agent/)).not.toBeInTheDocument();
     fireEvent.change(within(sheet).getByLabelText('Address'), { target: { value: '203.0.113.40' } });
     fireEvent.change(within(sheet).getByLabelText('Name'), { target: { value: 'USVA-2' } });
-    expect(await within(sheet).findByText('ssh-ed25519 AAAAMINE laptop')).toBeInTheDocument();
+    expect(await within(sheet).findByText('Is laptop on the server already?')).toBeInTheDocument();
     fireEvent.change(within(sheet).getByLabelText('Port'), { target: { value: '655' } });
     fireEvent.click(within(sheet).getByRole('button', { name: 'Add server' }));
     await waitFor(() => expect(added).toEqual({ kind: 'ssh', name: 'USVA-2', ssh: { key: key.path, user: 'root', port: 655, host: '203.0.113.40' } }));
@@ -2665,20 +2918,535 @@ describe('SSH for a watched server', () => {
     expect(calls).toContain('POST /api/hosts/h1/ssh/reinstall-agent');
   });
 
-  it('gives one command that lets the key in, safely run twice', async () => {
-    const { execFileSync } = await import('node:child_process');
-    const { mkdtempSync, readFileSync, statSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-    const home = mkdtempSync(join(tmpdir(), 'nightjar-home-'));
-    const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHk3 jay's laptop";
-    const cmd = authorizeCommand(key);
-    for (let i = 0; i < 2; i++) execFileSync('sh', ['-c', cmd], { env: { ...process.env, HOME: home } });
-    const lines = readFileSync(join(home, '.ssh', 'authorized_keys'), 'utf8')
-      .trim()
-      .split('\n');
-    expect(lines).toEqual([key]);
-    expect(statSync(join(home, '.ssh')).mode & 0o777).toBe(0o700);
-    expect(statSync(join(home, '.ssh', 'authorized_keys')).mode & 0o777).toBe(0o600);
+  it('puts the key on the server with a password it does not keep', async () => {
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+    const host = { id: 'h1', name: 'vps', address: 'https://vps.example.net:9101', added: 0, kind: 'agent', status: 'online', readings: null, history: [], problems: [] };
+    const sent: unknown[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/api/ssh/authorize') {
+        const b = JSON.parse(String(init?.body));
+        if (b.password === 'wrong') return json({ error: 'the server turned the password down' }, 422);
+        sent.push(b);
+        return json({ ok: true });
+      }
+      if (url === '/api/hosts/h1/ssh' && init?.method === 'PUT') {
+        sent.push('save');
+        return json({ host: { ...host, ssh: { port: 22, user: 'root', key: '/srv/k' } }, test: { ok: true, output: 'root@vps' } });
+      }
+      if (url === '/api/ssh/keys') return json({ keys: [{ path: '/srv/k', name: 'k', type: 'ED25519', fingerprint: 'SHA256:x', public: 'ssh-ed25519 AAAAK k', own: true }] });
+      if (url === '/api/hosts/h1') return json({ host });
+      return json({}, 404);
+    });
+    render(
+      <MemoryRouter initialEntries={['/servers/h1']}>
+        <ToastProvider>
+          <ServicesProvider enabled>
+            <Routes>
+              <Route path="/servers/:id" element={<ServerDetail />} />
+            </Routes>
+          </ServicesProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Set up SSH…' }));
+    // One step: the password puts the key on, then the login is saved and tried.
+    fireEvent.click(await screen.findByRole('button', { name: 'Add it with a password' }));
+    const pw = screen.getByLabelText('Password on the server');
+    expect(pw).toHaveAttribute('type', 'password');
+    // A refused password stops there, with nothing saved.
+    fireEvent.change(pw, { target: { value: 'wrong' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add key, save and test' }));
+    expect(await screen.findByText(/Could not add the key: the server turned the password down/)).toBeInTheDocument();
+    expect(sent).toEqual([]);
+    fireEvent.change(pw, { target: { value: 'hunter2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add key, save and test' }));
+    expect(await screen.findByText('SSH login saved')).toBeInTheDocument();
+    expect(sent).toEqual([{ id: 'h1', login: { key: '/srv/k', user: 'root', port: 22 }, password: 'hunter2' }, 'save']);
+    expect(screen.queryByLabelText('Password on the server')).not.toBeInTheDocument();
+  });
+
+  it('shows a host key nobody confirmed, and sends the password only once it is confirmed', async () => {
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+    const host = { id: 'h1', name: 'vps', address: 'https://vps.example.net:9101', added: 0, kind: 'agent', status: 'online', readings: null, history: [], problems: [] };
+    const sent: unknown[] = [];
+    let trusted = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/api/ssh/authorize') {
+        if (!trusted) return json({ error: 'Nobody has confirmed this server’s host key yet', host_key: 'ED25519 SHA256:abc' }, 422);
+        sent.push(JSON.parse(String(init?.body)));
+        return json({ ok: true });
+      }
+      if (url === '/api/ssh/trust') {
+        const b = JSON.parse(String(init?.body));
+        sent.push({ trust: b.host_key });
+        trusted = true;
+        return json({ ok: true });
+      }
+      if (url === '/api/hosts/h1/ssh' && init?.method === 'PUT') {
+        sent.push('save');
+        return json({ host: { ...host, ssh: { port: 22, user: 'root', key: '/srv/k' } }, test: { ok: true, output: 'root@vps' } });
+      }
+      if (url === '/api/ssh/keys') return json({ keys: [{ path: '/srv/k', name: 'k', type: 'ED25519', fingerprint: 'SHA256:x', public: 'ssh-ed25519 AAAAK k', own: true }] });
+      if (url === '/api/hosts/h1') return json({ host });
+      return json({}, 404);
+    });
+    render(
+      <MemoryRouter initialEntries={['/servers/h1']}>
+        <ToastProvider>
+          <ServicesProvider enabled>
+            <Routes>
+              <Route path="/servers/:id" element={<ServerDetail />} />
+            </Routes>
+          </ServicesProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Set up SSH…' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add it with a password' }));
+    fireEvent.change(screen.getByLabelText('Password on the server'), { target: { value: 'hunter2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add key, save and test' }));
+    // The key to compare on the server, and how to see it there; nothing is sent or saved yet.
+    expect(await screen.findByText('ED25519 SHA256:abc')).toBeInTheDocument();
+    expect(screen.getByText('ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub')).toBeInTheDocument();
+    expect(sent).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: 'It matches, add the key' }));
+    expect(await screen.findByText('SSH login saved')).toBeInTheDocument();
+    expect(sent).toEqual([{ trust: 'ED25519 SHA256:abc' }, { id: 'h1', login: { key: '/srv/k', user: 'root', port: 22 }, password: 'hunter2' }, 'save']);
+  });
+});
+
+describe('acting on several servers', () => {
+  it('runs an action on the selected servers that can take it, and says how each went', async () => {
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+    const base = { added: 0, kind: 'agent', status: 'online', readings: null, history: [], problems: [] };
+    const login = { port: 22, user: 'root', key: '/srv/k' };
+    let hosts = [
+      { ...base, id: 'a', name: 'nas', address: 'https://192.168.0.20:9101', ssh: login },
+      { ...base, id: 'b', name: 'pi', address: 'https://192.168.0.31:9101' },
+      { ...base, id: 'c', name: 'box', address: 'https://192.168.0.44:9101', ssh: login },
+    ];
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (method !== 'GET') calls.push(`${method} ${url}`);
+      if (url === '/api/hosts') return json({ hosts, port: 9101 });
+      if (url === '/api/hosts/a/ssh/test') return json({ output: 'root@nas\n up 3 days' });
+      if (url === '/api/hosts/c/ssh/test') return json({ error: 'the server did not answer SSH in time' }, 422);
+      const gone = url.match(/^\/api\/hosts\/([a-z])$/);
+      if (gone && method === 'DELETE') {
+        hosts = hosts.filter((h) => h.id !== gone[1]);
+        return new Response(null, { status: 204 });
+      }
+      return json({}, 404);
+    });
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <ServersPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Select' }));
+    // While choosing, the cards are boxes to tick, not links.
+    expect(screen.queryByRole('link', { name: /nas/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(screen.getAllByRole('checkbox', { checked: true })).toHaveLength(3);
+    const bar = screen.getByRole('toolbar', { name: 'Selected servers' });
+    expect(within(bar).getByText('3')).toBeInTheDocument();
+
+    // pi has no SSH login, so a test leaves it out; each server's answer is listed.
+    fireEvent.click(within(bar).getByRole('button', { name: 'Test SSH (2)' }));
+    const results = await screen.findByRole('region', { name: 'Test SSH results' });
+    await waitFor(() => expect(within(results).getByText('1 did not work')).toBeInTheDocument());
+    expect(within(results).getByText('root@nas')).toBeInTheDocument();
+    expect(within(results).getByText('the server did not answer SSH in time')).toBeInTheDocument();
+    expect(within(results).getByText('no SSH login')).toBeInTheDocument();
+    expect(calls.filter((c) => c.includes('/ssh/'))).toEqual(expect.arrayContaining(['POST /api/hosts/a/ssh/test', 'POST /api/hosts/c/ssh/test']));
+    expect(calls).not.toContain('POST /api/hosts/b/ssh/test');
+
+    // Rebooting asks first.
+    fireEvent.click(within(bar).getByRole('button', { name: 'Reboot (2)…' }));
+    expect(within(bar).getByText('Reboot 2 servers?')).toBeInTheDocument();
+    fireEvent.click(within(bar).getByRole('button', { name: 'Keep running' }));
+    expect(calls.some((c) => c.endsWith('/reboot'))).toBe(false);
+
+    // Removing them all asks too, then the selection is empty.
+    fireEvent.click(within(bar).getByRole('button', { name: 'Remove…' }));
+    fireEvent.click(within(bar).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(calls.filter((c) => c.startsWith('DELETE'))).toHaveLength(3));
+    await waitFor(() => expect(screen.queryByRole('toolbar', { name: 'Selected servers' })).not.toBeInTheDocument());
+  });
+});
+
+describe('attack watch', () => {
+  it('names each method, how strong it is and how it works, and who is most involved', () => {
+    render(
+      <AttackWatch
+        now={2000}
+        view={{
+          attacking: true,
+          current: {
+            id: 'a',
+            start: 1905,
+            methods: [{ method: 'syn_flood', value: 6100, threshold: 100, normal: 0.2 }],
+            peak_rx_bits: 8e8,
+            peak_rx_packets: 4e5,
+            sources: [
+              { address: '185.220.101.4', established: 0, syn_recv: 720, requests: 0 },
+              { address: '172.68.10.21', established: 38, syn_recv: 0, requests: 0, network: 'Cloudflare' },
+            ],
+          },
+          findings: [],
+          busy: {},
+          rx_bits: 0,
+          rx_packets: 0,
+          learning: false,
+          history: [],
+        }}
+      />,
+    );
+    expect(screen.getByText('Under attack')).toBeInTheDocument();
+    expect(screen.getByText('6.1k per second')).toBeInTheDocument();
+    expect(screen.getByText('normal here: under 1')).toBeInTheDocument();
+    expect(screen.getByText(/never finishes them/)).toBeInTheDocument();
+    expect(screen.getByText(/for 1m 35s · peak/)).toBeInTheDocument();
+    expect(screen.getByText(/Cloudflare: many visitors, never blocked/)).toBeInTheDocument();
+  });
+
+  it('says calm, and why heavy traffic that is explained is not an attack', () => {
+    render(
+      <AttackWatch
+        now={2000}
+        view={{
+          attacking: false,
+          findings: [{ method: 'volumetric', value: 0.95, threshold: 0.9, normal: 0, expected: 'apt-get is downloading' }],
+          busy: { installing: 'apt-get' },
+          rx_bits: 0,
+          rx_packets: 0,
+          learning: true,
+          history: [],
+        }}
+      />,
+    );
+    expect(screen.getByText(/Calm · still learning/)).toBeInTheDocument();
+    expect(screen.getByText('Volumetric-sized traffic (95% of the link), but apt-get is downloading: not an attack.')).toBeInTheDocument();
+  });
+
+  it('shows the defense: what it does, who it blocked, and what it cannot do, with the switch and unblock', async () => {
+    const toggled: boolean[] = [];
+    const unblocked: string[] = [];
+    const view = {
+      attacking: true,
+      current: {
+        id: 'a',
+        start: 1905,
+        methods: [{ method: 'syn_flood', value: 6100, threshold: 100, normal: 0.2 }],
+        peak_rx_bits: 8e8,
+        peak_rx_packets: 4e5,
+        sources: [
+          { address: '185.220.101.4', established: 0, syn_recv: 720, requests: 0 },
+          { address: '198.51.100.200', established: 3, syn_recv: 0, requests: 0, ssh: true },
+        ],
+      },
+      findings: [],
+      busy: {},
+      rx_bits: 0,
+      rx_packets: 0,
+      learning: false,
+      history: [],
+      defense: {
+        on: true,
+        active: true,
+        web: true,
+        measures: [{ id: 'syn_limit', name: 'SYN limit per address', how: 'New connections from one address beyond 50 a second are dropped.' }],
+        blocked: [{ address: '185.220.101.4', until: 2000 + 14 * 60, why: '720 half-open connections', where: 'firewall' as const }],
+        cannot: ['The line itself is full.'],
+      },
+    };
+    const { rerender } = render(
+      <AttackWatch
+        now={2000}
+        view={view}
+        onToggle={async (on) => {
+          toggled.push(on);
+        }}
+        onUnblock={async (a) => {
+          unblocked.push(a);
+        }}
+      />,
+    );
+    expect(screen.getByText('Defending')).toBeInTheDocument();
+    expect(screen.getByText('SYN limit per address')).toBeInTheDocument();
+    expect(screen.getByText('720 half-open connections')).toBeInTheDocument();
+    expect(screen.getByText('14m more')).toBeInTheDocument();
+    expect(screen.getByText('The line itself is full.')).toBeInTheDocument();
+    // The sources say who is blocked, and that whoever is on SSH never is.
+    expect(screen.getByText(/logged in over SSH, never blocked/)).toBeInTheDocument();
+    expect(screen.getByText(/^\s*blocked$/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock' }));
+    await waitFor(() => expect(unblocked).toEqual(['185.220.101.4']));
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off' }));
+    await waitFor(() => expect(toggled).toEqual([false]));
+
+    // An agent's view is read-only: no switch, no unblock.
+    rerender(<AttackWatch now={2000} view={{ ...view, defense: { ...view.defense, on: false, active: false, measures: [], blocked: [] } }} />);
+    expect(screen.getByText('Off: attacks are only watched')).toBeInTheDocument();
+    expect(screen.getByText(/AGENT_DEFEND=off/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Turn/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('firewall', () => {
+  // fakeFirewall is a machine's firewall that behaves like the real one: blocks before allows, the
+  // dashboard's own address refused, the default waiting to be kept.
+  function fakeFirewall(over: Partial<FirewallStatus> = {}) {
+    let st: FirewallStatus = {
+      full: true,
+      tool: 'ufw',
+      policy: 'DROP',
+      default: '',
+      open: [
+        { port: 22, what: 'SSH' },
+        { port: 8080, what: 'this dashboard' },
+      ],
+      rules: [
+        { id: 'r1', action: 'block', source: '45.142.120.0/24', note: 'kept scanning SSH', added: 1 },
+        { id: 'r0', action: 'limit', port: '22', proto: 'tcp', rate: '6/min', added: 1 },
+        { id: 'r9', action: 'block', direction: 'out', port: '25', proto: 'tcp', added: 1 },
+      ],
+      listening: [
+        { port: 22, proto: 'tcp', program: 'sshd', allowed: true },
+        { port: 8080, proto: 'tcp', program: 'nightjar', local: true },
+        { port: 51413, proto: 'udp', program: 'qbittorrent-nox' },
+      ],
+      hits: { r1: { packets: 1204, bytes: 72240 } },
+      since: Date.now() / 1000 - 3600,
+      drops: [
+        { at: Date.now() / 1000 - 60, rule: 'r1', source: '45.142.120.11', proto: 'tcp', port: 22 },
+        { at: Date.now() / 1000 - 120, rule: 'r1', source: '45.142.120.11', proto: 'tcp', port: 22 },
+        { at: Date.now() / 1000 - 180, rule: 'default', source: '198.51.100.9', proto: 'udp', port: 161 },
+        { at: Date.now() / 1000 - 240, rule: 'default', source: '198.51.100.9', proto: 'udp', port: 161 },
+      ],
+      native: 'Status: active\nTo Action From',
+      ...over,
+    };
+    const calls: string[] = [];
+    let n = 10;
+    const target: FirewallTarget = {
+      key: 'nas',
+      name: 'nas',
+      load: async () => st,
+      add: async (rule) => {
+        calls.push(`add ${rule.action} ${rule.source ?? ''} ${rule.port ?? ''} ${rule.direction ?? 'in'}`);
+        if (rule.port === '9101') throw new Error('that would cut off the dashboard (45.33.1.2, port 9101)');
+        const r = { ...rule, id: `r${n++}`, added: 2 } as FirewallRule;
+        const at = r.action === 'allow' ? -1 : st.rules.findIndex((o) => o.action === 'allow');
+        const rules = [...st.rules];
+        rules.splice(at < 0 ? rules.length : at, 0, r);
+        st = { ...st, rules };
+        return st;
+      },
+      update: async (id, rule) => {
+        calls.push(`update ${id} paused=${!!rule.paused}`);
+        st = { ...st, rules: st.rules.map((r) => (r.id === id ? ({ ...r, ...rule, id } as FirewallRule) : r)) };
+        return st;
+      },
+      remove: async (id) => {
+        calls.push(`remove ${id}`);
+        st = { ...st, rules: st.rules.filter((r) => r.id !== id) };
+        return st;
+      },
+      order: async (ids) => {
+        calls.push(`order ${ids.join(',')}`);
+        st = { ...st, rules: ids.map((i) => st.rules.find((r) => r.id === i)!) };
+        return st;
+      },
+      setDefault: async (def) => {
+        calls.push(`default ${def}`);
+        st = { ...st, default: def, pending: { default: def, until: Date.now() / 1000 + 60 } };
+        return st;
+      },
+      keep: async (keep) => {
+        calls.push(`keep ${keep}`);
+        st = { ...st, default: keep ? st.default : '', pending: undefined };
+        return st;
+      },
+    };
+    return { target, calls, get: () => st };
+  }
+
+  it('says whether an address is in a network', () => {
+    expect(inNetwork('45.142.120.11', '45.142.120.0/24')).toBe(true);
+    expect(inNetwork('45.142.121.11', '45.142.120.0/24')).toBe(false);
+    expect(inNetwork('203.0.113.7', '203.0.113.7')).toBe(true);
+    expect(inNetwork('10.1.2.3', '0.0.0.0/0')).toBe(true);
+    expect(inNetwork('2001:db8::1', '2001:db8::/32')).toBe(false);
+  });
+
+  it('adds rules in their place, refuses with the reason, pauses, moves, edits and removes them', async () => {
+    const fw = fakeFirewall();
+    render(
+      <ToastProvider>
+        <FirewallManager target={fw.target} />
+      </ToastProvider>,
+    );
+    expect(await screen.findByText('45.142.120.0/24')).toBeInTheDocument();
+    expect(screen.getByText('kept scanning SSH')).toBeInTheDocument();
+    expect(screen.getByText('tcp port 22 · at most 6 a minute each')).toBeInTheDocument();
+    expect(screen.getByText(/dropped 1,204/)).toBeInTheDocument();
+    expect(screen.getByText('this machine only')).toBeInTheDocument();
+    // The outgoing rule waits on its own tab.
+    expect(screen.queryByText('to')).not.toBeInTheDocument();
+
+    // A port's "Add rule" fills the form; the dashboard's own port is refused with the reason.
+    const submit = () => fireEvent.click(screen.getByLabelText('Port').closest('form')!.querySelector('button[type=submit]')!);
+    fireEvent.change(screen.getByLabelText('Port'), { target: { value: '9101' } });
+    submit();
+    expect(await screen.findByText(/would cut off the dashboard/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Add a rule for 51413/udp' }));
+    await waitFor(() => expect(screen.getByLabelText('Port')).toHaveValue('51413'));
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '198.51.100.0/24' } });
+    submit();
+    await waitFor(() => expect(fw.calls).toContain('add block 198.51.100.0/24 51413 in'));
+    expect(await screen.findByText('198.51.100.0/24')).toBeInTheDocument();
+
+    // A preset opens a port for everyone.
+    fireEvent.click(screen.getByRole('button', { name: 'Web' }));
+    expect(screen.getByLabelText('Port')).toHaveValue('80,443');
+    submit();
+    await waitFor(() => expect(fw.calls).toContain('add allow  80,443 in'));
+
+    // Pausing keeps the rule, out of place; moving swaps it with its neighbour.
+    const first = () => screen.getAllByRole('listitem').find((li) => li.classList.contains('fw-rule'))!;
+    fireEvent.click(within(first()).getByRole('button', { name: 'Pause' }));
+    await waitFor(() => expect(fw.calls).toContain('update r1 paused=true'));
+    expect(await screen.findByText('paused: not in place')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Move down: Block 45.142.120.0/24 on every port' }));
+    await waitFor(() => expect(fw.calls.some((c) => c.startsWith('order r0,r1,'))).toBe(true));
+    expect(screen.getByRole('button', { name: /Move up: Limit anyone/ })).toBeDisabled();
+
+    // Editing loads the rule into the form and saves it in place.
+    fireEvent.click(within(screen.getByText('tcp port 22 · at most 6 a minute each').closest('li')!).getByRole('button', { name: 'Edit' }));
+    expect(screen.getByText('Changing: Limit anyone on tcp port 22 to 6 a minute each')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('How many'), { target: { value: '10' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('tcp port 22 · at most 10 a minute each')).toBeInTheDocument();
+    expect(fw.get().rules.find((r) => r.id === 'r0')?.rate).toBe('10/min');
+
+    fireEvent.click(within(screen.getByText('198.51.100.0/24').closest('li')!).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(screen.queryByText('198.51.100.0/24')).not.toBeInTheDocument());
+
+    // Outgoing: its own rules, and no limits.
+    fireEvent.click(screen.getByRole('button', { name: /Outgoing/ }));
+    expect(screen.getByText('tcp port 25')).toBeInTheDocument();
+    expect(screen.getByLabelText('To')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Limit' })).not.toBeInTheDocument();
+  });
+
+  it('asks which open ports to keep before dropping what no rule allows, then waits to be kept', async () => {
+    const fw = fakeFirewall();
+    render(
+      <ToastProvider>
+        <FirewallManager target={fw.target} />
+      </ToastProvider>,
+    );
+    fireEvent.click(await screen.findByRole('radio', { name: /Drop it/ }));
+    // qBittorrent's port is open and no rule lets anyone in: it is offered, ticked.
+    const box = screen.getByRole('checkbox');
+    expect(box).toBeChecked();
+    expect(within(screen.getByRole('group', { name: 'Ports to keep open' })).getByText('51413/udp')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep 1 open, drop the rest' }));
+    await waitFor(() => expect(fw.calls).toEqual(['add allow  51413 in', 'default drop']));
+    expect(await screen.findByText('Now dropping what no rule allows.')).toBeInTheDocument();
+    expect(screen.getByText(/goes back by itself in/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep it' }));
+    await waitFor(() => expect(screen.queryByText('Now dropping what no rule allows.')).not.toBeInTheDocument());
+    expect(fw.calls.at(-1)).toBe('keep true');
+    expect(screen.getByRole('radio', { name: /Drop it/ })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('shows what was dropped, who most, and offers to block those not blocked yet', async () => {
+    const fw = fakeFirewall();
+    render(
+      <ToastProvider>
+        <FirewallManager target={fw.target} />
+      </ToastProvider>,
+    );
+    expect(await screen.findByText('Dropped most')).toBeInTheDocument();
+    // 45.142.120.11 is in a blocked network; 198.51.100.9 is not, so it can be blocked from here.
+    const top = screen.getByText('Dropped most').closest('.fw-top') as HTMLElement;
+    expect(within(top).getByText('blocked')).toBeInTheDocument();
+    expect(within(top).queryByRole('button', { name: 'Block 45.142.120.11' })).not.toBeInTheDocument();
+    fireEvent.click(within(top).getByRole('button', { name: 'Block 198.51.100.9' }));
+    await waitFor(() => expect(screen.getByLabelText('From')).toHaveValue('198.51.100.9'));
+    expect(screen.getAllByText('no rule allowed it').length).toBe(2);
+    expect(screen.getByText(/Show what ufw has/)).toBeInTheDocument();
+  });
+
+  it('shows an older agent its rules only, and says it updates itself', async () => {
+    const fw = fakeFirewall({ full: false, rules: [{ id: 'r1', action: 'block', source: '203.0.113.7', added: 1 }] });
+    render(
+      <ToastProvider>
+        <FirewallManager target={fw.target} />
+      </ToastProvider>,
+    );
+    expect(await screen.findByText('203.0.113.7')).toBeInTheDocument();
+    expect(screen.getByText(/runs an older version/)).toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /Drop it/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Dropped lately')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+  });
+});
+
+describe('new builds', () => {
+  it('names a build by its main script', () => {
+    expect(buildIn('<script type="module" crossorigin src="/assets/index-B9x_2kQe.js"></script>')).toBe('/assets/index-B9x_2kQe.js');
+    expect(buildIn('/src/main.tsx')).toBe('');
+    expect(buildIn(null)).toBe('');
+  });
+
+  it('notices a newer build, waits while something is typed, and moves over on the next page', async () => {
+    const script = document.createElement('script');
+    script.type = 'module';
+    script.src = '/assets/index-old1.js';
+    document.head.appendChild(script);
+    const reload = vi.fn();
+    const real = window.location;
+    Object.defineProperty(window, 'location', { configurable: true, value: { ...real, reload } });
+    const fetched = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('<script type="module" src="/assets/index-new2.js"></script>'));
+    onTestFinished(() => {
+      script.remove();
+      fetched.mockRestore();
+      Object.defineProperty(window, 'location', { configurable: true, value: real });
+    });
+
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    onTestFinished(() => input.remove());
+    const { result, rerender } = renderHook(({ path }) => useNewBuild(path), { initialProps: { path: '/' } });
+    await waitFor(() => expect(result.current).toBe(true));
+    expect(fetched).toHaveBeenCalledWith('/', expect.objectContaining({ cache: 'no-store' }));
+
+    // Something typed: coming back to the tab does not throw it away.
+    fireEvent.input(input, { target: { value: 'half a rule' } });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(reload).not.toHaveBeenCalled();
+
+    // A page change leaves it behind anyway, so that loads the new build.
+    rerender({ path: '/network' });
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing when the page is served from source', async () => {
+    const fetched = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('<script type="module" src="/assets/index-same.js"></script>'));
+    onTestFinished(() => fetched.mockRestore());
+    const { result } = renderHook(() => useNewBuild('/'));
+    // No built script on the page (the dev server): nothing to compare, nothing fetched.
+    expect(fetched).not.toHaveBeenCalled();
+    expect(result.current).toBe(false);
   });
 });

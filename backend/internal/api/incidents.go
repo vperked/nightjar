@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"nightjar/internal/analytics"
@@ -152,20 +153,48 @@ func (s *Server) publicNames() map[string]string {
 func (s *Server) publicNotices() []incidents.Notice {
 	cut := nowSeconds() - 30*86400
 	out := []incidents.Notice{}
-	ended := map[int64]*float64{}
-	for _, inc := range s.listIncidents(30) {
-		ended[inc.ID] = inc.Ended
-	}
 	for _, n := range incidents.AllNotices(s.cfg.Store) {
 		if !n.Published || n.Started < cut {
 			continue
 		}
-		if e, ok := ended[n.ID]; ok {
-			n.Ended = e
-		}
 		n.Updated = 0
 		out = append(out, n)
 	}
+	if len(out) == 0 {
+		return out
+	}
+	ended := s.incidentEnds()
+	for i := range out {
+		if e, ok := ended[out[i].ID]; ok {
+			out[i].Ended = e
+		}
+	}
 	slices.SortFunc(out, func(a, b incidents.Notice) int { return int(b.Started - a.Started) })
 	return out
+}
+
+// endedCache keeps when the last 30 days' incidents ended, for the notices on the public status page.
+// Working that out reads a month of alerts and readings, and anyone may poll the page.
+type endedCache struct {
+	mu    sync.Mutex
+	at    time.Time
+	ended map[int64]*float64
+}
+
+const endedCacheTTL = time.Minute
+
+// incidentEnds is when each incident of the last 30 days ended, by ID (nil while it goes on).
+func (s *Server) incidentEnds() map[int64]*float64 {
+	c := &s.ends
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ended != nil && time.Since(c.at) < endedCacheTTL {
+		return c.ended
+	}
+	ended := map[int64]*float64{}
+	for _, inc := range s.listIncidents(30) {
+		ended[inc.ID] = inc.Ended
+	}
+	c.ended, c.at = ended, time.Now()
+	return ended
 }

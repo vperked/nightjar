@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"nightjar/internal/config"
 	"nightjar/internal/logx"
 )
 
@@ -468,6 +469,9 @@ func runScript(ctx context.Context, dir, name, script string, line func(string))
 	} else {
 		cmd = exec.CommandContext(ctx, "/bin/bash", f.Name())
 	}
+	// Someone else's installer gets none of Nightjar's secrets (webhooks, tokens, passwords). A unit
+	// systemd-run starts takes systemd's environment, not this one, so this is for bash run directly.
+	cmd.Env = config.Environ()
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

@@ -42,6 +42,10 @@ const (
 	maxHTML = 20000
 )
 
+// maxDesignBody is how large a design may be to save: more than the usual limit on a change, since
+// the CSS and HTML alone may be 90,000 characters, and more in JSON, plus up to 30 groups of 200 checks.
+const maxDesignBody = 2 << 20
+
 // StatusGroup is a heading and the checks under it.
 type StatusGroup struct {
 	Name  string       `json:"name"`
@@ -173,6 +177,10 @@ func (s *Server) statusPageDesign(w http.ResponseWriter, r *http.Request) {
 func (s *Server) saveStatusPageDesign(w http.ResponseWriter, r *http.Request) {
 	var d StatusDesign
 	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
+		if tooLarge := (*http.MaxBytesError)(nil); errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, errBody(fmt.Sprintf("The design is larger than %d MB; shorten its CSS, HTML or groups", maxDesignBody>>20)))
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, errBody("Expected a status page design"))
 		return
 	}

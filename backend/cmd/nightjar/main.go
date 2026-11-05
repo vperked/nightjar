@@ -4,11 +4,14 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slices"
@@ -27,8 +30,10 @@ import (
 	"nightjar/internal/cleanup"
 	"nightjar/internal/collect"
 	"nightjar/internal/config"
+	"nightjar/internal/ddos"
 	"nightjar/internal/discord"
 	"nightjar/internal/docker"
+	"nightjar/internal/firewall"
 	"nightjar/internal/format"
 	"nightjar/internal/kernel"
 	"nightjar/internal/logx"
@@ -44,6 +49,7 @@ import (
 	"nightjar/internal/remote"
 	"nightjar/internal/repair"
 	"nightjar/internal/report"
+	"nightjar/internal/selfcheck"
 	"nightjar/internal/services"
 	"nightjar/internal/smart"
 	"nightjar/internal/storage"
@@ -91,10 +97,15 @@ func main() {
 		os.Exit(runResetAdmin(db))
 	case *selfTest:
 		os.Exit(runSelfTest(cfg, db))
-	case *installSystemd || config.Bool("INSTALL_SYSTEMD", false):
+	case *installSystemd:
+		os.Exit(install(cfg, loadedEnv, *force || config.Bool("SYSTEMD_FORCE_INSTALL", false)))
+	// .env's switch installs the service when Nightjar is started by hand. The service reads the same
+	// .env, so started by systemd (which sets INVOCATION_ID) it goes on to monitor rather than
+	// installing itself again and exiting, over and over.
+	case config.Bool("INSTALL_SYSTEMD", false) && os.Getenv("INVOCATION_ID") == "":
 		os.Exit(install(cfg, loadedEnv, *force || config.Bool("SYSTEMD_FORCE_INSTALL", false)))
 	}
-	if run(cfg, db) {
+	if run(cfg, db, loadedEnv) {
 		restart(environ)
 	}
 }
@@ -292,7 +303,7 @@ func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 		Notifications:      wh.hub,
 		Metrics:            metrics.New(),
 		Gates: alerts.NewGates(cfg.AlertCooldown, max(0, cfg.AlertMaxCooldown), min(10, max(1, cfg.AlertBackoff)),
-			max(cfg.AlertRecoverySeconds, 3*cfg.CheckInterval)),
+			monitor.GateRecovery(cfg)),
 		ErrorLogFile: cfg.ErrorLogFile,
 		Store:        db,
 		Units:        units.New(),
@@ -342,6 +353,16 @@ func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 		return remote.Limits{Temp: c.TempThreshold, Memory: c.MemoryThreshold, Disk: c.DiskThreshold}
 	}})
 	ctx.Remote.MoveLegacyChecks(ctx.Services)
+	ctx.Attacks = attackWatcher(ctx, db, wh.hub.Route("attacks"))
+	// Firewall rules set from the dashboard, kept in the database and put back in place on start. Rules
+	// that cannot be read are not taken for none: putting "none" in place would lift the owner's blocks,
+	// so the firewall is left as the last run left it, and not managed until a restart can read them.
+	if rules, err := db.MetaValue(firewallKey); err != nil {
+		log.Warn("Firewall rules unreadable; leaving the firewall as it is until Nightjar restarts with its database", "err", err)
+	} else {
+		ctx.Firewall = &firewall.Manager{Load: func() []byte { return []byte(rules) }, Save: func(b []byte) error { return db.SetMeta(firewallKey, string(b)) },
+			Open: dashboardOpen(cfg.WebPort)}
+	}
 	// A monitor restarting itself to apply settings already announced services that were failed.
 	ctx.Units.AnnounceExisting = os.Getenv(restartedEnv) == ""
 	monitor.LoadDrives(ctx)
@@ -451,7 +472,7 @@ func sendStartup(ctx *monitor.Context) {
 	if ctx.Webhook == nil || os.Getenv(restartedEnv) != "" || !announce(ctx.Store, "startup") {
 		return
 	}
-	log.Info("Sending system info to Discord")
+	log.Info("Sending system info", "to", ctx.AlertDestinations())
 	collect.PerCore() // prime the CPU delta
 	time.Sleep(500 * time.Millisecond)
 	per, _ := collect.PerCore()
@@ -465,7 +486,7 @@ func sendStartup(ctx *monitor.Context) {
 	mem, _ := collect.VirtualMemory()
 	if discord.SystemInfo(ctx.Webhook, collect.SystemInfo(), cpuPct, collect.CPUCount(), mem,
 		collect.TotalDisk(collect.Partitions(true)), ctx.Processes.Overview(5)) {
-		log.Info("System info sent to Discord")
+		log.Info("System info sent")
 	}
 	if ctx.QBittorrent != nil && ctx.QBittorrentWebhook != nil && ctx.QBittorrent.Available() {
 		torrents := ctx.QBittorrent.Torrents()
@@ -481,14 +502,14 @@ func sendStartup(ctx *monitor.Context) {
 			}
 		}
 		if discord.TorrentList(ctx.QBittorrentWebhook, downloading, seeding) {
-			log.Info("qBittorrent status sent to Discord")
+			log.Info("qBittorrent status sent", "to", ctx.AlertDestinations())
 		}
 	}
 }
 
 // run monitors until a signal stops it, or until settings saved in the dashboard ask for a
 // restart, which it reports.
-func run(cfg config.Settings, db *storage.Store) (restart bool) {
+func run(cfg config.Settings, db *storage.Store, envFile string) (restart bool) {
 	log.Info("Starting Nightjar " + version)
 	ctx := buildContext(cfg, db)
 	ctx.Watchdog.Start()
@@ -496,22 +517,47 @@ func run(cfg config.Settings, db *storage.Store) (restart bool) {
 	stop, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	defer cancel()
 	restartRequested := make(chan struct{})
+	decided := make(chan struct{})
 	var once sync.Once
 	go func() {
+		defer close(decided)
 		select {
 		case <-restartRequested:
-			restart = true
-			cancel()
+			// A signal that came at the same moment wins: it asked to stop, not to start again.
+			if stop.Err() == nil {
+				restart = true
+				cancel()
+			}
 		case <-stop.Done():
 		}
 	}()
 
-	requestRestart := func() { once.Do(func() { close(restartRequested) }) }
+	// An update under way (apt or dpkg) holds a restart until it ends: shutting down waits for it
+	// anyway, and this way the dashboard stays up meanwhile.
+	requestRestart := func() {
+		once.Do(func() {
+			go func() {
+				defer close(restartRequested)
+				if u := ctx.Updates; u != nil && u.Applying() != "" {
+					log.Info("Restarting once the update under way has finished")
+					for u.Applying() != "" && stop.Err() == nil {
+						time.Sleep(time.Second)
+					}
+				}
+			}()
+		})
+	}
+	// A plugin that delivers alerts, found after the start, has no channel until one is set up for it.
+	ctx.Plugins.NotifyChanged = func() {
+		log.Info("Plugins that deliver alerts changed; restarting to set up their channels")
+		requestRestart()
+	}
 	ctx.Updates = updates.New(updates.Options{
 		Store: db, GitHubToken: cfg.GitHubToken, Timeout: time.Duration(cfg.SystemUpdateTimeout) * time.Second,
 		Alerts: ctx.Webhook, NotifyAvailable: cfg.UpdatesNotify, Restart: requestRestart,
 	}, func() []updates.Spec { return updates.Detect(updates.Exec) }, legacyAutoUpdate(db))
 	logSummary(ctx)
+	checkOwnFiles(ctx, cfg, envFile)
 
 	var srv *api.Server
 	if cfg.WebUIEnabled {
@@ -543,11 +589,30 @@ func run(cfg config.Settings, db *storage.Store) (restart bool) {
 		defer close(remoteDone)
 		ctx.Remote.Run(stop)
 	}()
-	go ctx.Plugins.Loop(stop)
-	go report.Schedule(stop.Done(), ctx)
-	go ctx.MediaCleanup.Loop(stop.Done())
+	// background is what else runs until the stop, waited for (a while) before the database closes.
+	var background sync.WaitGroup
+	background.Go(func() { ctx.Plugins.Loop(stop) })
+	background.Go(func() { ctx.Attacks.Run(stop) })
+	if ctx.Firewall != nil {
+		background.Go(func() { ctx.Firewall.Start(stop) })
+	}
+	// Something once took the monitor's right to switch users while it ran, which broke apt and git;
+	// say so, and when, if it happens again.
+	background.Go(func() {
+		selfcheck.WatchCaps(stop, time.Minute, func(names []string) {
+			log.Error("Nightjar lost capabilities it started with; what needs them fails until it restarts", "lost", strings.Join(names, ","))
+			if ctx.Webhook != nil {
+				ctx.Webhook.SendEmbed("Nightjar lost permissions it needs", "It lost "+strings.Join(names, ", ")+" while running, so updates and app installs that switch users fail. Restart Nightjar to get them back.", discord.Warning, nil, "Monitor")
+			}
+		})
+	})
+	background.Go(func() { report.Schedule(stop.Done(), ctx) })
+	background.Go(func() { ctx.MediaCleanup.Loop(stop.Done()) })
 	loop := monitor.NewLoop(ctx)
 	loop.Run(stop)
+	<-decided
+	// Stop catching signals: one more Ctrl+C or SIGTERM during a slow shutdown ends the process.
+	cancel()
 
 	shutdownStart := time.Now()
 	if restart {
@@ -563,6 +628,9 @@ func run(cfg config.Settings, db *storage.Store) (restart bool) {
 	}
 	loop.Wait() // running uptime checks still record their results
 	<-remoteDone
+	if !waitFor(&background, 5*time.Second) {
+		log.Warn("Some background work had not stopped; closing the database without it")
+	}
 	ctx.Analytics.Flush() // the minute in progress
 	announceStop := !restart && ctx.Webhook != nil && announce(db, "shutdown")
 	db.Close() // after the API and the checks, which use it, have stopped
@@ -575,6 +643,21 @@ func run(cfg config.Settings, db *storage.Store) (restart bool) {
 		log.Info("Nightjar stopped gracefully")
 	}
 	return restart
+}
+
+// waitFor waits for wg, at most d, and reports whether it finished.
+func waitFor(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 // legacyAutoUpdate carries SYSTEM_UPDATE_APPLY (from before updates had their own page) over to
@@ -640,4 +723,212 @@ func runSelfTest(cfg config.Settings, db *storage.Store) int {
 		return 0
 	}
 	return 1
+}
+
+// checkOwnFiles warns, in the log and as an alert, when another account could change something
+// Nightjar runs, serves or reads its settings from: running as root, that would hand them root.
+func checkOwnFiles(ctx *monitor.Context, cfg config.Settings, envFile string) {
+	self, _ := os.Executable()
+	wd, _ := os.Getwd()
+	problems := selfcheck.Exposed([]string{self, wd, envFile, cfg.HistoryDB, cfg.FrontendDir, cfg.PluginsDir, cfg.RepairsDir, cfg.SSHDir})
+	if len(problems) == 0 {
+		return
+	}
+	for _, p := range problems {
+		log.Warn("Another account could take Nightjar over", "problem", p)
+	}
+	if ctx.Webhook != nil {
+		discord.About(ctx.Webhook, "monitor:files").SendEmbed("Nightjar's files can be changed by other accounts",
+			"Nightjar runs as root, so whoever can change these can run their own code as root:\n- "+strings.Join(problems, "\n- ")+
+				"\nMake them belong to root and writable only by it (chown root:root, chmod go-w).", discord.Critical, nil, "Nightjar")
+	}
+}
+
+// dashboardOpen are the ports the firewall keeps open for the dashboard: the web's, and its own.
+func dashboardOpen(port int) []firewall.Open {
+	open := []firewall.Open{{Port: 80, What: "web"}, {Port: 443, What: "web"}}
+	if port > 0 && port < 65536 && port != 80 && port != 443 {
+		open = append(open, firewall.Open{Port: uint16(port), What: "this dashboard"})
+	}
+	return open
+}
+
+// firewallKey is where the firewall rules set from the dashboard are kept.
+const firewallKey = "firewall.rules"
+
+// attacksKey is where the attacks seen are kept, so a restart remembers them.
+const attacksKey = "attacks.history"
+
+// attackWatcher watches this machine for denial-of-service attacks. Package installs, Nightjar's own
+// app installs and updates, and torrent clients explain heavy traffic, so they are not called attacks.
+func attackWatcher(ctx *monitor.Context, db *storage.Store, alerts discord.Sender) *ddos.Watcher {
+	w := &ddos.Watcher{WebLogs: webLogs()}
+	// It defends too, unless switched off on the Network page.
+	w.Defender = &ddos.Defender{
+		On:           defending(db),
+		Trusted:      trustedAddresses(ctx),
+		WebBlockFile: webBlockFile(),
+	}
+	var history []ddos.Attack
+	if raw := db.Meta(attacksKey); raw != "" && json.Unmarshal([]byte(raw), &history) == nil {
+		w.Restore(history)
+	}
+	w.Busy = func() ddos.Busy {
+		b := ddos.ReadBusy("/proc")
+		if b.Installing == "" && ctx.Apps != nil {
+			if j := ctx.Apps.Job(0); j != nil && j.Finished == 0 && j.Action == "install" {
+				b.Installing = "Nightjar installing " + j.App
+			}
+		}
+		if b.Installing == "" && ctx.Updates != nil {
+			if id := ctx.Updates.Applying(); id != "" {
+				b.Installing = "Nightjar updating " + id
+			}
+		}
+		return b
+	}
+	save := func() {
+		if raw, err := json.Marshal(w.History()); err == nil {
+			db.SetMeta(attacksKey, string(raw))
+		}
+	}
+	send := func(title, desc string, sev discord.Severity, fields []discord.Field) {
+		if alerts != nil {
+			discord.About(alerts, "attack:local").SendEmbed(title, desc, sev, fields, "Attacks")
+		}
+	}
+	w.OnStart = func(a ddos.Attack) {
+		log.Warn("Under attack", "methods", ddos.Describe(a))
+		desc := "This machine is being flooded. Nightjar keeps watching and says when it stops."
+		if w.Defender.View().On {
+			desc = "This machine is being flooded. Nightjar is defending it in the firewall, and says when it stops."
+		}
+		send("Under attack: "+ddos.Describe(a), desc, discord.Critical, attackFields(a))
+	}
+	w.OnEnd = func(a ddos.Attack) {
+		save()
+		log.Info("Attack over", "methods", ddos.Describe(a), "lasted", time.Duration(a.End-a.Start)*time.Second)
+		send("Attack over: "+ddos.Describe(a), fmt.Sprintf("It lasted %s. At its height it brought %s.",
+			(time.Duration(a.End-a.Start)*time.Second).String(), format.BytesPerSecond(a.PeakRx/8)), discord.OK, attackFields(a))
+	}
+	return w
+}
+
+// defending reads whether the defender is switched on. While that cannot be read it keeps the last
+// answer it had, and until it has one it does not defend, since the owner may have switched it off.
+func defending(db *storage.Store) func() bool {
+	var mu sync.Mutex
+	on := false
+	return func() bool {
+		v, err := db.MetaValue(ddos.DefendKey)
+		mu.Lock()
+		defer mu.Unlock()
+		if err == nil {
+			on = v != "off"
+		}
+		return on
+	}
+}
+
+// attackFields are an attack's methods at their strongest and the addresses most involved.
+func attackFields(a ddos.Attack) []discord.Field {
+	var methods, sources []string
+	for _, f := range a.Methods {
+		methods = append(methods, fmt.Sprintf("**%s** %s", ddos.Describe(ddos.Attack{Methods: []ddos.Finding{f}}), ddos.FormatValue(f)))
+	}
+	for _, s := range a.Sources[:min(5, len(a.Sources))] {
+		line := s.Address
+		if s.Network != "" {
+			line += " (" + s.Network + ", many visitors)"
+		}
+		sources = append(sources, line)
+	}
+	fields := []discord.Field{{Name: "Methods", Value: strings.Join(methods, "\n")}}
+	if len(sources) > 0 {
+		fields = append(fields, discord.Field{Name: "Most involved", Value: strings.Join(sources, "\n")})
+	}
+	return fields
+}
+
+// trustedAddresses are addresses the defender never blocks: DDOS_TRUSTED's (addresses or networks,
+// separated by commas or spaces), and the servers Nightjar watches, which it must keep reaching. Their
+// names are looked up at most every ten minutes, in the background: the defender asks while it holds
+// its own lock, and a lookup during a flood can take seconds per name.
+func trustedAddresses(ctx *monitor.Context) func() []string {
+	var mu sync.Mutex
+	var servers []string
+	var looked time.Time
+	known := map[string][]string{} // each name's addresses, kept for when a lookup fails
+	lookup := func() {
+		var found []string
+		for _, h := range ctx.Remote.List(0) {
+			names := []string{h.Address}
+			if u, err := url.Parse(h.Address); err == nil && u.Hostname() != "" {
+				names[0] = u.Hostname()
+			}
+			if h.SSH != nil && h.SSH.Host != "" {
+				names = append(names, h.SSH.Host)
+			}
+			for _, name := range names {
+				if net.ParseIP(name) != nil {
+					found = append(found, name)
+					continue
+				}
+				lctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				ips, err := net.DefaultResolver.LookupHost(lctx, name)
+				cancel()
+				mu.Lock()
+				if err == nil {
+					known[name] = ips
+				} else {
+					ips = known[name]
+				}
+				mu.Unlock()
+				found = append(found, ips...)
+			}
+		}
+		mu.Lock()
+		servers = found
+		mu.Unlock()
+	}
+	if ctx.Remote != nil {
+		looked = time.Now()
+		go lookup()
+	}
+	return func() []string {
+		out := strings.FieldsFunc(os.Getenv("DDOS_TRUSTED"), func(r rune) bool { return r == ',' || r == ' ' })
+		if ctx.Remote == nil {
+			return out
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Since(looked) > 10*time.Minute {
+			looked = time.Now()
+			go lookup()
+		}
+		return append(out, servers...)
+	}
+}
+
+// webBlockFile is the nginx file the defender blocks addresses in that reach the web server through
+// Cloudflare: WEB_BLOCK_FILE ("off" for none), or a file in nginx's conf.d when nginx is installed.
+func webBlockFile() string {
+	if v := strings.TrimSpace(os.Getenv("WEB_BLOCK_FILE")); v != "" {
+		if v == "off" {
+			return ""
+		}
+		return v
+	}
+	if st, err := os.Stat("/etc/nginx/conf.d"); err == nil && st.IsDir() {
+		if _, err := exec.LookPath("nginx"); err == nil {
+			return "/etc/nginx/conf.d/nightjar-blocked.conf"
+		}
+	}
+	return ""
+}
+
+// webLogs are nginx's access logs, current ones only, to count web requests in.
+func webLogs() []string {
+	paths, _ := filepath.Glob("/var/log/nginx/*access*.log")
+	return paths
 }

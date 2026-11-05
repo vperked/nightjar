@@ -53,6 +53,24 @@ func (s *Server) controlUnit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("Stopping the monitor from its own dashboard would take the dashboard down; use systemctl"))
 		return
 	}
+	if action == "restart" && name == s.ctx.Config().SystemdServiceName+".service" {
+		if _, ok := s.ctx.Units.Get(name); !ok {
+			writeJSON(w, http.StatusNotFound, errBody(units.ErrUnknown.Error()))
+			return
+		}
+		// Restarting the monitor ends this request with it: answer first. systemd carries the restart
+		// out once asked, even though the systemctl that asked is stopped along with the monitor.
+		log.Info("Service changed from the dashboard", "unit", name, "action", action)
+		writeJSON(w, http.StatusAccepted, map[string]any{"restarting": true})
+		time.AfterFunc(300*time.Millisecond, func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			if err := s.ctx.Units.Control(ctx, action, name); err != nil {
+				log.Warn("Could not restart the monitor", "unit", name, "err", err)
+			}
+		})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 	if err := s.ctx.Units.Control(ctx, action, name); err != nil {

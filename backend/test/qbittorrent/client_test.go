@@ -18,6 +18,7 @@ type fakeQB struct {
 	mu       sync.Mutex
 	list     string
 	v5       bool // qBittorrent 5 has /start but no /resume
+	v52      bool // from 5.2 a login answers 204, with a cookie named for the port
 	actions  []string
 	failList bool
 	logins   int
@@ -40,11 +41,16 @@ func (f *fakeQB) serve(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("Fails."))
 			return
 		}
+		if f.v52 {
+			http.SetCookie(w, &http.Cookie{Name: f.cookie(), Value: "ok", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		http.SetCookie(w, &http.Cookie{Name: "SID", Value: "ok", Path: "/"})
 		w.Write([]byte("Ok."))
 		return
 	}
-	if c, err := r.Cookie("SID"); err != nil || c.Value != "ok" {
+	if c, err := r.Cookie(f.cookie()); err != nil || c.Value != "ok" {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -65,6 +71,13 @@ func (f *fakeQB) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (f *fakeQB) cookie() string {
+	if f.v52 {
+		return "QBT_SID_10914"
+	}
+	return "SID"
 }
 
 func (f *fakeQB) loginAttempts() int {
@@ -156,5 +169,53 @@ func TestFailingLoginOpensBreaker(t *testing.T) {
 	}
 	if got := qb.loginAttempts(); got != 5 {
 		t.Fatalf("the breaker should stop after 5 failed logins, server saw %d", got)
+	}
+}
+
+// qBittorrent 5.2 and later answer a good login with 204 and no body: that is a login, not a failure.
+func TestLoginToQBittorrent52AndLater(t *testing.T) {
+	f := newFakeQB(t)
+	f.v52 = true
+	c, err := qbittorrent.New(f.URL, 1, "admin", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if !c.Available() {
+			t.Fatalf("not connected: %s", c.LastError())
+		}
+	}
+	if n := f.loginAttempts(); n != 1 {
+		t.Fatalf("logged in %d times; once is enough", n)
+	}
+	if _, err := c.List(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An IPv6 host without a port keeps its brackets when the configured port is added.
+func TestNewIPv6HostGetsPort(t *testing.T) {
+	for host, want := range map[string]string{"http://[::1]": "http://[::1]:8080", "[fd00::5]": "http://[fd00::5]:8080", "http://[::1]:9090": "http://[::1]:9090"} {
+		c, err := qbittorrent.New(host, 8080, "admin", "secret")
+		if err != nil || c.URL() != want {
+			t.Errorf("%s: got %v %v, want %s", host, c, err, want)
+		}
+	}
+}
+
+// Only a finished torrent is inactive: a download added stopped, or paused partway, is kept.
+func TestInactiveMeansFinished(t *testing.T) {
+	for _, tc := range []struct {
+		t    qbittorrent.Torrent
+		want string
+	}{
+		{qbittorrent.Torrent{State: "stoppedup", Progress: 1}, "inactive"},
+		{qbittorrent.Torrent{State: "pausedup", Progress: 1}, "inactive"},
+		{qbittorrent.Torrent{State: "stoppeddl", Progress: 0}, ""},
+		{qbittorrent.Torrent{State: "pauseddl", Progress: 0.4}, ""},
+	} {
+		if got := qbittorrent.RemoveReason(tc.t, 0); got != tc.want {
+			t.Errorf("%s at %.0f%%: %q, want %q", tc.t.State, tc.t.ProgressPercent(), got, tc.want)
+		}
 	}
 }

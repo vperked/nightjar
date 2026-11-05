@@ -46,7 +46,9 @@ func TestAnalyticsReadsTheMinutesKept(t *testing.T) {
 	if local["id"] != "local" || local["kind"] != "local" || sum["cpu_avg"] != 30.0 || sum["uptime"] != nil || len(local["points"].([]any)) < 24 {
 		t.Fatalf("this server: %v", local)
 	}
-	if code, body := get("/api/analytics/local?range=1h"); code != http.StatusOK || len(body["host"].(map[string]any)["points"].([]any)) != 59 {
+	// 59 of the minutes fall in the last hour; one more or fewer when a minute ticks over between
+	// laying them out above and the server reading the clock.
+	if code, body := get("/api/analytics/local?range=1h"); code != http.StatusOK || len(body["host"].(map[string]any)["points"].([]any)) < 58 || len(body["host"].(map[string]any)["points"].([]any)) > 60 {
 		t.Fatalf("one server over an hour: %d %v", code, body)
 	}
 	if code, _ := get("/api/analytics/nope"); code != http.StatusNotFound {

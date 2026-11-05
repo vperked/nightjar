@@ -38,6 +38,7 @@ var Areas = []Area{
 	{"torrents", "qBittorrent"},
 	{"media", "Plex"},
 	{"servers", "Other servers"},
+	{"attacks", "Attacks"},
 }
 
 func knownArea(id string) bool {
@@ -62,6 +63,8 @@ func areaOf(route, category string) string {
 		return "torrents"
 	case "Servers":
 		return "servers"
+	case "Attacks":
+		return "attacks"
 	}
 	return route
 }
@@ -206,7 +209,7 @@ type Hub struct {
 
 	mu     sync.Mutex
 	prefs  Prefs
-	failed map[string]int64 // area and title → the record of a delivery that failed everywhere, so retries update it
+	failed map[string]failure // an alert whose delivery failed everywhere → its record, so a retry updates it
 	pruned time.Time
 	// summaryTries counts quiet hours summaries that did not get through, which are retried a few times.
 	summaryTries int
@@ -222,7 +225,7 @@ type Hub struct {
 // NewHub routes to dests and keeps history in store (which may be unavailable: alerts are then
 // delivered without being kept, and quiet hours send them straight away).
 func NewHub(store *storage.Store, dests []Destination) *Hub {
-	h := &Hub{store: store, dests: dests, Now: time.Now, Limits: DefaultLimits, failed: map[string]int64{}, subjects: map[string]*subjectLog{}}
+	h := &Hub{store: store, dests: dests, Now: time.Now, Limits: DefaultLimits, failed: map[string]failure{}, subjects: map[string]*subjectLog{}}
 	h.prefs = Prefs{Quiet: Quiet{Start: "23:00", End: "07:00", Critical: true}}
 	if raw := store.Meta(prefsKey); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &h.prefs); err != nil {
@@ -330,8 +333,18 @@ func (h *Hub) send(a Alert, area, subject string, throttle bool) bool {
 	return true
 }
 
+// RetryWindow is how long after a delivery that failed everywhere the same alert sent again counts
+// as a retry of it, updating its record rather than adding one.
+const RetryWindow = time.Hour
+
+// failure is the record of a delivery that failed everywhere, and when.
+type failure struct {
+	id int64
+	at time.Time
+}
+
 // deliver sends to every target at once and keeps the outcome. It succeeds if any delivery did; when
-// none did, the caller retries later and the retry updates the same record.
+// none did, a caller that sends the same alert again within RetryWindow updates the same record.
 func (h *Hub) deliver(rec storage.Notification, targets []target, a Alert) bool {
 	ok := make([]bool, len(targets))
 	var wg sync.WaitGroup
@@ -363,19 +376,27 @@ func (h *Hub) deliver(rec storage.Notification, targets []target, a Alert) bool 
 		rec.Status = "failed"
 	}
 
-	key := rec.Area + "\x00" + rec.Title
+	// Only the same alert sent again soon after is a retry; anything else is a new record.
+	key := strings.Join([]string{rec.Area, rec.Subject, rec.Title, rec.Body}, "\x00")
+	now := h.Now()
 	h.mu.Lock()
-	id := h.failed[key]
+	f, retry := h.failed[key]
 	delete(h.failed, key)
+	for k, f := range h.failed {
+		if now.Sub(f.at) > RetryWindow {
+			delete(h.failed, k)
+		}
+	}
 	h.mu.Unlock()
-	if id > 0 {
+	id := f.id
+	if retry && now.Sub(f.at) <= RetryWindow {
 		h.store.SetNotificationStatus(id, rec.Status, rec.Channels, rec.Error)
 	} else {
 		id = h.store.AddNotification(rec)
 	}
 	if rec.Status == "failed" && id > 0 {
 		h.mu.Lock()
-		h.failed[key] = id
+		h.failed[key] = failure{id: id, at: now}
 		h.mu.Unlock()
 	}
 	return rec.Status == "sent"

@@ -37,11 +37,12 @@ func Detect(run Runner) []Spec {
 	add(d.adguard())
 	add(d.autobrr())
 	add(d.release("bazarr", "Bazarr", "morpheus65535/bazarr", "/opt/bazarr/VERSION", "cat /opt/bazarr/VERSION", "bazarr"))
-	add(d.release("seerr", "Seerr", "seerr-team/seerr", "/opt/seerr/package.json", `grep -m1 '"version"' /opt/seerr/package.json`, "seerr"))
+	add(d.seerr())
 	if qb := d.firstUnit("qbittorrent@*", "qbittorrent", "qbittorrent-nox"); qb != "" && d.dpkgHas("qbittorrent-nox") {
-		// swizzin builds qBittorrent from source interactively, so it is only checked.
+		// swizzin builds qBittorrent from source, interactively, and only up to 5.1. The official
+		// static build replaces its program instead: one file, any version, in seconds.
 		add(Spec{ID: "qbittorrent", Name: "qBittorrent", Kind: KindRelease, Repo: "qbittorrent/qBittorrent", TagPrefix: "release-",
-			VersionCommand: "dpkg-query -W -f='${Version}' qbittorrent-nox", Unit: qb}, true)
+			VersionCommand: qbVersion, UpdateCommand: qbStaticUpdate, Unit: qb, Restart: true}, true)
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		for _, dir := range []string{"/opt/uptime-kuma", filepath.Join(home, "uptime-kuma")} {
@@ -187,6 +188,50 @@ func (d detector) release(id, name, repo, marker, versionCommand, unit string) (
 		s.Unit = d.firstUnit(unit)
 	}
 	return s, true
+}
+
+// qbVersion asks the program itself, which is right whichever build is installed.
+const qbVersion = "/usr/bin/qbittorrent-nox --version"
+
+// qbStaticUpdate puts the newest official static build in place of /usr/bin/qbittorrent-nox: it
+// downloads it, checks it runs, then swaps it in with a rename, which works while the old one runs.
+const qbStaticUpdate = `set -e
+case "$(uname -m)" in x86_64) arch=x86_64 ;; aarch64) arch=aarch64 ;; *) echo "no static qBittorrent build for $(uname -m)"; exit 1 ;; esac
+tmp=$(mktemp /usr/bin/.qbittorrent-nox.XXXXXX); trap 'rm -f "$tmp"' EXIT
+curl -fsSL --retry 3 -o "$tmp" "https://github.com/userdocs/qbittorrent-nox-static/releases/latest/download/${arch}-qbittorrent-nox"
+chmod 755 "$tmp"
+"$tmp" --version
+mv -f "$tmp" /usr/bin/qbittorrent-nox
+trap - EXIT`
+
+// seerrFetch gets the one release tag it installs. Fetching every tag fails once upstream has moved
+// any of them (Seerr moves its preview tags), and git says so only without --quiet.
+const seerrFetch = `git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"`
+
+// superseded are recipe lines replaced by better ones: a saved command made from the older recipe,
+// and otherwise untouched, gets the new line.
+var superseded = [][2]string{
+	{"git fetch --tags --quiet origin", seerrFetch},
+}
+
+// seerr is Seerr in a git checkout: an update checks out the new tag and rebuilds it with the Node
+// its service runs, and the restart puts the new build live.
+func (d detector) seerr() (Spec, bool) {
+	s, ok := d.release("seerr", "Seerr", "seerr-team/seerr", "/opt/seerr/package.json", `grep -m1 '"version"' /opt/seerr/package.json`, "seerr")
+	if !ok || !isDir("/opt/seerr/.git") || !isFile("/opt/seerr/pnpm-lock.yaml") || s.Unit == "" {
+		return s, ok
+	}
+	path := ""
+	if args := d.execArgs(s.Unit); len(args) > 0 && filepath.Base(args[0]) == "node" {
+		path = "export PATH=" + shellQuote(filepath.Dir(args[0])) + ":$PATH\n"
+	}
+	s.UpdateCommand = "set -e\n" + path + `cd /opt/seerr
+` + seerrFetch + `
+git -c advice.detachedHead=false checkout --quiet "$TAG"
+CYPRESS_INSTALL_BINARY=0 pnpm install --frozen-lockfile
+pnpm build`
+	s.Restart = true
+	return s, ok
 }
 
 // self is the monitor's own checkout, rebuilt with make after pulling.

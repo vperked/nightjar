@@ -56,6 +56,9 @@ func (w *gzipWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// Unwrap lets http.ResponseController reach the connection, to extend a slow handler's write deadline.
+func (w *gzipWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *gzipWriter) close() {
 	if w.gz != nil {
 		w.gz.Close()

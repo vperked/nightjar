@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,8 +16,10 @@ import (
 	"nightjar/internal/cleanup"
 	"nightjar/internal/collect"
 	"nightjar/internal/config"
+	"nightjar/internal/ddos"
 	"nightjar/internal/discord"
 	"nightjar/internal/docker"
+	"nightjar/internal/firewall"
 	"nightjar/internal/kernel"
 	"nightjar/internal/logx"
 	"nightjar/internal/maintenance"
@@ -66,8 +69,10 @@ type Context struct {
 	DiscordBot       *discord.Bot          // when alerts go through a bot, for its button clicks
 	// Activity records something done, by whom (for the activity log); nil records nothing.
 	Activity func(who, kind, target, detail string)
-	Docker   *docker.Client  // containers, for container checks and repairs
-	Remote   *remote.Monitor // other servers, watched through their agents
+	Docker   *docker.Client    // containers, for container checks and repairs
+	Remote   *remote.Monitor   // other servers, watched through their agents
+	Attacks  *ddos.Watcher     // denial-of-service attacks on this machine
+	Firewall *firewall.Manager // firewall rules set from the dashboard
 	// Analytics records every server's minutes for the analytics page; nil records nothing.
 	Analytics *analytics.Recorder
 	Freeze    *FreezeMonitor
@@ -127,7 +132,17 @@ func (c *Context) applyPending() bool {
 	}
 	c.Cfg, c.pending = *c.pending, nil
 	logx.SetLevel(c.Cfg.LogLevel)
+	// The check interval is live, and an episode must outlast a few cycles of it.
+	if c.Gates != nil {
+		c.Gates.SetRecovery(GateRecovery(c.Cfg))
+	}
 	return true
+}
+
+// GateRecovery is how long an alert's condition must go unreported before its episode ends:
+// ALERT_RECOVERY_SECONDS, and never less than three check intervals.
+func GateRecovery(cfg config.Settings) float64 {
+	return max(cfg.AlertRecoverySeconds, 3*cfg.CheckInterval)
 }
 
 // Sample is one cycle's headline numbers, kept so the dashboard can draw trends immediately.
@@ -150,10 +165,14 @@ func (c *Context) History() []Sample {
 	return append([]Sample(nil), c.samples...)
 }
 
-// Heartbeat tells the watchdog the loop is still alive.
+// Heartbeat tells the watchdog (and the freeze monitor) the loop is still alive. Only the loop's
+// goroutine may call it: a beat from anywhere else would hide a stuck loop.
 func (c *Context) Heartbeat() {
 	if c.Watchdog != nil {
 		c.Watchdog.Heartbeat()
+	}
+	if c.Freeze != nil {
+		c.Freeze.Heartbeat()
 	}
 }
 
@@ -251,8 +270,16 @@ func newHandler(ctx *Context, component string) handler {
 // raiseAlert logs "[ALERT] message" and calls send when webhook is set (or logs plainly otherwise),
 // then records the alert. It returns false when the gate suppressed this occurrence.
 func (h handler) raiseAlert(key string, now float64, message string, webhook discord.Sender, send func() bool, alertType string, recordResult bool) bool {
-	gate := h.ctx.Gates.Get(key, now)
-	if !gate.ShouldAlert(now) {
+	return h.raiseAlertEvery(key, now, 0, message, webhook, send, alertType, recordResult)
+}
+
+// raiseAlertEvery is raiseAlert for a condition looked at only every interval seconds, so its
+// episode (and the cooldown's backoff) survives the gaps between looks.
+func (h handler) raiseAlertEvery(key string, now, interval float64, message string, webhook discord.Sender, send func() bool, alertType string, recordResult bool) bool {
+	gate := h.ctx.Gates.GetEvery(key, now, interval)
+	// Marked sent before sending, so a second report of the same condition arriving while this
+	// one is still being sent waits out the cooldown instead of alerting twice.
+	if !gate.Allow(now) {
 		h.log.Debug(fmt.Sprintf("%s cooldown: %.0fs", key, gate.SecondsUntilNext(now)))
 		return false
 	}
@@ -273,12 +300,16 @@ func (h handler) raiseAlert(key string, now float64, message string, webhook dis
 	} else {
 		h.log.Warn(message)
 	}
-	gate.MarkSent(now)
 	return true
 }
 
-// withTimeout runs fn in a goroutine and returns def if it does not finish in time.
-func withTimeout[T any](timeout time.Duration, def T, name string, fn func() T) T {
+// beatEvery is how often the loop tells the watchdog it is alive while it waits on slow work.
+const beatEvery = 5 * time.Second
+
+// withTimeout runs fn in a goroutine and returns def if it does not finish in time. It is for the
+// loop's goroutine: while it waits it beats c's heartbeat, since it always returns within timeout
+// and a loop waiting on bounded work has not stopped (c may be nil, for no beats).
+func withTimeout[T any](c *Context, timeout time.Duration, def T, name string, fn func() T) T {
 	ch := make(chan T, 1)
 	go func() {
 		defer func() {
@@ -288,12 +319,22 @@ func withTimeout[T any](timeout time.Duration, def T, name string, fn func() T) 
 		}()
 		ch <- fn()
 	}()
-	select {
-	case v := <-ch:
-		return v
-	case <-time.After(timeout):
-		log.Warn(fmt.Sprintf("%s timed out after %s", name, timeout))
-		return def
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	beat := time.NewTicker(beatEvery)
+	defer beat.Stop()
+	for {
+		select {
+		case v := <-ch:
+			return v
+		case <-beat.C:
+			if c != nil {
+				c.Heartbeat()
+			}
+		case <-deadline.C:
+			log.Warn(fmt.Sprintf("%s timed out after %s", name, timeout))
+			return def
+		}
 	}
 }
 
@@ -312,4 +353,15 @@ func (c *Context) send(webhook discord.Sender, sev discord.Severity, title, desc
 // UpdateWindow is when automatic updates may start.
 func UpdateWindow(cfg config.Settings) updates.Window {
 	return updates.Window{Start: cfg.UpdatesWindowStart, End: cfg.UpdatesWindowEnd}
+}
+
+// AlertDestinations says where alerts go, for the log: the channels set up, else the dashboard's
+// notifications alone.
+func (c *Context) AlertDestinations() string {
+	if c.Notifications != nil {
+		if ch := c.Notifications.Channels(); len(ch) > 0 {
+			return strings.Join(ch, ", ")
+		}
+	}
+	return "the dashboard's notifications (no alert channels set up)"
 }

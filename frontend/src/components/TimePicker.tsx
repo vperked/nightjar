@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FocusEvent, type KeyboardEvent } from 'react';
 
 // TimePicker is the dashboard's time field: a button showing the time and a small panel of hour and
 // minute columns, in place of the browser's own picker. The value is "HH:MM" on a 24-hour clock;
@@ -86,8 +86,15 @@ export function TimePicker({ value, onChange, label, disabled }: { value: string
     setOpen(false);
     button.current?.focus();
   };
-  // Arrow keys on the closed field step a quarter of an hour, wrapping round midnight.
+  // Arrow keys on the closed field step a quarter of an hour, wrapping round midnight. Escape closes
+  // the panel from the field too, where focus stays after opening it.
   const onKey = (e: KeyboardEvent) => {
+    if (open && e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+      return;
+    }
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
       const t = (h * 60 + m + (e.key === 'ArrowUp' ? 15 : -15) + 1440) % 1440;
@@ -108,8 +115,14 @@ export function TimePicker({ value, onChange, label, disabled }: { value: string
   const hours = hour12 ? Array.from({ length: 12 }, (_, i) => ({ value: i === 0 ? 12 : i, text: String(i === 0 ? 12 : i) })) : Array.from({ length: 24 }, (_, i) => ({ value: i, text: pad(i) }));
   const pm = h >= 12;
 
+  // Closes when focus moves on to something else on the page, as tabbing past the panel does. A blur
+  // with nowhere to go (a click on a button Safari does not focus) is left to the mousedown above.
+  const onBlur = (e: FocusEvent) => {
+    if (open && e.relatedTarget && !root.current?.contains(e.relatedTarget as Node)) setOpen(false);
+  };
+
   return (
-    <div className={`tp ${open ? 'open' : ''} ${disabled ? 'disabled' : ''}`} ref={root}>
+    <div className={`tp ${open ? 'open' : ''} ${disabled ? 'disabled' : ''}`} ref={root} onBlur={onBlur}>
       <button
         ref={button}
         type="button"

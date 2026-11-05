@@ -129,6 +129,7 @@ func (h *driveWatcher) check(s *Snapshot) {
 	}
 	h.lastRead = s.Now
 	limits := smart.Limits{HDD: cfg.SmartHDDTempLimit, SSD: cfg.SmartSSDTempLimit}
+	every := cfg.SmartCheckInterval
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -146,8 +147,15 @@ func (h *driveWatcher) check(s *Snapshot) {
 		}
 		h.lastErr = ""
 		for _, d := range drives {
-			if d.Checked == float64(now.Unix()) {
-				h.compare(d, s.Now)
+			switch {
+			case d.Error != "":
+				// It was read before and stopped answering, which is how a dying disk often looks.
+				if !d.Asleep && d.Checked != 0 {
+					h.unanswered(d)
+				}
+			case d.Checked == float64(now.Unix()):
+				h.compare(d, s.Now, every)
+				h.answering(d)
 			}
 		}
 		if data, err := json.Marshal(drives); err == nil {
@@ -180,17 +188,52 @@ func baselineOf(d smart.Drive) baseline {
 	return b
 }
 
-func driveName(d smart.Drive) string {
-	if d.Model != "" {
-		return d.Model + " (" + d.Device + ")"
+// driveDevice is where a drive is read. Drives behind a RAID controller share one device
+// (/dev/bus/0) and differ by their slot in smartctl's type (megaraid,0 and megaraid,1).
+func driveDevice(d smart.Drive) string {
+	if strings.Contains(d.Type, ",") {
+		return d.Device + " " + d.Type
 	}
 	return d.Device
 }
 
-// driveID names a drive across reboots, which can reorder device names.
-func driveID(d smart.Drive) string { return cmp.Or(d.Serial, d.Device) }
+func driveName(d smart.Drive) string {
+	if d.Model != "" {
+		return d.Model + " (" + driveDevice(d) + ")"
+	}
+	return driveDevice(d)
+}
 
-func (h *driveWatcher) compare(d smart.Drive, now float64) {
+// driveID names a drive across reboots, which can reorder device names.
+func driveID(d smart.Drive) string { return cmp.Or(d.Serial, driveDevice(d)) }
+
+// unansweredKey marks a drive whose stopping answering was already announced, until it reads again.
+func unansweredKey(d smart.Drive) string { return "smart.unanswered." + driveID(d) }
+
+// unanswered announces, once per outage, a drive that was read before and now cannot be.
+func (h *driveWatcher) unanswered(d smart.Drive) {
+	key := unansweredKey(d)
+	if h.ctx.Store.Meta(key) != "" {
+		return
+	}
+	h.ctx.Store.SetMeta(key, d.Error)
+	h.log.Warn("Drive stopped answering", "drive", driveName(d), "err", d.Error)
+	if hook := discord.About(h.ctx.Webhook, "drive:"+driveID(d)); hook != nil {
+		hook.SendEmbed("Drive not answering: "+driveName(d), "SMART could not read it: "+d.Error+"\nA drive that stops answering is often failing, or its cable is loose: check it, and back up what is on it.",
+			discord.Warning, nil, "Disk")
+	}
+}
+
+// answering clears a drive's outage once it reads again, so the next one is announced too.
+func (h *driveWatcher) answering(d smart.Drive) {
+	if key := unansweredKey(d); h.ctx.Store.Meta(key) != "" {
+		h.log.Info("Drive answering again", "drive", driveName(d))
+		h.ctx.Store.SetMeta(key, "")
+	}
+}
+
+// compare announces what is new about a drive read every interval seconds.
+func (h *driveWatcher) compare(d smart.Drive, now, interval float64) {
 	key := "smart.baseline." + driveID(d)
 	var old baseline
 	json.Unmarshal([]byte(h.ctx.Store.Meta(key)), &old)
@@ -237,7 +280,8 @@ func (h *driveWatcher) compare(d smart.Drive, now float64) {
 	// Heat comes and goes, so it is gated like the other threshold alerts rather than announced once.
 	if d.Temperature != nil && slices.ContainsFunc(d.Problems, func(p string) bool { return strings.HasPrefix(p, "running hot") }) {
 		msg := fmt.Sprintf("%s is at %d°C", driveName(d), *d.Temperature)
-		h.raiseAlert("drive-temp:"+d.Device, now, msg, hook, func() bool {
+		// Drives are read every interval, so the episode must outlast the gap between reads.
+		h.raiseAlertEvery("drive-temp:"+driveDevice(d), now, interval, msg, hook, func() bool {
 			return hook.SendEmbed("Drive running hot: "+driveName(d), msg, discord.Warning, fields, "Disk")
 		}, "drive_temperature", false)
 	}

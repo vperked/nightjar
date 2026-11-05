@@ -221,8 +221,15 @@ func (m *Monitor) pings(token string, now float64) *Pings {
 	}
 	p := &Pings{Seen: now}
 	if m.store != nil {
-		if raw := m.store.Meta(pingKey(token)); raw != "" {
+		raw, err := m.store.MetaValue(pingKey(token))
+		if raw != "" {
 			json.Unmarshal([]byte(raw), p)
+		} else if err == nil {
+			// Kept at once, so a restart does not move when Nightjar began listening for a job
+			// that never pings, which would keep putting off its late or missed verdict. A record
+			// that could not be read is not written over: it may hold the job's pings.
+			data, _ := json.Marshal(p)
+			m.store.SetMeta(pingKey(token), string(data))
 		}
 	}
 	m.heartbeats[token] = p

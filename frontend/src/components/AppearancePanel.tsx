@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import { useConfig } from '../api/ConfigContext';
 import type { Appearance } from '../api/types';
 import { DEFAULT_APPEARANCE, previewAppearance } from '../appearance';
+import { useUnsaved } from '../freshness';
 import { configChanged } from './Sections';
 import { SettingsGroup } from './SettingsGroup';
 import { useToast } from './Toasts';
@@ -46,6 +47,8 @@ export function AppearancePanel() {
   const [error, setError] = useState('');
   const current = draft ?? saved;
   const dirty = draft !== undefined && !same(draft, saved);
+  // The draft is outside a form, edited with buttons: say so, so a new build does not reload it away.
+  useUnsaved(dirty);
 
   // The draft is shown everywhere while it differs from the saved look; once the saved look
   // catches up (after a save) or the draft is dropped, the saved one shows again.

@@ -80,19 +80,31 @@ func (r readCloser) Close() error {
 	return r.f.Close()
 }
 
-// unpacked caches each build unpacked, with its SHA-256, for sending to agents that update.
-var unpacked sync.Map // arch → packed
+// hashes caches each build's SHA-256: checking whether an agent is current happens after every poll,
+// while sending a build is rare, so only the hash is kept, not the 8 MB build.
+var hashes sync.Map // arch → hex
 
-type packed struct {
-	data []byte
-	hash string
+// Hash is the SHA-256 of the agent for arch, unpacked.
+func Hash(arch string) (string, error) {
+	if h, ok := hashes.Load(arch); ok {
+		return h.(string), nil
+	}
+	rc, _, err := Open(arch)
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, rc); err != nil {
+		return "", err
+	}
+	h := hex.EncodeToString(sum.Sum(nil))
+	hashes.Store(arch, h)
+	return h, nil
 }
 
-// Load is the agent for arch, unpacked, with its SHA-256 in hex.
+// Load is the agent for arch, unpacked, with its SHA-256 in hex. It is read afresh each time.
 func Load(arch string) ([]byte, string, error) {
-	if p, ok := unpacked.Load(arch); ok {
-		return p.(packed).data, p.(packed).hash, nil
-	}
 	rc, _, err := Open(arch)
 	if err != nil {
 		return nil, "", err
@@ -103,7 +115,7 @@ func Load(arch string) ([]byte, string, error) {
 		return nil, "", err
 	}
 	sum := sha256.Sum256(data)
-	p := packed{data, hex.EncodeToString(sum[:])}
-	unpacked.Store(arch, p)
-	return p.data, p.hash, nil
+	h := hex.EncodeToString(sum[:])
+	hashes.Store(arch, h)
+	return data, h, nil
 }

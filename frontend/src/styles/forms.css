@@ -24,6 +24,28 @@
   border-radius: 0 3px 3px 0;
   background: var(--series-1);
 }
+/* On a phone the label sits above its field, so the field gets the whole width. */
+@media (max-width: 640px) {
+  .form-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .form-row .form-label {
+    padding-top: 0;
+  }
+  .form-row.changed::before {
+    left: -14px;
+  }
+  .form-control > .field,
+  .with-unit .field:not(.short) {
+    flex-basis: 100%;
+  }
+  /* A form's choices wrap onto another line rather than hide past the edge. */
+  .form-control .seg {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+}
 .form-label {
   font-size: 13.5px;
   font-weight: 500;

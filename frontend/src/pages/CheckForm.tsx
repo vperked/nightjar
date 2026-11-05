@@ -117,7 +117,7 @@ function PluginTarget({ target, onChange }: { target: string; onChange: (t: stri
   const [plugins, setPlugins] = useState<Plugin[]>();
   useEffect(() => {
     api.plugins().then(
-      (r) => setPlugins(r.plugins.filter((p) => p.provides.includes('check'))),
+      (r) => setPlugins(r.plugins.filter((p) => (p.provides ?? []).includes('check'))),
       () => setPlugins([]),
     );
   }, []);

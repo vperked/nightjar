@@ -63,35 +63,34 @@ type credentials struct {
 	Code      string `json:"code"` // the authenticator's, with two-factor sign-in on
 }
 
-func (s *Server) readCredentials(w http.ResponseWriter, r *http.Request) (credentials, bool) {
-	var c credentials
+// readCredentials reads a sign-in's credentials and starts a try at them (see passwordTry); finish
+// ends it.
+func (s *Server) readCredentials(w http.ResponseWriter, r *http.Request) (c credentials, finish func(failed bool), ok bool) {
 	if s.cfg.Accounts == nil {
 		writeJSON(w, http.StatusNotFound, errBody("Accounts are not enabled"))
-		return c, false
-	}
-	if s.throttled(clientIP(r)) {
-		writeJSON(w, http.StatusTooManyRequests, errBody("Too many tries. Wait a minute and try again."))
-		return c, false
+		return c, nil, false
 	}
 	if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("Send a username and password"))
-		return c, false
+		return c, nil, false
 	}
-	return c, true
+	finish, ok = s.passwordTry(w, r)
+	return c, finish, ok
 }
 
 // createAdmin makes the admin account (once, with the setup code) and signs this browser in.
 func (s *Server) createAdmin(w http.ResponseWriter, r *http.Request) {
-	c, ok := s.readCredentials(w, r)
+	c, finish, ok := s.readCredentials(w, r)
 	if !ok {
 		return
 	}
-	switch err := s.cfg.Accounts.Create(c.Username, c.Password, c.SetupCode); {
+	err := s.cfg.Accounts.Create(c.Username, c.Password, c.SetupCode)
+	finish(errors.Is(err, accounts.ErrSetupCode))
+	switch {
 	case errors.Is(err, accounts.ErrExists):
 		writeJSON(w, http.StatusConflict, errBody(err.Error()))
 	case errors.Is(err, accounts.ErrSetupCode):
-		s.recordFailure(clientIP(r))
-		log.Warn("Wrong setup code", "ip", clientIP(r))
+		log.Warn("Wrong setup code", "ip", s.clientNames(r))
 		writeJSON(w, http.StatusForbidden, errBody(err.Error()))
 	case err != nil:
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
@@ -101,14 +100,15 @@ func (s *Server) createAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	c, ok := s.readCredentials(w, r)
+	c, finish, ok := s.readCredentials(w, r)
 	if !ok {
 		return
 	}
 	if err := s.cfg.Accounts.Verify(c.Username, c.Password); err != nil {
-		if errors.Is(err, accounts.ErrCredentials) {
-			s.recordFailure(clientIP(r))
-			log.Warn("Failed sign-in", "ip", clientIP(r))
+		wrong := errors.Is(err, accounts.ErrCredentials)
+		finish(wrong)
+		if wrong {
+			log.Warn("Failed sign-in", "ip", s.clientNames(r))
 		}
 		writeJSON(w, http.StatusUnauthorized, errBody(err.Error()))
 		return
@@ -116,18 +116,20 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	// With two-factor sign-in on, the password alone is not enough: the page then asks for a code.
 	if s.cfg.Accounts.TwoFactor() {
 		if strings.TrimSpace(c.Code) == "" {
+			finish(false)
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Enter the code from your authenticator app", "need_code": true, "fields": map[string]string{"code": "needed"}})
 			return
 		}
 		if err := s.cfg.Accounts.CheckCode(c.Code); err != nil {
-			s.recordFailure(clientIP(r))
-			log.Warn("Failed sign-in: wrong code", "ip", clientIP(r))
+			finish(true)
+			log.Warn("Failed sign-in: wrong code", "ip", s.clientNames(r))
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error(), "need_code": true, "fields": map[string]string{"code": err.Error()}})
 			return
 		}
 	}
-	log.Info("Signed in", "ip", clientIP(r))
-	s.record(r, "Signed in", "account", "", "from "+clientIP(r))
+	finish(false)
+	log.Info("Signed in", "ip", s.clientNames(r))
+	s.record(r, "Signed in", "account", "", "from "+s.clientNames(r))
 	s.startSession(w, r)
 }
 
@@ -138,6 +140,9 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	s.setCookie(w, r, "", -1)
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// The signed-in account's own changes ask for the password again, and each is a try at it like a
+// sign-in (see passwordTry): a session left open or stolen cannot be used to guess the password.
 
 func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Accounts == nil {
@@ -152,10 +157,15 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("Send the current and new password"))
 		return
 	}
-	if err := s.cfg.Accounts.ChangePassword(body.Current, body.New, sessionCookie(r)); err != nil {
+	finish, ok := s.passwordTry(w, r)
+	if !ok {
+		return
+	}
+	err := s.cfg.Accounts.ChangePassword(body.Current, body.New, sessionCookie(r))
+	finish(errors.Is(err, accounts.ErrWrongCurrent))
+	if err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, accounts.ErrWrongCurrent) {
-			s.recordFailure(clientIP(r))
 			code = http.StatusForbidden
 		}
 		writeJSON(w, code, errBody(err.Error()))
@@ -166,6 +176,10 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 
 // beginTwoFactor offers a new authenticator secret, to confirm with enableTwoFactor.
 func (s *Server) beginTwoFactor(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Accounts == nil {
+		writeJSON(w, http.StatusNotFound, errBody("Accounts are not enabled"))
+		return
+	}
 	secret, link, err := s.cfg.Accounts.BeginTwoFactor()
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
@@ -174,12 +188,23 @@ func (s *Server) beginTwoFactor(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"secret": secret, "link": link})
 }
 
+// enableTwoFactor turns two-factor sign-in on, with the password and a code from the new secret.
 func (s *Server) enableTwoFactor(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Accounts == nil {
+		writeJSON(w, http.StatusNotFound, errBody("Accounts are not enabled"))
+		return
+	}
 	var in struct {
-		Code string `json:"code"`
+		Password string `json:"password"`
+		Code     string `json:"code"`
 	}
 	json.NewDecoder(r.Body).Decode(&in)
-	codes, err := s.cfg.Accounts.EnableTwoFactor(in.Code)
+	finish, ok := s.passwordTry(w, r)
+	if !ok {
+		return
+	}
+	codes, err := s.cfg.Accounts.EnableTwoFactor(in.Password, in.Code)
+	finish(errors.Is(err, accounts.ErrWrongCurrent))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 		return
@@ -188,12 +213,22 @@ func (s *Server) enableTwoFactor(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) disableTwoFactor(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Accounts == nil {
+		writeJSON(w, http.StatusNotFound, errBody("Accounts are not enabled"))
+		return
+	}
 	var in struct {
 		Password string `json:"password"`
 		Code     string `json:"code"`
 	}
 	json.NewDecoder(r.Body).Decode(&in)
-	if err := s.cfg.Accounts.DisableTwoFactor(in.Password, in.Code); err != nil {
+	finish, ok := s.passwordTry(w, r)
+	if !ok {
+		return
+	}
+	err := s.cfg.Accounts.DisableTwoFactor(in.Password, in.Code)
+	finish(errors.Is(err, accounts.ErrWrongCurrent) || errors.Is(err, accounts.ErrCode))
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 		return
 	}

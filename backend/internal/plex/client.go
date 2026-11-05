@@ -66,6 +66,10 @@ func (c *Client) request(path string, query url.Values) (*http.Response, error) 
 	return resp, nil
 }
 
+// maxBody is the most of one answer that is read. A longer one is refused rather than handed
+// to the parser cut short; what can be long (a library, the watch history) is read in pages.
+const maxBody = 8 << 20
+
 func (c *Client) get(path string, query url.Values, v any) error {
 	resp, err := c.request(path, query)
 	if err != nil {
@@ -78,9 +82,12 @@ func (c *Client) get(path string, query url.Values, v any) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return err
+	}
+	if len(body) > maxBody {
+		return fmt.Errorf("Plex's answer to %s is larger than the %d MB Nightjar reads", path, maxBody>>20)
 	}
 	if err := json.Unmarshal(body, v); err != nil {
 		return fmt.Errorf("unexpected response: %w", err)
@@ -520,11 +527,53 @@ type Item struct {
 	Guids []string `json:"guids"`
 }
 
-// Items lists a movie or show library.
+// itemsPage is how many items Items asks for at once: a movie with its files, guids, genres and
+// cast is a few KB, so a whole large library would not fit in one answer.
+const itemsPage = 500
+
+// Items lists a movie or show library, a page at a time. A library that changes while it is read
+// is an error rather than a list that may miss an item.
 func (c *Client) Items(lib Library) ([]Item, error) {
+	out := []Item{}
+	seen := map[string]bool{}
+	total := -1
+	for start := 0; ; start += itemsPage {
+		page, size, err := c.itemsFrom(lib, start)
+		if err != nil {
+			return nil, err
+		}
+		if total < 0 {
+			total = size
+		} else if size != total {
+			return nil, fmt.Errorf("%s changed while it was read", lib.Title)
+		}
+		added := 0
+		for _, it := range page {
+			if !seen[it.Key] {
+				seen[it.Key] = true
+				out = append(out, it)
+				added++
+			}
+		}
+		// A server that ignores the paging sends the whole library each time: a page with nothing
+		// new, or one that reaches the total, is the end rather than a reason to ask again.
+		if len(page) < itemsPage || added == 0 || (total > 0 && start+len(page) >= total) {
+			break
+		}
+	}
+	if total > 0 && len(out) < total {
+		return nil, fmt.Errorf("%s changed while it was read: %d of its %d items were listed", lib.Title, len(out), total)
+	}
+	return out, nil
+}
+
+// itemsFrom is one page of a library from start, and how many items Plex says it has in all
+// (0 when it does not say).
+func (c *Client) itemsFrom(lib Library, start int) ([]Item, int, error) {
 	var r struct {
 		MediaContainer struct {
-			Metadata []struct {
+			TotalSize num `json:"totalSize"`
+			Metadata  []struct {
 				RatingKey       string `json:"ratingKey"`
 				Type            string `json:"type"`
 				Title           string `json:"title"`
@@ -533,10 +582,8 @@ func (c *Client) Items(lib Library) ([]Item, error) {
 				ViewCount       num    `json:"viewCount"`
 				ViewOffset      num    `json:"viewOffset"`
 				ViewedLeafCount num    `json:"viewedLeafCount"`
-				Guid            []struct {
-					ID string `json:"id"`
-				}
-				Media []struct {
+				Guid            guids
+				Media           []struct {
 					Part []struct {
 						File string `json:"file"`
 						Size num    `json:"size"`
@@ -545,16 +592,15 @@ func (c *Client) Items(lib Library) ([]Item, error) {
 			}
 		}
 	}
-	if err := c.get("/library/sections/"+url.PathEscape(lib.Key)+"/all", url.Values{"includeGuids": {"1"}}, &r); err != nil {
-		return nil, err
+	q := url.Values{"includeGuids": {"1"}, "X-Plex-Container-Start": {strconv.Itoa(start)}, "X-Plex-Container-Size": {strconv.Itoa(itemsPage)}}
+	if err := c.get("/library/sections/"+url.PathEscape(lib.Key)+"/all", q, &r); err != nil {
+		return nil, 0, err
 	}
 	out := make([]Item, 0, len(r.MediaContainer.Metadata))
 	for _, m := range r.MediaContainer.Metadata {
 		it := Item{Key: m.RatingKey, Kind: m.Type, Title: m.Title, Year: int(m.Year), Library: lib.Title, Added: float64(m.AddedAt),
 			Watched: m.ViewCount > 0 || m.ViewOffset > 0 || m.ViewedLeafCount > 0, Files: []string{}, Guids: []string{}}
-		for _, g := range m.Guid {
-			it.Guids = append(it.Guids, g.ID)
-		}
+		it.Guids = append(it.Guids, m.Guid...)
 		for _, md := range m.Media {
 			for _, p := range md.Part {
 				it.Files = append(it.Files, p.File)
@@ -563,7 +609,30 @@ func (c *Client) Items(lib Library) ([]Item, error) {
 		}
 		out = append(out, it)
 	}
-	return out, nil
+	return out, int(r.MediaContainer.TotalSize), nil
+}
+
+// guids is an item's ids elsewhere (tmdb://603, imdb://tt0133093), from its "Guid" list. Plex also sends
+// "guid", its own plex:// id as a string, and Go matches keys regardless of case, so both land here: the
+// string is skipped rather than failing the whole library.
+type guids []string
+
+func (g *guids) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || b[0] != '[' {
+		return nil
+	}
+	var list []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(b, &list); err != nil {
+		return err
+	}
+	for _, x := range list {
+		if x.ID != "" {
+			*g = append(*g, x.ID)
+		}
+	}
+	return nil
 }
 
 // Sections lists the libraries without counting them.
@@ -587,12 +656,21 @@ func (c *Client) Sections() ([]Library, error) {
 	return out, nil
 }
 
+// maxWatchHistory is the most watch history entries EverWatched reads.
+const maxWatchHistory = 2_000_000
+
 // EverWatched is every item anyone on the server has watched, by ratingKey, from Plex's whole
-// watch history: each movie, episode, and the season and show an episode belongs to.
+// watch history: each movie, episode, and the season and show an episode belongs to. History it
+// could not read in full is an error, never a shorter map: the media cleanup takes what is missing
+// from it as never watched.
 func (c *Client) EverWatched() (map[string]bool, error) {
 	seen := map[string]bool{}
 	const page = 1000
-	for start := 0; start < 100000; start += page {
+	read, total := 0, -1
+	for start := 0; ; start += page {
+		if start >= maxWatchHistory {
+			return nil, fmt.Errorf("the watch history has more than %d entries, more than Nightjar reads", maxWatchHistory)
+		}
 		var r struct {
 			MediaContainer struct {
 				TotalSize num `json:"totalSize"`
@@ -607,6 +685,10 @@ func (c *Client) EverWatched() (map[string]bool, error) {
 		if err := c.get("/status/sessions/history/all", q, &r); err != nil {
 			return nil, err
 		}
+		if total < 0 {
+			total = int(r.MediaContainer.TotalSize)
+		}
+		read += len(r.MediaContainer.Metadata)
 		for _, m := range r.MediaContainer.Metadata {
 			for _, k := range []string{m.RatingKey, m.ParentRatingKey, m.GrandparentRatingKey} {
 				if k != "" {
@@ -617,6 +699,10 @@ func (c *Client) EverWatched() (map[string]bool, error) {
 		if len(r.MediaContainer.Metadata) < page {
 			break
 		}
+	}
+	// Entries deleted while it was read shift the pages, so some may have been skipped.
+	if read < total {
+		return nil, fmt.Errorf("the watch history changed while it was read: %d of its %d entries were read", read, total)
 	}
 	return seen, nil
 }

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -191,41 +192,54 @@ func ClosePort(fw, listen string, out io.Writer) {
 	}
 }
 
-// installers are how each package manager installs smartmontools without asking.
+// installers are how each package manager installs a package without asking; the package's name
+// goes last.
 var installers = [][]string{
-	{"apt-get", "install", "-y", "-q", "smartmontools"},
-	{"dnf", "install", "-y", "smartmontools"},
-	{"yum", "install", "-y", "smartmontools"},
-	{"zypper", "--non-interactive", "install", "smartmontools"},
-	{"pacman", "-S", "--noconfirm", "--needed", "smartmontools"},
-	{"apk", "add", "smartmontools"},
+	{"apt-get", "install", "-y", "-q"},
+	{"dnf", "install", "-y"},
+	{"yum", "install", "-y"},
+	{"zypper", "--non-interactive", "install"},
+	{"pacman", "-S", "--noconfirm", "--needed"},
+	{"apk", "add"},
 }
 
 // InstallSmart adds smartmontools, which drive readings need, when smartctl is missing.
 func InstallSmart(out io.Writer) {
-	if _, err := lookPath("smartctl"); err == nil {
+	installPackage(out, "smartmontools", "smartctl", "drive readings", "For drive temperatures and health, also install smartmontools.")
+}
+
+// InstallIPTables adds iptables, which defending against attacks needs, when it is missing.
+func InstallIPTables(out io.Writer) {
+	installPackage(out, "iptables", "iptables-restore", "defending against attacks", "To defend against attacks, also install iptables.")
+}
+
+// installPackage installs pkg with the first package manager there, unless its command is already
+// installed; without a package manager it says what to install.
+func installPackage(out io.Writer, pkg, command, why, otherwise string) {
+	if _, err := lookPath(command); err == nil {
 		return
 	}
 	for _, cmd := range installers {
 		if _, err := lookPath(cmd[0]); err != nil {
 			continue
 		}
-		fmt.Fprintf(out, "Installing smartmontools for drive readings (%s)…\n", cmd[0])
+		args := append(slices.Clone(cmd[1:]), pkg)
+		fmt.Fprintf(out, "Installing %s for %s (%s)…\n", pkg, why, cmd[0])
 		os.Setenv("DEBIAN_FRONTEND", "noninteractive")
-		msg, err := run(cmd[0], cmd[1:]...)
+		msg, err := run(cmd[0], args...)
 		if err != nil && cmd[0] == "apt-get" {
 			// A fresh machine may not have its package lists yet.
 			run("apt-get", "update", "-q")
-			msg, err = run(cmd[0], cmd[1:]...)
+			msg, err = run(cmd[0], args...)
 		}
 		if err != nil {
-			fmt.Fprintf(out, "Could not install smartmontools: %s\n", lastLine(msg))
+			fmt.Fprintf(out, "Could not install %s: %s\n", pkg, lastLine(msg))
 			return
 		}
-		fmt.Fprintln(out, "Installed smartmontools.")
+		fmt.Fprintf(out, "Installed %s.\n", pkg)
 		return
 	}
-	fmt.Fprintln(out, "For drive temperatures and health, also install smartmontools.")
+	fmt.Fprintln(out, otherwise)
 }
 
 func lastLine(s string) string {

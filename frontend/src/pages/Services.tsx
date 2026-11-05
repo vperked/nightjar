@@ -17,8 +17,10 @@ export function ServiceRow({ s, now, onEdit, server }: { s: Service; now: number
   const navigate = useNavigate();
   const href = `/services/${encodeURIComponent(s.name)}`;
   return (
-    <tr className="link" onClick={() => navigate(href)}>
-      <td className="shrink">
+    // A click on the name's own link is left to the link, so it goes once into the history (and a
+    // Ctrl-click opens a tab without moving this one).
+    <tr className="link" onClick={(e) => !(e.target as Element).closest('a') && navigate(href)}>
+      <td className="shrink hide-sm">
         <State status={s.status} />
       </td>
       <td className="name-cell">
@@ -29,7 +31,9 @@ export function ServiceRow({ s, now, onEdit, server }: { s: Service; now: number
           {s.type === 'heartbeat' ? `heartbeat · ${s.schedule}` : `${s.type} · ${s.target}`}
           {server && ` · on ${server}`}
         </span>
-        <div className="show-sm">
+        {/* On a phone the state sits with the last checks, to leave the name the room. */}
+        <div className="show-sm svc-sm">
+          <State status={s.status} />
           <Ticks beats={s.recent} slots={30} />
         </div>
       </td>
@@ -71,6 +75,12 @@ export function ServicesPage() {
   const presetServer = new URLSearchParams(location.search).get('server') ?? undefined;
   const servers = useServerNames();
   const [editing, setEditing] = useState<CheckSpec>();
+  // #add opens the form when it is followed while already here too (the Finder's "Add an uptime check").
+  useEffect(() => {
+    if (location.hash !== '#add') return;
+    setEditing(undefined);
+    setAdding(true);
+  }, [location.hash, location.key]);
   const notify = useToast();
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
@@ -169,7 +179,7 @@ export function ServicesPage() {
           <table className="table">
             <thead>
               <tr>
-                <th className="shrink">State</th>
+                <th className="shrink hide-sm">State</th>
                 <th>Service</th>
                 <th className="hide-sm">Last 48 checks</th>
                 <th className="r hide-sm">Resp.</th>

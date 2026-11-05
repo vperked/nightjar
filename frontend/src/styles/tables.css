@@ -106,6 +106,17 @@
     display: block;
     margin-top: 8px;
   }
+  /* A check's state beside its last checks, under the name. */
+  .show-sm.svc-sm {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .svc-sm > :last-child {
+    flex: 1;
+    min-width: 0;
+  }
 }
 
 .table .sub {

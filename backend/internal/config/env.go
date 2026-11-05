@@ -4,6 +4,7 @@ package config
 import (
 	"bufio"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -41,6 +42,24 @@ func LoadDotenv(path string) error {
 		}
 	}
 	return scanner.Err()
+}
+
+// Environ is the process environment without the settings that are secrets (webhooks, tokens,
+// passwords, API keys), for the programs Nightjar starts: LoadDotenv, and the service's
+// EnvironmentFile, put every one of them in Nightjar's own environment, and a script that prints
+// its environment or runs someone else's installer has no need of them.
+func Environ() []string {
+	var s Settings
+	secret := map[string]bool{}
+	for _, f := range s.Fields() {
+		if f.Kind == KindSecret {
+			secret[f.Key] = true
+		}
+	}
+	return slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		key, _, _ := strings.Cut(kv, "=")
+		return secret[key]
+	})
 }
 
 // Bool reads a true/false environment variable outside Settings (install-time switches), falling

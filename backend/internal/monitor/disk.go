@@ -77,31 +77,46 @@ type diskCleanup struct {
 	lastCleanup float64
 }
 
+// rootPercent is how full the root filesystem is. What disk cleanup frees (logs, temporary files,
+// caches) lives there, so another disk filling up, or the total across disks, must not set it off.
+func rootPercent(s *Snapshot) float64 {
+	for _, p := range s.Partitions {
+		if p.Mountpoint == "/" {
+			return p.Percent
+		}
+	}
+	if u, err := collect.DiskUsage("/"); err == nil {
+		return u.Percent
+	}
+	return 0
+}
+
 func (h *diskCleanup) check(s *Snapshot) {
 	cfg := h.ctx.Cfg
+	percent := rootPercent(s)
 	since := s.Now - h.lastCleanup
-	if s.DiskPercent >= cfg.DiskCleanupThreshold && since >= logCleanupInterval {
-		h.cleanLogs(s)
+	if percent >= cfg.DiskCleanupThreshold && since >= logCleanupInterval {
+		h.cleanLogs(s, percent)
 		since = 0
 	}
 	switch {
-	case s.DiskPercent >= cfg.DiskEmergencyThreshold:
+	case percent >= cfg.DiskEmergencyThreshold:
 		if since >= diskEmergencyCooldown {
-			h.emergency(s)
+			h.emergency(s, percent)
 		}
-	case s.DiskPercent >= cfg.DiskCleanupThreshold:
-		if cd := cleanupCooldown(s.DiskPercent); since >= cd {
-			h.routine(s)
+	case percent >= cfg.DiskCleanupThreshold:
+		if cd := cleanupCooldown(percent); since >= cd {
+			h.routine(s, percent)
 		} else {
 			h.log.Debug(fmt.Sprintf("Disk cleanup cooldown: %.0fs", cd-since))
 		}
 	}
 }
 
-func (h *diskCleanup) cleanLogs(s *Snapshot) {
+func (h *diskCleanup) cleanLogs(s *Snapshot, percent float64) {
 	ctx := h.ctx
-	h.log.Warn(fmt.Sprintf("[CLEANUP] Disk at %.1f%% - starting log cleanup...", s.DiskPercent))
-	st := withTimeout(5*time.Minute, cleanup.Stats{}, "log cleanup operation", ctx.Cleaner.CleanLogsAndRestart)
+	h.log.Warn(fmt.Sprintf("[CLEANUP] Disk at %.1f%% - starting log cleanup...", percent))
+	st := withTimeout(h.ctx, 5*time.Minute, cleanup.Stats{}, "log cleanup operation", ctx.Cleaner.CleanLogsAndRestart)
 	ctx.Heartbeat()
 	if st.LogsCleaned > 0 {
 		h.log.Warn(fmt.Sprintf("[CLEANUP] Cleared %d log file(s), freed %s", st.LogsCleaned, format.Bytes(float64(st.BytesCleared))))
@@ -112,70 +127,94 @@ func (h *diskCleanup) cleanLogs(s *Snapshot) {
 	h.lastCleanup = s.Now
 }
 
-func (h *diskCleanup) emergency(s *Snapshot) {
+// notify sends what a cleanup did through the alert gate under key, so a disk that stays full
+// does not repeat it on every run (every interval seconds) but backs off like any other alert.
+func (h handler) notify(key string, now, interval float64, sev discord.Severity, title, desc string, fields []discord.Field, footer string) {
+	ctx := h.ctx
+	h.raiseAlertEvery(key, now, interval, title, ctx.DiskWebhook, func() bool {
+		return ctx.send(ctx.DiskWebhook, sev, title, desc, fields, footer)
+	}, "", false)
+}
+
+func (h *diskCleanup) emergency(s *Snapshot, percent float64) {
 	cfg, ctx := h.ctx.Cfg, h.ctx
 	threshold := cfg.DiskEmergencyThreshold
-	h.log.Error(fmt.Sprintf("[EMERGENCY] Disk usage at %.1f%% (emergency threshold: %.1f%%) - CRITICAL! Starting emergency cleanup...", s.DiskPercent, threshold))
-	st := withTimeout(10*time.Minute, cleanup.Stats{}, "emergency disk cleanup", func() cleanup.Stats { return ctx.Cleaner.EmergencyClean("/") })
+	h.log.Error(fmt.Sprintf("[EMERGENCY] Disk usage at %.1f%% (emergency threshold: %.1f%%) - CRITICAL! Starting emergency cleanup...", percent, threshold))
+	st := withTimeout(h.ctx, 10*time.Minute, cleanup.Stats{}, "emergency disk cleanup", func() cleanup.Stats { return ctx.Cleaner.EmergencyClean("/") })
 	ctx.Heartbeat()
 	h.lastCleanup = s.Now
+	const key = "cleanup-emergency:/"
 	if st.BytesCleared == 0 {
 		h.log.Error("No space could be freed; the disk may fill completely")
-		ctx.send(ctx.DiskWebhook, discord.Critical, fmt.Sprintf("The disk is %.0f%% full, and cleanup freed nothing", s.DiskPercent),
+		h.notify(key, s.Now, diskEmergencyCooldown, discord.Critical, fmt.Sprintf("The disk is %.0f%% full, and cleanup freed nothing", percent),
 			fmt.Sprintf("Emergency cleanup starts at %.0f%%, but found nothing it may remove. Free space by hand now.", threshold),
 			nil, "Critical Alert")
 		return
 	}
 	const stillFull = "Disk still critically full after cleanup! Manual intervention required!"
 	h.log.Error(fmt.Sprintf("[EMERGENCY] Emergency cleanup cleared %s %s", format.Bytes(float64(st.BytesCleared)), cleanupCounts(st)))
-	final := pctOr(st.FinalUsage, s.DiskPercent)
+	final := pctOr(st.FinalUsage, percent)
 	if st.FinalUsage != nil {
 		h.log.Error(fmt.Sprintf("[EMERGENCY] Disk usage after emergency cleanup: %.1f%%", final))
 		if final >= threshold {
 			h.log.Error("[EMERGENCY] " + stillFull)
 		}
 	}
-	fields := append(usageFields(st, s.DiskPercent), field("Logs emptied", fmt.Sprint(st.LogsCleaned), true))
+	fields := append(usageFields(st, percent), field("Logs emptied", fmt.Sprint(st.LogsCleaned), true))
 	fields = append(fields, errorsField(st, "emergency cleanup")...)
 	desc := "Nightjar ran an emergency cleanup so it would not reach 100%."
 	if final >= threshold {
 		desc += " It is still too full: free space by hand."
 	}
-	if ctx.send(ctx.DiskWebhook, discord.Critical, fmt.Sprintf("The disk was %.0f%% full", pctOr(st.InitialUsage, s.DiskPercent)), desc, fields, "Emergency") {
-		h.log.Info("    Discord emergency notification sent")
-	}
+	h.notify(key, s.Now, diskEmergencyCooldown, discord.Critical, fmt.Sprintf("The disk was %.0f%% full", pctOr(st.InitialUsage, percent)), desc, fields, "Emergency")
 }
 
-func (h *diskCleanup) routine(s *Snapshot) {
+func (h *diskCleanup) routine(s *Snapshot, percent float64) {
 	cfg, ctx := h.ctx.Cfg, h.ctx
-	h.log.Warn(fmt.Sprintf("[CLEANUP] Disk usage at %.1f%% (cleanup threshold: %.1f%%), starting automatic cleanup...", s.DiskPercent, cfg.DiskCleanupThreshold))
-	st := withTimeout(5*time.Minute, cleanup.Stats{}, "disk cleanup operation", func() cleanup.Stats { return ctx.Cleaner.CleanDiskSpace("/", targetFreePercent) })
+	h.log.Warn(fmt.Sprintf("[CLEANUP] Disk usage at %.1f%% (cleanup threshold: %.1f%%), starting automatic cleanup...", percent, cfg.DiskCleanupThreshold))
+	st := withTimeout(h.ctx, 5*time.Minute, cleanup.Stats{}, "disk cleanup operation", func() cleanup.Stats { return ctx.Cleaner.CleanDiskSpace("/", targetFreePercent) })
 	h.lastCleanup = s.Now
 	if st.BytesCleared == 0 {
 		h.log.Info("[CLEANUP] No files were cleaned (disk may need manual intervention)")
 		return
 	}
 	h.log.Info(fmt.Sprintf("[CLEANUP] Cleaned %s %s", format.Bytes(float64(st.BytesCleared)), cleanupCounts(st)))
-	fields := append(usageFields(st, s.DiskPercent), errorsField(st, "cleanup")...)
-	if ctx.send(ctx.DiskWebhook, discord.Info, "Freed "+format.Bytes(float64(st.BytesCleared))+" on the disk", "Nightjar cleaned up before the disk filled.", fields, "") {
-		h.log.Info("    Discord cleanup notification sent")
-	}
+	fields := append(usageFields(st, percent), errorsField(st, "cleanup")...)
+	h.notify("cleanup:/", s.Now, cleanupCooldown(percent), discord.Info, "Freed "+format.Bytes(float64(st.BytesCleared))+" on the disk",
+		"Nightjar cleaned up before the disk filled.", fields, "")
 }
 
 type diskAlerts struct{ handler }
 
 func (h diskAlerts) gateOK(key string, now float64) bool {
 	gate := h.ctx.Gates.Get(key, now)
-	if !gate.ShouldAlert(now) {
+	if !gate.Allow(now) {
 		h.log.Debug(fmt.Sprintf("%s cooldown: %.0fs", key, gate.SecondsUntilNext(now)))
 		return false
 	}
-	gate.MarkSent(now)
 	return true
 }
 
+// largestBudget is the longest an alert waits for the largest directories on its disk; the alert
+// goes without them after that. It runs inside the loop, so it stays short.
+const largestBudget = 10 * time.Second
+
+// largest sizes the biggest directories inside path for an alert, within largestBudget in all: one
+// slow subdirectory after another (or a hung network mount) must not hold up the loop for long.
+// LargestSubdirs stops itself after twice perDir, so nothing is left running much past that.
+func (h handler) largest(path string, limit int, perDir time.Duration) []cleanup.DirEntry {
+	return withTimeout(h.ctx, largestBudget, []cleanup.DirEntry(nil), "sizing the largest directories in "+path, func() []cleanup.DirEntry {
+		return cleanup.LargestSubdirs(path, limit, perDir)
+	})
+}
+
+// alertPartitions alerts on each partition past the threshold, when partitions are watched one by
+// one; otherwise alertTotal alerts on the total across disks.
 func (h diskAlerts) alertPartitions(s *Snapshot) {
 	cfg, ctx := h.ctx.Cfg, h.ctx
+	if !cfg.MonitorIndividualPartitions {
+		return
+	}
 	for _, p := range s.Partitions {
 		if p.Percent < cfg.DiskThreshold || !h.gateOK("partition:"+p.Mountpoint, s.Now) {
 			continue
@@ -187,7 +226,7 @@ func (h diskAlerts) alertPartitions(s *Snapshot) {
 		}
 		h.log.Warn("[ALERT] " + msg)
 		fields := []discord.Field{field("Used", format.Bytes(float64(p.Used)), true), field("Free", format.Bytes(float64(p.Free)), true), field("Size", format.Bytes(float64(p.Total)), true)}
-		fields = append(fields, largestDirsField(cleanup.LargestSubdirs(p.Mountpoint, maxDirectoriesDisplay, 15*time.Second))...)
+		fields = append(fields, largestDirsField(h.largest(p.Mountpoint, maxDirectoriesDisplay, largestBudget/2))...)
 		if ctx.send(ctx.DiskWebhook, discord.Warning, fmt.Sprintf("%s is %.0f%% full", p.Mountpoint, p.Percent),
 			fmt.Sprintf("Above the %.0f%% limit.", cfg.DiskThreshold), fields, "") {
 			h.log.Info("    Discord alert sent")
@@ -199,7 +238,7 @@ func (h diskAlerts) alertPartitions(s *Snapshot) {
 
 func (h diskAlerts) alertTotal(s *Snapshot) {
 	cfg, ctx := h.ctx.Cfg, h.ctx
-	if len(s.Partitions) > 0 || s.DiskPercent < cfg.DiskThreshold || !h.gateOK("disk", s.Now) {
+	if (cfg.MonitorIndividualPartitions && len(s.Partitions) > 0) || s.DiskPercent < cfg.DiskThreshold || !h.gateOK("disk", s.Now) {
 		return
 	}
 	msg := fmt.Sprintf("Disk: %.1f%% (threshold: %.1f%%)", s.DiskPercent, cfg.DiskThreshold)
@@ -213,7 +252,7 @@ func (h diskAlerts) alertTotal(s *Snapshot) {
 		field("Size", format.Bytes(float64(s.TotalDisk.Total)), true),
 	}
 	if root, err := collect.DiskUsage("/"); err == nil && root.Percent >= cfg.DiskThreshold {
-		fields = append(fields, largestDirsField(cleanup.LargestSubdirs("/", maxDirectoriesDisplay, 15*time.Second))...)
+		fields = append(fields, largestDirsField(h.largest("/", maxDirectoriesDisplay, largestBudget/2))...)
 	}
 	ctx.send(ctx.DiskWebhook, discord.Warning, fmt.Sprintf("Disks are %.0f%% full", s.DiskPercent), fmt.Sprintf("Above the %.0f%% limit.", cfg.DiskThreshold), fields, "")
 }
@@ -231,17 +270,14 @@ func (h *partitionMaintenance) check(s *Snapshot) {
 	for _, p := range s.Partitions {
 		h.maintain(p, s.Now)
 	}
-	for _, p := range s.Partitions {
-		if p.IsNVMe && p.Percent >= cfg.DiskEarlyWarningThreshold {
-			h.earlyWarning(p, "nvme:"+p.Mountpoint, "NVMe "+p.Mountpoint, "NVMe early warning", s.Now)
-		}
-	}
 }
 
 func (h *partitionMaintenance) maintain(p collect.Partition, now float64) {
 	cfg, key := h.ctx.Cfg, p.Mountpoint
 	since := now - h.lastCleanup[key]
 	switch {
+	case key == "/":
+		// diskCleanup looks after the root filesystem every cycle.
 	case p.Percent >= cfg.DiskEmergencyThreshold:
 		if since >= diskEmergencyCooldown {
 			h.emergency(p, now)
@@ -249,17 +285,15 @@ func (h *partitionMaintenance) maintain(p collect.Partition, now float64) {
 	case p.Percent >= cfg.DiskCleanupThreshold && since >= diskCleanupCooldownNormal:
 		h.routine(p, now)
 	}
-	switch {
-	case p.Percent >= cfg.DiskThreshold:
-		h.thresholdAlert(p, now)
-	case p.Percent >= cfg.DiskEarlyWarningThreshold:
-		h.earlyWarning(p, "partition-early:"+key, "Partition "+key, "partition early warning", now)
+	// Past DiskThreshold, alertPartitions has already alerted.
+	if p.Percent < cfg.DiskThreshold && p.Percent >= cfg.DiskEarlyWarningThreshold {
+		h.earlyWarning(p, now)
 	}
 }
 
 func (h *partitionMaintenance) run(name string, fn func() cleanup.Stats) cleanup.Stats {
 	h.ctx.Heartbeat()
-	st := withTimeout(5*time.Minute, cleanup.Stats{Errors: []string{"cleanup timed out"}}, name, fn)
+	st := withTimeout(h.ctx, 5*time.Minute, cleanup.Stats{Errors: []string{"cleanup timed out"}}, name, fn)
 	h.ctx.Heartbeat()
 	return st
 }
@@ -279,9 +313,7 @@ func (h *partitionMaintenance) emergency(p collect.Partition, now float64) {
 	if pctOr(st.FinalUsage, p.Percent) >= cfg.DiskEmergencyThreshold {
 		desc += " It is still too full: free space by hand."
 	}
-	if ctx.send(ctx.DiskWebhook, discord.Critical, fmt.Sprintf("%s was %.0f%% full", key, pctOr(st.InitialUsage, p.Percent)), desc, fields, "Emergency") {
-		h.log.Info("    Discord emergency notification sent for " + key)
-	}
+	h.notify("cleanup-emergency:"+key, now, diskEmergencyCooldown, discord.Critical, fmt.Sprintf("%s was %.0f%% full", key, pctOr(st.InitialUsage, p.Percent)), desc, fields, "Emergency")
 }
 
 func (h *partitionMaintenance) routine(p collect.Partition, now float64) {
@@ -295,40 +327,18 @@ func (h *partitionMaintenance) routine(p collect.Partition, now float64) {
 	}
 	h.log.Info(fmt.Sprintf("[CLEANUP] Partition %s: Cleaned %s %s", key, format.Bytes(float64(st.BytesCleared)), cleanupCounts(st)))
 	fields := append(usageFields(st, p.Percent), errorsField(st, "cleanup")...)
-	if ctx.send(ctx.DiskWebhook, discord.Info, "Freed "+format.Bytes(float64(st.BytesCleared))+" on "+key, "Nightjar cleaned up before it filled.", fields, "") {
-		h.log.Info("    Discord partition cleanup notification sent for " + key)
-	}
+	h.notify("cleanup:"+key, now, diskCleanupCooldownNormal, discord.Info, "Freed "+format.Bytes(float64(st.BytesCleared))+" on "+key, "Nightjar cleaned up before it filled.", fields, "")
 }
 
-func (h *partitionMaintenance) thresholdAlert(p collect.Partition, now float64) {
+func (h *partitionMaintenance) earlyWarning(p collect.Partition, now float64) {
 	cfg, ctx := h.ctx.Cfg, h.ctx
-	gate := ctx.Gates.Get("partition:"+p.Mountpoint, now)
-	if !gate.ShouldAlert(now) {
-		return
-	}
-	msg := fmt.Sprintf("Partition %s: %.1f%% (threshold: %.1f%%)", p.Mountpoint, p.Percent, cfg.DiskThreshold)
-	if ctx.DiskWebhook != nil {
-		h.log.Warn("[ALERT] " + msg)
-		if discord.PartitionAlert(ctx.DiskWebhook, p, cfg.DiskThreshold, false) {
-			h.log.Info("    Discord partition alert sent for " + p.Mountpoint)
-		}
-	} else {
-		h.log.Warn(msg)
-	}
-	gate.MarkSent(now)
-}
-
-func (h *partitionMaintenance) earlyWarning(p collect.Partition, key, label, kind string, now float64) {
-	cfg, ctx := h.ctx.Cfg, h.ctx
-	gate := ctx.Gates.Get(key, now)
-	if !gate.ShouldAlert(now) {
+	if !ctx.Gates.Get("partition-early:"+p.Mountpoint, now).Allow(now) {
 		return
 	}
 	if ctx.DiskWebhook != nil {
-		h.log.Warn(fmt.Sprintf("[WARNING] %s: %.1f%% (early warning: %.1f%%)", label, p.Percent, cfg.DiskEarlyWarningThreshold))
+		h.log.Warn(fmt.Sprintf("[WARNING] Partition %s: %.1f%% (early warning: %.1f%%)", p.Mountpoint, p.Percent, cfg.DiskEarlyWarningThreshold))
 		if discord.PartitionAlert(ctx.DiskWebhook, p, cfg.DiskEarlyWarningThreshold, true) {
-			h.log.Info(fmt.Sprintf("    Discord %s sent for %s", kind, p.Mountpoint))
+			h.log.Info("    Discord partition early warning sent for " + p.Mountpoint)
 		}
 	}
-	gate.MarkSent(now)
 }

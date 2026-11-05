@@ -35,4 +35,4 @@ The Overview's **Drive health** card reads each disk's SMART data every half hou
 
 Sleeping disks are never woken up just to be read. They show as _asleep_, with when they were last read.
 
-A drive alerts when its health turns to warning or failing, and when it runs hotter than its limit (55 °C for hard disks, 70 °C for SSDs, under **[Settings → Drive health](/settings)**). You can mute a drive from its row.
+A drive alerts when its health turns to warning or failing, once when a drive that was read before stops answering (often a failing disk or a loose cable), and when it runs hotter than its limit (55 °C for hard disks, 70 °C for SSDs, under **[Settings → Drive health](/settings)**). You can mute a drive from its row.

@@ -13,12 +13,15 @@ type Sample struct {
 	CPU     *float64 `json:"cpu"`
 	CPUMax  *float64 `json:"cpu_max"`
 	Mem     *float64 `json:"mem"`
+	MemMax  *float64 `json:"mem_max"`
 	Temp    *float64 `json:"temp"`
 	TempMax *float64 `json:"temp_max"`
 	Disk    *float64 `json:"disk"`
 	Rx      *float64 `json:"rx"`
 	Tx      *float64 `json:"tx"`
 	Latency *float64 `json:"latency"`
+	// LatencyMax is the slowest answer; minutes stored before it was kept use their average.
+	LatencyMax *float64 `json:"latency_max"`
 	// Minutes is how many stored minutes a bucket stands for (1 for a stored row).
 	Minutes int `json:"minutes"`
 }
@@ -30,8 +33,8 @@ func (s *Store) AddSamples(rows []Sample) {
 	}
 	err := s.tx(func(tx *sql.Tx) error {
 		for _, r := range rows {
-			if _, err := tx.Exec(`INSERT INTO samples (host, ts, up, cpu, cpu_max, mem, temp, temp_max, disk, rx, tx, latency) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				r.Host, r.TS, r.Up, r.CPU, r.CPUMax, r.Mem, r.Temp, r.TempMax, r.Disk, r.Rx, r.Tx, r.Latency); err != nil {
+			if _, err := tx.Exec(`INSERT INTO samples (host, ts, up, cpu, cpu_max, mem, mem_max, temp, temp_max, disk, rx, tx, latency, latency_max) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				r.Host, r.TS, r.Up, r.CPU, r.CPUMax, r.Mem, r.MemMax, r.Temp, r.TempMax, r.Disk, r.Rx, r.Tx, r.Latency, r.LatencyMax); err != nil {
 				return err
 			}
 		}
@@ -43,33 +46,37 @@ func (s *Store) AddSamples(rows []Sample) {
 }
 
 // SampleBuckets summarises a host's minutes since `since` into buckets of `width` seconds, oldest
-// first: means, peaks, the share answered, and how many minutes each holds. Empty buckets are left out.
+// first: means, peaks, the share answered, and how many minutes each holds. Empty buckets are left out;
+// with nothing to show, or no database, it is empty rather than nil.
 func (s *Store) SampleBuckets(host string, since, width float64) []Sample {
+	out := []Sample{}
 	if width <= 0 {
-		return nil
+		return out
 	}
 	db, unlock := s.lock()
 	defer unlock()
 	if db == nil {
-		return nil
+		return out
 	}
-	rows, err := db.Query(`SELECT ? + CAST((ts - ?) / ? AS INTEGER) * ?, AVG(up), AVG(cpu), MAX(cpu_max), AVG(mem), AVG(temp), MAX(temp_max), AVG(disk), AVG(rx), AVG(tx), AVG(latency), COUNT(*)
+	// A minute stored before its peaks were kept stands in with its average.
+	rows, err := db.Query(`SELECT ? + CAST((ts - ?) / ? AS INTEGER) * ?, AVG(up), AVG(cpu), MAX(cpu_max), AVG(mem), MAX(COALESCE(mem_max, mem)),
+		AVG(temp), MAX(temp_max), AVG(disk), AVG(rx), AVG(tx), AVG(latency), MAX(COALESCE(latency_max, latency)), COUNT(*)
 		FROM samples WHERE host = ? AND ts >= ? GROUP BY CAST((ts - ?) / ? AS INTEGER) ORDER BY 1`,
 		since, since, width, width, host, since, since, width)
 	if err != nil {
 		log.Warn("Samples query failed", "err", err)
-		return nil
+		return out
 	}
 	defer rows.Close()
-	out := []Sample{}
 	for rows.Next() {
 		var b Sample
-		var cpu, cpuMax, mem, temp, tempMax, disk, rx, tx, latency sql.NullFloat64
-		if rows.Scan(&b.TS, &b.Up, &cpu, &cpuMax, &mem, &temp, &tempMax, &disk, &rx, &tx, &latency, &b.Minutes) != nil {
+		var cpu, cpuMax, mem, memMax, temp, tempMax, disk, rx, tx, latency, latencyMax sql.NullFloat64
+		if rows.Scan(&b.TS, &b.Up, &cpu, &cpuMax, &mem, &memMax, &temp, &tempMax, &disk, &rx, &tx, &latency, &latencyMax, &b.Minutes) != nil {
 			continue
 		}
 		b.Host = host
-		b.CPU, b.CPUMax, b.Mem, b.Temp, b.TempMax, b.Disk, b.Rx, b.Tx, b.Latency = nf(cpu), nf(cpuMax), nf(mem), nf(temp), nf(tempMax), nf(disk), nf(rx), nf(tx), nf(latency)
+		b.CPU, b.CPUMax, b.Mem, b.MemMax, b.Temp, b.TempMax = nf(cpu), nf(cpuMax), nf(mem), nf(memMax), nf(temp), nf(tempMax)
+		b.Disk, b.Rx, b.Tx, b.Latency, b.LatencyMax = nf(disk), nf(rx), nf(tx), nf(latency), nf(latencyMax)
 		out = append(out, b)
 	}
 	return out

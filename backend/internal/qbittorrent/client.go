@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +69,8 @@ type Torrent struct {
 	SavePath     string  `json:"save_path"`
 	Downloaded   int64   `json:"downloaded"`
 	Uploaded     int64   `json:"uploaded"`
+	// ContentPath is the torrent's file, or the folder holding its files (qBittorrent 4.3.2 on).
+	ContentPath string `json:"content_path"`
 }
 
 func (t Torrent) ProgressPercent() float64 { return t.Progress * 100 }
@@ -76,9 +80,11 @@ func IsDownloadStalled(t Torrent) bool {
 	return t.State == "stalleddl" && t.DLSpeed == 0 && t.Progress < 1
 }
 
-// RemoveReason returns "inactive", "ratio" or "" for the cleanup policy.
+// RemoveReason returns "inactive", "ratio" or "" for the cleanup policy. Only a finished torrent
+// is inactive: a stopped download (one just added stopped, to pick its files first, or paused
+// partway) would lose its progress and leave its partial files behind.
 func RemoveReason(t Torrent, minRatio float64) string {
-	if InactiveStates[t.State] {
+	if InactiveStates[t.State] && t.Progress >= 1 {
 		return "inactive"
 	}
 	if minRatio > 0 && SeedingActiveStates[t.State] && t.Progress >= 1 && t.Ratio >= minRatio {
@@ -117,14 +123,14 @@ func New(host string, port int, username, password string) (*Client, error) {
 		return nil, err
 	}
 	if u.Port() == "" {
-		u.Host = fmt.Sprintf("%s:%d", u.Hostname(), port)
+		u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(port))
 	}
 	jar, _ := cookiejar.New(nil)
 	return &Client{
 		base:     strings.TrimSuffix(u.String(), "/"),
 		username: username, password: password,
 		http:    &http.Client{Timeout: 10 * time.Second, Jar: jar},
-		breaker: discord.NewCircuitBreaker(5, 60*time.Second, 2),
+		breaker: discord.NewCircuitBreaker(5, 60*time.Second, 2).Named("qBittorrent"),
 	}, nil
 }
 
@@ -155,7 +161,8 @@ func (c *Client) login() error {
 	if err != nil {
 		return err
 	}
-	if status != http.StatusOK || strings.TrimSpace(string(data)) == "Fails." {
+	// qBittorrent answers 200 "Ok." up to 5.1 and 204 with no body from 5.2; a refusal is "Fails.".
+	if status < 200 || status > 299 || strings.TrimSpace(string(data)) == "Fails." {
 		return fmt.Errorf("login failed (HTTP %d)", status)
 	}
 	return nil

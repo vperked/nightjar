@@ -95,3 +95,103 @@ func TestEditingRunsTheCheckAgainButKeepsLastCheck(t *testing.T) {
 		t.Fatal("an edited check runs on the next cycle and still shows when it last ran")
 	}
 }
+
+// A check renamed while it runs reports under its old name: the result lands on the renamed
+// check, which then runs again (it stayed marked running for good, never checked again).
+func TestRenamingARunningCheck(t *testing.T) {
+	store := storage.Open(":memory:")
+	defer store.Close()
+	m := services.NewMonitor(nil, store)
+	m.Save("", parseSpec(t, `{"name":"api","type":"tcp","target":"127.0.0.1:1","interval":60}`))
+	if len(m.Claim(1000)) != 1 {
+		t.Fatal("a new check runs")
+	}
+	if err := m.Save("api", parseSpec(t, `{"name":"api-prod","type":"tcp","target":"127.0.0.1:1","interval":60}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Meanwhile a new check takes the old name; it has not run, so the result is not its.
+	m.Save("", parseSpec(t, `{"name":"api","type":"tcp","target":"127.0.0.1:2","interval":60}`))
+	// It says where the result went, for its alert to use the new name.
+	if name, _ := m.RecordAs("api", services.Result{Up: true}, 1005); name != "api-prod" {
+		t.Fatalf("recorded as %q", name)
+	}
+	if got := m.State("api-prod"); got.LastCheck != 1005 || got.Status != services.StatusUp {
+		t.Fatalf("the result goes to the renamed check: %+v", got)
+	}
+	if got := m.State("api"); got.LastCheck != 0 {
+		t.Fatalf("not to the new one: %+v", got)
+	}
+	due := m.Claim(1100)
+	if len(due) != 2 {
+		t.Fatalf("both run again: %+v", due)
+	}
+}
+
+// Changing a running check's target drops the old target's result and does not start the new
+// one beside it; it runs as soon as the old run is done.
+func TestRetargetingARunningCheck(t *testing.T) {
+	store := storage.Open(":memory:")
+	defer store.Close()
+	m := services.NewMonitor(nil, store)
+	m.Save("", parseSpec(t, `{"name":"api","type":"tcp","target":"127.0.0.1:1","interval":60}`))
+	m.Claim(1000)
+	m.Save("api", parseSpec(t, `{"name":"api","type":"tcp","target":"127.0.0.1:2","interval":60}`))
+	if len(m.Claim(1001)) != 0 {
+		t.Fatal("the old run is still under way")
+	}
+	if got := m.Record("api", services.Result{Detail: "refused"}, 1002); got != "" || m.State("api").LastResult != nil || m.State("api").Status != services.StatusUnknown {
+		t.Fatalf("the old target's result is dropped: %q %+v", got, m.State("api"))
+	}
+	if due := m.Claim(1003); len(due) != 1 || due[0].Target != "127.0.0.1:2" {
+		t.Fatalf("the new target runs at once: %+v", due)
+	}
+}
+
+// A check renamed twice while it runs still reports under its first name, and leaves nothing
+// behind that would send a later check's result to it.
+func TestRenamingARunningCheckTwice(t *testing.T) {
+	store := storage.Open(":memory:")
+	defer store.Close()
+	m := services.NewMonitor(nil, store)
+	m.Save("", parseSpec(t, `{"name":"a","type":"tcp","target":"127.0.0.1:1","interval":60}`))
+	m.Claim(1000)
+	m.Save("a", parseSpec(t, `{"name":"b","type":"tcp","target":"127.0.0.1:1","interval":60}`))
+	m.Save("b", parseSpec(t, `{"name":"c","type":"tcp","target":"127.0.0.1:1","interval":60}`))
+	m.Record("a", services.Result{Up: true}, 1005)
+	if got := m.State("c"); got.LastCheck != 1005 {
+		t.Fatalf("the result goes to the check's latest name: %+v", got)
+	}
+	// A new check named b, deleted while it runs: its result is dropped, not given to c.
+	m.Save("", parseSpec(t, `{"name":"b","type":"tcp","target":"127.0.0.1:2","interval":60}`))
+	if due := m.Claim(1010); len(due) != 1 || due[0].Name != "b" {
+		t.Fatalf("only the new check is due: %+v", due)
+	}
+	m.Delete("b")
+	m.Record("b", services.Result{Detail: "refused"}, 1012)
+	if got := m.State("c"); got.LastCheck != 1005 || got.Status != services.StatusUp {
+		t.Fatalf("c keeps its own result: %+v", got)
+	}
+}
+
+// A check renamed and renamed back while it runs reports under its name as usual.
+func TestRenamingARunningCheckBack(t *testing.T) {
+	store := storage.Open(":memory:")
+	defer store.Close()
+	m := services.NewMonitor(nil, store)
+	m.Save("", parseSpec(t, `{"name":"a","type":"tcp","target":"127.0.0.1:1","interval":60}`))
+	m.Claim(1000)
+	m.Save("a", parseSpec(t, `{"name":"b","type":"tcp","target":"127.0.0.1:1","interval":60}`))
+	m.Save("b", parseSpec(t, `{"name":"a","type":"tcp","target":"127.0.0.1:1","interval":60}`))
+	m.Record("a", services.Result{Up: true}, 1005)
+	if got := m.State("a"); got.LastCheck != 1005 {
+		t.Fatalf("the result lands on the check: %+v", got)
+	}
+	// A new check named b, deleted while it runs, does not pass its result to a.
+	m.Save("", parseSpec(t, `{"name":"b","type":"tcp","target":"127.0.0.1:2","interval":60}`))
+	m.Claim(1010)
+	m.Delete("b")
+	m.Record("b", services.Result{Detail: "refused"}, 1012)
+	if got := m.State("a"); got.LastCheck != 1005 || got.Status != services.StatusUp {
+		t.Fatalf("a keeps its own result: %+v", got)
+	}
+}

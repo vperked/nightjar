@@ -2,6 +2,10 @@ import type {
   Finding,
   AlertTestResult,
   AnalyticsRangeName,
+  AgentFirewall,
+  AttackView,
+  FirewallRule,
+  FirewallStatus,
   AnalyticsResponse,
   HostAnalytics,
   AppConfig,
@@ -75,10 +79,12 @@ export class UnauthorizedError extends Error {
 }
 
 // ApiError carries the server's message and, for rejected settings, the problem with each field.
+// hostKey is the server's SSH host key when adding a key with a password waits for someone to confirm it.
 export class ApiError extends Error {
   constructor(
     message: string,
     readonly fields: Record<string, string> = {},
+    readonly hostKey?: string,
   ) {
     super(message);
   }
@@ -121,17 +127,28 @@ export function onUnauthorized(handler: () => void): void {
   unauthorizedHandler = handler;
 }
 
+// Changes still waiting for their answer; a reload now would cut them off part-way.
+let writing = 0;
+
+// writesPending reports whether a change (any request but a GET) is still on its way.
+export const writesPending = () => writing > 0;
+
 async function request<T>(path: string, init: { method?: string; body?: unknown } = {}, timeoutMs = 15000): Promise<T> {
+  const method = init.method ?? 'GET';
+  // The server takes changes only as JSON, so one with nothing to say still sends an empty object.
+  const body = init.body ?? (method === 'GET' || method === 'DELETE' ? undefined : {});
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   // The session is an HttpOnly cookie the browser sends itself.
   const headers: Record<string, string> = {};
-  if (init.body !== undefined) headers['Content-Type'] = 'application/json';
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const write = method !== 'GET';
+  if (write) writing++;
   try {
     const res = await transport(path, {
-      method: init.method ?? 'GET',
+      method,
       headers,
-      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
       cache: 'no-store',
     });
@@ -141,12 +158,17 @@ async function request<T>(path: string, init: { method?: string; body?: unknown 
       throw new UnauthorizedError();
     }
     if (!res.ok) {
-      const err = (await res.json().catch(() => ({}))) as { error?: string; fields?: Record<string, string> };
-      throw new ApiError(err.error ?? `${path}: HTTP ${res.status}`, err.fields);
+      const err = (await res.json().catch(() => ({}))) as { error?: string; fields?: Record<string, string>; host_key?: string };
+      throw new ApiError(err.error ?? `${path}: HTTP ${res.status}`, err.fields, err.host_key);
     }
     return (res.status === 204 ? undefined : await res.json()) as T;
+  } catch (e) {
+    // Our own time limit ran out: say so, rather than the browser's bare "signal is aborted".
+    if (controller.signal.aborted) throw new ApiError(`No answer from Nightjar within ${Math.round(timeoutMs / 1000)} seconds`);
+    throw e;
   } finally {
     clearTimeout(timer);
+    if (write) writing--;
   }
 }
 
@@ -174,7 +196,8 @@ export const api = {
   createAdmin: (username: string, password: string, setupCode: string) => request<{ username: string }>('/api/auth/setup', { method: 'POST', body: { username, password, setup_code: setupCode } }),
   login: (username: string, password: string, code = '') => request<{ username: string }>('/api/auth/login', { method: 'POST', body: { username, password, code } }),
   twoFactorBegin: () => request<{ secret: string; link: string }>('/api/auth/2fa/begin', { method: 'POST', body: {} }),
-  twoFactorEnable: (code: string) => request<{ recovery: string[] }>('/api/auth/2fa/enable', { method: 'POST', body: { code } }),
+  // Turning it on asks for the password too, so an open session alone cannot.
+  twoFactorEnable: (password: string, code: string) => request<{ recovery: string[] }>('/api/auth/2fa/enable', { method: 'POST', body: { password, code } }),
   twoFactorDisable: (password: string, code: string) => request<void>('/api/auth/2fa/disable', { method: 'POST', body: { password, code } }),
   activity: (before = 0) => request<{ activity: ActivityEntry[] }>(`/api/activity?limit=100${before ? `&before=${before}` : ''}`),
   backup: (secrets: boolean) => request<Record<string, unknown>>(`/api/backup${secrets ? '?secrets=1' : ''}`),
@@ -191,8 +214,9 @@ export const api = {
   plugins: () => request<PluginsResponse>('/api/plugins'),
   rescanPlugins: () => request<PluginsResponse>('/api/plugins/rescan', { method: 'POST', body: {} }),
   configurePlugin: (id: string, c: PluginChange) => request<{ plugin: Plugin }>(`/api/plugins/${encodeURIComponent(id)}`, { method: 'PUT', body: c }),
+  // tryPlugin runs a plugin once; the server gives it up to 2 minutes.
   tryPlugin: (id: string, mode: 'check' | 'card', argument = '') =>
-    request<{ check?: CheckResult; card?: PluginCard }>(`/api/plugins/${encodeURIComponent(id)}/try`, { method: 'POST', body: { mode, argument } }),
+    request<{ check?: CheckResult; card?: PluginCard }>(`/api/plugins/${encodeURIComponent(id)}/try`, { method: 'POST', body: { mode, argument } }, 130000),
   pluginCards: () => request<{ cards: PluginCard[] }>('/api/plugins/cards'),
   incidents: (days = 14) => request<IncidentsResponse>(`/api/incidents?days=${days}`),
   feedback: (id: number, f: Pick<IncidentFeedback, 'verdict' | 'actual' | 'note'> | null) =>
@@ -204,9 +228,10 @@ export const api = {
   deleteMaintenance: (id: string) => request<void>(`/api/maintenance/${id}`, { method: 'DELETE' }),
   containers: () => request<ContainersResponse>('/api/docker/containers'),
   report: () => request<ReportResponse>('/api/report'),
-  sendReport: () => request<{ sent: boolean }>('/api/report/send', { method: 'POST' }),
+  sendReport: () => request<{ sent: boolean }>('/api/report/send', { method: 'POST', body: {} }, 60000),
   repairs: (check = '') => request<RepairsResponse>(`/api/repairs${check ? `?check=${encodeURIComponent(check)}` : ''}`),
-  repairCheck: (name: string) => request<{ repair: RepairAttempt }>(`/api/checks/${encodeURIComponent(name)}/repair`, { method: 'POST' }),
+  // repairCheck runs a check's repair now; the server gives it up to 3 minutes.
+  repairCheck: (name: string) => request<{ repair: RepairAttempt }>(`/api/checks/${encodeURIComponent(name)}/repair`, { method: 'POST', body: {} }, 190000),
   appearance: () => request<{ appearance: Appearance }>('/api/appearance'),
   saveAppearance: (a: Appearance) => request<{ appearance: Appearance }>('/api/appearance', { method: 'PUT', body: a }),
   statusDesign: () => request<StatusDesignResponse>('/api/statuspage'),
@@ -238,7 +263,33 @@ export const api = {
   controlUnit: (name: string, action: UnitAction) => request<{ unit: Unit }>(`/api/units/${encodeURIComponent(name)}/${action}`, { method: 'POST', body: {} }, 95000),
   drives: () => request<DrivesResponse>('/api/drives'),
   // network keeps the live meter running; with `since` it returns only newer samples.
-  network: (since?: number) => request<NetworkResponse>(since === undefined ? '/api/network' : `/api/network?since=${since}`),
+  // network is the live meter, asked every second: a reply that takes more than a few seconds is
+  // given up on so the next poll can go out, rather than holding the meter still.
+  // attacks is the watch for denial-of-service attacks on this machine.
+  attacks: () => request<{ enabled: boolean; attacks?: AttackView }>('/api/attacks'),
+  // setDefense switches defending against attacks on or off; unblock lifts a block and leaves the address alone for an hour.
+  setDefense: (on: boolean) => request<{ enabled: boolean; attacks?: AttackView }>('/api/attacks/defense', { method: 'PUT', body: { on } }),
+  unblock: (address: string) => request<{ enabled: boolean; attacks?: AttackView }>(`/api/attacks/blocked/${encodeURIComponent(address)}`, { method: 'DELETE' }),
+  // This machine's firewall rules, and each agent's through it.
+  firewall: () => request<{ enabled: boolean; firewall?: FirewallStatus }>('/api/firewall'),
+  addFirewallRule: (rule: Partial<FirewallRule>) => request<{ enabled: boolean; firewall?: FirewallStatus }>('/api/firewall/rules', { method: 'POST', body: rule }),
+  removeFirewallRule: (id: string) => request<{ enabled: boolean; firewall?: FirewallStatus }>(`/api/firewall/rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  updateFirewallRule: (id: string, rule: Partial<FirewallRule>) =>
+    request<{ enabled: boolean; firewall?: FirewallStatus }>(`/api/firewall/rules/${encodeURIComponent(id)}`, { method: 'PUT', body: rule }),
+  orderFirewall: (ids: string[]) => request<{ enabled: boolean; firewall?: FirewallStatus }>('/api/firewall/order', { method: 'PUT', body: { ids } }),
+  setFirewallDefault: (def: '' | 'drop') => request<{ enabled: boolean; firewall?: FirewallStatus }>('/api/firewall/default', { method: 'PUT', body: { default: def } }),
+  keepFirewallDefault: (keep: boolean) => request<{ enabled: boolean; firewall?: FirewallStatus }>('/api/firewall/default/keep', { method: 'POST', body: { keep } }),
+  hostFirewall: (id: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall`, undefined, 40000),
+  addHostRule: (id: string, rule: Partial<FirewallRule>) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/rules`, { method: 'POST', body: rule }, 40000),
+  removeHostRule: (id: string, rule: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/rules/${encodeURIComponent(rule)}`, { method: 'DELETE' }, 40000),
+  updateHostRule: (id: string, rule: string, r: Partial<FirewallRule>) =>
+    request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/rules/${encodeURIComponent(rule)}`, { method: 'PUT', body: r }, 40000),
+  orderHostRules: (id: string, ids: string[]) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/order`, { method: 'PUT', body: { ids } }, 40000),
+  setHostDefault: (id: string, def: '' | 'drop') => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/default`, { method: 'PUT', body: { default: def } }, 40000),
+  keepHostDefault: (id: string, keep: boolean) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/default/keep`, { method: 'POST', body: { keep } }, 40000),
+  setHostDefense: (id: string, on: boolean) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/defense`, { method: 'PUT', body: { on } }, 40000),
+  unblockHost: (id: string, address: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/blocked/${encodeURIComponent(address)}`, { method: 'DELETE' }, 40000),
+  network: (since?: number) => request<NetworkResponse>(since === undefined ? '/api/network' : `/api/network?since=${since}`, {}, 5000),
   // logs is the monitor's own recent log; with `after` only newer entries, for following it.
   logs: (q: { after?: number; level?: string; component?: string; q?: string }) => {
     const p = new URLSearchParams();
@@ -268,7 +319,7 @@ export const api = {
   hostToken: () => request<{ token: string; port: number }>('/api/hosts/token', { method: 'POST', body: {} }),
   // addHost checks that the agent (or the SSH port) answers before saving it; a server added with just an
   // SSH login comes back with its first login tried.
-  addHost: (body: HostBody) => request<{ host: RemoteHost; test?: LoginTest }>('/api/hosts', { method: 'POST', body }),
+  addHost: (body: HostBody) => request<{ host: RemoteHost; test?: LoginTest }>('/api/hosts', { method: 'POST', body }, 60000),
   // updateHost keeps an agent's saved token when token is empty.
   updateHost: (id: string, body: HostBody) => request<{ host: RemoteHost }>(`/api/hosts/${encodeURIComponent(id)}`, { method: 'PUT', body }),
   // analytics is every server's history over a range; hostAnalytics one server's ("local" for this one).
@@ -282,8 +333,16 @@ export const api = {
   importSSHKey: (name: string, privateKey: string) => request<{ key: SSHKey }>('/api/ssh/keys', { method: 'POST', body: { name, private: privateKey } }),
   // A login saved comes back already tried.
   setHostSSH: (id: string, ssh: HostSSH | null) =>
-    request<{ host: RemoteHost; test?: LoginTest }>(`/api/hosts/${encodeURIComponent(id)}/ssh`, ssh ? { method: 'PUT', body: ssh } : { method: 'DELETE' }),
-  runHostSSH: (id: string, action: SSHAction) => request<{ output: string }>(`/api/hosts/${encodeURIComponent(id)}/ssh/${action}`, { method: 'POST', body: {} }),
+    request<{ host: RemoteHost; test?: LoginTest }>(`/api/hosts/${encodeURIComponent(id)}/ssh`, ssh ? { method: 'PUT', body: ssh } : { method: 'DELETE' }, 60000),
+  // authorizeSSHKey puts a login's key on its server, logging in once with the password, which is kept nowhere.
+  // The server gives that a minute and a half (checking the host key, then the login). The password only goes
+  // to a server whose host key someone confirmed: otherwise it fails with the key in ApiError.hostKey.
+  authorizeSSHKey: (body: { id?: string; login: HostSSH; password: string }) => request<{ ok: boolean; output?: string }>('/api/ssh/authorize', { method: 'POST', body }, 100000),
+  // trustSSHHostKey keeps a server's host key once someone has checked it on the server.
+  trustSSHHostKey: (body: { id?: string; login: HostSSH; host_key: string }) => request<{ ok: boolean }>('/api/ssh/trust', { method: 'POST', body }, 75000),
+  // runHostSSH waits as long as the server lets the action run (5 minutes, for a reinstall over a slow
+  // link): the action goes on to its end on the server either way, but giving up sooner would show it failed.
+  runHostSSH: (id: string, action: SSHAction) => request<{ output: string }>(`/api/hosts/${encodeURIComponent(id)}/ssh/${action}`, { method: 'POST', body: {} }, 340000),
   apps: () => request<AppsResponse>('/api/apps'),
   // appJob follows the running install; `after` skips log lines already shown.
   appJob: (after = 0) => request<{ job: AppJob | null }>(`/api/apps/job?after=${after}`),
@@ -301,8 +360,9 @@ export const api = {
   detectUpdates: () => request<{ added: UpdateTarget[] | null }>('/api/updates/detect', { method: 'POST', body: {} }),
   // The summary view omits charts, libraries and recent plays (used by the overview).
   cleanup: () => request<CleanupView>('/api/cleanup'),
-  cleanupScan: () => request<CleanupView>('/api/cleanup/scan', { method: 'POST' }),
-  cleanupKeep: (key: string, keep: boolean) => request<CleanupView>(`/api/cleanup/${encodeURIComponent(key)}/keep`, { method: keep ? 'PUT' : 'DELETE' }),
+  // cleanupScan checks every library now; the server gives that up to 5 minutes.
+  cleanupScan: () => request<CleanupView>('/api/cleanup/scan', { method: 'POST', body: {} }, 310000),
+  cleanupKeep: (key: string, keep: boolean) => request<CleanupView>(`/api/cleanup/${encodeURIComponent(key)}/keep`, keep ? { method: 'PUT', body: {} } : { method: 'DELETE' }),
   plexStats: (days = 7) => request<{ enabled: boolean; stats?: PlexStats }>(`/api/plex/stats?days=${days}`),
   plex: (view: PlexView = 'full') => request<PlexResponse>(view === 'summary' ? '/api/plex?view=summary' : '/api/plex'),
   stopPlexStream: (id: string, message: string) => request<PlexResponse>(`/api/plex/streams/${encodeURIComponent(id)}/stop`, { method: 'POST', body: { message } }),

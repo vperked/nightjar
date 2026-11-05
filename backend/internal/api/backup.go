@@ -54,6 +54,9 @@ func (s *Server) makeBackup(w http.ResponseWriter, r *http.Request) {
 		if raw := s.cfg.Store.Meta(k); raw != "" {
 			var v any
 			if json.Unmarshal([]byte(raw), &v) == nil {
+				if !withSecrets {
+					v = s.withoutSecrets(k, v)
+				}
 				b.Meta[k] = v
 			}
 		}
@@ -109,6 +112,9 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for k, v := range b.Meta {
+		if !b.Secrets {
+			v = s.keepSecrets(k, v)
+		}
 		data, _ := json.Marshal(v)
 		if err := s.cfg.Store.SetMeta(k, string(data)); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
@@ -132,6 +138,114 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 	if restart {
 		time.AfterFunc(300*time.Millisecond, s.cfg.Restart)
 	}
+}
+
+// Besides the secret settings, two parts hold secrets: each server's agent token in remote.hosts
+// (whoever has it can change that server's firewall, or replace its agent with a program of their
+// own), and the plugins' secret settings in plugins.state. A backup without secrets leaves them out,
+// and restoring one keeps the secrets already here.
+
+// withoutSecrets is a part of the backup with its secrets taken out.
+func (s *Server) withoutSecrets(key string, v any) any {
+	switch key {
+	case "remote.hosts":
+		hosts, _ := v.([]any)
+		for _, h := range hosts {
+			if m, ok := h.(map[string]any); ok {
+				delete(m, "token")
+			}
+		}
+	case "plugins.state":
+		plain := s.plainPluginSettings()
+		states, _ := v.(map[string]any)
+		for id, st := range states {
+			m, _ := st.(map[string]any)
+			settings, _ := m["settings"].(map[string]any)
+			// A setting is kept only when the plugin says it is not a secret; one Nightjar
+			// cannot look up (the plugin is gone, or plugins are off) is left out.
+			for k := range settings {
+				if !plain[id][k] {
+					delete(settings, k)
+				}
+			}
+		}
+	}
+	return v
+}
+
+// plainPluginSettings is, by plugin, the settings that are not secrets.
+func (s *Server) plainPluginSettings() map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	if s.ctx.Plugins == nil {
+		return out
+	}
+	for _, p := range s.ctx.Plugins.List() {
+		out[p.ID] = map[string]bool{}
+		for _, set := range p.Settings {
+			if set.Type != "secret" {
+				out[p.ID][set.Key] = true
+			}
+		}
+	}
+	return out
+}
+
+// keepSecrets is a part of a backup made without secrets, with the secrets already here put back:
+// the agent tokens of the servers it has, and the plugin settings it left out. A token goes back only
+// to the same server at the same address: one the backup has somewhere else (saved before the server
+// moved) would send it to whatever answers there, so that server has to be paired again.
+func (s *Server) keepSecrets(key string, v any) any {
+	var current any
+	if raw := s.cfg.Store.Meta(key); raw == "" || json.Unmarshal([]byte(raw), &current) != nil {
+		return v
+	}
+	switch key {
+	case "remote.hosts":
+		here := map[string]map[string]any{}
+		old, _ := current.([]any)
+		for _, h := range old {
+			if m, ok := h.(map[string]any); ok && m["token"] != nil && m["id"] != nil {
+				here[fmt.Sprint(m["id"])] = m
+			}
+		}
+		hosts, _ := v.([]any)
+		for _, h := range hosts {
+			m, ok := h.(map[string]any)
+			if !ok || m["id"] == nil {
+				continue
+			}
+			if t, _ := m["token"].(string); t == "" {
+				if was, ok := here[fmt.Sprint(m["id"])]; ok && fmt.Sprint(was["address"]) == fmt.Sprint(m["address"]) {
+					m["token"] = was["token"]
+				}
+			}
+		}
+	case "plugins.state":
+		old, _ := current.(map[string]any)
+		states, _ := v.(map[string]any)
+		for id, st := range states {
+			m, ok := st.(map[string]any)
+			if !ok {
+				continue
+			}
+			was, _ := old[id].(map[string]any)
+			oldSettings, _ := was["settings"].(map[string]any)
+			if len(oldSettings) == 0 {
+				continue
+			}
+			settings, _ := m["settings"].(map[string]any)
+			if settings == nil {
+				settings = map[string]any{}
+				m["settings"] = settings
+			}
+			for k, val := range oldSettings {
+				if _, ok := settings[k]; !ok {
+					settings[k] = val
+				}
+			}
+		}
+	}
+	return v
 }
 
 func contains(list []string, v string) bool {

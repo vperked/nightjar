@@ -24,7 +24,7 @@ func fakePlexToken(t *testing.T, token string) {
 	})
 	setup.PlexPreferences = []string{prefs}
 	setup.HomeDirs = func() []string { return []string{dir} }
-	setup.Probe = func(int) bool { return false }
+	setup.Probe = func(string, int) bool { return false }
 	setup.PlexURL = "http://127.0.0.1:1"
 }
 

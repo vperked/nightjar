@@ -317,8 +317,8 @@
     animation: none;
   }
 }
-/* The selection bar floats at the bottom of the screen in inverted colours, like a toast with buttons. */
-.qb-bulk {
+/* The selection bar (torrents, servers) floats at the bottom of the screen in inverted colours, like a toast with buttons. */
+.bulk-bar {
   --bulk-ink: var(--bg);
   --bulk-danger: #ff8f87;
   position: fixed;
@@ -340,7 +340,7 @@
   overflow-x: auto;
   scrollbar-width: none;
 }
-:root[data-theme='dark'] .qb-bulk {
+:root[data-theme='dark'] .bulk-bar {
   --bulk-danger: #b42a2a;
 }
 @keyframes bulk-rise {
@@ -350,60 +350,65 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .qb-bulk {
+  .bulk-bar {
     animation: none;
   }
 }
-.qb-bulk-count {
+.bulk-bar-count {
   padding: 0 10px 0 11px;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
   color: color-mix(in srgb, var(--bulk-ink) 75%, transparent);
 }
-.qb-bulk-count strong {
+.bulk-bar-count strong {
   color: var(--bulk-ink);
   font-weight: 600;
 }
-.qb-bulk-rule {
+.bulk-bar-rule {
   flex: none;
   width: 1px;
   height: 18px;
   margin: 0 4px;
   background: color-mix(in srgb, var(--bulk-ink) 22%, transparent);
 }
-.qb-bulk .qb-actions,
-.qb-bulk .qb-confirm {
+.bulk-bar .qb-actions,
+.bulk-bar .qb-confirm,
+.bulk-bar .bulk-bar-actions,
+.bulk-bar .bulk-bar-confirm {
+  display: flex;
+  align-items: center;
   margin: 0;
   flex-wrap: nowrap;
   gap: 2px;
   white-space: nowrap;
   color: color-mix(in srgb, var(--bulk-ink) 75%, transparent);
 }
-.qb-bulk .qb-confirm {
+.bulk-bar .qb-confirm,
+.bulk-bar .bulk-bar-confirm {
   padding-left: 8px;
 }
-.qb-bulk .btn-quiet {
+.bulk-bar .btn-quiet {
   padding: 7px 11px;
   border-radius: var(--radius-sm);
   color: color-mix(in srgb, var(--bulk-ink) 85%, transparent);
 }
-.qb-bulk .btn-quiet:hover {
+.bulk-bar .btn-quiet:hover {
   background: color-mix(in srgb, var(--bulk-ink) 14%, transparent);
   color: var(--bulk-ink);
 }
-.qb-bulk .btn-quiet.danger {
+.bulk-bar .btn-quiet.danger {
   color: var(--bulk-danger);
 }
-.qb-bulk .btn-quiet.danger:hover {
+.bulk-bar .btn-quiet.danger:hover {
   background: color-mix(in srgb, var(--bulk-danger) 18%, transparent);
   color: var(--bulk-danger);
 }
-.qb-bulk .btn-quiet:focus-visible,
-.qb-bulk-close:focus-visible {
+.bulk-bar .btn-quiet:focus-visible,
+.bulk-bar-close:focus-visible {
   outline: 2px solid var(--series-1);
   outline-offset: 1px;
 }
-.qb-bulk-close {
+.bulk-bar-close {
   flex: none;
   display: grid;
   place-items: center;
@@ -415,17 +420,17 @@
   color: color-mix(in srgb, var(--bulk-ink) 70%, transparent);
   cursor: pointer;
 }
-.qb-bulk-close:hover {
+.bulk-bar-close:hover {
   background: color-mix(in srgb, var(--bulk-ink) 14%, transparent);
   color: var(--bulk-ink);
 }
-.qb-bulk-close svg {
+.bulk-bar-close svg {
   width: 15px;
   height: 15px;
 }
 /* Phones: the bar spans the screen above the tab bar, with tighter buttons that wrap when they must. */
 @media (max-width: 760px) {
-  .qb-bulk {
+  .bulk-bar {
     left: 12px;
     right: 12px;
     bottom: calc(80px + env(safe-area-inset-bottom));
@@ -437,21 +442,21 @@
     animation-name: bulk-rise-phone;
     overflow-x: visible;
   }
-  .qb-bulk-rule {
+  .bulk-bar-rule {
     display: none;
   }
-  .qb-bulk-count {
+  .bulk-bar-count {
     padding: 0 6px;
   }
-  .qb-bulk .btn-quiet {
+  .bulk-bar .btn-quiet {
     padding: 7px 8px;
   }
-  .qb-bulk .qb-actions,
-  .qb-bulk .qb-confirm {
+  .bulk-bar .qb-actions,
+  .bulk-bar .qb-confirm {
     flex-wrap: wrap;
     justify-content: center;
   }
-  .qb-bulk-close {
+  .bulk-bar-close {
     width: 30px;
     height: 30px;
   }
@@ -479,7 +484,7 @@
 }
 
 /* While deleting asks to confirm, its own cancel replaces the bar's close button. */
-.qb-bulk:has(.qb-confirm) .qb-bulk-close {
+.bulk-bar:has(.qb-confirm) .bulk-bar-close {
   display: none;
 }
 .qb-phone-line {

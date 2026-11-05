@@ -156,6 +156,28 @@ func TestFailedDeliveryIsRetriedInPlace(t *testing.T) {
 	}
 }
 
+// Only the same alert sent again soon after is a retry: one about something else, or the same
+// title long after, is an alert of its own and keeps its own record.
+func TestALaterAlertWithTheSameTitleIsNotARetry(t *testing.T) {
+	c := &fake{name: "Discord", fail: true}
+	hub, db := newHub(t, notify.Destination{Channel: c})
+	now := at("10:00")
+	hub.Now = func() time.Time { return now }
+	r := hub.Route("uptime")
+	discord.About(r, "check:plex").SendEmbed("is down", "timed out", discord.Critical, nil, "")
+	discord.About(r, "check:sonarr").SendEmbed("is down", "timed out", discord.Critical, nil, "")
+	if h := history(db); len(h) != 2 {
+		t.Fatalf("an alert about another subject is a new record, got %+v", h)
+	}
+	c.fail = false
+	now = now.Add(notify.RetryWindow + time.Minute)
+	discord.About(r, "check:plex").SendEmbed("is down", "timed out", discord.Critical, nil, "")
+	h := history(db)
+	if len(h) != 3 || h[0].Status != "sent" || h[1].Status != "failed" || h[2].Status != "failed" {
+		t.Fatalf("the same alert long after is a new record, and the old failures stay failed, got %+v", h)
+	}
+}
+
 func TestQuietHoursHoldAlertsForOneSummary(t *testing.T) {
 	c := &fake{name: "Discord"}
 	hub, db := newHub(t, notify.Destination{Channel: c})

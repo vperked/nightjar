@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { ApiError, api } from '../api/client';
+import { ApiError, api, UnauthorizedError, waitForRestart } from '../api/client';
 import type { Finding, Unit, UnitAction, UnitsResponse } from '../api/types';
 import { CauseLine, Diagnosis } from '../components/Diagnosis';
 import { MuteButton, MutedTag } from '../components/MuteButton';
@@ -14,6 +14,14 @@ import { usePoll } from '../hooks/usePoll';
 
 type Filter = 'all' | 'problems' | 'running';
 const short = (name: string) => name.replace(/\.service$/, '');
+
+// Restarting one of these can cut off the way in (ssh, the network) or take much else down with it
+// (every container), so the Restart button asks first, as it does for the monitor itself.
+const CAREFUL = /^(ssh|sshd|docker|containerd|networking|NetworkManager|systemd-[^.]+|dbus|dbus-broker)\.service$/;
+
+// selfRestartCut tells an answer the monitor's own restart cut short from a real refusal: no answer
+// in time, the systemctl it ran killed with the rest of the monitor, or a proxy's bad gateway.
+const selfRestartCut = (message: string) => message.startsWith('No answer') || /signal: (terminated|killed)/.test(message) || /: HTTP 50[234]$/.test(message);
 
 // ServicesTabs switches between uptime checks and systemd services under the Services tab.
 export function ServicesTabs({ current }: { current: 'checks' | 'system' }) {
@@ -76,10 +84,31 @@ function UnitRow({ u, self, open, focus, onToggle, onChanged, now }: { u: Unit; 
   const notify = useToast();
   const [busy, setBusy] = useState<UnitAction>();
   const [confirmStop, setConfirmStop] = useState(false);
+  const [confirmRestart, setConfirmRestart] = useState(false);
   const [tone, word] = verdict(u);
+  const isSelf = u.name === self;
   const act = async (action: UnitAction) => {
     setBusy(action);
     setConfirmStop(false);
+    setConfirmRestart(false);
+    // Restarting the monitor ends the request with it: no answer, or none in time, means it is
+    // restarting, so wait for it to come back as the settings do. So does an answer the restart
+    // itself cut short: the systemctl it ran killed along with the monitor, or a proxy in front
+    // saying the monitor went away. Any other answer is a refusal to show.
+    if (isSelf && action === 'restart') {
+      try {
+        await api.controlUnit(u.name, action);
+      } catch (err) {
+        if (err instanceof UnauthorizedError || (err instanceof ApiError && !selfRestartCut(err.message))) {
+          notify({ tone: 'error', title: `Could not restart ${short(u.name)}`, body: err.message });
+          setBusy(undefined);
+          return;
+        }
+      }
+      notify({ tone: 'info', title: `Restarting ${short(u.name)}`, body: 'The page reloads when it is back.' });
+      await waitForRestart();
+      return;
+    }
     try {
       const { unit } = await api.controlUnit(u.name, action);
       const [, state] = verdict(unit);
@@ -122,8 +151,22 @@ function UnitRow({ u, self, open, focus, onToggle, onChanged, now }: { u: Unit; 
           {/* Down services get the strong button; running ones a quiet one; finished one-shot jobs none. */}
           {u.sub === 'exited' ? (
             <span className="small-btn-space" />
+          ) : confirmRestart ? (
+            <span className="confirm">
+              <span className="small ink-3">{isSelf ? 'Restart the monitor? The dashboard is away for a moment' : `Restart ${short(u.name)}? What runs on it restarts or drops too`}</span>
+              <button className="btn-quiet danger" disabled={!!busy} onClick={() => act('restart')}>
+                Restart
+              </button>
+              <button className="btn-quiet" onClick={() => setConfirmRestart(false)}>
+                Keep running
+              </button>
+            </span>
           ) : (
-            <button className={tone === 'crit' || !running ? 'btn small-btn' : 'btn-ghost small-btn'} disabled={!!busy} onClick={() => act(running ? 'restart' : 'start')}>
+            <button
+              className={tone === 'crit' || !running ? 'btn small-btn' : 'btn-ghost small-btn'}
+              disabled={!!busy}
+              onClick={() => (running && (isSelf || CAREFUL.test(u.name)) ? setConfirmRestart(true) : act(running ? 'restart' : 'start'))}
+            >
               {busy === 'restart' ? 'Restarting…' : busy === 'start' ? 'Starting…' : running ? 'Restart' : 'Start'}
             </button>
           )}

@@ -12,11 +12,15 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"nightjar/internal/collect"
+	"nightjar/internal/ddos"
+	"nightjar/internal/firewall"
 	"nightjar/internal/smart"
 )
 
@@ -53,6 +57,8 @@ type Readings struct {
 	// Drives are SMART readings, refreshed every few minutes; empty without smartmontools.
 	Drives      []smart.Drive `json:"drives"`
 	DrivesError string        `json:"drives_error,omitempty"`
+	// Attacks is the agent's own watch for denial-of-service attacks on this machine.
+	Attacks *ddos.View `json:"attacks,omitempty"`
 }
 
 type CPU struct {
@@ -77,6 +83,16 @@ type Sampler struct {
 	gpu       *collect.GPUReader
 	bandwidth *collect.BandwidthMeter
 	drives    *smart.Reader
+	// attacks watches this machine for denial-of-service attacks; nil when not running.
+	attacks *ddos.Watcher
+	// firewall keeps the rules set from the dashboard; nil when not running. port is the one the
+	// agent listens on, which a rule must not close to the dashboard.
+	firewall *firewall.Manager
+	port     uint16
+
+	// dashboards are the addresses that asked for readings with the token, and when they last did:
+	// never blocked while defending.
+	dashboards map[string]time.Time
 
 	mu      sync.Mutex
 	latest  *Readings
@@ -87,6 +103,36 @@ type Sampler struct {
 
 func NewSampler(build string) *Sampler {
 	return &Sampler{build: build, sensors: collect.NewSensors(), gpu: &collect.GPUReader{}, bandwidth: &collect.BandwidthMeter{}, drives: smart.NewReader()}
+}
+
+// noteDashboard remembers an address that asked with the token.
+func (s *Sampler) noteDashboard(remoteAddr string) {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dashboards == nil {
+		s.dashboards = map[string]time.Time{}
+	}
+	s.dashboards[host] = time.Now()
+	for addr, at := range s.dashboards {
+		if time.Since(at) > 24*time.Hour {
+			delete(s.dashboards, addr)
+		}
+	}
+}
+
+// trusted are the addresses never to block: the dashboards of the last day, and AGENT_TRUSTED.
+func (s *Sampler) trusted() []string {
+	s.mu.Lock()
+	out := make([]string, 0, len(s.dashboards))
+	for addr := range s.dashboards {
+		out = append(out, addr)
+	}
+	s.mu.Unlock()
+	return append(out, strings.FieldsFunc(os.Getenv("AGENT_TRUSTED"), func(r rune) bool { return r == ',' || r == ' ' })...)
 }
 
 // Interval is how often the machine is sampled; CPU usage is averaged over it.
@@ -158,6 +204,12 @@ func (s *Sampler) Sample(ctx context.Context) {
 		_ = err // kept by the reader and reported below
 	}
 	r.Drives, r.DrivesError = s.drives.Drives()
+	if s.attacks != nil {
+		v := s.attacks.View()
+		v.Methods = nil // the dashboard knows them
+		v.History = v.History[:min(5, len(v.History))]
+		r.Attacks = &v
+	}
 	if r.Drives == nil {
 		r.Drives = []smart.Drive{}
 	}
@@ -191,12 +243,14 @@ func Handler(s *Sampler, token string, self *Self, secure bool) http.Handler {
 		return token != "" && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(got)), []byte(token)) == 1
 	}
 	mux.HandleFunc("POST "+UpdatePath, updateHandler(self, authorized, secure))
+	firewallRoutes(mux, s, authorized, secure)
 	mux.HandleFunc("GET "+Path, func(w http.ResponseWriter, r *http.Request) {
 		if !authorized(r) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		s.noteDashboard(r.RemoteAddr)
 		latest := s.Latest()
 		if latest == nil {
 			http.Error(w, "still taking the first reading", http.StatusServiceUnavailable)
@@ -204,7 +258,7 @@ func Handler(s *Sampler, token string, self *Self, secure bool) http.Handler {
 		}
 		if self != nil {
 			copied := *latest
-			copied.Build, copied.CanUpdate = self.Hash, secure && self.CanUpdate()
+			copied.Build, copied.CanUpdate = self.Build(), secure && self.CanUpdate()
 			latest = &copied
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -236,6 +290,20 @@ func Serve(ctx context.Context, listen, token, build string, plain bool) error {
 		}
 	}
 	s := NewSampler(build)
+	// The same attack watch the dashboard runs on its own machine, reported with the readings.
+	webLogs, _ := filepath.Glob("/var/log/nginx/*access*.log")
+	// It defends too, in iptables chains of its own, unless switched off from the dashboard or with
+	// AGENT_DEFEND=off; AGENT_TRUSTED names more addresses or networks never to block.
+	s.attacks = &ddos.Watcher{WebLogs: webLogs, Defender: &ddos.Defender{On: Defending, Trusted: s.trusted}}
+	attacksDone := make(chan struct{})
+	go func() {
+		defer close(attacksDone)
+		s.attacks.Run(ctx)
+	}()
+	// The rules set from the dashboard, put back in place: iptables forgets them on a reboot.
+	s.port = listenPort(listen)
+	s.firewall = newFirewall(s.port)
+	go s.firewall.Start(ctx)
 	go s.Run(ctx)
 	self, err := FindSelf()
 	if err != nil {
@@ -257,6 +325,11 @@ func Serve(ctx context.Context, listen, token, build string, plain bool) error {
 	}()
 	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
+	}
+	// The defence takes its chains and blocks out as its watch stops: nothing would lift them later.
+	select {
+	case <-attacksDone:
+	case <-time.After(30 * time.Second):
 	}
 	return nil
 }

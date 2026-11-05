@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"nightjar/internal/plugins"
@@ -27,12 +29,29 @@ func (s *Server) listPlugins(w http.ResponseWriter, r *http.Request) {
 }
 
 // rescanPlugins looks in the plugins folder again, for plugins added or changed since the start.
+// When the plugins that deliver alerts changed, Nightjar restarts to set up their channels, and the
+// answer says so with "restarting".
 func (s *Server) rescanPlugins(w http.ResponseWriter, r *http.Request) {
+	before := notifyPlugins(s.ctx.Plugins.List())
 	if err := s.ctx.Plugins.Scan(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("Could not read the plugins folder: "+err.Error()))
 		return
 	}
-	s.listPlugins(w, r)
+	list := s.ctx.Plugins.List()
+	restarting := s.ctx.Plugins.NotifyChanged != nil && notifyPlugins(list) != before
+	writeJSON(w, http.StatusOK, map[string]any{"dir": s.ctx.Plugins.Dir(), "plugins": list, "restarting": restarting})
+}
+
+// notifyPlugins names the plugins that deliver alerts, by id and name, to tell when they change.
+func notifyPlugins(list []plugins.View) string {
+	var out []string
+	for _, v := range list {
+		if slices.Contains(v.Provides, plugins.Notify) {
+			out = append(out, v.ID+"\x00"+v.Name)
+		}
+	}
+	slices.Sort(out)
+	return strings.Join(out, "\n")
 }
 
 func (s *Server) configurePlugin(w http.ResponseWriter, r *http.Request) {

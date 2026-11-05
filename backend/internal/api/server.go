@@ -11,14 +11,15 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nightjar/internal/accounts"
@@ -66,13 +67,19 @@ type Server struct {
 
 	failMu   sync.Mutex
 	failures map[string][]time.Time
+	hashing  chan struct{} // a slot for each password check running
+
+	// noRealIP and noForwarded are set once a request through a proxy on this machine came without
+	// that header: the proxy does not set it, so whatever it holds is the client's own (see learnProxy).
+	noRealIP, noForwarded atomic.Bool
 
 	statsMu  sync.Mutex
 	stats    *Stats
 	statsAt  time.Time
 	statsTTL time.Duration
 
-	days dayCache // the status page's days per check
+	days dayCache   // the status page's days per check
+	ends endedCache // when recent incidents ended, for the status page's notices
 
 	testMu   sync.Mutex
 	lastTest time.Time // when a test alert last went out
@@ -99,13 +106,13 @@ func tooSoon(w http.ResponseWriter, wait time.Duration) {
 }
 
 func New(cfg Config, ctx *monitor.Context) *Server {
-	s := &Server{cfg: cfg, ctx: ctx, failures: map[string][]time.Time{}, statsTTL: 2 * time.Second}
+	s := &Server{cfg: cfg, ctx: ctx, failures: map[string][]time.Time{}, hashing: make(chan struct{}, maxHashing), statsTTL: 2 * time.Second}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /api/config", s.config)
-	mux.HandleFunc("POST /api/auth/setup", fromDashboard(s.createAdmin))
-	mux.HandleFunc("POST /api/auth/login", fromDashboard(s.login))
-	mux.HandleFunc("POST /api/auth/logout", fromDashboard(s.logout))
+	mux.HandleFunc("POST /api/auth/setup", s.fromDashboard(s.createAdmin))
+	mux.HandleFunc("POST /api/auth/login", s.fromDashboard(s.login))
+	mux.HandleFunc("POST /api/auth/logout", s.fromDashboard(s.logout))
 	mux.Handle("POST /api/auth/password", s.writable(s.changePassword))
 	mux.Handle("POST /api/auth/2fa/begin", s.writable(s.beginTwoFactor))
 	mux.Handle("POST /api/auth/2fa/enable", s.writable(s.enableTwoFactor))
@@ -114,11 +121,8 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("GET /api/backup", s.auth(s.makeBackup))
 	// A backup can be larger than other changes, so it skips their size limit for its own.
 	mux.Handle("POST /api/backup/restore", s.auth(s.logged(func(w http.ResponseWriter, r *http.Request) {
-		if origin := r.Header.Get("Origin"); origin != "" {
-			if u, err := url.Parse(origin); err != nil || u.Host != r.Host {
-				writeJSON(w, http.StatusForbidden, errBody("Cross-origin changes are not allowed"))
-				return
-			}
+		if !s.sameOrigin(w, r) {
+			return
 		}
 		if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 			writeJSON(w, http.StatusUnsupportedMediaType, errBody("Send JSON"))
@@ -140,14 +144,14 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("GET /api/report", s.auth(s.weeklyReport))
 	mux.Handle("GET /api/plex/stats", s.auth(s.plexStats))
 	mux.Handle("GET /api/cleanup", s.auth(s.cleanupView))
-	mux.Handle("POST /api/cleanup/scan", s.writable(s.cleanupScan))
+	mux.Handle("POST /api/cleanup/scan", s.writable(slow(5*time.Minute, s.cleanupScan)))
 	mux.Handle("PUT /api/cleanup/{key}/keep", s.writable(s.cleanupKeep))
 	mux.Handle("DELETE /api/cleanup/{key}/keep", s.writable(s.cleanupKeep))
-	mux.Handle("POST /api/report/send", s.writable(s.sendReport))
+	mux.Handle("POST /api/report/send", s.writable(slow(time.Minute, s.sendReport)))
 	mux.Handle("GET /api/appearance", s.auth(s.getAppearance))
 	mux.Handle("PUT /api/appearance", s.writable(s.saveAppearance))
 	mux.Handle("GET /api/statuspage", s.auth(s.statusPageDesign))
-	mux.Handle("PUT /api/statuspage", s.writable(s.saveStatusPageDesign))
+	mux.Handle("PUT /api/statuspage", s.writableUpTo(maxDesignBody, s.saveStatusPageDesign))
 	mux.Handle("GET /api/stats", s.auth(s.serveStats))
 	mux.Handle("GET /api/logs", s.auth(s.logs))
 	mux.Handle("GET /api/apps", s.auth(s.needApps(s.listApps)))
@@ -158,7 +162,7 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("GET /api/plugins/cards", s.auth(s.needPlugins(s.pluginCards)))
 	mux.Handle("POST /api/plugins/rescan", s.writable(s.needPlugins(s.rescanPlugins)))
 	mux.Handle("PUT /api/plugins/{id}", s.writable(s.needPlugins(s.configurePlugin)))
-	mux.Handle("POST /api/plugins/{id}/try", s.writable(s.needPlugins(s.tryPlugin)))
+	mux.Handle("POST /api/plugins/{id}/try", s.writable(slow(2*time.Minute, s.needPlugins(s.tryPlugin))))
 	mux.Handle("GET /api/notifications", s.auth(s.notifications))
 	mux.Handle("GET /api/notifications/summary", s.auth(s.notificationSummary))
 	mux.Handle("POST /api/notifications/read", s.writable(s.markNotifications))
@@ -171,15 +175,25 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("GET /api/agent/download", s.auth(s.downloadAgent))
 	mux.Handle("GET /api/analytics", s.auth(s.analyticsAll))
 	mux.Handle("GET /api/analytics/{id}", s.auth(s.analyticsHost))
-	mux.Handle("POST /api/hosts", s.writable(s.needRemote(s.saveHost)))
-	mux.Handle("PUT /api/hosts/{id}", s.writable(s.needRemote(s.saveHost)))
+	mux.Handle("POST /api/hosts", s.writable(slow(sshBudget, s.needRemote(s.saveHost))))
+	mux.Handle("PUT /api/hosts/{id}", s.writable(slow(sshBudget, s.needRemote(s.saveHost))))
 	mux.Handle("DELETE /api/hosts/{id}", s.writable(s.needRemote(s.deleteHost)))
-	mux.Handle("PUT /api/hosts/{id}/ssh", s.writable(s.needRemote(s.setHostSSH)))
+	mux.Handle("PUT /api/hosts/{id}/ssh", s.writable(slow(sshBudget, s.needRemote(s.setHostSSH))))
 	mux.Handle("DELETE /api/hosts/{id}/ssh", s.writable(s.needRemote(s.setHostSSH)))
-	mux.Handle("POST /api/hosts/{id}/ssh/{action}", s.writable(s.needRemote(s.runHostSSH)))
+	mux.Handle("POST /api/hosts/{id}/ssh/{action}", s.writable(slow(sshBudget, s.needRemote(s.runHostSSH))))
+	mux.Handle("GET /api/hosts/{id}/firewall", s.auth(slow(hostFirewallBudget, s.needRemote(s.hostFirewall))))
+	mux.Handle("POST /api/hosts/{id}/firewall/rules", s.writable(slow(hostFirewallBudget, s.needRemote(s.addHostRule))))
+	mux.Handle("PUT /api/hosts/{id}/firewall/rules/{rule}", s.writable(slow(hostFirewallBudget, s.needRemote(s.updateHostRule))))
+	mux.Handle("DELETE /api/hosts/{id}/firewall/rules/{rule}", s.writable(slow(hostFirewallBudget, s.needRemote(s.removeHostRule))))
+	mux.Handle("PUT /api/hosts/{id}/firewall/order", s.writable(slow(hostFirewallBudget, s.needRemote(s.orderHostRules))))
+	mux.Handle("PUT /api/hosts/{id}/firewall/default", s.writable(slow(hostFirewallBudget, s.needRemote(s.setHostDefault))))
+	mux.Handle("POST /api/hosts/{id}/firewall/default/keep", s.writable(slow(hostFirewallBudget, s.needRemote(s.keepHostDefault))))
+	mux.Handle("PUT /api/hosts/{id}/defense", s.writable(slow(hostFirewallBudget, s.needRemote(s.setHostDefense))))
+	mux.Handle("DELETE /api/hosts/{id}/blocked/{address}", s.writable(slow(hostFirewallBudget, s.needRemote(s.unblockHost))))
 	mux.Handle("GET /api/ssh/keys", s.auth(s.needRemote(s.sshKeys)))
 	mux.Handle("POST /api/ssh/keys", s.writable(s.needRemote(s.newSSHKey)))
-	mux.Handle("POST /api/ssh/authorize", s.writable(s.needRemote(s.authorizeSSHKey)))
+	mux.Handle("POST /api/ssh/authorize", s.writable(slow(sshAuthorizeBudget, s.needRemote(s.authorizeSSHKey))))
+	mux.Handle("POST /api/ssh/trust", s.writable(slow(time.Minute, s.needRemote(s.trustSSHHostKey))))
 	mux.Handle("GET /api/services", s.auth(s.services))
 	mux.Handle("GET /api/services/history", s.auth(s.serviceHistory))
 	mux.Handle("GET /api/plex", s.auth(s.plex))
@@ -193,7 +207,7 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("POST /api/checks/test", s.writable(s.testCheck))
 	mux.Handle("PUT /api/checks/{name}", s.writable(s.saveCheck))
 	mux.Handle("DELETE /api/checks/{name}", s.writable(s.deleteCheck))
-	mux.Handle("POST /api/checks/{name}/repair", s.writable(s.repairCheck))
+	mux.Handle("POST /api/checks/{name}/repair", s.writable(slow(3*time.Minute, s.repairCheck)))
 	mux.Handle("GET /api/repairs", s.auth(s.repairs))
 	// Discord signs each button click with the bot's key; the bot checks it, and who clicked.
 	mux.HandleFunc("POST /discord/interactions", func(w http.ResponseWriter, r *http.Request) {
@@ -213,9 +227,19 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("POST /api/alerts/test", s.writable(s.testAlerts))
 	mux.Handle("GET /api/units", s.auth(s.listUnits))
 	mux.Handle("GET /api/units/{name}/logs", s.auth(s.unitLogs))
-	mux.Handle("POST /api/units/{name}/{action}", s.writable(s.controlUnit))
+	mux.Handle("POST /api/units/{name}/{action}", s.writable(slow(90*time.Second, s.controlUnit)))
 	mux.Handle("GET /api/drives", s.auth(s.drives))
 	mux.Handle("GET /api/network", s.auth(s.network))
+	mux.Handle("GET /api/attacks", s.auth(s.attacks))
+	mux.Handle("PUT /api/attacks/defense", s.writable(s.setDefense))
+	mux.Handle("DELETE /api/attacks/blocked/{address}", s.writable(s.unblock))
+	mux.Handle("GET /api/firewall", s.auth(s.localFirewall))
+	mux.Handle("POST /api/firewall/rules", s.writable(s.addLocalRule))
+	mux.Handle("PUT /api/firewall/rules/{rule}", s.writable(s.updateLocalRule))
+	mux.Handle("DELETE /api/firewall/rules/{rule}", s.writable(s.removeLocalRule))
+	mux.Handle("PUT /api/firewall/order", s.writable(s.orderLocalRules))
+	mux.Handle("PUT /api/firewall/default", s.writable(s.setLocalDefault))
+	mux.Handle("POST /api/firewall/default/keep", s.writable(s.keepLocalDefault))
 	mux.Handle("GET /api/updates", s.auth(s.updates))
 	mux.Handle("POST /api/updates", s.writable(s.needUpdates(s.saveUpdateTarget)))
 	mux.Handle("POST /api/updates/check", s.writable(s.needUpdates(s.checkUpdates)))
@@ -235,6 +259,28 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 		IdleTimeout:       60 * time.Second,
 	}
 	return s
+}
+
+// sshBudget is the longest an SSH action takes: finding the server's architecture, then the action
+// itself (an agent reinstall streams the whole build over).
+const sshBudget = 30*time.Second + 5*time.Minute
+
+// hostFirewallBudget is the longest a call to a server's agent about its firewall takes.
+const hostFirewallBudget = 30 * time.Second
+
+// sshAuthorizeBudget is the longest putting a key on a server takes: checking its host key (a scan
+// and fingerprinting each key it presents), then a minute's password login.
+const sshAuthorizeBudget = 30*time.Second + time.Minute
+
+// slow lets a handler whose work may run past the server's WriteTimeout still answer: without it, a
+// unit restart or an agent reinstall that took a minute would be carried out, but the browser would
+// get no reply and report it failed. budget is the longest the work may take.
+func slow(budget time.Duration, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Not every writer can (a test's recorder cannot); those have no deadline to extend.
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(budget + 30*time.Second))
+		next(w, r)
+	}
 }
 
 func (s *Server) detect() []updates.Spec {
@@ -287,6 +333,7 @@ func (s *Server) headers(next http.Handler) http.Handler {
 	custom := "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; " +
 		"font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.learnProxy(r)
 		h := w.Header()
 		if r.URL.Path == "/status" || r.URL.Path == "/status-page" {
 			h.Set("Content-Security-Policy", custom)
@@ -316,37 +363,115 @@ func (s *Server) headers(next http.Handler) http.Handler {
 	})
 }
 
-// clientIP is who is asking. Behind a reverse proxy on this machine (nginx on most media boxes)
-// every request comes from loopback, so the proxy's X-Real-IP or X-Forwarded-For names the client;
-// from anywhere else those headers could be forged and are ignored.
-func clientIP(r *http.Request) string {
+// clientIPs is who is asking, as the sign-in limits see it. Behind a reverse proxy on this machine
+// (nginx on most media boxes) every request comes from loopback, so the proxy names the client: nginx
+// set up as the docs say in X-Real-IP; Caddy, cloudflared and nginx's $proxy_add_x_forwarded_for as
+// the last X-Forwarded-For hop. Each of them passes the other header on just as the client sent it.
+// Once learnProxy has seen which one the proxy leaves out, only the other is taken, so a made-up
+// header can neither slip the limits nor count failures against someone else's address. Until then
+// (or behind two proxies that set one each) both are taken, when they hold an address: a client still
+// cannot slip the limits. From anywhere else those headers could be forged and are ignored.
+func (s *Server) clientIPs(r *http.Request) []string {
+	host, local := peer(r)
+	if !local {
+		return []string{host}
+	}
+	noRealIP, noForwarded := s.noRealIP.Load(), s.noForwarded.Load()
+	var out []string
+	add := func(v string) {
+		if ip := net.ParseIP(strings.TrimSpace(v)); ip != nil && !slices.Contains(out, ip.String()) {
+			out = append(out, ip.String())
+		}
+	}
+	if !noRealIP || noForwarded {
+		add(r.Header.Get("X-Real-IP"))
+	}
+	if fwd := r.Header.Values("X-Forwarded-For"); len(fwd) > 0 && (!noForwarded || noRealIP) {
+		parts := strings.Split(fwd[len(fwd)-1], ",")
+		add(parts[len(parts)-1])
+	}
+	if len(out) == 0 {
+		return []string{host}
+	}
+	return out
+}
+
+// learnProxy notes which of X-Real-IP and X-Forwarded-For the proxy on this machine does not set. A
+// browser sends neither, so a proxied request with one and not the other shows that the proxy leaves
+// the other out. A client can add a header but not take away one the proxy sets, so this cannot be
+// faked from outside; a request with neither came from this machine itself, not through the proxy.
+func (s *Server) learnProxy(r *http.Request) {
+	if _, local := peer(r); !local {
+		return
+	}
+	realIP, forwarded := r.Header.Get("X-Real-IP") != "", len(r.Header.Values("X-Forwarded-For")) > 0
+	switch {
+	case realIP && !forwarded:
+		s.noForwarded.Store(true)
+	case forwarded && !realIP:
+		s.noRealIP.Store(true)
+	}
+}
+
+// peer is the address the request came from, and whether that is this machine.
+func peer(r *http.Request) (host string, local bool) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
-			return real
-		}
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			parts := strings.Split(fwd, ",")
-			return strings.TrimSpace(parts[len(parts)-1])
-		}
-	}
-	return host
+	ip := net.ParseIP(host)
+	return host, ip != nil && ip.IsLoopback()
 }
 
-// authorized accepts a signed-in browser's session cookie, or WEB_AUTH_TOKEN as
-// "Authorization: Bearer <token>" or "X-Auth-Token".
-func (s *Server) authorized(r *http.Request) bool {
-	if s.cfg.AuthToken != "" && subtle.ConstantTimeCompare([]byte(presentedToken(r)), []byte(s.cfg.AuthToken)) == 1 {
-		return true
+// clientIP is the one address to act on for the client, such as the one the firewall keeps reachable.
+func (s *Server) clientIP(r *http.Request) string { return s.clientIPs(r)[0] }
+
+// clientNames names the client for the logs: every address the proxy gave, when they differ.
+func (s *Server) clientNames(r *http.Request) string { return strings.Join(s.clientIPs(r), " or ") }
+
+// access is what a request's credentials come to.
+type access int
+
+const (
+	denied access = iota
+	allowed
+	lockedOut // a token was sent from a client locked out for guessing, and was not looked at
+)
+
+// access accepts a signed-in browser's session cookie, or WEB_AUTH_TOKEN as
+// "Authorization: Bearer <token>" or "X-Auth-Token". A session cookie cannot be guessed, so it is
+// let in even while the client's address is locked out: others sharing that address (behind the
+// same proxy or edge) cannot lock the admin out of a dashboard already open. A token can be guessed,
+// so it is only looked at while the client is not locked out, and every wrong one counts, wherever
+// it is sent: the public endpoints that say whether the caller is signed in included.
+func (s *Server) access(r *http.Request) access {
+	if s.cfg.Accounts != nil && s.cfg.Accounts.Valid(sessionCookie(r)) {
+		return allowed
 	}
-	if s.cfg.Accounts != nil {
-		return s.cfg.Accounts.Valid(sessionCookie(r))
+	if s.cfg.AuthToken == "" {
+		if s.cfg.Accounts == nil {
+			return allowed
+		}
+		return denied
 	}
-	return s.cfg.AuthToken == ""
+	token := presentedToken(r)
+	if token == "" {
+		return denied
+	}
+	if s.throttled(r) {
+		return lockedOut
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AuthToken)) == 1 {
+		return allowed
+	}
+	s.recordFailure(r)
+	log.Warn("Unauthorized request", "path", r.URL.Path, "ip", s.clientNames(r))
+	return denied
 }
+
+// authorized reports whether the request is signed in, for the public endpoints that only say more
+// when it is.
+func (s *Server) authorized(r *http.Request) bool { return s.access(r) == allowed }
 
 func presentedToken(r *http.Request) string {
 	if t := r.Header.Get("X-Auth-Token"); t != "" {
@@ -361,9 +486,27 @@ func presentedToken(r *http.Request) string {
 // signInRequired reports whether every request must be signed in (always, outside tests).
 func (s *Server) signInRequired() bool { return s.cfg.Accounts != nil || s.cfg.AuthToken != "" }
 
-func (s *Server) throttled(ip string) bool {
+// maxFailClients is how many clients' failures are kept at most.
+const maxFailClients = 1024
+
+// throttled reports whether the client has failed too often of late, under any of its addresses.
+func (s *Server) throttled(r *http.Request) bool {
 	s.failMu.Lock()
 	defer s.failMu.Unlock()
+	return s.throttledLocked(s.clientIPs(r))
+}
+
+func (s *Server) throttledLocked(ips []string) bool {
+	for _, ip := range ips {
+		if len(s.recentLocked(ip)) >= authFailLimit {
+			return true
+		}
+	}
+	return false
+}
+
+// recentLocked is ip's failures within the window; older ones are forgotten.
+func (s *Server) recentLocked(ip string) []time.Time {
 	var recent []time.Time
 	for _, t := range s.failures[ip] {
 		if time.Since(t) < authFailWindow {
@@ -375,44 +518,121 @@ func (s *Server) throttled(ip string) bool {
 	} else {
 		s.failures[ip] = recent
 	}
-	return len(recent) >= authFailLimit
+	return recent
 }
 
-func (s *Server) recordFailure(ip string) {
+// recordFailure counts a failure against each of the client's addresses.
+func (s *Server) recordFailure(r *http.Request) {
 	s.failMu.Lock()
 	defer s.failMu.Unlock()
-	if len(s.failures) > 1024 {
-		for k := range s.failures {
-			delete(s.failures, k)
-			break
+	now := time.Now()
+	for _, ip := range s.clientIPs(r) {
+		s.addFailureLocked(ip, now)
+	}
+}
+
+func (s *Server) addFailureLocked(ip string, at time.Time) {
+	if _, ok := s.failures[ip]; !ok && len(s.failures) >= maxFailClients {
+		s.evictLocked()
+	}
+	s.failures[ip] = append(s.failures[ip], at)
+}
+
+// evictLocked makes room for one more client: clients whose failures have all expired go first, and
+// failing that the one whose last failure is oldest, so the clients failing right now are kept.
+func (s *Server) evictLocked() {
+	var oldest string
+	var oldestAt time.Time
+	for ip, list := range s.failures {
+		last := list[len(list)-1]
+		if time.Since(last) >= authFailWindow {
+			delete(s.failures, ip)
+			continue
+		}
+		if oldest == "" || last.Before(oldestAt) {
+			oldest, oldestAt = ip, last
 		}
 	}
-	s.failures[ip] = append(s.failures[ip], time.Now())
+	if len(s.failures) >= maxFailClients {
+		delete(s.failures, oldest)
+	}
+}
+
+// How many password checks (600,000 rounds of PBKDF2 each) may run at once, and how long a sign-in
+// waits for its turn. Without a cap, a flood of sign-ins would keep every core busy hashing.
+const (
+	maxHashing = 2
+	hashWait   = 5 * time.Second
+)
+
+// passwordTry starts a try at the password, which may be a guess: it is counted against the client's
+// limit before the slow check, so tries sent all at once cannot all pass the limit before the first
+// failure is counted, and it waits for a hashing slot. It answers and is false when the client is
+// locked out or too many checks are running. Otherwise finish ends the try: failed keeps it
+// counted, and a try that worked, or was never a guess, is taken back.
+func (s *Server) passwordTry(w http.ResponseWriter, r *http.Request) (finish func(failed bool), ok bool) {
+	ips := s.clientIPs(r)
+	at := time.Now()
+	s.failMu.Lock()
+	if s.throttledLocked(ips) {
+		s.failMu.Unlock()
+		writeJSON(w, http.StatusTooManyRequests, errBody("Too many tries. Wait a minute and try again."))
+		return nil, false
+	}
+	for _, ip := range ips {
+		s.addFailureLocked(ip, at)
+	}
+	s.failMu.Unlock()
+	takeBack := func() {
+		s.failMu.Lock()
+		defer s.failMu.Unlock()
+		for _, ip := range ips {
+			if i := slices.Index(s.failures[ip], at); i >= 0 {
+				s.failures[ip] = slices.Delete(s.failures[ip], i, i+1)
+			}
+			if len(s.failures[ip]) == 0 {
+				delete(s.failures, ip)
+			}
+		}
+	}
+	wait := time.NewTimer(hashWait)
+	defer wait.Stop()
+	select {
+	case s.hashing <- struct{}{}:
+	case <-wait.C:
+		takeBack()
+		writeJSON(w, http.StatusTooManyRequests, errBody("Too many sign-ins at once. Try again in a moment."))
+		return nil, false
+	case <-r.Context().Done():
+		takeBack()
+		writeJSON(w, http.StatusServiceUnavailable, errBody("The request was cancelled"))
+		return nil, false
+	}
+	return func(failed bool) {
+		<-s.hashing
+		if !failed {
+			takeBack()
+		}
+	}, true
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
-		// Checked before the credentials, so a client that is guessing learns nothing while locked out.
-		if s.throttled(ip) {
+		switch s.access(r) {
+		case allowed:
+			next(w, r)
+		case lockedOut:
+			// The token is not looked at, so a client that is guessing learns nothing while locked out.
 			writeJSON(w, http.StatusTooManyRequests, errBody("Too Many Requests"))
-			return
-		}
-		if !s.authorized(r) {
+		default:
 			// Only a wrong token counts towards the limit. A session cookie cannot be guessed, and a
 			// stale one (signed out elsewhere, or expired) comes with every request a page makes at
 			// once, which would lock its owner out of signing in again; it is cleared instead.
-			if presentedToken(r) != "" {
-				s.recordFailure(ip)
-				log.Warn("Unauthorized request", "path", r.URL.Path, "ip", ip)
-			}
 			if sessionCookie(r) != "" {
 				s.setCookie(w, r, "", -1)
 			}
 			writeJSON(w, http.StatusUnauthorized, errBody("Unauthorized"))
-			return
 		}
-		next(w, r)
 	})
 }
 
@@ -444,7 +664,7 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 		"status_page_title":   s.ctx.Config().StatusPageTitle,
 		"needs_setup":         false,
 		"hidden":              []string{},
-		"appearance":          s.publicAppearance(r),
+		"appearance":          s.publicAppearance(signedIn),
 	}
 	if signedIn {
 		out["plex_enabled"], out["qbittorrent_enabled"] = s.ctx.Plex != nil, s.ctx.QBittorrentBoard != nil
@@ -482,12 +702,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 			status = "degraded"
 		}
 	}
-	if per, err := collect.PerCore(); err == nil && len(per) > 0 {
-		sum := 0.0
-		for _, v := range per {
-			sum += v
-		}
-		pct := sum / float64(len(per))
+	// The loop's latest reading: measuring here would reset the CPU baseline the loop measures from,
+	// and anyone can call this as often as they like.
+	if latest := s.ctx.Latest(); latest != nil {
+		pct := latest.CPUPercent
 		checks["cpu"] = check{Status: "ok", UsagePercent: round(pct, 1)}
 		if pct > 95 {
 			degrade("CPU usage very high")
@@ -603,6 +821,9 @@ func (s *Server) collectStats() *Stats {
 	st.Network.Interfaces = collect.Interfaces()
 	st.Processes = s.ctx.Processes.Overview(5)
 	// The dashboard shows names and percentages; command lines (kept for alerts) would be most of the payload.
+	// The lists share their entries with the scanner's cache, which the loop's alerts read, so they are
+	// copied before being trimmed.
+	st.Processes.TopCPU, st.Processes.TopMemory = slices.Clone(st.Processes.TopCPU), slices.Clone(st.Processes.TopMemory)
 	for _, list := range [][]collect.Process{st.Processes.TopCPU, st.Processes.TopMemory} {
 		for i := range list {
 			list[i].Cmdline, list[i].RSS, list[i].VMS = nil, 0, 0

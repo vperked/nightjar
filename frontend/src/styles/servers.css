@@ -485,12 +485,252 @@
   color: var(--ink-3);
   cursor: default;
 }
-.ssh-public-line summary {
-  margin-top: 4px;
+
+/* How the key gets onto the server, asked once the key is chosen. */
+.ssh-place {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+}
+.ssh-place-head {
+  font-size: 13px;
+  font-weight: 600;
+}
+.ssh-place .seg {
+  justify-self: start;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+.ssh-place .form-help {
+  margin: 0;
+}
+/* A server's host key, to compare on the server before the password goes to it. */
+.ssh-host-key p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Whether the saved login works, from the last time it was used. */
+.ssh-status {
+  --tone: var(--ink-3);
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--tone) 30%, var(--rule));
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+}
+.ssh-status.ok {
+  --tone: var(--good-mark);
+}
+.ssh-status.bad {
+  --tone: var(--crit-mark);
+}
+.ssh-status-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  min-width: 0;
+}
+.ssh-status-mark {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  align-self: center;
+  border-radius: 2px;
+  background: var(--tone);
+}
+.ssh-status.busy .ssh-status-mark {
+  animation: ssh-pulse 1s ease-in-out infinite alternate;
+}
+@keyframes ssh-pulse {
+  to {
+    opacity: 0.3;
+  }
+}
+.ssh-status-word {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.ssh-status.bad .ssh-status-word {
+  color: var(--crit);
+}
+.ssh-status-when {
+  margin-left: auto;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+.ssh-status-why,
+.ssh-status-key {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.ssh-status-key {
+  color: var(--ink-3);
+}
+.ssh-by-hand summary {
   color: var(--ink-3);
   font-size: 12.5px;
   cursor: pointer;
 }
-.ssh-public-line .cmd {
+.ssh-by-hand .cmd {
   margin-top: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ssh-status.busy .ssh-status-mark {
+    animation: none;
+  }
+}
+
+/* Choosing servers to act on together. */
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+main.choosing-servers {
+  padding-bottom: 96px;
+}
+.host-card.selectable {
+  cursor: pointer;
+  user-select: none;
+}
+.host-card.selectable:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
+}
+.host-card.picked {
+  border-color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink);
+}
+.host-select {
+  flex: none;
+  align-self: center;
+  margin-right: 2px;
+}
+.host-select.on {
+  border-color: var(--ink);
+  background: var(--ink);
+}
+.host-select.on::before {
+  transform: scale(1);
+}
+.bulk-hint {
+  margin-top: 12px;
+}
+
+/* Each server's outcome of the last thing done to several at once. */
+.bulk-results {
+  margin-bottom: 16px;
+}
+.bulk-results .section-head > span:last-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.bulk-results-close {
+  padding: 2px 6px;
+  font-size: 12.5px;
+}
+.bulk-results-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.bulk-outcome {
+  --tone: var(--ink-3);
+  display: grid;
+  grid-template-columns: 8px minmax(0, max-content) auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--rule);
+  font-size: 13px;
+}
+.bulk-outcome:first-child {
+  border-top: 0;
+}
+.bulk-outcome.ok {
+  --tone: var(--good-mark);
+}
+.bulk-outcome.failed {
+  --tone: var(--crit-mark);
+}
+.bulk-outcome-mark {
+  width: 8px;
+  height: 8px;
+  align-self: center;
+  border-radius: 2px;
+  background: var(--tone);
+}
+.bulk-outcome.running .bulk-outcome-mark {
+  animation: ssh-pulse 1s ease-in-out infinite alternate;
+}
+.bulk-outcome-word {
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.bulk-outcome.failed .bulk-outcome-word {
+  color: var(--crit);
+}
+.bulk-outcome-text {
+  min-width: 0;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 560px) {
+  .bulk-outcome {
+    grid-template-columns: 8px minmax(0, 1fr) auto;
+  }
+  .bulk-outcome-text {
+    grid-column: 2 / -1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bulk-outcome.running .bulk-outcome-mark {
+    animation: none;
+  }
+}
+.host-select + .min0 {
+  flex: 1;
+}
+/* On a phone the servers' actions wrap under the count rather than scroll out of sight. */
+@media (max-width: 640px) {
+  .bulk-bar.servers-bar {
+    left: 12px;
+    right: 12px;
+    flex-wrap: wrap;
+    max-width: none;
+    transform: none;
+    animation: none;
+  }
+  .bulk-bar.servers-bar .bulk-bar-actions,
+  .bulk-bar.servers-bar .bulk-bar-confirm {
+    order: 3;
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+  .bulk-bar.servers-bar .bulk-bar-rule {
+    display: none;
+  }
+  .bulk-bar.servers-bar .bulk-bar-count {
+    flex: 1;
+  }
+  main.choosing-servers {
+    padding-bottom: 150px;
+  }
 }

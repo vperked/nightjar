@@ -109,3 +109,26 @@ func TestOutagesAndTheDiskForecast(t *testing.T) {
 		t.Fatal("an hour is too short to forecast a disk")
 	}
 }
+
+// A spike shows as the peak however wide the range's buckets are.
+func TestPeaksAreNotSmoothedAway(t *testing.T) {
+	db := openDB(t)
+	c := &clock{time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
+	r := analytics.NewRecorder(db)
+	r.Now = c.now
+	for i := range 120 {
+		mem, lat := 50.0, 10.0
+		if i%60 == 30 {
+			mem, lat = 98, 900
+		}
+		r.Add("nas", analytics.Reading{Up: true, Mem: f(mem), Latency: f(lat)})
+		c.add(30 * time.Second)
+	}
+	r.Flush()
+	for _, rng := range []string{"1h", "24h", "7d", "30d"} {
+		s := analytics.Read(db, "nas", analytics.RangeNamed(rng), c.now(), true).Summary
+		if !near(s.MemPeak, 98) || !near(s.LatencyPeak, 900) {
+			t.Errorf("%s: memory peak %v, latency peak %v", rng, *s.MemPeak, *s.LatencyPeak)
+		}
+	}
+}

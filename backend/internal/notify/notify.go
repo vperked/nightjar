@@ -11,6 +11,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -58,7 +59,7 @@ func (d *delivery) record(channel string, err error) bool {
 	d.mu.Lock()
 	d.lastErr = ""
 	if err != nil {
-		d.lastErr = err.Error()
+		d.lastErr = logx.Redact(err.Error())
 	}
 	d.mu.Unlock()
 	if err != nil && !errors.Is(err, discord.ErrBreakerOpen) {
@@ -84,7 +85,7 @@ func newBase(name string, render func(Alert) (*http.Request, error)) *base {
 	return &base{
 		name: name, render: render,
 		client:  &http.Client{Timeout: 10 * time.Second},
-		breaker: discord.NewCircuitBreaker(5, time.Minute, 2),
+		breaker: discord.NewCircuitBreaker(5, time.Minute, 2).Named(name),
 	}
 }
 
@@ -102,7 +103,7 @@ func (b *base) deliver(a Alert) error {
 	return b.breaker.Call(func() error {
 		resp, err := b.client.Do(req)
 		if err != nil {
-			return err
+			return withoutURL(err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode >= 300 {
@@ -111,6 +112,16 @@ func (b *base) deliver(a Alert) error {
 		}
 		return nil
 	})
+}
+
+// withoutURL drops the request URL from a network error. A webhook's URL, or Telegram's with the
+// bot token in it, is the secret itself, and the error is kept, shown and logged.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
 
 func jsonRequest(url string, payload any) (*http.Request, error) {

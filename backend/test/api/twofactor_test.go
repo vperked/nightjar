@@ -54,13 +54,21 @@ func TestTwoFactorActivityAndBackup(t *testing.T) {
 	if !strings.HasPrefix(begin["link"].(string), "otpauth://totp/Nightjar:jay?") {
 		t.Fatalf("link %v", begin["link"])
 	}
-	if code, _ := call("POST", "/api/auth/2fa/enable", `{"code":"000000"}`); code != http.StatusBadRequest {
+	if code, _ := call("POST", "/api/auth/2fa/enable", `{"password":"correct horse battery","code":"000000"}`); code != http.StatusBadRequest {
 		t.Fatal("a wrong code turned it on")
 	}
 	now := time.Now().Unix()
-	code, en := call("POST", "/api/auth/2fa/enable", `{"code":"`+accounts.TOTP(secret, now)+`"}`)
+	// A session alone cannot tie the account to an authenticator: it takes the password.
+	if code, _ := call("POST", "/api/auth/2fa/enable", `{"code":"`+accounts.TOTP(secret, now)+`"}`); code != http.StatusBadRequest || acc.TwoFactor() {
+		t.Fatal("it was turned on without the password")
+	}
+	code, en := call("POST", "/api/auth/2fa/enable", `{"password":"correct horse battery","code":"`+accounts.TOTP(secret, now)+`"}`)
 	if code != http.StatusOK || len(en["recovery"].([]any)) != 10 {
 		t.Fatalf("enable: %d %v", code, en)
+	}
+	// Nor can it swap the authenticator for another while it is on.
+	if code, _ := call("POST", "/api/auth/2fa/begin", `{}`); code != http.StatusBadRequest {
+		t.Fatalf("a new authenticator while one is on: %d", code)
 	}
 	recovery := en["recovery"].([]any)[0].(string)
 
@@ -111,13 +119,23 @@ func TestTwoFactorActivityAndBackup(t *testing.T) {
 
 	// A backup leaves secrets out unless asked; restoring it puts a deleted check back.
 	call("PUT", "/api/settings", `{"values":{"CPU_THRESHOLD":"85","PLEX_TOKEN":"hunter2"}}`)
+	db.SetMeta("remote.hosts", `[{"id":"nas","name":"NAS","address":"https://10.0.0.20:9101","token":"agent-token-agent-token"}]`)
+	db.SetMeta("plugins.state", `{"weather":{"enabled":true,"settings":{"API_KEY":"plugin-secret"}}}`)
 	_, b := call("GET", "/api/backup", "")
 	settings := b["settings"].(map[string]any)
 	if settings["CPU_THRESHOLD"] != "85" || settings["PLEX_TOKEN"] != nil || b["secrets"] != false || len(b["checks"].([]any)) != 1 {
 		t.Fatalf("backup: %v", b)
 	}
-	if _, withSecrets := call("GET", "/api/backup?secrets=1", ""); withSecrets["settings"].(map[string]any)["PLEX_TOKEN"] != "hunter2" {
+	// Agent tokens and plugin secrets are secrets too.
+	if raw, _ := json.Marshal(b); strings.Contains(string(raw), "agent-token") || strings.Contains(string(raw), "plugin-secret") || !strings.Contains(string(raw), "10.0.0.20") {
+		t.Fatalf("a backup without secrets holds them: %s", raw)
+	}
+	_, withSecrets := call("GET", "/api/backup?secrets=1", "")
+	if withSecrets["settings"].(map[string]any)["PLEX_TOKEN"] != "hunter2" {
 		t.Fatal("secrets when asked")
+	}
+	if raw, _ := json.Marshal(withSecrets); !strings.Contains(string(raw), "agent-token-agent-token") || !strings.Contains(string(raw), "plugin-secret") {
+		t.Fatalf("a backup with secrets lacks them: %s", raw)
 	}
 	call("DELETE", "/api/checks/nas", "")
 	raw, _ := json.Marshal(b)
@@ -126,6 +144,10 @@ func TestTwoFactorActivityAndBackup(t *testing.T) {
 	}
 	if !ctx.Services.Has("nas") {
 		t.Fatal("the check is back")
+	}
+	// Restoring it keeps the secrets already here.
+	if !strings.Contains(db.Meta("remote.hosts"), "agent-token-agent-token") || !strings.Contains(db.Meta("plugins.state"), "plugin-secret") {
+		t.Fatalf("a restore without secrets dropped them: %s %s", db.Meta("remote.hosts"), db.Meta("plugins.state"))
 	}
 	if code, _ := call("POST", "/api/backup/restore", `{"nightjar":"x","meta":{"auth.admin":{}}}`); code != http.StatusBadRequest {
 		t.Fatalf("a backup cannot replace the account: %d", code)

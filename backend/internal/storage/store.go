@@ -5,6 +5,8 @@ package storage
 
 import (
 	"database/sql"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,7 +55,8 @@ CREATE TABLE IF NOT EXISTS samples (
     host TEXT NOT NULL,
     ts REAL NOT NULL,
     up REAL NOT NULL,
-    cpu REAL, cpu_max REAL, mem REAL, temp REAL, temp_max REAL, disk REAL, rx REAL, tx REAL, latency REAL
+    cpu REAL, cpu_max REAL, mem REAL, temp REAL, temp_max REAL, disk REAL, rx REAL, tx REAL, latency REAL,
+    mem_max REAL, latency_max REAL
 );
 CREATE INDEX IF NOT EXISTS idx_samples_host_ts ON samples (host, ts);
 -- What Nightjar did to repair a check that went down, and whether the check came back after it.
@@ -114,12 +117,43 @@ type Store struct {
 	db *sql.DB
 }
 
+// added are columns later versions added to tables an older database already has.
+var added = []struct{ table, column, kind string }{
+	{"samples", "mem_max", "REAL"},
+	{"samples", "latency_max", "REAL"},
+}
+
+// migrate adds the columns an older database lacks.
+func migrate(db *sql.DB) error {
+	for _, a := range added {
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?", a.table, a.column).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := db.Exec("ALTER TABLE " + a.table + " ADD COLUMN " + a.column + " " + a.kind); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Open opens (creating if needed) the database at path. The returned store may be unavailable.
 func Open(path string) *Store {
-	db, err := sql.Open("sqlite", path)
+	// Another process holding the database for a moment (a backup, the sqlite3 shell) is waited
+	// for rather than leaving the monitor without its database.
+	dsn := path + "?_pragma=busy_timeout(5000)"
+	if strings.Contains(path, "?") {
+		dsn = path + "&_pragma=busy_timeout(5000)"
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err == nil {
 		db.SetMaxOpenConns(1)
 		_, err = db.Exec("PRAGMA journal_mode=WAL;" + schema)
+	}
+	if err == nil {
+		err = migrate(db)
 	}
 	if err != nil {
 		log.Warn("Database unavailable", "path", path, "err", err)
@@ -127,6 +161,11 @@ func Open(path string) *Store {
 			db.Close()
 		}
 		return &Store{}
+	}
+	// It holds agent tokens, password and session hashes and the two-factor secret: readable by its
+	// owner alone, whatever the umask, and so are the WAL files SQLite keeps beside it.
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		os.Chmod(p, 0o600)
 	}
 	return &Store{db: db}
 }
@@ -293,8 +332,15 @@ func (s *Store) Buckets(service string, since, until float64, n int) []Point {
 	return out
 }
 
-// Prune deletes results older than the cutoff and returns how many were removed.
+// Prune deletes results older than the cutoff, and the repair attempts made as long ago, and
+// returns how many results were removed.
 func (s *Store) Prune(olderThan float64) int64 {
+	n := s.pruneChecks(olderThan)
+	s.PruneRepairs(olderThan)
+	return n
+}
+
+func (s *Store) pruneChecks(olderThan float64) int64 {
 	db, unlock := s.lock()
 	defer unlock()
 	if db == nil {

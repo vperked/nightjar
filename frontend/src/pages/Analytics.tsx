@@ -56,7 +56,7 @@ function Tile({ label, value, sub, to }: { label: string; value: string; sub: st
     <>
       <span className="label">{label}</span>
       <div className="readout-value">{value}</div>
-      <div className="readout-sub truncate">{sub}</div>
+      <div className="readout-sub">{sub}</div>
     </>
   );
   return to ? (
@@ -269,7 +269,9 @@ export function AnalyticsPage() {
   const fetch = useCallback(() => api.analytics(range), [range]);
   const { data, error } = usePoll(fetch, 60000);
   const label = RANGES.find((r) => r.value === range)!.label;
-  const hosts = useMemo(() => data?.hosts ?? [], [data]);
+  // A server's points come back null when the database could not be read; as none, so the
+  // page still says why instead of failing on them.
+  const hosts = useMemo(() => (data?.hosts ?? []).map((h) => ({ ...h, points: h.points ?? [] })), [data]);
   return (
     <main>
       <div className="page-title">

@@ -105,6 +105,20 @@ export function ServersTabs({ current }: { current: '/servers' | '/servers/analy
   );
 }
 
+// NetworkTabs switches between the live network meter and the firewall.
+export function NetworkTabs({ current }: { current: '/network' | '/network/firewall' }) {
+  return (
+    <SubTabs
+      label="Network"
+      current={current}
+      items={[
+        { to: '/network', label: 'Live' },
+        { to: '/network/firewall', label: 'Firewall' },
+      ]}
+    />
+  );
+}
+
 // MediaTabs joins Plex, qBittorrent and the media cleanup under one Media tab, for those watched.
 export function MediaTabs({ current }: { current: '/plex' | '/qbittorrent' | '/plex/cleanup' }) {
   const config = useConfig();

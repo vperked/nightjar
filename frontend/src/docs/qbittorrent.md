@@ -19,6 +19,6 @@ When recovery does not get a stalled download moving, Nightjar asks Sonarr or Ra
 ## Seeding limits
 
 - `SEEDING_RATIO_LIMIT` removes torrents that reach that ratio (0 seeds forever), with their files if `SEEDING_RATIO_DELETE_FILES` is on.
-- `INACTIVE_TORRENT_AUTO_REMOVE` removes paused torrents, keeping their files.
+- `INACTIVE_TORRENT_AUTO_REMOVE` removes paused torrents that have finished downloading, keeping their files; stopped or paused downloads are left alone.
 
 qBittorrent's alerts go to `QBITTORRENT_WEBHOOK`, and only there unless you change the [notification rules](/docs/notifications).

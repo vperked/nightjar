@@ -24,6 +24,11 @@ const (
 	maxRuns      = 5
 	lastCheckKey = "updates.last_check"
 	seededKey    = "updates.seeded"
+	// recipesKey is the version of the update recipes last filled into saved targets.
+	recipesKey = "updates.recipes"
+	recipes    = "3"
+	// probeTimeout is the longest one check may take.
+	probeTimeout = 15 * time.Minute
 )
 
 // Options configure a Manager. Zero values get working defaults.
@@ -65,6 +70,8 @@ type Run struct {
 	OK     bool    `json:"ok"`
 	Auto   bool    `json:"auto"`
 	Detail string  `json:"detail,omitempty"`
+	// Log is the end of what the update did and printed.
+	Log []string `json:"log,omitempty"`
 }
 
 // Status is a target as the dashboard sees it. The API key never leaves the server.
@@ -74,12 +81,15 @@ type Status struct {
 	APIKeySet bool   `json:"api_key_set,omitempty"`
 	CanUpdate bool   `json:"can_update"`
 	Busy      string `json:"busy,omitempty"` // "checking", "updating" or "queued"
+	// Live is what the update under way has done so far.
+	Live *Live `json:"live,omitempty"`
 }
 
 type target struct {
 	spec  Spec
 	state State
 	busy  string
+	live  *liveLog // while it updates
 }
 
 type job struct {
@@ -101,6 +111,8 @@ type Manager struct {
 	running   sync.WaitGroup
 	lastCheck float64
 	checking  bool
+	applying  string // the target being updated now, if any
+	stopping  bool   // Wait was called: no job starts after it
 }
 
 // New loads the stored targets. On the first start it stores what detect finds; legacyAuto turns on
@@ -136,6 +148,12 @@ func New(opt Options, detect func() []Spec, legacyAuto bool) *Manager {
 			}
 		}
 		opt.Store.SetMeta(seededKey, "1")
+		opt.Store.SetMeta(recipesKey, recipes)
+	}
+	// Targets saved before Nightjar knew how to update them get the way now, once.
+	if opt.Store.Available() && opt.Store.Meta(recipesKey) != recipes && detect != nil {
+		m.fillRecipes(detect())
+		opt.Store.SetMeta(recipesKey, recipes)
 	}
 	go m.work()
 	return m
@@ -158,6 +176,9 @@ func (m *Manager) status(t *target) Status {
 	s := Status{Spec: t.spec, State: t.state, APIKeySet: t.spec.APIKey != "", CanUpdate: t.spec.CanUpdate(), Busy: t.busy}
 	s.Spec.APIKey = ""
 	s.Runs = slices.Clone(t.state.Runs)
+	if t.live != nil {
+		s.Live = t.live.view()
+	}
 	return s
 }
 
@@ -170,6 +191,13 @@ func (m *Manager) Get(id string) (Status, bool) {
 		return Status{}, false
 	}
 	return m.status(t), true
+}
+
+// Applying is the target being updated now ("" when none): its download looks like a surge of traffic.
+func (m *Manager) Applying() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.applying
 }
 
 // Activity reports whether a check round is running and when the last one finished.
@@ -268,6 +296,7 @@ func (m *Manager) Delete(id string) error {
 
 // AddDetected stores the detected targets not already present and returns them.
 func (m *Manager) AddDetected(detected []Spec) []Status {
+	m.fillRecipes(detected)
 	var added []Status
 	for _, s := range detected {
 		if m.add(s) == nil {
@@ -277,6 +306,46 @@ func (m *Manager) AddDetected(detected []Spec) []Status {
 		}
 	}
 	return added
+}
+
+// fillRecipes gives a saved target that cannot update the update command detection now knows for
+// it, with the version command and restart that go with it. A target that has an update command,
+// one set up by hand, is left alone.
+func (m *Manager) fillRecipes(detected []Spec) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, d := range detected {
+		t := m.targets[d.ID]
+		if t == nil || d.UpdateCommand == "" || t.spec.Kind != d.Kind || t.busy != "" {
+			continue
+		}
+		// One set up by hand stays; one from an older recipe gets the newer.
+		if t.spec.UpdateCommand != "" && !fromOlderRecipe(t.spec.UpdateCommand, d.UpdateCommand) {
+			continue
+		}
+		spec := t.spec
+		spec.UpdateCommand, spec.VersionCommand, spec.Restart = d.UpdateCommand, d.VersionCommand, d.Restart
+		spec.Unit = cmp.Or(spec.Unit, d.Unit)
+		data, _ := json.Marshal(spec)
+		if err := m.opt.Store.SaveUpdateTarget(spec.ID, data); err != nil {
+			log.Warn("Could not give a target its update command", "target", spec.Name, "err", err)
+			continue
+		}
+		t.spec = spec
+		log.Info("Can now update", "target", spec.Name)
+	}
+}
+
+// fromOlderRecipe says whether a saved command is the recipe's command as an older Nightjar wrote it.
+func fromOlderRecipe(saved, recipe string) bool {
+	if saved == recipe {
+		return false
+	}
+	upgraded := saved
+	for _, r := range superseded {
+		upgraded = strings.ReplaceAll(upgraded, r[0], r[1])
+	}
+	return upgraded == recipe
 }
 
 // ---------- scheduling ----------
@@ -311,7 +380,8 @@ func (m *Manager) Tick(now time.Time, interval time.Duration, window Window) {
 	last := time.Unix(int64(m.lastCheck), 0)
 	open := window.Contains(now)
 	hasAuto := slices.ContainsFunc(m.order, func(id string) bool { return m.targets[id].spec.Auto })
-	if now.Sub(last) >= interval || (open && hasAuto && !window.Always() && last.Before(window.Opened(now))) {
+	// A round under way counts: lastCheck moves only when it ends.
+	if !m.checking && (now.Sub(last) >= interval || (open && hasAuto && !window.Always() && last.Before(window.Opened(now)))) {
 		m.enqueueLocked(job{key: "check"})
 	}
 	if !open || m.checking || m.queued["check"] {
@@ -355,9 +425,18 @@ func (m *Manager) enqueueLocked(j job) {
 	}
 }
 
-// Wait blocks until the running job ends or timeout passes, so shutdown does not cut an
-// upgrade short when it can be helped.
+// Wait stops new jobs from starting and blocks until the running one ends, so shutdown does not
+// cut it short. A check gets timeout. An update gets as long as it may take, however long that is:
+// apt or dpkg stopped halfway leaves the machine's packages broken, and a restart replaces this
+// process, which stops it at its next line of output.
 func (m *Manager) Wait(timeout time.Duration) {
+	m.mu.Lock()
+	m.stopping = true
+	if t := m.targets[m.applying]; t != nil {
+		timeout = max(timeout, m.opt.Timeout+probeTimeout+5*time.Minute)
+		log.Info("Waiting for the update under way to finish before stopping", "target", t.spec.Name)
+	}
+	m.mu.Unlock()
 	done := make(chan struct{})
 	go func() { m.running.Wait(); close(done) }()
 	select {
@@ -371,7 +450,18 @@ func (m *Manager) work() {
 	for j := range m.jobs {
 		m.mu.Lock()
 		delete(m.queued, j.key)
+		if m.stopping {
+			if t := m.targets[j.id]; t != nil && t.busy == "queued" {
+				t.busy = ""
+			}
+			m.mu.Unlock()
+			continue
+		}
 		m.running.Add(1)
+		// Marked with the job taken, so Wait cannot miss an update about to start.
+		if strings.HasPrefix(j.key, "apply:") {
+			m.applying = j.id
+		}
 		m.mu.Unlock()
 		func() {
 			defer m.running.Done()
@@ -388,6 +478,11 @@ func (m *Manager) work() {
 					m.announce([]Status{st})
 				}
 			default:
+				defer func() {
+					m.mu.Lock()
+					m.applying = ""
+					m.mu.Unlock()
+				}()
 				m.apply(j.id, j.auto)
 			}
 		}()
@@ -456,7 +551,7 @@ func (m *Manager) checkOne(r *round, id string) (Status, bool) {
 		m.finish(id, func(*State) {})
 		return Status{}, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	res, err := m.probe(ctx, r, spec)
 	isNew := false
@@ -490,7 +585,7 @@ func (m *Manager) apply(id string, auto bool) {
 		return
 	}
 	// Check first, so it installs what is on offer now rather than at the last check.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	if res, err := m.probe(ctx, &round{latest: map[string]string{}}, spec); err == nil {
 		before.Result = res
 	}
@@ -501,24 +596,39 @@ func (m *Manager) apply(id string, auto bool) {
 		return
 	}
 	m.mu.Lock()
+	live := newLiveLog()
 	if t := m.targets[id]; t != nil {
 		t.state.Attempted = before.key()
+		t.live = live
 	}
 	m.mu.Unlock()
 
 	log.Info("Updating", "target", spec.Name, "change", change(spec, before.Result), "auto", auto)
 	ctx, cancel = context.WithTimeout(context.Background(), m.opt.Timeout+5*time.Minute)
 	defer cancel()
-	detail, err := m.install(ctx, spec, before.Result)
+	ctx = withLive(ctx, live)
+	live.note("Updating " + spec.Name + ": " + change(spec, before.Result))
+	detail, err := m.install(ctx, spec, before.Result, auto)
 	if err == nil {
+		live.note("Checking it is running")
 		err = m.verifyRunning(ctx, spec)
 	}
+	live.note("Checking the version now installed")
 	after, probeErr := m.probe(ctx, &round{latest: map[string]string{}}, spec)
 	run := Run{At: float64(time.Now().Unix()), From: before.Installed, To: after.Installed, OK: err == nil, Auto: auto, Detail: detail}
 	if err != nil {
 		run.Detail = err.Error()
+		live.note("Failed: " + err.Error())
+	} else {
+		live.note("Done")
 	}
+	run.Log = live.tail()
 	m.report(spec, before.Result, run, err)
+	m.mu.Lock()
+	if t := m.targets[id]; t != nil {
+		t.live = nil
+	}
+	m.mu.Unlock()
 	m.finish(id, func(s *State) {
 		s.Runs = append([]Run{run}, s.Runs...)[:min(maxRuns, len(s.Runs)+1)]
 		s.Checked = run.At

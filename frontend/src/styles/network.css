@@ -184,3 +184,617 @@
   align-items: center;
   gap: 12px;
 }
+
+/* The attack watch. */
+.attack-status {
+  font-size: 12.5px;
+  color: var(--good);
+}
+.attack-status.on {
+  color: var(--crit);
+  font-weight: 600;
+}
+.attack-now {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--crit) 35%, var(--rule));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--crit) 6%, var(--surface));
+}
+.attack-now > strong {
+  color: var(--crit);
+  font-size: 15px;
+}
+.attack-methods {
+  display: grid;
+  gap: 8px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.attack-methods li {
+  display: grid;
+  grid-template-columns: minmax(0, auto) auto 1fr;
+  gap: 4px 12px;
+  align-items: baseline;
+}
+.attack-method {
+  font-weight: 600;
+}
+.attack-how {
+  grid-column: 1 / -1;
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+.attack-sources {
+  margin-top: 4px;
+}
+/* Who is involved in an attack, and who is blocked: an address with what it did, then numbers on the right. */
+.attack-list-head {
+  color: var(--ink-3);
+  font-size: 12px;
+  padding-bottom: 4px;
+}
+.attack-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.attack-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 2px 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--rule);
+}
+.attack-row-who {
+  overflow-wrap: anywhere;
+}
+.attack-row-why {
+  display: block;
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+.attack-row-nums {
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.attack-network {
+  color: var(--ink-3);
+  font-family: var(--sans);
+  font-size: 11.5px;
+}
+.attack-explained {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.attack-history {
+  margin-top: 14px;
+}
+.attack-history ul {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.attack-history li {
+  display: grid;
+  gap: 2px;
+}
+.table-scroll {
+  overflow-x: auto;
+}
+.attack-kinds {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.attack-kinds li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+}
+.attack-kinds .attack-how {
+  flex-basis: 100%;
+}
+.attack-measures {
+  margin-top: 6px;
+}
+
+/* Defense: what the firewall is doing about attacks. */
+.attack-defense {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+}
+.attack-defense.active {
+  border-color: color-mix(in srgb, var(--good-mark) 40%, var(--rule));
+}
+.attack-defense-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+.attack-defense-state {
+  font-size: 13px;
+  font-weight: 600;
+}
+.attack-defense.active .attack-defense-state {
+  color: var(--good);
+}
+.attack-defense.idle .attack-defense-state {
+  color: var(--ink-3);
+}
+.attack-defense-head .btn-quiet {
+  margin-left: auto;
+  padding: 4px 8px;
+  font-size: 12.5px;
+}
+.attack-defense p {
+  margin: 0;
+}
+.attack-defense-measures {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.attack-defense-measures li {
+  display: grid;
+  gap: 2px;
+}
+/* On a phone the numbers go under the address, and Unblock stays on the right. */
+@media (max-width: 560px) {
+  .attack-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .attack-row-nums {
+    grid-column: 1;
+    grid-row: 2;
+    text-align: left;
+  }
+  .attack-row .btn-quiet {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    align-self: center;
+  }
+}
+.attack-row .btn-quiet {
+  padding: 2px 6px;
+  font-size: 12.5px;
+}
+.attack-blocked-tag {
+  color: var(--crit);
+  font-family: var(--sans, inherit);
+  font-size: 12px;
+}
+.attack-cannot {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0 0 0 18px;
+  color: var(--warn);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+/* Firewall: the rules set from the dashboard, a form to add one, and the open ports. */
+.fw {
+  display: grid;
+  gap: 14px;
+}
+.fw .note {
+  margin: 0;
+}
+.fw-action {
+  display: inline-block;
+  min-width: 44px;
+  font-weight: 600;
+}
+.fw-action.block {
+  color: var(--crit);
+}
+.fw-action.allow {
+  color: var(--good);
+}
+.fw-action.limit {
+  color: var(--warn);
+}
+.fw-add.limit {
+  grid-template-columns: auto minmax(0, 1.2fr) minmax(0, 0.7fr) minmax(0, 0.8fr) minmax(0, 1.1fr) minmax(0, 0.9fr) auto;
+}
+.fw-rate-row {
+  display: grid;
+  grid-template-columns: minmax(48px, 0.6fr) minmax(0, 1fr);
+  gap: 6px;
+}
+.fw .table .btn-quiet {
+  padding: 2px 6px;
+  font-size: 12.5px;
+}
+.fw-add {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+}
+.fw-add .install-field .field {
+  width: 100%;
+  min-width: 0;
+}
+.fw-add .seg {
+  align-self: end;
+  margin-bottom: 2px;
+}
+.fw-error,
+.fw-help,
+.fw-editing,
+.fw-presets {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.fw-submit {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.fw-editing {
+  font-size: 13px;
+  font-weight: 600;
+}
+.fw-presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+/* The form fits the section it is in: one row where there is room, stacked in a server page's column
+   or on a phone. */
+.fw {
+  container-type: inline-size;
+}
+@container (max-width: 760px) {
+  .fw-add,
+  .fw-add.limit {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .fw-add .fw-rate {
+    grid-column: 1 / -1;
+  }
+  .fw-add .seg,
+  .fw-add .fw-source,
+  .fw-add .fw-note,
+  .fw-add .fw-submit {
+    grid-column: 1 / -1;
+  }
+  .fw-add .fw-submit .btn {
+    flex: 1;
+  }
+  .fw-add .seg {
+    justify-self: start;
+  }
+}
+/* The rules: an action, then who and which ports, its note, and Remove. */
+.fw-rule-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fw-rule {
+  display: grid;
+  grid-template-columns: 4.2em minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 2px 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--rule);
+}
+.fw-rule:has(.fw-move) {
+  grid-template-columns: auto 4.2em minmax(0, 1fr) auto;
+}
+.fw-rule.paused > :not(.fw-rule-acts):not(.fw-move) {
+  opacity: 0.5;
+}
+.fw-rule.editing {
+  box-shadow: inset 3px 0 0 var(--ink);
+  padding-left: 10px;
+}
+.fw-move {
+  display: flex;
+  gap: 2px;
+}
+.fw-move .icon-btn {
+  min-width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 13px;
+}
+.fw-move .icon-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+.fw-rule-acts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px;
+}
+.fw-rule-hits {
+  color: var(--ink-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.fw-to {
+  color: var(--ink-3);
+  font-family: var(--sans);
+}
+/* On a phone the buttons go under the rule's words. */
+@container (max-width: 560px) {
+  .fw-rule,
+  .fw-rule:has(.fw-move) {
+    grid-template-columns: 4.2em minmax(0, 1fr);
+  }
+  .fw-rule .fw-move {
+    grid-column: 1;
+    grid-row: 2;
+    align-self: start;
+  }
+  .fw-rule-acts {
+    grid-column: 2;
+    justify-content: flex-start;
+    margin-left: -6px;
+  }
+}
+.fw-rule:first-child {
+  border-top: 0;
+  padding-top: 2px;
+}
+.fw-rule .fw-action {
+  min-width: 0;
+  padding-top: 1px;
+}
+.fw-rule-text {
+  display: grid;
+  gap: 2px;
+}
+.fw-rule-who {
+  overflow-wrap: anywhere;
+}
+.fw-rule-what {
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.fw-rule-note {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.fw-rule .btn-quiet {
+  padding: 2px 6px;
+  font-size: 12.5px;
+}
+.fw-ports ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 2px 18px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.fw-ports li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: 13px;
+}
+.fw-ports li.local {
+  opacity: 0.7;
+}
+.fw-ports li > .ink-2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fw-port-rule,
+.fw-ports li > .small,
+.fw-port-end {
+  flex: none;
+  margin-left: auto;
+}
+.fw-port-end {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.fw-closed {
+  color: var(--warn);
+}
+.fw-ports li.closed .mono {
+  color: var(--ink-3);
+  text-decoration: line-through;
+}
+.fw-port-rule {
+  padding: 1px 6px;
+  font-size: 12.5px;
+}
+
+/* The default for traffic no rule decides: two choices, what stays open, and the change waiting. */
+.fw-default {
+  display: grid;
+  gap: 10px;
+}
+.fw-default-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.fw-choice {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.fw-choice strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+.fw-choice.on {
+  border-color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink);
+}
+.fw-choice:disabled {
+  cursor: default;
+}
+.fw-choice:not(.on):not(:disabled):hover {
+  border-color: var(--ink-3);
+}
+.fw-always {
+  margin: 0;
+}
+.fw-ask,
+.fw-pending {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn-mark) 45%, var(--rule));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warn-mark) 8%, var(--surface));
+  font-size: 13.5px;
+}
+.fw-ask p,
+.fw-pending p {
+  margin: 0;
+}
+.fw-ask ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fw-ask label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.fw-ask-acts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+@container (max-width: 560px) {
+  .fw-default-choices {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .fw-ask-acts .btn {
+    flex: 1;
+  }
+}
+.fw-dir {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+/* What was dropped: who most, then the latest. */
+.fw-top ul,
+.fw-drops {
+  display: grid;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.fw-top li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: 13px;
+}
+.fw-top .btn-quiet {
+  padding: 1px 6px;
+  font-size: 12.5px;
+}
+.fw-drops li {
+  display: grid;
+  grid-template-columns: 6.5em minmax(0, 1fr);
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: 13px;
+}
+.fw-drops li:last-child {
+  border-bottom: 0;
+}
+.fw-drop-what {
+  overflow-wrap: anywhere;
+}
+.fw-drop-why {
+  display: block;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.fw-default-hits {
+  margin: 0;
+}
+.fw-more {
+  justify-self: start;
+}
+.fw-native summary {
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.fw-native pre {
+  max-height: 420px;
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+.fw-summary {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}

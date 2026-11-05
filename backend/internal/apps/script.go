@@ -29,6 +29,10 @@ func (p plan) dir() string  { return Root + "/" + p.app.ID }
 func (p plan) data() string { return DataRoot + "/" + p.app.ID }
 func (p plan) unit() string { return p.app.ID + ".service" }
 
+// owned marks an app's directories as the store's, from its first install on: what is already
+// at those places without it belongs to someone else.
+func owned(id string) string { return ManifestDir + "/" + id + ".owned" }
+
 // fill expands a recipe template.
 func (p plan) fill(s string) string {
 	return strings.NewReplacer("{{dir}}", p.dir(), "{{data}}", p.data(), "{{port}}", strconv.Itoa(p.port), "{{user}}", p.user).Replace(s)
@@ -51,6 +55,15 @@ func (p plan) installScript() string {
 
 	w(`step "Preparing"`)
 	w(`id -u %[1]s >/dev/null 2>&1 || useradd --system --user-group --create-home --home-dir %[2]s/nightjar-apps --shell /usr/sbin/nologin %[1]s`, p.user, DataRoot)
+	// An install the store did not make (stopped, or under a unit name it does not know) is moved
+	// aside, not deleted or taken over.
+	w(`mkdir -p %s`, ManifestDir)
+	w(`if [ ! -f %[1]s/%[2]s.json ] && [ ! -f %[3]s ]; then`, ManifestDir, a.ID, owned(a.ID))
+	w(`  for d in %s %s; do`, p.dir(), p.data())
+	w(`    if [ -e "$d" ] || [ -L "$d" ]; then moved="$d.before-nightjar-$(date +%%s)"; mv "$d" "$moved"; echo "$d was not installed by Nightjar; it is kept at $moved"; fi`)
+	w(`  done`)
+	w(`fi`)
+	w(`touch %s`, owned(a.ID))
 	if a.dotnet {
 		w(`if ! ldconfig -p | grep libicuuc >/dev/null; then step "Installing ICU (needed by .NET apps)"; apt-get update -qq; apt-get install -y -qq --no-install-recommends libicu-dev sqlite3; fi`)
 	}
@@ -70,10 +83,17 @@ func (p plan) installScript() string {
 
 	w(`step "Configuring"`)
 	w(`mkdir -p %s`, p.data())
-	if a.setup != "" {
-		w(`%s`, p.fill(a.setup))
-	}
 	w(`chown -R %[1]s:%[1]s %[2]s %[3]s`, p.user, p.dir(), p.data())
+	if a.prepare != "" {
+		w(`%s`, p.fill(a.prepare))
+	}
+	// Setup writes into the data folder, which the app's user owns: as root, it would follow links
+	// that user put there.
+	if a.setup != "" {
+		w(`runuser -u %s -- bash -euo pipefail <<'SETUP'`, p.user)
+		w(`%s`, p.fill(a.setup))
+		w(`SETUP`)
+	}
 
 	w(`step "Creating the %s service"`, p.unit())
 	w(`cat > /etc/systemd/system/%s <<'UNIT'`, p.unit())
@@ -88,6 +108,9 @@ func (p plan) installScript() string {
 	w(`WorkingDirectory=%s`, p.data())
 	for _, e := range a.env {
 		w(`Environment=%s`, p.fill(e))
+	}
+	if len(a.caps) > 0 {
+		w(`AmbientCapabilities=%s`, strings.Join(a.caps, " "))
 	}
 	w(`ExecStart=%s`, p.fill(a.exec))
 	w(`Restart=on-failure`)
@@ -131,6 +154,8 @@ func removeScript(a App, purge bool) string {
 	fmt.Fprintf(&b, "rm -rf %s/%s\n", Root, a.ID)
 	if purge {
 		fmt.Fprintf(&b, "rm -rf %s/%s\n", DataRoot, a.ID)
+		// Kept settings stay the store's, so installing again picks them up.
+		fmt.Fprintf(&b, "rm -f %s\n", owned(a.ID))
 	}
 	fmt.Fprintf(&b, "rm -f %s/%s.json\n", ManifestDir, a.ID)
 	b.WriteString("step \"Removed\"\n")

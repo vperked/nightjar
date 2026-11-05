@@ -6,7 +6,7 @@
 - **[Services](/services)**: your [uptime checks](/docs/uptime-checks), and next to them the machine's [systemd services](/docs/system-services).
 - **[Incidents](/incidents)**: each stretch of trouble with its [likely cause](/docs/incidents), [planned maintenance](/docs/incidents#planned-maintenance) and the [weekly report](/docs/incidents#the-weekly-report).
 - **[Servers](/servers)**: [other machines](/docs/servers) you watch, and [Analytics](/docs/analytics) across all of them.
-- **[Network](/network)**: a live meter of what each network interface is sending and receiving.
+- **[Network](/network)**: a live meter of what each network interface is sending and receiving, and the **[Firewall](/network/firewall)** of this machine and each server: its [rules, default and what it dropped](/docs/firewall).
 - **Media**: [Plex](/docs/plex), its [cleanup](/docs/plex#cleanup) and [qBittorrent](/docs/qbittorrent), when they are set up.
 - **[Apps](/apps)**: the [app store](/docs/app-store) and [updates](/docs/updates).
 

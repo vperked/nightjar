@@ -7,13 +7,19 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"nightjar/internal/collect"
 	"nightjar/internal/format"
@@ -187,6 +193,106 @@ func deviceOf(info fs.FileInfo) uint64 {
 	return 0
 }
 
+// sameFilesystem says whether path sits on the filesystem mounted at mount: only cleaning there
+// can free space there. The device number alone is not enough: every btrfs subvolume has its own,
+// though all share one pool (openSUSE mounts @/var at /var, so /var/log looks apart from /).
+func sameFilesystem(mount, path string) bool {
+	m, err := os.Stat(mount)
+	if err != nil {
+		return false
+	}
+	p, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if deviceOf(m) == deviceOf(p) {
+		return true
+	}
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	return err == nil && SameBlockDevice(string(data), resolvePath(mount), resolvePath(path))
+}
+
+// resolvePath is path made absolute with its symlinks resolved, as far as that works.
+func resolvePath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
+}
+
+// SameBlockDevice says whether the mounts holding a and b (absolute, symlink-free paths) are of
+// one block device, per mountinfo (the text of /proc/self/mountinfo): two btrfs subvolumes, or a
+// bind mount and its origin. Mounts not backed by a /dev device (tmpfs, network shares, ZFS
+// datasets) never match here.
+func SameBlockDevice(mountinfo, a, b string) bool {
+	mounts := parseMountinfo(mountinfo)
+	ma, ok1 := containingMount(mounts, a)
+	mb, ok2 := containingMount(mounts, b)
+	return ok1 && ok2 && strings.HasPrefix(ma.source, "/dev/") && ma.source == mb.source
+}
+
+// mountEntry is one line of mountinfo.
+type mountEntry struct {
+	point, source string
+	dev           uint64
+}
+
+// parseMountinfo reads /proc/self/mountinfo's format: "id parent major:minor root mountpoint
+// options [optional fields...] - fstype source superoptions".
+func parseMountinfo(data string) []mountEntry {
+	var out []mountEntry
+	for _, line := range strings.Split(data, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 {
+			continue
+		}
+		major, minor, ok := strings.Cut(f[2], ":")
+		maj, err1 := strconv.ParseUint(major, 10, 32)
+		mnr, err2 := strconv.ParseUint(minor, 10, 32)
+		if !ok || err1 != nil || err2 != nil {
+			continue
+		}
+		e := mountEntry{point: unescapeMount(f[4]), dev: unix.Mkdev(uint32(maj), uint32(mnr))}
+		for i := 6; i+2 < len(f); i++ {
+			if f[i] == "-" {
+				e.source = unescapeMount(f[i+2])
+				break
+			}
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// containingMount is the mount path sits on: the longest mount point it is under, the last one
+// mounted when several share it.
+func containingMount(mounts []mountEntry, path string) (mountEntry, bool) {
+	var best mountEntry
+	found := false
+	for _, m := range mounts {
+		under := path == m.point || m.point == "/" || strings.HasPrefix(path, m.point+"/")
+		if under && (!found || len(m.point) >= len(best.point)) {
+			best, found = m, true
+		}
+	}
+	return best, found
+}
+
+// onMount keeps the paths on mount's filesystem.
+func onMount(mount string, paths []string) []string {
+	var out []string
+	for _, p := range paths {
+		if sameFilesystem(mount, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // or returns dirs, or def when dirs is empty.
 func or(dirs, def []string) []string {
 	if len(dirs) == 0 {
@@ -197,9 +303,17 @@ func or(dirs, def []string) []string {
 
 // CleanTemp removes files older than maxAgeDays (at least one hour) from the temp directories.
 func (c *Cleaner) CleanTemp(maxAgeDays float64) Stats {
+	return cleanTemp(c.tempDirs(), maxAgeDays)
+}
+
+func (c *Cleaner) tempDirs() []string {
+	return c.ResolveDirs(or(c.Opts.TempDirs, allowedTempBases), allowedTempBases)
+}
+
+func cleanTemp(dirs []string, maxAgeDays float64) Stats {
 	var st Stats
 	maxAge := time.Duration(max(3600, maxAgeDays*secondsPerDay) * float64(time.Second))
-	for _, dir := range c.ResolveDirs(or(c.Opts.TempDirs, allowedTempBases), allowedTempBases) {
+	for _, dir := range dirs {
 		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
 			CleanTree(dir, maxAge, &st, time.Now())
 		}
@@ -277,6 +391,8 @@ func freeEnough(mount string, target float64) bool {
 }
 
 // CleanDiskSpace works through logs, temp files and package caches until targetFreePercent is free.
+// Only what sits on mount's filesystem is touched: emptying /var/log cannot free a byte on a full
+// data disk.
 func (c *Cleaner) CleanDiskSpace(mount string, targetFreePercent float64) Stats {
 	var st Stats
 	initial := usagePercent(mount)
@@ -290,10 +406,18 @@ func (c *Cleaner) CleanDiskSpace(mount string, targetFreePercent float64) Stats 
 		st.FinalUsage = initial
 		return st
 	}
+	logsHere := c.Logs != nil && sameFilesystem(mount, c.Logs.LogDir)
+	temp := onMount(mount, c.tempDirs())
+	caches := onMount(mount, c.ResolveDirs(or(c.Opts.CacheDirs, defaultCacheDirs), allowedCacheBases))
+	if !logsHere && len(temp) == 0 && len(caches) == 0 {
+		diskLog.Info(fmt.Sprintf("[CLEANUP] %s is %.1f%% used, but nothing Nightjar cleans is on it", mount, *initial))
+		st.FinalUsage = initial
+		return st
+	}
 	diskLog.Info(fmt.Sprintf("[CLEANUP] Starting disk cleanup: %.1f%% used, %.1f%% free (target: %.1f%% free)", *initial, 100-*initial, targetFreePercent))
 	aggressive := *initial >= c.Opts.AggressiveThreshold
 
-	if c.Logs != nil {
+	if logsHere {
 		if aggressive {
 			diskLog.Warn(fmt.Sprintf("[CLEANUP] Step 1: Aggressive log cleanup (disk >= %.1f%%, emptying logs in /var/log)...", c.Opts.AggressiveThreshold))
 		} else {
@@ -306,16 +430,18 @@ func (c *Cleaner) CleanDiskSpace(mount string, targetFreePercent float64) Stats 
 		}
 	}
 
-	diskLog.Info("[CLEANUP] Step 2: Cleaning temporary files...")
-	for _, days := range []float64{7, 3, 1, 0} {
-		st.add(c.CleanTemp(days))
-		if freeEnough(mount, targetFreePercent) {
-			break
+	if len(temp) > 0 {
+		diskLog.Info("[CLEANUP] Step 2: Cleaning temporary files...")
+		for _, days := range []float64{7, 3, 1, 0} {
+			st.add(cleanTemp(temp, days))
+			if freeEnough(mount, targetFreePercent) {
+				break
+			}
 		}
 	}
-	if aggressive {
+	if aggressive && len(caches) > 0 {
 		diskLog.Info("[CLEANUP] Step 3: Cleaning package caches and other space consumers...")
-		st.add(c.cleanPackageCaches())
+		st.add(cleanPackageCaches(caches))
 	}
 	st.FinalUsage = usagePercent(mount)
 	if st.FinalUsage != nil {
@@ -325,10 +451,10 @@ func (c *Cleaner) CleanDiskSpace(mount string, targetFreePercent float64) Stats 
 	return st
 }
 
-func (c *Cleaner) cleanPackageCaches() Stats {
+// cleanPackageCaches empties the given (already resolved) package caches.
+func cleanPackageCaches(paths []string) Stats {
 	var st Stats
-	candidates := or(c.Opts.CacheDirs, defaultCacheDirs)
-	for _, path := range c.ResolveDirs(candidates, allowedCacheBases) {
+	for _, path := range paths {
 		if strings.Contains(path, "apt/archives") {
 			entries, err := os.ReadDir(path)
 			if err != nil {
@@ -358,7 +484,8 @@ func (c *Cleaner) cleanPackageCaches() Stats {
 	return st
 }
 
-// EmergencyClean runs every step at once: temp files older than an hour, every log, and regenerable caches.
+// EmergencyClean runs every step at once: temp files older than an hour, every log, and regenerable
+// caches, of those on mount's filesystem.
 func (c *Cleaner) EmergencyClean(mount string) Stats {
 	var st Stats
 	initial := usagePercent(mount)
@@ -367,16 +494,28 @@ func (c *Cleaner) EmergencyClean(mount string) Stats {
 		return st
 	}
 	st.InitialUsage = initial
+	logsHere := c.Logs != nil && sameFilesystem(mount, c.Logs.LogDir)
+	temp := onMount(mount, c.tempDirs())
+	allowed := append(append([]string{}, allowedTempBases...), allowedCacheBases...)
+	caches := onMount(mount, c.ResolveDirs(or(c.Opts.EmergencyCacheDirs, emergencyCacheDirs), allowed))
+	if !logsHere && len(temp) == 0 && len(caches) == 0 {
+		diskLog.Warn(fmt.Sprintf("[EMERGENCY] %s is %.1f%% used, but nothing Nightjar cleans is on it", mount, *initial))
+		st.FinalUsage = initial
+		return st
+	}
 	diskLog.Warn(fmt.Sprintf("[EMERGENCY] Disk critically full: %.1f%% used, %.1f%% free", *initial, 100-*initial))
-	diskLog.Info("[EMERGENCY] Step 1: Cleaning all temporary files...")
-	st.add(c.CleanTemp(1.0 / 24))
-	if c.Logs != nil {
+	if len(temp) > 0 {
+		diskLog.Info("[EMERGENCY] Step 1: Cleaning all temporary files...")
+		st.add(cleanTemp(temp, 1.0/24))
+	}
+	if logsHere {
 		diskLog.Info("[EMERGENCY] Step 2: Cleaning log files (aggressive - ALL logs in /var/log)...")
 		st.add(c.cleanLogs(true, true))
 	}
-	diskLog.Info("[EMERGENCY] Step 3: Cleaning additional cache directories...")
-	allowed := append(append([]string{}, allowedTempBases...), allowedCacheBases...)
-	for _, dir := range c.ResolveDirs(or(c.Opts.EmergencyCacheDirs, emergencyCacheDirs), allowed) {
+	if len(caches) > 0 {
+		diskLog.Info("[EMERGENCY] Step 3: Cleaning additional cache directories...")
+	}
+	for _, dir := range caches {
 		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
 			CleanTree(dir, 24*time.Hour, &st, time.Now())
 		}
@@ -420,7 +559,53 @@ func (c *Cleaner) RestartLogServices() {
 	}
 }
 
+// nginxOwner looks up NGINX_USER_GROUP's user and group ids.
+func nginxOwner(userGroup string) (uid, gid int, ok bool) {
+	name, group, _ := strings.Cut(userGroup, ":")
+	u, err := user.Lookup(name)
+	if err != nil {
+		return 0, 0, false
+	}
+	g, err := user.LookupGroup(group)
+	if err != nil {
+		return 0, 0, false
+	}
+	uid, err1 := strconv.Atoi(u.Uid)
+	gid, err2 := strconv.Atoi(g.Gid)
+	return uid, gid, err1 == nil && err2 == nil
+}
+
+// reclaimDir gives the directory r is open on back to root, without group or other write, when
+// it is not root's already. Earlier versions chowned the nginx log dir to the web user.
+func reclaimDir(r *os.Root, dir string) error {
+	d, err := r.Open(".")
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	info, err := d.Stat()
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || (st.Uid == 0 && info.Mode().Perm()&0o022 == 0) {
+		return nil
+	}
+	if err := d.Chown(0, -1); err != nil {
+		return err
+	}
+	if err := d.Chmod(info.Mode() & (fs.ModePerm | fs.ModeSetgid | fs.ModeSticky) &^ 0o022); err != nil {
+		return err
+	}
+	diskLog.Warn("[CLEANUP] gave the nginx log dir back to root; it was writable by another user", "dir", dir)
+	return nil
+}
+
 // SetupNginxLogs recreates nginx's log files and restarts it, when MANAGE_NGINX_LOGS is on.
+// The directory is kept root's (nginx opens its logs as root), and taken back from the web user
+// where an earlier version handed it over: were it the web user's, that user could plant a symlink
+// at a log's name and have root nginx open any file through it. The files are created without
+// following links and chowned through the open descriptor.
 func (c *Cleaner) SetupNginxLogs() {
 	o := c.Opts
 	if runtime.GOOS != "linux" || !o.ManageNginxLogs {
@@ -428,6 +613,10 @@ func (c *Cleaner) SetupNginxLogs() {
 	}
 	if !userGroupRE.MatchString(o.NginxUserGroup) {
 		diskLog.Error("invalid NGINX_USER_GROUP format, expected user:group", "value", o.NginxUserGroup)
+		return
+	}
+	if !serviceNameRE.MatchString(o.NginxServiceName) {
+		diskLog.Error("invalid NGINX_SERVICE_NAME", "value", o.NginxServiceName)
 		return
 	}
 	run := func(timeout time.Duration, name string, args ...string) error {
@@ -439,19 +628,32 @@ func (c *Cleaner) SetupNginxLogs() {
 		diskLog.Error("could not create nginx log dir", "err", err)
 		return
 	}
-	user := strings.Split(o.NginxUserGroup, ":")[0]
-	if run(5*time.Second, "id", user) == nil {
-		run(10*time.Second, "chown", o.NginxUserGroup, o.NginxLogDir)
+	r, err := os.OpenRoot(o.NginxLogDir)
+	if err != nil {
+		diskLog.Error("could not open nginx log dir", "err", err)
+		return
 	}
+	if err := reclaimDir(r, o.NginxLogDir); err != nil {
+		// Restarting nginx now would have root open logs where the web user can plant links.
+		diskLog.Error("could not give the nginx log dir back to root; not restarting "+o.NginxServiceName, "dir", o.NginxLogDir, "err", err)
+		r.Close()
+		return
+	}
+	uid, gid, owned := nginxOwner(o.NginxUserGroup)
 	for _, name := range []string{"error.log", "access.log"} {
-		p := filepath.Join(o.NginxLogDir, name)
-		if _, err := os.Stat(p); os.IsNotExist(err) {
-			if f, err := os.Create(p); err == nil {
-				f.Close()
-				run(10*time.Second, "chown", o.NginxUserGroup, p)
+		// O_EXCL never follows a link: an existing file, or a symlink in its place, is left alone.
+		f, err := r.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o640)
+		if err != nil {
+			continue
+		}
+		if owned {
+			if err := f.Chown(uid, gid); err != nil {
+				diskLog.Warn("could not hand nginx log to "+o.NginxUserGroup, "file", name, "err", err)
 			}
 		}
+		f.Close()
 	}
+	r.Close()
 	for attempt := range 3 {
 		if run(30*time.Second, "systemctl", "restart", o.NginxServiceName) == nil {
 			diskLog.Info("    " + o.NginxServiceName + " restarted successfully")
@@ -462,25 +664,118 @@ func (c *Cleaner) SetupNginxLogs() {
 	diskLog.Warn("    could not restart " + o.NginxServiceName)
 }
 
-// DirSize sums file sizes under path (without following symlinks), stopping at the deadline.
+// DirSize sums file sizes under path (without following symlinks), stopping at the deadline. The
+// deadline holds even when a stat hangs (a dead network mount): the walk is then left behind and
+// what it had counted is returned as partial. While a walk left behind has not returned, path is
+// not walked again (each would hang a thread as well): that is 0, partial. A timeout of 0 waits for
+// the whole walk.
 func DirSize(path string, timeout time.Duration) (size int64, partial bool) {
-	deadline := time.Now().Add(timeout)
-	errStop := errors.New("stop")
-	err := filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if timeout > 0 && time.Now().After(deadline) {
-			return errStop
-		}
-		if !d.IsDir() {
+	return dirSize(path, timeout, nil, 0)
+}
+
+// abandoned counts, per path, the walks dirSize gave up waiting for that are still running.
+var abandoned = struct {
+	sync.Mutex
+	walks map[string]int
+}{walks: map[string]int{}}
+
+// dirSize is DirSize that, given the mount table, does not descend into a filesystem other than
+// dev mounted below path.
+func dirSize(path string, timeout time.Duration, mounts map[string]uint64, dev uint64) (int64, bool) {
+	abandoned.Lock()
+	stuck := abandoned.walks[path] > 0
+	abandoned.Unlock()
+	if stuck {
+		diskLog.Warn("not sizing " + path + ": an earlier walk of it is still hung; is the mount responding?")
+		return 0, true
+	}
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	var total atomic.Int64
+	done := make(chan struct{})
+	// finished and left are guarded by abandoned's lock: whichever of the walk ending and the
+	// caller giving up comes second settles the count.
+	var finished, left bool
+	go func() {
+		defer close(done)
+		defer func() {
+			abandoned.Lock()
+			finished = true
+			if left {
+				if abandoned.walks[path]--; abandoned.walks[path] <= 0 {
+					delete(abandoned.walks, path)
+				}
+			}
+			abandoned.Unlock()
+		}()
+		filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return filepath.SkipAll
+			}
+			if d.IsDir() {
+				if md, ok := mounts[p]; ok && p != path && md != dev {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			if info, err := d.Info(); err == nil {
-				size += info.Size()
+				total.Add(info.Size())
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-done:
+		return total.Load(), ctx.Err() != nil
+	case <-ctx.Done():
+		abandoned.Lock()
+		if !finished {
+			left = true
+			abandoned.walks[path]++
+		}
+		abandoned.Unlock()
+		return total.Load(), true
+	}
+}
+
+// mountPoints maps each mount point to its device, from /proc/self/mountinfo, without touching the
+// mounts themselves (a stat on a dead network mount never returns). Nil where there is no such file.
+func mountPoints() map[string]uint64 {
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return nil
+	}
+	out := map[string]uint64{}
+	for _, m := range parseMountinfo(string(data)) {
+		out[m.point] = m.dev
+	}
+	return out
+}
+
+// unescapeMount undoes mountinfo's octal escapes (\040 for a space).
+func unescapeMount(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+4 <= len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
 			}
 		}
-		return nil
-	})
-	return size, errors.Is(err, errStop)
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // DirEntry is one subdirectory and its size.
@@ -489,12 +784,23 @@ type DirEntry struct {
 	Size int64
 }
 
-// LargestSubdirs sizes each immediate subdirectory of parent, largest first.
+// LargestSubdirs sizes each immediate subdirectory of parent, largest first, in at most twice
+// perDirTimeout all told. When parent is a mount point the question is what fills that filesystem,
+// so other filesystems mounted below it (a NAS under /mnt, a second disk at /home) are left out.
 func LargestSubdirs(parent string, limit int, perDirTimeout time.Duration) []DirEntry {
 	entries, err := os.ReadDir(parent)
 	if err != nil {
 		return nil
 	}
+	var mounts map[string]uint64
+	var dev uint64
+	if abs, err := filepath.Abs(parent); err == nil {
+		all := mountPoints()
+		if d, ok := all[abs]; ok {
+			mounts, dev, parent = all, d, abs
+		}
+	}
+	deadline := time.Now().Add(2 * perDirTimeout)
 	var out []DirEntry
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -504,7 +810,16 @@ func LargestSubdirs(parent string, limit int, perDirTimeout time.Duration) []Dir
 		if parent == "/" && (e.Name() == "proc" || e.Name() == "sys" || e.Name() == "dev" || e.Name() == "run") {
 			continue
 		}
-		size, _ := DirSize(p, perDirTimeout)
+		if md, ok := mounts[p]; ok && md != dev {
+			continue
+		}
+		timeout := perDirTimeout
+		if perDirTimeout > 0 {
+			if timeout = min(perDirTimeout, time.Until(deadline)); timeout <= 0 {
+				break
+			}
+		}
+		size, _ := dirSize(p, timeout, mounts, dev)
 		out = append(out, DirEntry{p, size})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Size > out[j].Size })

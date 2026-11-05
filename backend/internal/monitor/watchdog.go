@@ -25,6 +25,9 @@ type FreezeMonitor struct {
 	HeartbeatTimeout float64
 	lastHeartbeat    time.Time
 	lastMetricUpdate time.Time
+	// lastMetricCall is the latest reading, changed or not: a stall is measured up to it, so a
+	// cycle slow to reach Check is not mistaken for readings that stopped changing.
+	lastMetricCall   time.Time
 	lastCPU, lastMem float64
 	haveMetrics      bool
 	lastDiskIO       *collect.IO
@@ -58,8 +61,9 @@ func (f *FreezeMonitor) UpdateMetrics(cpuPct, memPct float64, diskIO, netIO *col
 		n := *netIO
 		f.lastNetIO = &n
 	}
+	f.lastMetricCall = time.Now()
 	if changed || f.lastMetricUpdate.IsZero() || cpuPct < 15 {
-		f.lastMetricUpdate = time.Now()
+		f.lastMetricUpdate = f.lastMetricCall
 	}
 }
 
@@ -74,7 +78,7 @@ type FreezeStatus struct {
 func (f *FreezeMonitor) Check() FreezeStatus {
 	f.mu.Lock()
 	sinceHeartbeat := time.Since(f.lastHeartbeat).Seconds()
-	lastUpdate := f.lastMetricUpdate
+	lastUpdate, lastCall := f.lastMetricUpdate, f.lastMetricCall
 	f.mu.Unlock()
 
 	s := FreezeStatus{SinceHeartbeat: sinceHeartbeat, Responsive: true}
@@ -82,7 +86,8 @@ func (f *FreezeMonitor) Check() FreezeStatus {
 		s.Reasons = append(s.Reasons, fmt.Sprintf("Heartbeat timeout (%.1fs > %.1fs)", sinceHeartbeat, f.HeartbeatTimeout))
 	}
 	if !lastUpdate.IsZero() {
-		if stalled := time.Since(lastUpdate).Seconds(); stalled > f.Threshold {
+		// A loop that stops collecting altogether is the heartbeat's to catch.
+		if stalled := lastCall.Sub(lastUpdate).Seconds(); stalled > f.Threshold {
 			s.Reasons = append(s.Reasons, fmt.Sprintf("Metrics stalled (%.1fs > %.1fs)", stalled, f.Threshold))
 		}
 	}

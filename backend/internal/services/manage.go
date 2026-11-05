@@ -66,13 +66,34 @@ func (m *Monitor) Save(oldName string, spec Spec) error {
 	}
 	st := m.states[oldName]
 	if st.Spec.Type != spec.Type || st.Spec.Target != spec.Target {
-		*st = State{Spec: spec, Status: StatusUnknown, history: st.history, slots: st.slots}
+		// A run still under way checked the old target: it stays running, so the new one does not
+		// start beside it, and its result is dropped. runNow then runs the new one straight after.
+		*st = State{Spec: spec, Status: StatusUnknown, history: st.history, slots: st.slots, running: st.running, stale: st.running}
 	}
 	st.Spec, st.runNow = spec, true
 	if oldName != spec.Name {
 		delete(m.states, oldName)
 		m.states[spec.Name] = st
 		m.order[slices.Index(m.order, oldName)] = spec.Name
+		if st.running {
+			// Its result will come under the old name.
+			if m.renamed == nil {
+				m.renamed = map[string]string{}
+			}
+			// Renamed again before it reported: the result still comes under the first name.
+			chained := false
+			for from, to := range m.renamed {
+				if to == oldName {
+					m.renamed[from], chained = spec.Name, true
+				}
+				if m.renamed[from] == from {
+					delete(m.renamed, from) // renamed back
+				}
+			}
+			if !chained {
+				m.renamed[oldName] = spec.Name
+			}
+		}
 	}
 	return nil
 }

@@ -4,7 +4,8 @@ package agent
 // sends its own (POST UpdatePath, over the HTTPS the token pins, with the token). The agent takes it
 // only if it is whole (its SHA-256 matches), is a Linux program for this machine's processor, and the
 // agent can replace itself, which an install from this version on can: it runs from its own state
-// folder. It then swaps the file in and exits, and systemd starts the new build.
+// folder. It then swaps the file in and exits, and systemd starts the new build; an agent run by hand
+// starts the new build in its own place instead.
 
 import (
 	"bytes"
@@ -14,10 +15,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -33,9 +37,20 @@ const maxBuild = 64 << 20
 // Self is the running agent's own file, for updating it.
 type Self struct {
 	Path string // the agent program
-	Hash string // its SHA-256, hex
-	// Restart is called once a new build is in place; the default exits so systemd starts it.
+	Hash string // its SHA-256, hex; read it with Build while the agent serves
+	// Restart is called once a new build is in place; the default exits so systemd starts it, or
+	// runs the new build in this process's place when nothing would start it again.
 	Restart func()
+
+	// mu keeps one update at a time, and Hash with the file it names.
+	mu sync.Mutex
+}
+
+// Build is the SHA-256 of the build in place.
+func (s *Self) Build() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Hash
 }
 
 // FindSelf hashes the running program.
@@ -99,19 +114,56 @@ func (s *Self) Apply(build []byte, hash string) error {
 	if want, ok := machines[runtime.GOARCH]; !ok || f.Machine != want || (f.Type != elf.ET_EXEC && f.Type != elf.ET_DYN) {
 		return fmt.Errorf("that build is not for this machine (%s)", runtime.GOARCH)
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if hash == s.Hash {
 		return nil
 	}
-	tmp := s.Path + ".new"
-	if err := os.WriteFile(tmp, build, 0o755); err != nil {
+	// A file of its own beside the program, written out to the disk before it takes the program's
+	// place, so the program is only ever the whole of one build.
+	tmp, err := os.CreateTemp(filepath.Dir(s.Path), "."+filepath.Base(s.Path)+".new-*")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, s.Path); err != nil {
-		os.Remove(tmp)
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(build); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), s.Path); err != nil {
 		return err
 	}
 	s.Hash = hash
 	return nil
+}
+
+// supervised says whether a service manager starts the agent again when it exits: systemd sets
+// INVOCATION_ID for the services it runs.
+func supervised() bool {
+	return os.Getenv("INVOCATION_ID") != ""
+}
+
+// restart starts the new build: by exiting under systemd, which starts it again (Restart=always),
+// else in this process's place, so an agent run by hand keeps running.
+func (s *Self) restart() {
+	if supervised() {
+		os.Exit(0)
+	}
+	if err := syscall.Exec(s.Path, os.Args, os.Environ()); err != nil {
+		// It runs on as it was; the new build starts the next time it does.
+		slog.Error("could not start the new build", "path", s.Path, "err", err)
+	}
 }
 
 // updateHandler takes a new build from the dashboard. Only over HTTPS: over plain HTTP anyone on the
@@ -149,7 +201,7 @@ func updateHandler(self *Self, authorized func(*http.Request) bool, secure bool)
 		}
 		restart := self.Restart
 		if restart == nil {
-			restart = func() { os.Exit(0) }
+			restart = self.restart
 		}
 		time.AfterFunc(500*time.Millisecond, restart)
 	}

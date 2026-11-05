@@ -1,6 +1,9 @@
 package storage
 
-import "database/sql"
+import (
+	"database/sql"
+	"errors"
+)
 
 // UpdateTarget is one stored update target: its definition and its last known state (both JSON).
 type UpdateTarget struct {
@@ -57,16 +60,26 @@ func (s *Store) DeleteUpdateTarget(id string) error {
 	})
 }
 
-// Meta returns a value the monitor keeps for itself ("" when unset).
+// Meta returns a value the monitor keeps for itself ("" when unset, or when it cannot be read).
 func (s *Store) Meta(key string) string {
+	v, _ := s.MetaValue(key)
+	return v
+}
+
+// MetaValue returns a value the monitor keeps for itself, "" when unset. Unlike Meta it says when
+// the value could not be read (ErrUnavailable when there is no database), for state where "unset"
+// and "unknown" must not be confused.
+func (s *Store) MetaValue(key string) (string, error) {
 	db, unlock := s.lock()
 	defer unlock()
 	if db == nil {
-		return ""
+		return "", ErrUnavailable
 	}
 	var v string
-	s.db.QueryRow("SELECT value FROM meta WHERE key = ?", key).Scan(&v)
-	return v
+	if err := db.QueryRow("SELECT value FROM meta WHERE key = ?", key).Scan(&v); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	return v, nil
 }
 
 // SetMeta stores a value the monitor keeps for itself.

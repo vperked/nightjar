@@ -5,8 +5,11 @@ import type { NetInterface, NetSample, NetworkResponse, NetworkView, Sample } fr
 import { Num } from '../components/Num';
 import { Select } from '../components/Select';
 import { Skeleton } from '../components/Skeleton';
+import { AttackWatch } from '../components/Attacks';
+import { useToast } from '../components/Toasts';
+import { useNow } from '../hooks/useNow';
 import { Legend, TrendChart } from '../components/TrendChart';
-import { Section, Seg } from '../components/ui';
+import { NetworkTabs, Section, Seg } from '../components/ui';
 import { formatBytes, formatRate } from '../format';
 import { usePoll } from '../hooks/usePoll';
 
@@ -22,30 +25,45 @@ const mbit = (bps: number) => {
 };
 const axis = (v: number) => formatRate(v).replace('/s', '');
 
-// useNetwork polls once a second, asking only for samples newer than those it has.
+// failuresBeforeAlert is how many polls in a row must fail before the page says so: one lost poll in
+// a second-by-second meter is a blip, and the last reading stays on screen through it.
+const failuresBeforeAlert = 3;
+
+// useNetwork polls once a second, asking only for samples newer than those it has. failures counts
+// the polls that failed in a row.
 function useNetwork() {
   const samples = useRef<Record<string, NetSample[]>>({});
   const history = useRef<Sample[]>([]);
+  const [failures, setFailures] = useState(0);
   const fetchNetwork = useCallback(async (): Promise<NetworkResponse> => {
     const lasts = Object.values(samples.current)
       .map((s) => s.at(-1)?.ts ?? 0)
       .filter(Boolean);
     const since = lasts.length ? Math.min(...lasts) : undefined;
-    const r = await api.network(since);
+    let r: NetworkResponse;
+    try {
+      r = await api.network(since);
+    } catch (err) {
+      setFailures((n) => n + 1);
+      throw err;
+    }
+    setFailures(0);
     if (r.history) history.current = r.history;
     if (r.network) {
+      // A monitor from before this sent null for an empty list (an interface with nothing new).
       const merged: Record<string, NetSample[]> = {};
-      for (const [name, fresh] of Object.entries(r.network.samples)) {
+      for (const [name, fresh] of Object.entries(r.network.samples ?? {})) {
         const have = samples.current[name] ?? [];
         const last = have.at(-1)?.ts ?? 0;
-        merged[name] = [...have, ...fresh.filter((s) => s.ts > last)].slice(-KEEP);
+        merged[name] = [...have, ...(fresh ?? []).filter((s) => s.ts > last)].slice(-KEEP);
       }
       samples.current = merged;
-      return { ...r, network: { ...r.network, samples: merged }, history: history.current };
+      const n = r.network;
+      return { ...r, network: { ...n, interfaces: n.interfaces ?? [], processes: n.processes ?? [], hosts: n.hosts ?? [], samples: merged }, history: history.current };
     }
     return r;
   }, []);
-  return usePoll(fetchNetwork, 1000);
+  return { ...usePoll(fetchNetwork, 1000), failures };
 }
 
 function Direction({ label, color, rate, avg, peak, total, speed }: { label: string; color: string; rate: number; avg: number; peak: number; total: number; speed?: number }) {
@@ -139,10 +157,11 @@ function active<T extends { rx_bps: number; tx_bps: number; connections: number 
 }
 
 function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
-  const choices = net.interfaces.filter((i) => !i.virtual || i.up);
   const [picked, setPicked] = useState<string>();
   const [range, setRange] = useState<Range>('live');
   const iface: NetInterface | undefined = net.interfaces.find((i) => i.name === picked) ?? net.interfaces[0];
+  // Down virtual interfaces stay out of the menu, unless one is being watched (picked from its card).
+  const choices = net.interfaces.filter((i) => !i.virtual || i.up || i === iface);
   const samples = iface ? (net.samples[iface.name] ?? []) : [];
   const series = useMemo(() => {
     const pts = range === 'live' ? samples.map((s) => ({ t: s.ts, rx: s.rx, tx: s.tx })) : history.map((s) => ({ t: s.ts, rx: s.rx_bps, tx: s.tx_bps }));
@@ -157,7 +176,8 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
   const procs = active(net.processes);
   const hosts = active(net.hosts);
 
-  if (!iface) return <p className="note">No network interfaces found.</p>;
+  // The meter has just woken and not read the interfaces yet: a moment, not "none".
+  if (!iface) return Date.now() / 1000 - net.since < 10 ? <Skeleton kind="dashboard" /> : <p className="note">No network interfaces found.</p>;
   return (
     <>
       <div className="page-title">
@@ -175,6 +195,7 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
             {iface.default ? ' · default route' : ''}
             {!iface.up ? ' · down' : ''} · live, every second
           </div>
+          <NetworkTabs current="/network" />
         </div>
         {choices.length > 1 && (
           <div className="toolbar">
@@ -187,6 +208,8 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
           </div>
         )}
       </div>
+
+      <LocalAttacks />
 
       <section className="panel net-live">
         <div className="net-dirs">
@@ -310,11 +333,42 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
   );
 }
 
+// LocalAttacks is the watch for attacks on this machine, every 5 seconds.
+function LocalAttacks() {
+  const { data, refresh } = usePoll(api.attacks, 5000);
+  const now = useNow(5000);
+  const notify = useToast();
+  if (!data?.enabled || !data.attacks) return null;
+  const toggle = async (on: boolean) => {
+    try {
+      await api.setDefense(on);
+      notify(
+        on
+          ? { tone: 'ok', title: 'Defending against attacks', body: 'Nightjar answers the next one in the firewall.' }
+          : { tone: 'ok', title: 'Defense off', body: 'Attacks are still watched and announced.' },
+      );
+      refresh();
+    } catch (e) {
+      notify({ tone: 'error', title: 'Could not change the defense', body: (e as Error).message });
+    }
+  };
+  const unblock = async (address: string) => {
+    try {
+      await api.unblock(address);
+      notify({ tone: 'ok', title: `${address} unblocked`, body: 'Left alone for an hour.' });
+      refresh();
+    } catch (e) {
+      notify({ tone: 'error', title: `Could not unblock ${address}`, body: (e as Error).message });
+    }
+  };
+  return <AttackWatch view={data.attacks} now={now} onToggle={toggle} onUnblock={unblock} />;
+}
+
 export function NetworkPage() {
   const poll = useNetwork();
   return (
     <main>
-      {poll.error && !poll.unauthorized && <div className="alert">Can't reach the monitor ({poll.error.message}). Retrying.</div>}
+      {poll.error && !poll.unauthorized && (poll.failures >= failuresBeforeAlert || !poll.data) && <div className="alert">Can't reach the monitor ({poll.error.message}). Retrying.</div>}
       {!poll.data ? (
         <Skeleton kind="dashboard" />
       ) : poll.data.enabled && poll.data.network ? (

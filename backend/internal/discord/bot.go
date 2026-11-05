@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,30 @@ type Bot struct {
 	breaker *CircuitBreaker
 	mu      sync.Mutex
 	lastErr string
+	// seen holds the interactions handled lately, by id, so a replayed request does nothing.
+	seen map[string]time.Time
+}
+
+// freshFor is how far a click's signed timestamp may be from now; anything older is a replay.
+const freshFor = 5 * time.Minute
+
+// replayed reports whether interaction id was already handled, and remembers it if not.
+func (b *Bot) replayed(id string, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k, at := range b.seen {
+		if now.Sub(at) > 2*freshFor {
+			delete(b.seen, k)
+		}
+	}
+	if _, ok := b.seen[id]; ok {
+		return true
+	}
+	if b.seen == nil {
+		b.seen = map[string]time.Time{}
+	}
+	b.seen[id] = now
+	return false
 }
 
 // NewBot checks the settings and makes a bot.
@@ -60,7 +85,7 @@ func NewBot(token, channel, publicKey string, allowed []string, origin Origin) (
 		return nil, errors.New("the Discord bot's public key is the 64 hex characters on its application's General Information page")
 	}
 	return &Bot{Token: token, Channel: channel, PublicKey: key, Allowed: allowed, Origin: origin, API: apiBase,
-		http: &http.Client{Timeout: 15 * time.Second}, breaker: NewCircuitBreaker(5, time.Minute, 2)}, nil
+		http: &http.Client{Timeout: 15 * time.Second}, breaker: NewCircuitBreaker(5, time.Minute, 2).Named("Discord bot")}, nil
 }
 
 func (b *Bot) Name() string { return "Discord bot" }
@@ -119,7 +144,7 @@ func (b *Bot) call(ctx context.Context, method, path string, body any) error {
 	}
 	resp, err := b.http.Do(req)
 	if err != nil {
-		return err
+		return withoutURL(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
@@ -139,7 +164,14 @@ func (b *Bot) Interactions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad signature", http.StatusUnauthorized)
 		return
 	}
+	// The signature covers the timestamp, so a captured request replayed later is refused here.
+	now := time.Now()
+	if sec, err := strconv.ParseInt(stamp, 10, 64); err != nil || now.Sub(time.Unix(sec, 0)).Abs() > freshFor {
+		http.Error(w, "stale request", http.StatusUnauthorized)
+		return
+	}
 	var in struct {
+		ID            string `json:"id"`
 		Type          int    `json:"type"`
 		Token         string `json:"token"`
 		ApplicationID string `json:"application_id"`
@@ -168,6 +200,11 @@ func (b *Bot) Interactions(w http.ResponseWriter, r *http.Request) {
 		reply(map[string]int{"type": 1})
 		return
 	case 3: // a button
+		// And one replayed within that window is recognised by its id.
+		if in.ID == "" || b.replayed(in.ID, now) {
+			reply(map[string]any{"type": 4, "data": map[string]any{"content": "That click was already handled.", "flags": 64}})
+			return
+		}
 	default:
 		reply(map[string]any{"type": 4, "data": map[string]any{"content": "Nightjar only handles its buttons.", "flags": 64}})
 		return

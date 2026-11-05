@@ -19,7 +19,7 @@ journalctl -u nightjar | grep setup_code | tail -1
 
 ## Two-factor sign-in
 
-Under **Settings → Account**, **Set it up** shows a key to add to an authenticator app (1Password, Google Authenticator, Aegis and the like), or a link that opens it in the app on the same device. Type the app's current code to turn it on. Signing in then asks for a code after the password; each code works once.
+Under **Settings → Account**, **Set it up** shows a key to add to an authenticator app (1Password, Google Authenticator, Aegis and the like), or a link that opens it in the app on the same device. Type the app's current code and your password to turn it on. Signing in then asks for a code after the password; each code works once.
 
 Ten recovery codes are shown once, when you turn it on: each signs you in once without the app. Keep them somewhere safe. If both the phone and the codes are lost, run `nightjar -reset-admin` on the server and create the account again.
 
@@ -44,11 +44,12 @@ location / {
     proxy_pass http://127.0.0.1:8080;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
 
-Behind a proxy on the same machine, the monitor takes the visitor's address from `X-Real-IP` (so sign-in limits apply per visitor), and marks its cookie secure when `X-Forwarded-Proto` says HTTPS.
+Behind a proxy on the same machine, the monitor takes the visitor's address from `X-Real-IP` or the last `X-Forwarded-For` hop, whichever the proxy sets (so sign-in limits apply per visitor), and marks its cookie secure when `X-Forwarded-Proto` says HTTPS.
 
 Setting `WEB_HOST=0.0.0.0` listens on every address. Everyone must still sign in, but the traffic is plain HTTP, so prefer one of the ways above.
 

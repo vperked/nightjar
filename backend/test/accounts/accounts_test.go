@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"nightjar/internal/accounts"
 	"nightjar/internal/storage"
@@ -78,5 +79,52 @@ func TestAdminAccountLifecycle(t *testing.T) {
 	}
 	if a = accounts.New(db); a.Configured() || a.SetupCode() == "" {
 		t.Fatal("after a reset the account can be created again")
+	}
+}
+
+func TestTwoFactorTakesThePasswordAndKeepsThroughAPasswordChange(t *testing.T) {
+	db := storage.Open(filepath.Join(t.TempDir(), "a.db"))
+	t.Cleanup(db.Close)
+	a := accounts.New(db)
+	if err := a.Create("jay", "correct horse battery", a.SetupCode()); err != nil {
+		t.Fatal(err)
+	}
+	secret, _, err := a.BeginTwoFactor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if _, err := a.EnableTwoFactor("not the password", accounts.TOTP(secret, now)); !errors.Is(err, accounts.ErrWrongCurrent) || a.TwoFactor() {
+		t.Fatalf("turned on without the password: %v", err)
+	}
+	if _, err := a.EnableTwoFactor("correct horse battery", accounts.TOTP(secret, now)); err != nil || !a.TwoFactor() {
+		t.Fatalf("enable: %v", err)
+	}
+	// Another authenticator only after turning it off, which takes the password and a code.
+	if _, _, err := a.BeginTwoFactor(); !errors.Is(err, accounts.ErrTwoFactorOn) {
+		t.Fatalf("a new authenticator while one is on: %v", err)
+	}
+	// A password change keeps the account's two-factor sign-in, and its codes.
+	if err := a.ChangePassword("correct horse battery", "a brand new password", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !a.TwoFactor() || a.RecoveryLeft() != 10 {
+		t.Fatalf("the password change undid two-factor sign-in: %v %d", a.TwoFactor(), a.RecoveryLeft())
+	}
+}
+
+func TestSessionsUnusedForTooLongAreForgotten(t *testing.T) {
+	db := storage.Open(filepath.Join(t.TempDir(), "a.db"))
+	t.Cleanup(db.Close)
+	old := float64(time.Now().Add(-accounts.SessionLife - time.Hour).Unix())
+	db.SaveSession(storage.Session{Hash: "stale", Created: old, Seen: old})
+	db.SaveSession(storage.Session{Hash: "fresh", Created: old, Seen: float64(time.Now().Unix())})
+	accounts.New(db)
+	var left []string
+	for _, s := range db.Sessions() {
+		left = append(left, s.Hash)
+	}
+	if strings.Join(left, ",") != "fresh" {
+		t.Fatalf("sessions left: %v", left)
 	}
 }

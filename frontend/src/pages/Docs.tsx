@@ -10,6 +10,16 @@ const BODIES = import.meta.glob<string>('../docs/*.md', { query: '?raw', import:
 
 export const docBody = (s: string) => BODIES[`../docs/${s}.md`];
 
+// hashId is the section a link's #fragment names. A malformed escape ("#%") is taken as written
+// rather than thrown, which would blank the page.
+const hashId = (hash: string) => {
+  try {
+    return decodeURIComponent(hash.slice(1));
+  } catch {
+    return hash.slice(1);
+  }
+};
+
 interface Section {
   doc: DocEntry;
   heading: string; // "" for the part before the first heading
@@ -273,7 +283,7 @@ export function DocsPage() {
   // A link to a section lands on it; a new page starts at its top.
   useEffect(() => {
     if (searching) return;
-    const id = decodeURIComponent(location.hash.slice(1));
+    const id = hashId(location.hash);
     const target = id ? document.getElementById(id) : null;
     if (target) target.scrollIntoView?.({ block: 'start' });
     else (document.scrollingElement ?? document.documentElement).scrollTo?.({ top: 0 });
@@ -283,7 +293,7 @@ export function DocsPage() {
     setQuery('');
     setMenu(false);
   };
-  const current = inView || decodeURIComponent(location.hash.slice(1));
+  const current = inView || hashId(location.hash);
 
   return (
     <main className={`docs ${home && !searching ? 'is-home' : ''}`}>

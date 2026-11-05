@@ -25,8 +25,8 @@ const usage = `nightjar-agent reports this machine's readings to a Nightjar dash
         its port in ufw, firewalld or iptables when one is on, and installs smartmontools for drive readings,
         unless told not to. Over HTTPS, the dashboard keeps it on its own version.
   sudo nightjar-agent install
-        reinstall it as it was set up (the token and settings already on this machine), so an
-        older install can update itself from then on
+        reinstall it as it was set up (the token and settings already on this machine, and a
+        -firewall=false or -smart=false given then), so an older install can update itself from then on
   sudo nightjar-agent uninstall
         stop it and remove it
   nightjar-agent [-listen :9101]

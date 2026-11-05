@@ -241,12 +241,62 @@
   .app {
     padding-bottom: calc(84px + env(safe-area-inset-bottom));
   }
-  .savebar {
+  .savebar,
+  .bulk-bar {
     bottom: calc(74px + env(safe-area-inset-bottom));
   }
 }
+/* A phone on its side is ~360px tall: the header scrolls away and the tab bar is one slim row,
+   so they don't take a third of the screen. */
+@media (max-width: 760px) and (max-height: 500px) {
+  .masthead {
+    position: static;
+  }
+  .nav {
+    padding: 2px 8px calc(2px + env(safe-area-inset-bottom));
+  }
+  .nav a {
+    flex-direction: row;
+    justify-content: center;
+    gap: 6px;
+    padding: 7px 0;
+    font-size: 9.5px;
+  }
+  .nav a svg {
+    width: 18px;
+    height: 18px;
+  }
+  .nav a .nav-badge {
+    position: static;
+  }
+  .app {
+    padding-bottom: calc(52px + env(safe-area-inset-bottom));
+  }
+  .savebar,
+  .bulk-bar {
+    bottom: calc(44px + env(safe-area-inset-bottom));
+  }
+  .settings-layout .settings-nav {
+    top: 0;
+  }
+}
+/* Small laptops and tablets on their side: the tabs no longer sit centred between two equal sides
+   (that needs ~1140px with every section on), but between the wordmark and the icons, closer. */
+@media (min-width: 761px) and (max-width: 1180px) {
+  .masthead-inner {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 16px;
+  }
+  .nav {
+    justify-content: center;
+  }
+  .nav a {
+    padding: 6px 9px;
+    letter-spacing: 0.02em;
+  }
+}
 /* Narrow tablets: the tabs keep only their icons, except the current one. */
-@media (min-width: 761px) and (max-width: 900px) {
+@media (min-width: 761px) and (max-width: 1000px) {
   .nav a:not(.active) > span:not(.nav-badge) {
     display: none;
   }

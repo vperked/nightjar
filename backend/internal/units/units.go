@@ -79,6 +79,10 @@ type Monitor struct {
 	flapped  map[string]bool
 	causes   map[string]diagnose.Finding
 	polled   bool
+	// reads counts Refresh calls; refreshed is the count at a service's last one. A poll that
+	// started before it has an older reading than the one kept, and leaves the service alone.
+	reads     uint64
+	refreshed map[string]uint64
 }
 
 type restartObs struct {
@@ -87,7 +91,7 @@ type restartObs struct {
 }
 
 func New() *Monitor {
-	return &Monitor{Run: execRunner, units: map[string]Unit{}, failedAt: map[string]time.Time{}, restarts: map[string][]restartObs{}, flapped: map[string]bool{}, causes: map[string]diagnose.Finding{}}
+	return &Monitor{Run: execRunner, units: map[string]Unit{}, failedAt: map[string]time.Time{}, restarts: map[string][]restartObs{}, flapped: map[string]bool{}, causes: map[string]diagnose.Finding{}, refreshed: map[string]uint64{}}
 }
 
 // properties read for every service that is not idle.
@@ -98,6 +102,9 @@ var properties = "Id,Description,ActiveState,SubState,UnitFileState,Result,ExecM
 // that count as a restart loop. The first poll only learns the current state, unless
 // AnnounceExisting asks it to report services that are already failed.
 func (m *Monitor) Poll(ctx context.Context, now time.Time, ignore []string, flapAt int) ([]Event, error) {
+	m.mu.Lock()
+	started := m.reads
+	m.mu.Unlock()
 	units, err := m.read(ctx, now)
 	if err != nil {
 		return nil, err
@@ -111,6 +118,10 @@ func (m *Monitor) Poll(ctx context.Context, now time.Time, ignore []string, flap
 	for _, u := range units {
 		u.Ignored = ignored(u.Name, ignore)
 		seen[u.Name] = true
+		// The dashboard restarted it while this poll read systemd: what it kept is newer.
+		if m.refreshed[u.Name] > started {
+			continue
+		}
 		events = append(events, m.flapping(&u, now, flapAt)...)
 		events = append(events, m.transition(u, now, first)...)
 		m.units[u.Name] = u
@@ -218,6 +229,7 @@ func (m *Monitor) forgetGone(seen map[string]bool) {
 			delete(m.failedAt, name)
 			delete(m.restarts, name)
 			delete(m.flapped, name)
+			delete(m.refreshed, name)
 		}
 	}
 }
@@ -377,6 +389,8 @@ func (m *Monitor) Refresh(ctx context.Context, name string) (Unit, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.reads++
+	m.refreshed[name] = m.reads
 	prev := m.units[name]
 	u.Ignored, u.Flapping = prev.Ignored, prev.Flapping
 	if !u.Failed() {

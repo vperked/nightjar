@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -18,6 +19,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"nightjar/internal/selfcheck"
 )
 
 // Result is what a check found.
@@ -45,14 +48,18 @@ type round struct {
 }
 
 var (
-	sandboxedRE  = regexp.MustCompile(`setresuid|cannot set user id|Failed to set new user ids`)
-	errSandboxed = errors.New("not allowed to switch users here, which apt and git need: the monitor's systemd unit sets NoNewPrivileges with User=root")
+	sandboxedRE   = regexp.MustCompile(`setresuid|cannot set user id|Failed to set new user ids`)
+	errLostSetuid = errors.New("lost the right to switch users (CAP_SETUID), which apt and git need: restart Nightjar to get it back")
 )
 
 // run is a command runner with the manager's defaults filled in.
 func (m *Manager) run(ctx context.Context, c Command, okCodes ...int) (Output, error) {
 	if c.Timeout == 0 {
 		c.Timeout = 2 * time.Minute
+	}
+	if l := liveFrom(ctx); l != nil {
+		l.note("$ " + strings.Join(c.Argv, " "))
+		c.Output = l
 	}
 	out, err := m.opt.Run(ctx, c)
 	switch {
@@ -61,10 +68,17 @@ func (m *Manager) run(ctx context.Context, c Command, okCodes ...int) (Output, e
 	case err != nil:
 		return out, err
 	case out.Code != 0 && !slices.Contains(okCodes, out.Code):
-		if sandboxedRE.MatchString(out.Stderr + out.Stdout) {
-			return out, errSandboxed
+		if sandboxedRE.MatchString(out.Stderr+out.Stdout) && !selfcheck.HasCap(selfcheck.CapSetuid) {
+			return out, errLostSetuid
 		}
-		return out, fmt.Errorf("%s failed (exit %d): %s", strings.Join(c.Argv[:min(2, len(c.Argv))], " "), out.Code, out.Tail(600))
+		name := strings.Join(c.Argv[:min(2, len(c.Argv))], " ")
+		if len(c.Argv) > 1 && c.Argv[0] == "sh" && c.Argv[1] == "-c" {
+			name = "the command"
+		}
+		if tail := out.Tail(600); tail != "" {
+			return out, fmt.Errorf("%s failed (exit %d): %s", name, out.Code, tail)
+		}
+		return out, fmt.Errorf("%s failed (exit %d) without saying why; its log shows the step it reached", name, out.Code)
 	}
 	return out, nil
 }
@@ -88,7 +102,7 @@ func (m *Manager) probe(ctx context.Context, r *round, s Spec) (Result, error) {
 }
 
 // install applies the update the last check found and returns a short note on what it did.
-func (m *Manager) install(ctx context.Context, s Spec, res Result) (string, error) {
+func (m *Manager) install(ctx context.Context, s Spec, res Result, auto bool) (string, error) {
 	long := m.opt.Timeout
 	switch s.Kind {
 	case KindSystem:
@@ -105,7 +119,7 @@ func (m *Manager) install(ctx context.Context, s Spec, res Result) (string, erro
 		_, err := m.run(ctx, Command{Argv: append(aptInstall, s.Package), Env: aptEnv, Root: true, Timeout: long})
 		return "", err
 	case KindArr:
-		return "", m.installArr(ctx, s, res)
+		return "", m.installArr(ctx, s, res, auto)
 	case KindGit:
 		return m.installGit(ctx, s)
 	case KindRelease:
@@ -295,7 +309,12 @@ func (m *Manager) arrEndpoint(ctx context.Context, s Spec) (string, string, erro
 			if urlBase != "" {
 				urlBase = "/" + urlBase
 			}
-			base = fmt.Sprintf("http://127.0.0.1:%d%s", c.Port, urlBase)
+			// An app bound to one address listens only there; bound to all ("*"), on loopback too.
+			host := "127.0.0.1"
+			if ip := net.ParseIP(strings.TrimSpace(c.BindAddress)); ip != nil && !ip.IsUnspecified() {
+				host = ip.String()
+			}
+			base = "http://" + net.JoinHostPort(host, strconv.Itoa(c.Port)) + urlBase
 		}
 		key = cmp.Or(key, c.APIKey)
 	}
@@ -349,52 +368,119 @@ func (m *Manager) probeArr(ctx context.Context, s Spec) (Result, error) {
 }
 
 // installArr asks the app to update itself, then waits for it to come back on the new version.
-func (m *Manager) installArr(ctx context.Context, s Spec, res Result) error {
+func (m *Manager) installArr(ctx context.Context, s Spec, res Result, auto bool) error {
 	api, key, err := m.arrEndpoint(ctx, s)
 	if err != nil {
 		return err
 	}
-	if err := m.postJSON(ctx, api+"/command", key, map[string]string{"name": "ApplicationUpdate"}); err != nil {
+	// The *arr apps install a new major version only when asked to in so many words, as their own
+	// Install button does. Automatic updates leave major versions to you.
+	major := majorVersion(res.Installed) != "" && majorVersion(res.Latest) != "" && majorVersion(res.Installed) != majorVersion(res.Latest)
+	if major && auto {
+		return fmt.Errorf("%s → %s is a major update, which automatic updates leave to you: press Update to install it", res.Installed, res.Latest)
+	}
+	if major {
+		noteStep(ctx, "Asking "+s.Name+" to update itself to "+res.Latest+" (a major update)")
+	} else {
+		noteStep(ctx, "Asking "+s.Name+" to update itself to "+res.Latest)
+	}
+	var cmd struct {
+		ID int `json:"id"`
+	}
+	if err := m.postJSON(ctx, api+"/command", key, map[string]any{"name": "ApplicationUpdate", "installMajorUpdate": major}, &cmd); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(min(m.opt.Timeout, 15*time.Minute))
+	noteStep(ctx, "Waiting for it to download the update and restart")
+	limit := min(m.opt.Timeout, 15*time.Minute)
+	deadline := time.Now().Add(limit)
+	seen, down, restarted := "", false, false
+	var finished time.Time
 	for time.Now().Before(deadline) {
 		if !sleep(ctx, m.opt.Poll) {
 			return ctx.Err()
 		}
 		var status struct{ Version string }
 		// The app is unreachable while it restarts.
-		if m.getJSON(ctx, api+"/system/status", key, &status) == nil && Compare(status.Version, res.Latest) >= 0 {
+		if err := m.getJSON(ctx, api+"/system/status", key, &status); err != nil {
+			if !down {
+				noteStep(ctx, "It stopped answering: restarting")
+				down, restarted = true, true
+			}
+			continue
+		}
+		if down || status.Version != seen {
+			noteStep(ctx, "It answers, on "+status.Version)
+			seen, down = status.Version, false
+		}
+		if Compare(status.Version, res.Latest) >= 0 {
 			return nil
 		}
+		// The command says how the update went, until the app restarts and forgets it.
+		if cmd.ID == 0 || restarted {
+			continue
+		}
+		var c struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		}
+		if m.getJSON(ctx, fmt.Sprintf("%s/command/%d", api, cmd.ID), key, &c) != nil {
+			continue
+		}
+		switch c.Status {
+		case "failed", "aborted", "cancelled", "orphaned":
+			return fmt.Errorf("%s turned the update down: %s", s.Name, cmp.Or(c.Message, c.Status+"; see its System → Logs"))
+		case "completed":
+			// It has the update and restarts to install it; one that does not, never will.
+			if finished.IsZero() {
+				finished = time.Now()
+				noteStep(ctx, "It has the update, and restarts to install it")
+			} else if time.Since(finished) > 30*m.opt.Poll { // a minute at the usual 2s
+				return fmt.Errorf("%s finished its update command without updating%s; see its System → Logs", s.Name, cmp.Or(": "+c.Message, ""))
+			}
+		}
 	}
-	return fmt.Errorf("still not on %s after %s; see the app's System → Logs", res.Latest, min(m.opt.Timeout, 15*time.Minute))
+	return fmt.Errorf("still not on %s after %s; see the app's System → Logs", res.Latest, limit)
+}
+
+// majorVersion is a version's first number: "2" for "2.3.7.5365".
+func majorVersion(v string) string {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	major, _, _ := strings.Cut(v, ".")
+	if _, err := strconv.Atoi(major); err != nil {
+		return ""
+	}
+	return major
 }
 
 // ---------- git checkouts ----------
 
-// owner is the account that owns dir, so git runs as it and pulled files keep their owner.
-func owner(dir string) string {
+// owner is the account that owns dir, so git runs as it and pulled files keep their owner. A
+// checkout that belongs to a uid with no account is refused rather than run as the monitor: its
+// owner could set hooks or a credential helper that would then run as root.
+func owner(dir string) (string, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
-		return ""
+		return "", nil // git says what is wrong
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return ""
+		return "", nil
 	}
 	u, err := user.LookupId(strconv.Itoa(int(st.Uid)))
-	if err != nil {
-		return ""
+	switch {
+	case err != nil && int(st.Uid) == os.Geteuid():
+		return "", nil // the monitor's own, account or not
+	case err != nil:
+		return "", fmt.Errorf("%s belongs to uid %d, which has no account to run git as; give it to a user with chown", dir, st.Uid)
 	}
-	return u.Username
+	return u.Username, nil
 }
 
 // gitUser is who runs git in a checkout: its owner, so pulled files keep their owner, except for
 // the monitor's own checkout, which uses the monitor's account (and its GitHub login and toolchain).
-func gitUser(s Spec) string {
+func gitUser(s Spec) (string, error) {
 	if s.Self {
-		return ""
+		return "", nil
 	}
 	return owner(s.Dir)
 }
@@ -403,9 +489,13 @@ func gitUser(s Spec) string {
 var gitEnv = []string{"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=true"}
 
 func (m *Manager) git(ctx context.Context, s Spec, timeout time.Duration, args ...string) (string, error) {
-	out, err := m.run(ctx, Command{Argv: append([]string{"git", "-c", "safe.directory=*", "-C", s.Dir}, args...), User: gitUser(s), Env: gitEnv, Timeout: timeout})
+	as, err := gitUser(s)
+	if err != nil {
+		return "", err
+	}
+	out, err := m.run(ctx, Command{Argv: append([]string{"git", "-c", "safe.directory=*", "-C", s.Dir}, args...), User: as, Env: gitEnv, Timeout: timeout})
 	if err != nil && strings.Contains(out.Stderr, "could not read Username") {
-		who := cmp.Or(gitUser(s), "the monitor's user")
+		who := cmp.Or(as, "the monitor's user")
 		return "", fmt.Errorf("the remote needs a login that %s does not have (use an SSH remote, or log in with gh auth login as that user)", who)
 	}
 	return strings.TrimSpace(out.Stdout), err
@@ -446,7 +536,11 @@ func (m *Manager) installGit(ctx context.Context, s Spec) (string, error) {
 	if s.UpdateCommand == "" {
 		return "", nil
 	}
-	if _, err := m.run(ctx, Command{Argv: shell(s.UpdateCommand), Dir: s.Dir, User: gitUser(s), Timeout: m.opt.Timeout}); err != nil {
+	as, err := gitUser(s)
+	if err != nil {
+		return "", err
+	}
+	if _, err := m.run(ctx, Command{Argv: shell(s.UpdateCommand), Dir: s.Dir, User: as, Timeout: m.opt.Timeout}); err != nil {
 		return "", fmt.Errorf("pulled, but the build failed (to undo: git -C %s reset --hard %.12s): %w", s.Dir, before, err)
 	}
 	return "", nil
@@ -523,14 +617,14 @@ func (m *Manager) getJSON(ctx context.Context, url, key string, v any) error {
 	return m.do(req, key, v)
 }
 
-func (m *Manager) postJSON(ctx context.Context, url, key string, body any) error {
+func (m *Manager) postJSON(ctx context.Context, url, key string, body, v any) error {
 	data, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(data)))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return m.do(req, key, nil)
+	return m.do(req, key, v)
 }
 
 func (m *Manager) do(req *http.Request, key string, v any) error {
@@ -560,7 +654,11 @@ func (m *Manager) do(req *http.Request, key string, v any) error {
 	if v == nil {
 		return nil
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(v)
+	// An empty answer is no data, not a failure.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(v); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
 }
 
 // ---------- services ----------

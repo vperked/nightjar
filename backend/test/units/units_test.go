@@ -233,3 +233,37 @@ func TestCauseShowsUntilRecovery(t *testing.T) {
 		t.Fatalf("a running service has no cause: %+v", u.Cause)
 	}
 }
+
+// A service restarted from the dashboard while a poll reads systemd is not announced as failed on
+// the poll's older reading, then as running again on the next.
+func TestARestartDuringAPollRaisesNoAlerts(t *testing.T) {
+	f := newFake()
+	m := units.New()
+	m.Run = f.run
+	t0 := time.Unix(1_800_000_000, 0)
+	f.set("sonarr.service", "failed", "failed", 0, "Result", "exit-code")
+	poll(t, m, t0)
+
+	restartMidPoll := true
+	m.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		out, err := f.run(ctx, name, args...)
+		// The poll's reading is taken; the dashboard restarts the service before the poll compares.
+		if restartMidPoll && name == "systemctl" && args[0] == "show" && len(args) > 4 {
+			restartMidPoll = false
+			f.set("sonarr.service", "active", "running", 0)
+			if _, err := m.Refresh(ctx, "sonarr.service"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return out, err
+	}
+	if ev := poll(t, m, t0.Add(30*time.Second)); len(ev) != 0 {
+		t.Fatalf("the poll's older reading raised: %s", kinds(ev))
+	}
+	if u, _ := m.Get("sonarr.service"); u.Failed() {
+		t.Fatalf("the older reading replaced the newer: %+v", u)
+	}
+	if ev := poll(t, m, t0.Add(60*time.Second)); len(ev) != 0 {
+		t.Fatalf("the next poll: %s", kinds(ev))
+	}
+}

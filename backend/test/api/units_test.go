@@ -57,6 +57,23 @@ func TestUnitRoutes(t *testing.T) {
 	if code, _ = m.send(t, http.MethodPost, "/api/units/sonarr.service/restart", `{}`, "Origin", "https://evil.example"); code != http.StatusForbidden {
 		t.Fatalf("cross-site restart: %d", code)
 	}
+	// Restarting the monitor itself answers before it goes, then asks systemd.
+	if code, body = m.send(t, http.MethodPost, "/api/units/nightjar.service/restart", `{}`); code != http.StatusAccepted || body["restarting"] != true {
+		t.Fatalf("restarting the monitor: %d %v", code, body)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		joined := strings.Join(calls, "|")
+		mu.Unlock()
+		if strings.Contains(joined, "systemctl restart -- nightjar.service") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the monitor was not restarted: %v", joined)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if !strings.Contains(strings.Join(calls, "|"), "systemctl restart -- sonarr.service") || strings.Contains(strings.Join(calls, "|"), "stop -- nightjar") {

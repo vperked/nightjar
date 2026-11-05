@@ -26,7 +26,7 @@ func resolveDetected(values map[string]string) error {
 // setupStatus says what is set up and what the monitor found on this machine to offer.
 func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 	cfg := s.ctx.Config()
-	var channels []string
+	channels := []string{}
 	for _, c := range s.ctx.Channels {
 		channels = append(channels, c.Name())
 	}

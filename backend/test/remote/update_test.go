@@ -6,12 +6,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"nightjar/internal/agent"
 	"nightjar/internal/collect"
+	"nightjar/internal/ddos"
 	"nightjar/internal/remote"
 )
 
@@ -97,5 +99,37 @@ func TestAgentsAreKeptOnTheDashboardsBuild(t *testing.T) {
 	defer mu.Unlock()
 	if posts != 1 {
 		t.Fatalf("updated with updates turned off: %d", posts)
+	}
+}
+
+func TestAServerUnderAttackIsAnnouncedOnceAndWhenItEnds(t *testing.T) {
+	a := newAgent(t)
+	sent := &alerts{}
+	m := newMonitor(t, openDB(t), sent)
+	ctx := context.Background()
+	st, err := m.Add(ctx, "nas", a.srv.URL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attack := ddos.Attack{ID: "a1", Start: 1000, Methods: []ddos.Finding{{Method: ddos.SYNFlood, Value: 9000}}}
+	a.set(func(r *agent.Readings, _ *bool) {
+		r.Attacks = &ddos.View{Attacking: true, Current: &attack}
+	})
+	m.PollAll(ctx)
+	m.PollAll(ctx)
+	got := sent.after(1)
+	if len(got) != 1 || got[0] != "critical: Under attack: nas" {
+		t.Fatalf("announced once: %v", got)
+	}
+	if h, _ := m.Get(st.ID); !slices.Contains(h.Problems, "Under attack: SYN flood") {
+		t.Fatalf("its page says so: %v", h.Problems)
+	}
+	attack.End = 1252
+	a.set(func(r *agent.Readings, _ *bool) {
+		r.Attacks = &ddos.View{History: []ddos.Attack{attack}}
+	})
+	m.PollAll(ctx)
+	if got := sent.after(2); len(got) != 2 || got[1] != "ok: Attack over: nas" {
+		t.Fatalf("over: %v", got)
 	}
 }

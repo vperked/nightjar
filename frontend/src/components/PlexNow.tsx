@@ -47,7 +47,7 @@ export function NowPlaying({ streams, compact = false, onManage }: { streams: Pl
       </p>
     );
   return (
-    <table className="table">
+    <table className="table np-table">
       <thead>
         <tr>
           <th>User</th>
@@ -65,7 +65,7 @@ export function NowPlaying({ streams, compact = false, onManage }: { streams: Pl
       <tbody>
         {streams.map((s) => (
           <tr key={s.id} className={onManage ? 'link' : undefined} onClick={onManage && (() => onManage(s))}>
-            <td className="shrink">
+            <td className="shrink np-user">
               <div>{s.user}</div>
               {!compact && (
                 <div className="sub truncate" title={`${s.player} · ${s.product}`}>
@@ -73,13 +73,13 @@ export function NowPlaying({ streams, compact = false, onManage }: { streams: Pl
                 </div>
               )}
             </td>
-            <td className="fill">
+            <td className="fill np-title">
               <div className="truncate" title={s.title}>
                 {s.title}
               </div>
               <div className="sub truncate">{s.subtitle}</div>
             </td>
-            <td className="shrink">
+            <td className="shrink np-stream">
               <Decision stream={s} />
               {!compact && <div className="sub">{[s.quality, s.throttled ? 'throttled' : s.speed ? `${s.speed.toFixed(1)}×` : ''].filter(Boolean).join(' · ')}</div>}
               {!compact && s.reason && (
@@ -93,7 +93,7 @@ export function NowPlaying({ streams, compact = false, onManage }: { streams: Pl
                 <Progress stream={s} />
               </td>
             )}
-            <td className="r shrink">
+            <td className="r shrink np-bw">
               <div className="num">{formatKbps(s.bandwidth_kbps)}</div>
               {!compact && <div className="sub">{s.local ? 'local' : 'remote'}</div>}
             </td>

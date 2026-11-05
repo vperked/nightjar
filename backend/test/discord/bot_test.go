@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -50,9 +51,9 @@ func TestBot(t *testing.T) {
 		t.Fatalf("post: %s", posted[0])
 	}
 
+	stamp := strconv.FormatInt(time.Now().Unix(), 10)
 	click := func(body string, sign bool) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/discord/interactions", strings.NewReader(body))
-		stamp := "1700000000"
 		req.Header.Set("X-Signature-Timestamp", stamp)
 		sig := ed25519.Sign(priv, append([]byte(stamp), body...))
 		if !sign {
@@ -69,13 +70,14 @@ func TestBot(t *testing.T) {
 	if rec := click(`{"type":1}`, true); !strings.Contains(rec.Body.String(), `"type":1`) {
 		t.Fatalf("ping: %s", rec.Body)
 	}
-	rec := click(`{"type":3,"token":"itok","application_id":"app","data":{"custom_id":"again:plex"},"member":{"user":{"id":"7"}}}`, true)
+	rec := click(`{"id":"1","type":3,"token":"itok","application_id":"app","data":{"custom_id":"again:plex"},"member":{"user":{"id":"7"}}}`, true)
 	var out map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &out)
 	if out["type"] != float64(4) || !strings.Contains(rec.Body.String(), "not allowed") {
 		t.Fatalf("a stranger: %s", rec.Body)
 	}
-	rec = click(`{"type":3,"token":"itok","application_id":"app","data":{"custom_id":"again:plex"},"member":{"user":{"id":"42"}}}`, true)
+	allowed := `{"id":"2","type":3,"token":"itok","application_id":"app","data":{"custom_id":"again:plex"},"member":{"user":{"id":"42"}}}`
+	rec = click(allowed, true)
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"type":5`)) {
 		t.Fatalf("deferred: %s", rec.Body)
 	}
@@ -97,6 +99,19 @@ func TestBot(t *testing.T) {
 		if n == 2 {
 			if !strings.Contains(last, "PATCH /webhooks/app/itok/messages/@original") || !strings.Contains(last, "Checking plex again now.") {
 				t.Fatalf("follow-up: %s", last)
+			}
+			// The same signed click sent again does nothing, and so does one signed long ago.
+			if rec := click(allowed, true); !strings.Contains(rec.Body.String(), "already handled") {
+				t.Fatalf("a replayed click: %s", rec.Body)
+			}
+			stamp = strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)
+			if rec := click(strings.Replace(allowed, `"id":"2"`, `"id":"3"`, 1), true); rec.Code != http.StatusUnauthorized {
+				t.Fatalf("a stale click: %d %s", rec.Code, rec.Body)
+			}
+			select {
+			case got := <-acted:
+				t.Fatalf("a replay was acted on: %s", got)
+			case <-time.After(50 * time.Millisecond):
 			}
 			return
 		}

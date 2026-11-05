@@ -60,6 +60,19 @@ export const DOC_GROUPS: { name: string; pages: DocEntry[] }[] = [
         summary: 'Add other machines with the agent or just an SSH login, see the services on each, and log in over SSH.',
         words: 'agent https token install remote ssh key private reboot restart authorized_keys services on it',
       },
+      {
+        slug: 'attacks',
+        title: 'Attacks',
+        summary: 'Denial-of-service attacks on this server and the others: how each is made, and who is behind it.',
+        words: 'ddos dos flood syn udp ping icmp http volumetric attack cloudflare block',
+      },
+      {
+        slug: 'firewall',
+        title: 'Firewall',
+        summary: 'Block, rate-limit or allow addresses and ports on this server and the others, from the dashboard.',
+        words:
+          'firewall iptables ufw firewalld block allow limit rate ratelimit hashlimit port open close rule ban unblock brute force default drop deny policy outgoing egress order pause dropped log counters',
+      },
       { slug: 'analytics', title: 'Analytics', summary: 'A day, a week or a month of every server: trends, outages and disk forecasts.', words: 'history trends uptime outages disk forecast' },
     ],
   },

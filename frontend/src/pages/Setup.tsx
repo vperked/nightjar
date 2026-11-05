@@ -141,7 +141,9 @@ function PlexStep({ st, s }: { st: SetupStatus; s: Saver }) {
   const [url, setUrl] = useState(p.enabled ? p.url : d.running ? d.url : p.url);
   const [useFound, setUseFound] = useState(d.token_found);
   const [token, setToken] = useState('');
-  const values = () => ({ PLEX_URL: url, PLEX_TOKEN: useFound ? '@detected' : token });
+  // An empty token is left out rather than sent: the server deletes a setting
+  // saved as '', which would drop the token stored from the dashboard.
+  const values = () => ({ PLEX_URL: url, ...(useFound ? { PLEX_TOKEN: '@detected' } : token ? { PLEX_TOKEN: token } : {}) });
   const tone: Tone = p.enabled ? 'good' : d.running ? 'warn' : 'idle';
   return (
     <Step n={2} title="Plex" tone={tone} status={p.enabled ? 'watching' : d.running ? 'found on this machine' : 'not found'}>
@@ -229,9 +231,11 @@ function ChecksStep({ st, refresh }: { st: SetupStatus; refresh: () => void }) {
   const suggestions = st.checks.suggestions;
   const [picked, setPicked] = useState<Set<string>>(() => new Set(suggestions.map((x) => x.target)));
   const [adding, setAdding] = useState(false);
+  // picked can still hold targets added earlier (they leave the suggestions on
+  // refresh), so count only what is listed and ticked now.
+  const chosen = suggestions.filter((x) => picked.has(x.target));
   const add = async () => {
     setAdding(true);
-    const chosen = suggestions.filter((x) => picked.has(x.target));
     const failed: string[] = [];
     for (const c of chosen) {
       try {
@@ -279,8 +283,8 @@ function ChecksStep({ st, refresh }: { st: SetupStatus; refresh: () => void }) {
             <Link className="btn-quiet" to="/services#add">
               Add another
             </Link>
-            <button className="btn" disabled={adding || picked.size === 0} onClick={add}>
-              {adding ? 'Adding…' : `Add ${plural(picked.size, 'check')}`}
+            <button className="btn" disabled={adding || chosen.length === 0} onClick={add}>
+              {adding ? 'Adding…' : `Add ${plural(chosen.length, 'check')}`}
             </button>
           </div>
         </>

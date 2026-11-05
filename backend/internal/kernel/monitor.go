@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -45,7 +44,7 @@ var journalCrashKeywords = []string{
 }
 
 var kernelLogCriticalKeywords = []string{
-	"kernel panic", "kernel oops", "kernel crash", "bug:", "panic:", "oops:", "crash:",
+	"kernel panic", "kernel oops", "kernel crash", "kernel bug at", "bug:", "panic:", "oops:", "crash:",
 	"general protection fault", "segmentation fault", "double fault", "unhandled page fault",
 }
 
@@ -63,11 +62,50 @@ func grepPattern(keywords []string) string {
 func matching(lower string, keywords []string) []string {
 	var out []string
 	for _, k := range keywords {
-		if strings.Contains(lower, strings.ToLower(k)) {
+		if HasKeyword(lower, strings.ToLower(k)) {
 			out = append(out, k)
 		}
 	}
 	return out
+}
+
+// HasKeyword says whether a lowercase line has a keyword where a word starts: "bug:" in "kernel
+// bug: ..." but not in "ollama_debug:info", and "panic" but not "nopanic".
+func HasKeyword(lower, kw string) bool {
+	for from := 0; ; {
+		i := strings.Index(lower[from:], kw)
+		if i < 0 {
+			return false
+		}
+		i += from
+		if i == 0 || !isWordByte(lower[i-1]) {
+			return true
+		}
+		from = i + 1
+	}
+}
+
+func isWordByte(b byte) bool {
+	return b == '_' || b >= 'a' && b <= 'z' || b >= '0' && b <= '9'
+}
+
+// KernelLogCrash finds a crash keyword in a line of a syslog file. Only the kernel's own lines
+// count: the same files hold every program's log, and an app's words are not a kernel crash.
+// (A program can still tag itself "kernel" in syslog and messages, so only kern.log is read.)
+func KernelLogCrash(line string) (string, bool) {
+	if !strings.Contains(line, " kernel: ") {
+		return "", false
+	}
+	lower := strings.ToLower(line)
+	if isSelf(lower) {
+		return "", false
+	}
+	for _, kw := range kernelLogCriticalKeywords {
+		if HasKeyword(lower, kw) {
+			return kw, true
+		}
+	}
+	return "", false
 }
 
 // Event is one crash, warning or hardware error.
@@ -87,6 +125,38 @@ type Event struct {
 type Reboot struct {
 	PreviousBootTime float64
 	CurrentBootTime  float64
+	// Clean is a reboot the previous boot's journal shows it shut down for: a planned one. Known
+	// is false when that journal could not be read.
+	Clean, Known bool
+}
+
+// shutdownMarkers are what systemd logs as it shuts a machine down on purpose.
+var shutdownMarkers = []string{
+	"reached target system reboot", "reached target system power off", "reached target system shutdown",
+	"reached target reboot", "reached target power-off", "reached target shutdown",
+	"system is rebooting", "system is powering down", "system is powering off", "shutting down.",
+}
+
+// CleanShutdown says whether the end of a boot's journal shows it shutting down on purpose.
+func CleanShutdown(tail string) bool {
+	lower := strings.ToLower(tail)
+	for _, m := range shutdownMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// previousShutdown reads the end of the previous boot's journal for a clean shutdown.
+func previousShutdown() (clean, known bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "journalctl", "-b", "-1", "-n", "300", "--no-pager", "-o", "cat").Output()
+	if err != nil || len(out) == 0 {
+		return false, false
+	}
+	return CleanShutdown(string(out)), true
 }
 
 // CrashReport is one crash-check pass.
@@ -95,6 +165,9 @@ type CrashReport struct {
 	EarlyWarnings  []Event
 	HardwareErrors []Event
 	Reboot         *Reboot
+	// Flood is the kernel writing far more than it should; while it lasts the journal checks are
+	// skipped, since they would only time out.
+	Flood *Flood
 }
 
 // Stability is one stability-check pass.
@@ -110,10 +183,16 @@ type tracking struct {
 	LastIOErrors   map[string]int64   `json:"last_io_errors"`
 	LastAlertTime  map[string]float64 `json:"last_alert_time"`
 	LastEdacCounts map[string]int64   `json:"last_edac_counts"`
-	SavedAt        float64            `json:"saved_at"`
+	// LastOOMKills is the kernel's OOM-kill count at the last stability check, so only new kills
+	// score; nil until the first check, which takes it as the baseline.
+	LastOOMKills *int64  `json:"last_oom_kills,omitempty"`
+	SavedAt      float64 `json:"saved_at"`
 }
 
 const maxDetected = 10000
+
+// maxJournalEntries caps what one journal read takes in.
+const maxJournalEntries = 2000
 
 // Monitor keeps per-boot state in a JSON file so device error counts and reboots survive restarts.
 type Monitor struct {
@@ -124,6 +203,11 @@ type Monitor struct {
 	detected       map[string]bool
 	state          tracking
 	pendingReboot  *Reboot
+	// lastJournal is when the journal was last read in full, so the next read starts there.
+	lastJournal time.Time
+	// reported is each crash message already alerted on and when, so one crash seen in the journal,
+	// dmesg and kern.log is told once.
+	reported map[string]time.Time
 }
 
 func bootTime() float64 {
@@ -144,6 +228,7 @@ func New(persistence string, ignoredDevices []string) *Monitor {
 		persistence:    persistence,
 		ignoredDevices: map[string]bool{},
 		detected:       map[string]bool{},
+		reported:       map[string]time.Time{},
 		state:          tracking{LastIOErrors: map[string]int64{}, LastAlertTime: map[string]float64{}, LastEdacCounts: map[string]int64{}},
 	}
 	for _, d := range ignoredDevices {
@@ -160,10 +245,13 @@ func New(persistence string, ignoredDevices []string) *Monitor {
 	return m
 }
 
+// resetTracking starts a new boot's counters: every kernel counter restarts at zero, so every OOM
+// kill it counts from here is new.
 func (m *Monitor) resetTracking() {
 	m.state.LastIOErrors = map[string]int64{}
 	m.state.LastAlertTime = map[string]float64{}
 	m.state.LastEdacCounts = map[string]int64{}
+	m.state.LastOOMKills = new(int64(0))
 }
 
 func (m *Monitor) load() {
@@ -179,6 +267,7 @@ func (m *Monitor) load() {
 	if saved.BootTime != 0 && m.bootTime != 0 && abs(saved.BootTime-m.bootTime) >= 10 {
 		log.Info("System rebooted since last run; queueing reboot alert")
 		m.pendingReboot = &Reboot{PreviousBootTime: saved.BootTime, CurrentBootTime: m.bootTime}
+		m.resetTracking()
 		m.save()
 		return
 	}
@@ -190,6 +279,19 @@ func (m *Monitor) load() {
 	}
 	if saved.LastEdacCounts != nil {
 		m.state.LastEdacCounts = saved.LastEdacCounts
+	}
+	m.state.LastOOMKills = saved.LastOOMKills
+	// Older versions kept one EDAC counter per file name ("edac_ce_count") for every controller;
+	// those are meaningless now that each controller has its own.
+	for key := range m.state.LastEdacCounts {
+		if !strings.Contains(key, "/") {
+			delete(m.state.LastEdacCounts, key)
+		}
+	}
+	for key := range m.state.LastAlertTime {
+		if strings.HasPrefix(key, "edac_") && !strings.Contains(key, "/") {
+			delete(m.state.LastAlertTime, key)
+		}
 	}
 }
 
@@ -257,29 +359,36 @@ type journalEntry struct {
 	Priority  string `json:"PRIORITY"`
 }
 
-func journalEntries(sinceMinutes int, priority, pattern string) []journalEntry {
+// journalEntries reads the kernel's journal lines since sinceMinutes ago, newest first. complete is
+// false when journalctl could not run or timed out, so the span has to be read again.
+func journalEntries(sinceMinutes int, priority, pattern string) (entries []journalEntry, complete bool) {
 	since := time.Now().Add(-time.Duration(sinceMinutes) * time.Minute).Format("2006-01-02 15:04:05")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "journalctl", "--since", since, "--priority", priority, "--grep", pattern, "--no-pager", "--output", "json").Output()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		// A flooded journal makes this slow; say so rather than report "nothing found".
-		log.Warn("journalctl timed out after 15s; these kernel checks were skipped (is something flooding the journal?)", "priority", priority)
-		return nil
+	// Only what the kernel itself logged, across boots, so a crash before a reboot still shows.
+	// Newest first, so when there is more than maxJournalEntries it is the oldest that is left out.
+	cmd := exec.CommandContext(ctx, "journalctl", "_TRANSPORT=kernel", "--since", since, "--priority", priority, "--grep", pattern, "--reverse", "--no-pager", "--output", "json")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil || cmd.Start() != nil {
+		return nil, false
 	}
-	if err != nil || len(bytes.TrimSpace(out)) == 0 {
-		return nil
-	}
-	var entries []journalEntry
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	sc.Buffer(make([]byte, 1<<20), 1<<24)
-	for sc.Scan() {
+	// Read as it comes and stop at maxJournalEntries, so a busy journal cannot fill memory.
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for sc.Scan() && len(entries) < maxJournalEntries {
 		var e journalEntry
 		if json.Unmarshal(sc.Bytes(), &e) == nil {
 			entries = append(entries, e)
 		}
 	}
-	return entries
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+	cancel() // stops journalctl if it has more to say
+	cmd.Wait()
+	if timedOut && len(entries) == 0 {
+		// A flooded journal makes this slow; say so rather than report "nothing found".
+		log.Warn("journalctl timed out after 15s; these kernel checks were skipped (is something flooding the journal?)", "priority", priority)
+	}
+	return entries, !timedOut
 }
 
 func (e journalEntry) message() string {
@@ -299,9 +408,10 @@ func isSelf(lower string) bool {
 	return false
 }
 
-func (m *Monitor) earlyWarnings(sinceMinutes int) []Event {
+func (m *Monitor) earlyWarnings(sinceMinutes int) ([]Event, bool) {
 	var out []Event
-	for _, e := range journalEntries(sinceMinutes, "0..4", grepPattern(earlyWarningKeywords)) {
+	entries, complete := journalEntries(sinceMinutes, "0..4", grepPattern(earlyWarningKeywords))
+	for _, e := range entries {
 		msg := e.message()
 		severity := "warning"
 		if p := e.Priority; p == "0" || p == "1" || p == "2" || p == "3" {
@@ -314,7 +424,7 @@ func (m *Monitor) earlyWarnings(sinceMinutes int) []Event {
 			out = append(out, Event{Type: "early_warning", Severity: severity, Keyword: kw, Message: msg, Source: "journalctl"})
 		}
 	}
-	return out
+	return out, complete
 }
 
 func (m *Monitor) hardwareErrors() []Event {
@@ -328,61 +438,61 @@ func (m *Monitor) hardwareErrors() []Event {
 	return out
 }
 
+// edacRoot is where the kernel lists its memory controllers.
+const edacRoot = "/sys/devices/system/edac/mc"
+
+// EdacCounts reads each memory controller's total correctable and uncorrectable error counts under
+// root, keyed "mc0/ce_count". Only the controller totals: the per-csrow and per-DIMM files under
+// them count the same errors again. A missing root (no EDAC driver) has none.
+func EdacCounts(root string) map[string]int64 {
+	out := map[string]int64{}
+	controllers, _ := os.ReadDir(root)
+	for _, mc := range controllers {
+		if !strings.HasPrefix(mc.Name(), "mc") {
+			continue
+		}
+		for _, name := range []string{"ce_count", "ue_count"} {
+			raw, err := os.ReadFile(filepath.Join(root, mc.Name(), name))
+			if err != nil {
+				continue
+			}
+			if count, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil {
+				out[mc.Name()+"/"+name] = count
+			}
+		}
+	}
+	return out
+}
+
 // edacErrors reports growth in the memory controllers' correctable and uncorrectable error counts:
 // any uncorrectable error, or 1000+ (or 10%+) new correctable ones, at most once a day per counter.
 func (m *Monitor) edacErrors() []Event {
 	var out []Event
 	now := float64(time.Now().Unix())
 	const cooldown = 24 * 3600
-	for _, root := range []string{"/sys/devices/system/edac/mc", "/sys/devices/system/edac"} {
-		filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			name := d.Name()
-			if err != nil || d.IsDir() || (!strings.Contains(name, "ce_count") && !strings.Contains(name, "ue_count")) {
-				return nil
-			}
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				return nil
-			}
-			count, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
-			if err != nil {
-				return nil
-			}
-			mc := memoryController(path)
-			key := mc + "_" + name
-			last := m.state.LastEdacCounts[key]
-			increase := count - last
-			m.state.LastEdacCounts[key] = count
-			kind := "uncorrectable"
-			if strings.Contains(name, "ce_count") {
-				kind = "correctable"
-			}
-			significant := kind == "uncorrectable" || increase >= 1000 || (last > 0 && float64(increase) >= float64(last)*0.1)
-			if increase <= 0 || !significant || now-m.state.LastAlertTime[key] < cooldown {
-				return nil
-			}
-			source := "EDAC-" + mc
-			if strings.Contains(mc, "mc") {
-				source = "Memory Controller " + mc
-			}
-			out = append(out, Event{
-				Type: "hardware_error", ErrorType: kind, Source: source, Count: count, CountIncrease: increase,
-				Message: fmt.Sprintf("%s%s memory error detected: %d new errors (total: %d)", strings.ToUpper(kind[:1]), kind[1:], increase, count),
-			})
-			m.state.LastAlertTime[key] = now
-			return nil
+	counts := EdacCounts(edacRoot)
+	for _, counter := range slices.Sorted(maps.Keys(counts)) {
+		count := counts[counter]
+		mc, name, _ := strings.Cut(counter, "/")
+		key := "edac_" + counter
+		last := m.state.LastEdacCounts[key]
+		increase := count - last
+		m.state.LastEdacCounts[key] = count
+		kind := "uncorrectable"
+		if name == "ce_count" {
+			kind = "correctable"
+		}
+		significant := kind == "uncorrectable" || increase >= 1000 || (last > 0 && float64(increase) >= float64(last)*0.1)
+		if increase <= 0 || !significant || now-m.state.LastAlertTime[key] < cooldown {
+			continue
+		}
+		out = append(out, Event{
+			Type: "hardware_error", ErrorType: kind, Source: "Memory Controller " + mc, Count: count, CountIncrease: increase,
+			Message: fmt.Sprintf("%s%s memory error detected: %d new errors (total: %d)", strings.ToUpper(kind[:1]), kind[1:], increase, count),
 		})
+		m.state.LastAlertTime[key] = now
 	}
 	return out
-}
-
-func memoryController(path string) string {
-	for _, part := range strings.Split(filepath.Dir(path), "/") {
-		if strings.HasPrefix(part, "mc") || strings.HasPrefix(part, "edac") {
-			return part
-		}
-	}
-	return "unknown"
 }
 
 // recentOOMKill is the latest unseen OOM-killer line in the last 500 lines of kern.log.
@@ -447,8 +557,13 @@ func (m *Monitor) CheckStability() Stability {
 			s.add(15, "Warning: Less than 200MB memory available", "")
 		}
 	}
-	if n := oomKills(); n > 0 {
-		s.add(25, fmt.Sprintf("Critical: OOM killer has killed %d process(es)", n), "OOM killer active - system memory critically low")
+	// Only kills since the last check: the counter runs from boot, and one OOM kill weeks ago
+	// says nothing about now.
+	if n, ok := oomKills(); ok {
+		if last := m.state.LastOOMKills; last != nil && n > *last {
+			s.add(25, fmt.Sprintf("Critical: OOM killer has killed %d process(es)", n-*last), "OOM killer active - system memory critically low")
+		}
+		m.state.LastOOMKills = &n
 	}
 	now := float64(time.Now().Unix())
 	errs := diskIOErrors()
@@ -471,18 +586,18 @@ func (m *Monitor) CheckStability() Stability {
 }
 
 // oomKills is the kernel's count of OOM kills since boot.
-func oomKills() int {
+func oomKills() (int64, bool) {
 	data, err := os.ReadFile("/proc/vmstat")
 	if err != nil {
-		return 0
+		return 0, false
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if v, ok := strings.CutPrefix(line, "oom_kill "); ok {
-			n, _ := strconv.Atoi(strings.TrimSpace(v))
-			return n
+			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			return n, err == nil
 		}
 	}
-	return 0
+	return 0, false
 }
 
 // diskIOErrors is each SCSI/SATA disk's lifetime I/O error count (/sys/block/*/device/ioerr_cnt, in hex).
@@ -523,21 +638,22 @@ func (m *Monitor) shouldAlertDevice(device string, count int64, now float64) boo
 	return alert
 }
 
-func (m *Monitor) journalCrashes(sinceMinutes int) []Event {
+// journalCrashes is one event per crash line: a line with two keywords ("BUG: Unable to handle
+// ...") is still one crash.
+func (m *Monitor) journalCrashes(sinceMinutes int) ([]Event, bool) {
 	var out []Event
-	for _, e := range journalEntries(sinceMinutes, "err", grepPattern(journalCrashKeywords)) {
+	entries, complete := journalEntries(sinceMinutes, "err", grepPattern(journalCrashKeywords))
+	for _, e := range entries {
 		msg := e.message()
 		lower := strings.ToLower(msg)
 		if isSelf(lower) {
 			continue
 		}
-		for _, kw := range matching(lower, journalCrashKeywords) {
-			if !m.seen(e.Timestamp + "_" + kw) {
-				out = append(out, Event{Type: "kernel_error", Keyword: kw, Message: msg, Source: "journalctl"})
-			}
+		if kws := matching(lower, journalCrashKeywords); len(kws) > 0 && !m.seen(e.Timestamp+"_"+kws[0]) {
+			out = append(out, Event{Type: "kernel_error", Keyword: kws[0], Message: msg, Source: "journalctl"})
 		}
 	}
-	return out
+	return out, complete
 }
 
 func containsAny(s string, subs []string) bool {
@@ -552,7 +668,8 @@ func containsAny(s string, subs []string) bool {
 func (m *Monitor) dmesgCrashes(sinceMinutes int) []Event {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "dmesg", "-T", "--level=err,warn").Output()
+	// Panics, oopses and BUGs are logged at emerg, alert and crit, above err.
+	out, err := exec.CommandContext(ctx, "dmesg", "-T", "--level=emerg,alert,crit,err,warn").Output()
 	if err != nil {
 		return nil
 	}
@@ -568,11 +685,11 @@ func (m *Monitor) dmesgCrashes(sinceMinutes int) []Event {
 			}
 		}
 		lower := strings.ToLower(line)
-		if isSelf(lower) || (containsAny(lower, dmesgIgnoreFragments) && !containsAny(lower, dmesgCriticalKeywords)) {
+		if isSelf(lower) || (containsAny(lower, dmesgIgnoreFragments) && len(matching(lower, dmesgCriticalKeywords)) == 0) {
 			continue
 		}
 		for _, kw := range dmesgCriticalKeywords {
-			if strings.Contains(lower, kw) {
+			if HasKeyword(lower, kw) {
 				if !m.seen("dmesg_" + line) {
 					events = append(events, Event{Type: "kernel_error", Keyword: kw, Message: line, Source: "dmesg"})
 				}
@@ -583,36 +700,92 @@ func (m *Monitor) dmesgCrashes(sinceMinutes int) []Event {
 	return events
 }
 
+// SyslogTime reads the timestamp a syslog line starts with: RFC 3339 ("2026-11-05T01:40:00.1+00:00")
+// or the traditional "Nov  5 01:40:00", which has no year and is taken as the latest one not ahead
+// of now.
+func SyslogTime(line string, now time.Time) (time.Time, bool) {
+	if f, _, ok := strings.Cut(line, " "); ok {
+		if t, err := time.Parse(time.RFC3339Nano, f); err == nil {
+			return t, true
+		}
+	}
+	if len(line) < 15 {
+		return time.Time{}, false
+	}
+	t, err := time.ParseInLocation("Jan _2 15:04:05", line[:15], now.Location())
+	if err != nil {
+		return time.Time{}, false
+	}
+	t = t.AddDate(now.Year(), 0, 0)
+	if t.After(now.Add(24 * time.Hour)) {
+		t = t.AddDate(-1, 0, 0)
+	}
+	return t, true
+}
+
+// kernelLogCrashes reads kern.log's crash lines from the last sinceMinutes. Only kern.log: syslog and
+// messages take any program's lines, and `logger -t kernel` can put a fake crash there.
 func (m *Monitor) kernelLogCrashes(sinceMinutes int) []Event {
-	cutoff := time.Now().Add(-time.Duration(sinceMinutes) * time.Minute)
+	now := time.Now()
+	cutoff := now.Add(-time.Duration(sinceMinutes) * time.Minute)
 	var out []Event
-	for _, path := range []string{"/var/log/kern.log", "/var/log/messages", "/var/log/syslog"} {
-		st, err := os.Stat(path)
-		if err != nil || st.ModTime().Before(cutoff) {
+	const path = "/var/log/kern.log"
+	st, err := os.Stat(path)
+	if err != nil || st.ModTime().Before(cutoff) {
+		return nil
+	}
+	lines, err := tailLines(path, 512*1024)
+	if err != nil {
+		return nil
+	}
+	if len(lines) > 1000 {
+		lines = lines[len(lines)-1000:]
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := lines[i]
+		// The file's tail can hold crashes from days ago; those were told when they happened.
+		if t, ok := SyslogTime(line, now); ok && t.Before(cutoff) {
+			break
+		}
+		if kw, ok := KernelLogCrash(line); ok && !m.seen(path+"_"+line) {
+			out = append(out, Event{Type: "kernel_error", Keyword: kw, Message: strings.TrimSpace(line), Source: path})
+		}
+	}
+	return out
+}
+
+// crashText is a crash line without its source's framing (a syslog prefix, dmesg's or printk's
+// [timestamp]), so the same line from the journal, dmesg and kern.log compares equal.
+func crashText(msg string) string {
+	if _, rest, ok := strings.Cut(msg, " kernel: "); ok {
+		msg = rest
+	}
+	msg = strings.TrimSpace(msg)
+	if strings.HasPrefix(msg, "[") {
+		if i := strings.Index(msg, "]"); i > 0 {
+			msg = msg[i+1:]
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(msg))
+}
+
+// newCrashes drops crashes already told from another source (or twice in one pass). A message is
+// remembered for twice the look-back, past which no source reads it again.
+func (m *Monitor) newCrashes(crashes []Event, sinceMinutes int, now time.Time) []Event {
+	keep := 2 * time.Duration(sinceMinutes) * time.Minute
+	for text, at := range m.reported {
+		if now.Sub(at) > keep {
+			delete(m.reported, text)
+		}
+	}
+	var out []Event
+	for _, c := range crashes {
+		text := crashText(c.Message)
+		if _, told := m.reported[text]; told {
 			continue
 		}
-		lines, err := tailLines(path, 512*1024)
-		if err != nil {
-			continue
-		}
-		if len(lines) > 1000 {
-			lines = lines[len(lines)-1000:]
-		}
-		for i := len(lines) - 1; i >= 0; i-- {
-			line := lines[i]
-			lower := strings.ToLower(line)
-			if strings.TrimSpace(line) == "" || isSelf(lower) {
-				continue
-			}
-			for _, kw := range kernelLogCriticalKeywords {
-				if strings.Contains(lower, kw) {
-					if !m.seen(path + "_" + line) {
-						out = append(out, Event{Type: "kernel_error", Keyword: kw, Message: strings.TrimSpace(line), Source: path})
-					}
-					break
-				}
-			}
-		}
+		m.reported[text] = now
+		out = append(out, c)
 	}
 	return out
 }
@@ -622,6 +795,7 @@ func (m *Monitor) CheckReboot() *Reboot {
 	if m.pendingReboot != nil {
 		r := m.pendingReboot
 		m.pendingReboot = nil
+		r.Clean, r.Known = previousShutdown()
 		return r
 	}
 	current := bootTime()
@@ -634,6 +808,7 @@ func (m *Monitor) CheckReboot() *Reboot {
 	}
 	if abs(current-m.bootTime) >= 10 {
 		r := &Reboot{PreviousBootTime: m.bootTime, CurrentBootTime: current}
+		r.Clean, r.Known = previousShutdown()
 		m.bootTime = current
 		m.save()
 		return r
@@ -648,10 +823,28 @@ func (m *Monitor) CheckCrashes(sinceMinutes int) CrashReport {
 		return r
 	}
 	r.Reboot = m.CheckReboot()
-	r.EarlyWarnings = m.earlyWarnings(sinceMinutes)
+	r.Flood = flooding()
+	// Each check reads the journal only since the last one (the window is the most it reads); what
+	// overlaps is already seen.
+	window := sinceMinutes
+	if !m.lastJournal.IsZero() {
+		window = min(sinceMinutes, int(time.Since(m.lastJournal).Minutes())+2)
+	}
+	if r.Flood == nil {
+		started := time.Now()
+		warnings, warningsRead := m.earlyWarnings(window)
+		crashes, crashesRead := m.journalCrashes(window)
+		r.EarlyWarnings = warnings
+		r.Crashes = append(r.Crashes, crashes...)
+		// A read that timed out is tried again from the same place next time; what it did get is
+		// already marked seen.
+		if warningsRead && crashesRead {
+			m.lastJournal = started
+		}
+	}
 	r.HardwareErrors = m.hardwareErrors()
-	r.Crashes = append(r.Crashes, m.journalCrashes(sinceMinutes)...)
 	r.Crashes = append(r.Crashes, m.dmesgCrashes(sinceMinutes)...)
 	r.Crashes = append(r.Crashes, m.kernelLogCrashes(sinceMinutes)...)
+	r.Crashes = m.newCrashes(r.Crashes, sinceMinutes, time.Now())
 	return r
 }

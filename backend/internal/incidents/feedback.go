@@ -8,6 +8,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"nightjar/internal/storage"
@@ -203,27 +204,50 @@ const (
 	noticesKey  = "incidents.notices"
 )
 
-func load[T any](store *storage.Store, key string) map[int64]T {
+func load[T any](store *storage.Store, key string) (map[int64]T, error) {
 	out := map[int64]T{}
-	if raw := store.Meta(key); raw != "" {
-		json.Unmarshal([]byte(raw), &out)
+	// A read that failed is not an empty list: keep would write back only its own entry.
+	raw, err := store.MetaValue(key)
+	if err != nil {
+		return out, err
 	}
-	return out
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			return out, fmt.Errorf("the stored %s are unreadable: %w", strings.TrimPrefix(key, "incidents."), err)
+		}
+	}
+	return out, nil
 }
 
+// keeping serializes keep: each save reads every entry and writes them all back, so two at once
+// would lose one of them.
+var keeping sync.Mutex
+
 func keep[T any](store *storage.Store, key string, id int64, v *T) error {
-	all := load[T](store, key)
+	keeping.Lock()
+	defer keeping.Unlock()
+	all, err := load[T](store, key)
+	if err != nil {
+		// Writing back what could be read would wipe every other entry.
+		return err
+	}
 	if v == nil {
 		delete(all, id)
 	} else {
 		all[id] = *v
 	}
-	data, _ := json.Marshal(all)
+	data, err := json.Marshal(all)
+	if err != nil {
+		return err
+	}
 	return store.SetMeta(key, string(data))
 }
 
 // AllFeedback is every incident's feedback, by incident.
-func AllFeedback(store *storage.Store) map[int64]Feedback { return load[Feedback](store, feedbackKey) }
+func AllFeedback(store *storage.Store) map[int64]Feedback {
+	all, _ := load[Feedback](store, feedbackKey)
+	return all
+}
 
 // SetFeedback keeps (or, with nil, drops) an incident's feedback.
 func SetFeedback(store *storage.Store, id int64, f *Feedback) error {
@@ -236,7 +260,10 @@ func LearnedFrom(store *storage.Store) Learned {
 }
 
 // AllNotices is every incident's status page notice, by incident.
-func AllNotices(store *storage.Store) map[int64]Notice { return load[Notice](store, noticesKey) }
+func AllNotices(store *storage.Store) map[int64]Notice {
+	all, _ := load[Notice](store, noticesKey)
+	return all
+}
 
 // SetNotice keeps (or, with nil, drops) an incident's notice.
 func SetNotice(store *storage.Store, id int64, n *Notice) error {

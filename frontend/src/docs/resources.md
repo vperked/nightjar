@@ -22,7 +22,7 @@ An alert doesn't repeat every cycle. After it fires, the same alert waits `ALERT
 
 ## Disk cleanup
 
-As a disk fills, the monitor makes room:
+As a disk fills, the monitor makes room on it. Only what is on that disk counts: the root filesystem's own usage sets off the log and cache cleanup there, and another disk filling up cleans only the temp and cache folders that live on it, which for a data disk is usually nothing.
 
 - At `DISK_CLEANUP_THRESHOLD` (85%) it removes old temp files, apt's caches and rotated logs older than `ROTATED_LOG_RETENTION_DAYS`.
 - At `DISK_AGGRESSIVE_CLEANUP_THRESHOLD` (92%) it also empties large logs and package caches.
