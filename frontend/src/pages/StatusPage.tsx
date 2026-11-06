@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { bootDone } from '../boot';
 import { api } from '../api/client';
 import type { PublicDay, PublicService, PublicStatus, ServiceStatus } from '../api/types';
 import { DemoBanner } from '../components/ui';
@@ -27,7 +28,7 @@ const STATE: Record<ServiceStatus, string> = { up: 'Operational', down: 'Down', 
 // when is a time for visitors: "Sun 3 Nov, 02:00", or only the time when it is the same day as `same`.
 function when(ts: number, same?: number): string {
   const d = new Date(ts * 1000);
-  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   if (same !== undefined && new Date(same * 1000).toDateString() === d.toDateString()) return time;
   return `${d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}, ${time}`;
 }
@@ -51,6 +52,24 @@ export function uptimeOf(days: PublicDay[]): number | null {
 
 function percent(v: number): string {
   return v >= 99.995 ? '100%' : `${v.toFixed(v >= 99 ? 2 : 1)}%`;
+}
+
+// names lists services for a sentence: "plex", "plex and sonarr", "plex, sonarr and 3 more".
+function names(list: string[]): string {
+  if (list.length <= 2) return list.join(' and ');
+  if (list.length === 3) return `${list[0]}, ${list[1]} and ${list[2]}`;
+  return `${list[0]}, ${list[1]} and ${list.length - 2} more`;
+}
+
+// heroLine says what is wrong, by name, so a visitor need not hunt the list for the red dot.
+function heroLine(data: PublicStatus): string {
+  const named = (status: ServiceStatus) => [...new Set(data.services.filter((s) => s.status === status).map((s) => s.name))];
+  const down = named('down');
+  const resting = named('maintenance');
+  const verb = (l: string[]) => (l.length === 1 ? 'is' : 'are');
+  if (data.overall === 'degraded' && down.length) return `${names(down)} ${verb(down)} down. Everything else is running normally.`;
+  if (data.overall === 'operational' && resting.length) return `${names(resting)} ${verb(resting)} under planned maintenance. Everything else is running normally.`;
+  return VERDICT[data.overall].sub;
 }
 
 function ago(seconds: number): string {
@@ -105,6 +124,7 @@ function DayBars({ days, name }: { days: PublicDay[]; name: string }) {
 
 function Row({ s, data }: { s: PublicService; data: PublicStatus }) {
   const days = data.show_history !== false ? (s.days ?? []) : [];
+  // An older monitor sends no days; the page still says how the service has done.
   const uptime = data.show_uptime !== false ? (s.uptime_90d ?? s.uptime_30d) : null;
   return (
     <div className="status-row">
@@ -138,12 +158,14 @@ function Row({ s, data }: { s: PublicService; data: PublicStatus }) {
 function Group({ name, services, data }: { name: string; services: PublicService[]; data: PublicStatus }) {
   const watched = services.filter((s) => s.status !== 'paused');
   const up = watched.filter((s) => s.status === 'up').length;
-  const down = watched.some((s) => s.status === 'down');
+  const down = watched.filter((s) => s.status === 'down').length;
+  // Red when all are down, amber when some are, grey when some only rest (maintenance, checking).
+  const tone = down ? (down === watched.length ? 'down' : 'some') : up < watched.length ? 'quiet' : '';
   return (
     <section className="status-group">
       <div className="status-group-head">
         <h2>{name || 'Services'}</h2>
-        <span className={`status-group-count ${down ? 'down' : ''}`}>{watched.length ? (up === watched.length ? 'All operational' : `${up} of ${watched.length} operational`) : ''}</span>
+        <span className={`status-group-count ${tone}`}>{watched.length ? (up === watched.length ? 'All operational' : `${up} of ${watched.length} operational`) : ''}</span>
       </div>
       <div className="status-list">
         {services.map((s) => (
@@ -168,6 +190,10 @@ export function StatusView({ data, scope }: { data: PublicStatus; scope?: string
   const groups = (data.groups ?? [{ name: '', services: data.services }]).filter((g) => g.services.length);
   const verdict = VERDICT[data.overall];
   const history = data.show_history !== false && data.services.some((s) => (s.days ?? []).length > 0);
+  // Ongoing incidents are news, so they sit under the headline; settled ones go at the foot.
+  const incidents = data.incidents ?? [];
+  const ongoing = incidents.filter((n) => n.ended === null);
+  const settled = incidents.filter((n) => n.ended !== null);
   return (
     <main className="status-page">
       {css && <style>{css}</style>}
@@ -195,19 +221,29 @@ export function StatusView({ data, scope }: { data: PublicStatus; scope?: string
         </span>
         <div className="min0">
           <strong>{verdict.title}</strong>
-          <span>{verdict.sub}</span>
+          <span>{heroLine(data)}</span>
         </div>
         <span className="status-hero-when num">Updated {ago(Math.max(0, now - data.updated))}</span>
       </div>
 
-      {(data.maintenance ?? []).length > 0 && (
-        <section className="status-maint" aria-label="Planned maintenance">
-          {data.maintenance!.map((m) => (
-            <div key={m.title + m.start} className={`status-maint-row ${m.on ? 'on' : ''}`}>
-              <span className="status-maint-tag">{m.on ? 'Maintenance now' : 'Planned'}</span>
+      {(ongoing.length > 0 || (data.maintenance ?? []).length > 0) && (
+        <section className="status-notices" aria-label="Incidents and planned maintenance">
+          {ongoing.map((n) => (
+            <article key={n.id} className="status-notice incident">
+              <span className="status-notice-tag">Ongoing incident</span>
+              <div className="min0">
+                <strong>{n.title}</strong>
+                <span className="status-notice-when num">Since {when(n.started)}</span>
+                {n.text && <p>{n.text}</p>}
+              </div>
+            </article>
+          ))}
+          {(data.maintenance ?? []).map((m) => (
+            <div key={m.title + m.start} className={`status-notice maint ${m.on ? 'on' : ''}`}>
+              <span className="status-notice-tag">{m.on ? 'Maintenance now' : 'Planned'}</span>
               <div className="min0">
                 <strong>{m.title}</strong>
-                <span className="status-maint-when num">
+                <span className="status-notice-when num">
                   {when(m.start)} – {when(m.end, m.start)}
                   {m.all ? ' · all services' : m.covers.length ? ` · ${m.covers.join(', ')}` : ''}
                 </span>
@@ -221,25 +257,6 @@ export function StatusView({ data, scope }: { data: PublicStatus; scope?: string
       {groups.map((g, i) => (
         <Group key={g.name + i} name={g.name} services={g.services} data={data} />
       ))}
-
-      {(data.incidents ?? []).length > 0 && (
-        <section className="status-incidents">
-          <h2>Recent incidents</h2>
-          {data.incidents!.map((n) => (
-            <article key={n.id} className={`status-incident ${n.ended === null ? 'open' : ''}`}>
-              <div className="status-incident-head">
-                <strong>{n.title}</strong>
-                <span className="num">
-                  {when(n.started)}
-                  {n.ended === null ? ' · ongoing' : ''}
-                </span>
-              </div>
-              {n.text && <p>{n.text}</p>}
-            </article>
-          ))}
-        </section>
-      )}
-      {data.services.length === 0 && <p className="note">No services are listed yet.</p>}
 
       {history && (
         <div className="status-legend" aria-label="What the bars mean">
@@ -258,6 +275,25 @@ export function StatusView({ data, scope }: { data: PublicStatus; scope?: string
         </div>
       )}
 
+      {settled.length > 0 && (
+        <section className="status-incidents">
+          <h2>Recent incidents</h2>
+          {settled.map((n) => (
+            <article key={n.id} className="status-incident">
+              <div className="status-incident-head">
+                <strong>{n.title}</strong>
+                <span className="status-incident-when num">
+                  <span className="status-resolved">Resolved</span>
+                  {when(n.started)} – {when(n.ended!, n.started)}
+                </span>
+              </div>
+              {n.text && <p>{n.text}</p>}
+            </article>
+          ))}
+        </section>
+      )}
+      {data.services.length === 0 && <p className="note">No services are listed yet.</p>}
+
       <Custom html={data.footer_html} where="bottom" />
       <footer className="status-footer">
         <span>{data.footer || 'Nightjar'}</span>
@@ -275,14 +311,29 @@ export function StatusPage() {
     const { title, overall } = status.data;
     document.title = overall === 'operational' ? title : `${VERDICT[overall].title} · ${title}`;
   }, [status.data]);
+  // The loading screen index.html opens with stays up until the first answer, or the first failure.
+  const answered = Boolean(status.data || status.error);
+  useEffect(() => {
+    if (answered) bootDone();
+  }, [answered]);
 
   if (status.error && !status.data) {
     return (
-      <main className="status-page">
+      <main className="status-page status-unavailable">
         <header className="status-top">
           <h1>Status</h1>
         </header>
-        <p className="note">The status page is not available.</p>
+        <div className="status-hero unknown" role="status">
+          <span className="status-hero-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M12 7.5v5.5M12 16.5h.01" />
+            </svg>
+          </span>
+          <div className="min0">
+            <strong>The status page is not available</strong>
+            <span>It could not be reached just now. This page tries again every 30 seconds.</span>
+          </div>
+        </div>
       </main>
     );
   }

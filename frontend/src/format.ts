@@ -21,9 +21,9 @@ export function formatUptime(seconds: number): string {
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h ${m}m`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
+  // Zero units are left out: "15d", "15d 4h", "2h 5m".
+  const parts = d > 0 ? [`${d}d`, h && `${h}h`, m && `${m}m`] : h > 0 ? [`${h}h`, m && `${m}m`] : [`${m}m`];
+  return parts.filter(Boolean).join(' ');
 }
 
 export function formatAgo(ts: number | null, now = Date.now() / 1000): string {
@@ -62,9 +62,11 @@ export function formatDuration(seconds: number): string {
   const d = Math.floor(s / 86400);
   const h = Math.floor((s % 86400) / 3600);
   const m = Math.floor((s % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s % 60}s`;
+  // A zero second unit adds nothing: "30m", not "30m 0s".
+  const two = (a: string, b: number, unit: string) => (b ? `${a} ${b}${unit}` : a);
+  if (d > 0) return two(`${d}d`, h, 'h');
+  if (h > 0) return two(`${h}h`, m, 'm');
+  if (m > 0) return two(`${m}m`, s % 60, 's');
   return `${s}s`;
 }
 

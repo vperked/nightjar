@@ -307,7 +307,7 @@ export function demoPings(): Pings {
 
 export function demoHeartbeatDetail(): string {
   const p = demoPings();
-  const next = new Date((p.start + DAY) * 1000).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  const next = new Date((p.start + DAY) * 1000).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
   const h = Math.floor((now() - p.ok) / HOUR);
   return `last ran ${h ? `${h}h` : `${Math.floor((now() - p.ok) / 60)} min`} ago; next run ${next}`;
 }

@@ -9,7 +9,7 @@ import { SettingsGroup } from './SettingsGroup';
 // The activity log: what was changed and by whom, on the dashboard, through Discord's buttons,
 // or by Nightjar itself.
 
-const when = (ts: number) => new Date(ts * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const when = (ts: number) => new Date(ts * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 
 // merge puts lists of entries together newest first, each entry once.
 const merge = (...lists: ActivityEntry[][]) => [...new Map(lists.flat().map((a) => [a.id, a])).values()].sort((a, b) => b.id - a.id);

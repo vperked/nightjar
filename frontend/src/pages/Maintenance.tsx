@@ -15,7 +15,7 @@ import { IncidentsTabs } from './Incidents';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-const stamp = (ts: number) => new Date(ts * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const stamp = (ts: number) => new Date(ts * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 
 // local is a unix time as a datetime-local input's value, and back.
 const local = (ts?: number) => {
@@ -187,8 +187,8 @@ export function MaintenancePage() {
       <div className="page-title">
         <div className="min0">
           <h1>Maintenance</h1>
-          <IncidentsTabs current="/incidents/maintenance" />
           <div className="page-sub">Planned downtime: no alerts, no repairs, and nothing against uptime.</div>
+          <IncidentsTabs current="/incidents/maintenance" />
         </div>
         {!editing && (
           <button className="btn" onClick={() => setEditing(blank())}>

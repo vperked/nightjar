@@ -12,15 +12,18 @@ Nightjar manages the whole firewall of this machine, and of each server with the
 
 Rules are checked in order, and the first that matches decides. Use **↑** and **↓** to move one. A new block or limit goes in before the allows, so an allow can't lift it; a new allow goes last.
 
-Choose **Block**, **Limit** or **Allow**, then:
+**+ Add a rule** opens a form that asks one thing at a time:
 
-- **From** (or **To**, for an outgoing rule): an address (`203.0.113.7`), a network (`203.0.113.0/24`, or an IPv6 one), or empty for anyone.
-- **Port**: a port (`22`), a range (`8000-8100`), a list (`80,443`, up to 15 ports, a range counting as two), or empty for every port.
-- **Over**: tcp and udp, or one of them, when a port is given.
-- **At most, each address** (for a limit): how many a second, a minute or an hour.
+- **Traffic**: **Coming in** to this machine, or **Going out** from it.
+- **Do**: **Allow** lets it in (even where the machine's own firewall would drop it), **Block** drops it, and **Limit** lets each address make only so many new connections and drops the rest. Nothing is picked for you.
+- **From** (or **To**, for an outgoing rule): **Anyone**, or **Only** an address (`203.0.113.7`) or a network (`203.0.113.0/24`, or an IPv6 one).
+- **Port**: **Every port**, or **Only** a port (`22`), a range (`8000-8100`) or a list (`80,443`, up to 15 ports, a range counting as two), over tcp and udp or just one of them.
+- **At most** (for a limit): how many a second, a minute or an hour from each address. A limit is always for a port.
 - **Note**: why, for later.
 
-**Open for** fills in an allow for what a home server usually runs: SSH, the web, Plex, qBittorrent (its own ports), DNS and Samba. **Add rule** beside an open port fills in its port.
+At the foot, the form says the rule in words (**This rule will limit anyone on tcp port 22 to 6 a minute each.**) or, until it is complete, what is still missing. A rule for anyone on every port is refused there, since it would block or let in everything.
+
+**Quick** fills in an allow for what a home server usually runs: SSH, the web, Plex, qBittorrent (its own ports), DNS and Samba. **Add rule** beside an open port opens the form on its port, and **Block** beside an address that kept being dropped opens it on a block of that address.
 
 Each rule says what it caught since the rules were last changed: **dropped 1,204 · 70 KB**, or **let in** for an allow. **Pause** takes a rule out of the firewall but keeps it, to try things without losing it; **Resume** puts it back. **Edit** changes it in place, checked like a new one.
 

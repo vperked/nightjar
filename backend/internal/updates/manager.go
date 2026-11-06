@@ -462,6 +462,10 @@ func (m *Manager) work() {
 		if strings.HasPrefix(j.key, "apply:") {
 			m.applying = j.id
 		}
+		// And a check round as running from here, so a Tick in between does not queue another.
+		if j.key == "check" {
+			m.checking = true
+		}
 		m.mu.Unlock()
 		func() {
 			defer m.running.Done()

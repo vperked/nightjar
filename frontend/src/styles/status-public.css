@@ -1,13 +1,18 @@
 /* Public status page */
 
 .status-page {
-  --day-good: var(--good);
-  --day-minor: var(--warn);
-  --day-major: var(--crit);
+  /* Bars, dots and badges use the bright marks; text keeps the darker tones that read on white. */
+  --day-good: var(--good-mark);
+  --day-minor: var(--warn-mark);
+  --day-major: var(--crit-mark);
   --day-none: color-mix(in srgb, var(--ink) 12%, transparent);
   max-width: 780px;
   margin: 0 auto;
   padding: 64px 24px 48px;
+}
+/* On white, cards sit on white too: the border and shadow set them apart, not a grey fill. */
+:root[data-theme='light'] .status-page {
+  --surface: var(--bg);
 }
 .status-top {
   margin-bottom: 26px;
@@ -68,20 +73,28 @@
 
 .status-hero {
   --tone: var(--good);
+  --mark: var(--good-mark);
   display: flex;
   align-items: center;
   gap: 16px;
   padding: 20px 22px;
-  border: 1px solid color-mix(in srgb, var(--tone) 28%, var(--rule));
+  border: 1px solid color-mix(in srgb, var(--mark) 32%, var(--rule));
   border-radius: var(--radius);
-  background: linear-gradient(120deg, color-mix(in srgb, var(--tone) 13%, var(--surface)), color-mix(in srgb, var(--tone) 4%, var(--surface)) 70%);
+  background: linear-gradient(120deg, color-mix(in srgb, var(--mark) 12%, var(--surface)), color-mix(in srgb, var(--mark) 3%, var(--surface)) 70%);
   box-shadow: var(--shadow);
 }
 .status-hero.degraded {
   --tone: var(--warn);
+  --mark: var(--warn-mark);
 }
 .status-hero.outage {
   --tone: var(--crit);
+  --mark: var(--crit-mark);
+}
+.status-hero.unknown {
+  --tone: var(--ink-3);
+  --mark: var(--ink-3);
+  box-shadow: none;
 }
 .status-hero-icon {
   position: relative;
@@ -91,7 +104,7 @@
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  background: var(--tone);
+  background: var(--mark);
 }
 .status-hero-icon svg {
   width: 24px;
@@ -102,13 +115,17 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+/* Amber is light in both themes, so its mark is drawn dark. */
+.status-hero.degraded .status-hero-icon svg {
+  stroke: #1f1600;
+}
 /* A slow ring while something is wrong, so the page reads at a glance. */
 .status-hero.degraded .status-hero-icon::after,
 .status-hero.outage .status-hero-icon::after {
   content: '';
   position: absolute;
   inset: -4px;
-  border: 2px solid var(--tone);
+  border: 2px solid var(--mark);
   border-radius: 50%;
   opacity: 0;
   animation: status-ring 2.4s ease-out infinite;
@@ -134,7 +151,8 @@
 }
 .status-hero .min0 > span {
   display: block;
-  margin-top: 2px;
+  margin-top: 3px;
+  line-height: 1.5;
   color: var(--ink-2);
   font-size: 13.5px;
 }
@@ -168,6 +186,12 @@
   font-size: 12.5px;
   font-weight: 500;
 }
+.status-group-count.quiet {
+  color: var(--ink-3);
+}
+.status-group-count.some {
+  color: var(--warn);
+}
 .status-group-count.down {
   color: var(--crit);
 }
@@ -195,6 +219,7 @@
 }
 .status-state {
   --tone: var(--good);
+  --mark: var(--good-mark);
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -205,20 +230,32 @@
 }
 .status-state.down {
   --tone: var(--crit);
+  --mark: var(--crit-mark);
 }
 .status-state.unknown,
 .status-state.paused {
   --tone: var(--ink-3);
+  --mark: var(--ink-3);
 }
 .status-state.maintenance {
   --tone: var(--warn);
+  --mark: var(--warn-mark);
 }
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--tone);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone) 18%, transparent);
+  background: var(--mark);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mark) 20%, transparent);
+}
+/* A service that is down pulses gently, like the headline. */
+.status-state.down .status-dot {
+  animation: status-dot 2s ease-in-out infinite;
+}
+@keyframes status-dot {
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--mark) 10%, transparent);
+  }
 }
 
 /* ---------- 90 days ---------- */
@@ -386,6 +423,15 @@
   .status-scale .short {
     display: inline;
   }
+  /* The tag goes above the notice, so the text keeps the full width. */
+  .status-notice {
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+  }
+  .status-legend {
+    gap: 8px 14px;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .status-hero .status-hero-icon::after {
@@ -393,6 +439,9 @@
   }
   .day-bars .day {
     transition: none;
+  }
+  .status-state.down .status-dot {
+    animation: none;
   }
 }
 
@@ -433,76 +482,106 @@
   margin-bottom: 0;
 }
 
-/* Planned maintenance and the owner's incident notices. */
-.status-maint {
+/* Ongoing incidents and planned maintenance, under the headline. */
+.status-notices {
   display: grid;
   gap: 10px;
-  margin-top: 18px;
+  margin-top: 16px;
 }
-.status-maint-row {
+.status-notice {
+  --tone: var(--warn);
+  --mark: var(--warn-mark);
   display: flex;
   gap: 14px;
   align-items: flex-start;
-  padding: 12px 16px;
-  border: 1px solid var(--rule);
-  border-left: 3px solid var(--warn-mark);
+  padding: 14px 18px;
+  border: 1px solid color-mix(in srgb, var(--mark) 26%, var(--rule));
+  border-left: 3px solid var(--mark);
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--warn) 5%, var(--surface));
+  background: color-mix(in srgb, var(--mark) 5%, var(--surface));
 }
-.status-maint-row strong {
+.status-notice.incident {
+  --tone: var(--crit);
+  --mark: var(--crit-mark);
+}
+.status-notice strong {
   display: block;
+  font-weight: 620;
 }
-.status-maint-row p {
-  margin: 4px 0 0;
+.status-notice p {
+  margin: 6px 0 0;
   color: var(--ink-2);
   font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre-line;
 }
-.status-maint-tag {
+.status-notice-tag {
   flex: none;
-  padding: 2px 8px;
+  margin-top: 1px;
+  padding: 2px 9px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--warn) 16%, transparent);
-  color: var(--warn);
+  background: color-mix(in srgb, var(--mark) 16%, transparent);
+  color: var(--tone);
   font-size: 12px;
   font-weight: 600;
+  white-space: nowrap;
 }
-.status-maint-when {
+.status-notice.maint.on .status-notice-tag,
+.status-notice.incident .status-notice-tag {
+  background: var(--mark);
+  color: #fff;
+}
+.status-notice.maint.on .status-notice-tag {
+  color: #1f1600;
+}
+.status-notice-when {
   display: block;
+  margin-top: 1px;
   color: var(--ink-3);
   font-size: 12.5px;
 }
+
+/* Settled incidents, at the foot. */
 .status-incidents {
   margin-top: 32px;
 }
 .status-incidents h2 {
-  margin: 0 0 10px;
+  margin: 0 4px 10px;
   font-size: 15px;
+  font-weight: 620;
 }
 .status-incident {
-  padding: 12px 0;
+  padding: 14px 4px;
   border-top: 1px solid var(--rule);
+}
+.status-incident:last-child {
+  border-bottom: 1px solid var(--rule);
 }
 .status-incident-head {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  align-items: baseline;
+  gap: 4px 12px;
   flex-wrap: wrap;
 }
-.status-incident-head span {
+.status-incident-head strong {
+  font-weight: 600;
+}
+.status-incident-when {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
   color: var(--ink-3);
   font-size: 12.5px;
 }
-.status-incident.open strong::before {
-  content: '';
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 8px;
-  border-radius: 50%;
-  background: var(--crit-mark);
+.status-resolved {
+  color: var(--good);
+  font-weight: 600;
 }
 .status-incident p {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   color: var(--ink-2);
   font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre-line;
 }

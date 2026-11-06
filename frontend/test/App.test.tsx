@@ -159,6 +159,8 @@ describe('StatusPage', () => {
     // The title is set once the page has its data, which can come a moment after its text.
     await waitFor(() => expect(document.title).toBe('Partial outage · Acme status'));
     expect(screen.getByText('0 of 1 operational')).toBeInTheDocument();
+    // The headline names what is down.
+    expect(screen.getByText('web is down. Everything else is running normally.')).toBeInTheDocument();
     expect(screen.getByText('99.21% uptime')).toBeInTheDocument();
     expect(screen.getByText('Updated just now')).toBeInTheDocument();
     const bars = screen.getByRole('img', { name: 'web, the last 90 days: 1 day with downtime' });
@@ -168,7 +170,7 @@ describe('StatusPage', () => {
     fireEvent.pointerEnter(bars.querySelectorAll('.day')[89]);
     const tip = screen.getByRole('tooltip');
     expect(tip).toHaveTextContent('97.2% up');
-    expect(tip).toHaveTextContent('about 40m 0s down');
+    expect(tip).toHaveTextContent('about 40m down');
   });
 
   it('falls back to the 30-day figure from an older monitor without days', async () => {
@@ -182,6 +184,40 @@ describe('StatusPage', () => {
     expect(screen.getByText('97.5% uptime')).toBeInTheDocument();
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
     await waitFor(() => expect(document.title).toBe('Acme status'));
+  });
+
+  it('puts ongoing incidents under the headline and settled ones at the foot', () => {
+    const web = { name: 'web', status: 'maintenance' as const, uptime_24h: 100, uptime_30d: 100, recent: [] };
+    render(
+      <StatusView
+        data={{
+          title: 'Acme status',
+          overall: 'operational',
+          updated: Date.now() / 1000,
+          services: [web],
+          incidents: [
+            { id: 1, title: 'Slow logins', text: 'Looking into it.', started: 1_700_000_000, ended: null, published: true },
+            { id: 2, title: 'Disk full', text: '', started: 1_699_000_000, ended: 1_699_003_600, published: true },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText('web is under planned maintenance. Everything else is running normally.')).toBeInTheDocument();
+    const notices = screen.getByRole('region', { name: 'Incidents and planned maintenance' });
+    expect(within(notices).getByText('Slow logins')).toBeInTheDocument();
+    expect(within(notices).getByText('Ongoing incident')).toBeInTheDocument();
+    expect(within(notices).queryByText('Disk full')).not.toBeInTheDocument();
+    const recent = screen.getByRole('heading', { name: 'Recent incidents' }).parentElement!;
+    expect(within(recent).getByText('Disk full')).toBeInTheDocument();
+    expect(within(recent).getByText('Resolved')).toBeInTheDocument();
+    // Nothing is down, but nothing is fully up either: the count stays quiet.
+    expect(screen.getByText('0 of 1 operational')).toHaveClass('quiet');
+  });
+
+  it('says when the page cannot be reached', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 500 }));
+    render(<StatusPage />);
+    expect(await screen.findByText('The status page is not available')).toBeInTheDocument();
   });
 });
 
@@ -764,8 +800,8 @@ describe('qBittorrent', () => {
       .slice(1)
       .map((r) => r.querySelector('.truncate')?.textContent);
     expect(names).toEqual(['stuck.mkv', 'active.iso', 'seeding.iso']);
-    expect(screen.getByText(/stalled 21m 0s, 1 recovery try/)).toBeInTheDocument();
-    expect(screen.getByText(/10m 0s left/)).toBeInTheDocument();
+    expect(screen.getByText(/stalled 21m, 1 recovery try/)).toBeInTheDocument();
+    expect(screen.getByText(/10m left/)).toBeInTheDocument();
 
     fireEvent.click(within(screen.getByRole('group', { name: 'Filter torrents' })).getByRole('button', { name: /^seeding/i }));
     expect(screen.queryByText('stuck.mkv')).not.toBeInTheDocument();
@@ -1273,7 +1309,7 @@ describe('network', () => {
     );
     expect(await screen.findByText('100 Mbit/s')).toBeInTheDocument(); // 12.5 MB/s down
     expect(screen.getAllByText('10% of link')).toHaveLength(1);
-    expect(screen.getByText(/speeds from qBittorrent \(includes uTP\)/)).toBeInTheDocument();
+    expect(screen.getByText(/via qBittorrent/)).toHaveAttribute('title', expect.stringContaining('uTP'));
     expect(screen.getByText('198.51.100.7')).toBeInTheDocument();
     // The page also asks for the attack watch; the meter's own polls ask only for new samples.
     const meter = () => fetchMock.mock.calls.map(([u]) => String(u)).filter((u) => u.startsWith('/api/network'));
@@ -1282,6 +1318,30 @@ describe('network', () => {
     fireEvent.click(screen.getByRole('button', { name: /^wg0/ }));
     expect(screen.getByRole('button', { name: /^wg0/ })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText(/wg0/, { selector: '.page-sub span' })).toBeInTheDocument();
+  });
+
+  it('keeps program rows in place while the monitor re-sorts them every second', async () => {
+    const nic = { name: 'eth0', up: true, default: true, virtual: false, rx_bps: 1000, tx_bps: 0, rx_pps: 0, tx_pps: 0, rx_peak: 0, tx_peak: 0, rx_avg: 0, tx_avg: 0, rx_total: 0, tx_total: 0, errors: 0, drops: 0 };
+    const proc = (name: string, rx: number) => ({ name, connections: 1, rx_bps: rx, tx_bps: 0 });
+    let calls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (!String(input).startsWith('/api/network')) return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+      calls++;
+      // Busiest first, as the monitor sends them: b overtakes a, and c goes quiet for a moment.
+      const processes = calls === 1 ? [proc('a', 900), proc('b', 500), proc('c', 100)] : [proc('b', 950), proc('a', 800), proc('c', 0)];
+      return new Response(JSON.stringify({ enabled: true, history: [], network: { interfaces: [nic], samples: { eth0: [{ ts: calls, rx: 1, tx: 1 }] }, processes, hosts: [], connections: 3, since: 90 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    render(
+      <MemoryRouter>
+        <NetworkPage />
+      </MemoryRouter>,
+    );
+    const names = () => [...document.querySelectorAll('.net-table tbody td.fill > div:first-child')].map((d) => d.textContent);
+    await waitFor(() => expect(names()).toEqual(['a', 'b', 'c']));
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(3), { timeout: 4000 });
+    expect(names()).toEqual(['a', 'b', 'c']);
   });
 
   it('shows the page when a list comes back null, as a monitor before the fix sent', async () => {
@@ -3303,18 +3363,22 @@ describe('firewall', () => {
 
     // A port's "Add rule" fills the form; the dashboard's own port is refused with the reason.
     const submit = () => fireEvent.click(screen.getByLabelText('Port').closest('form')!.querySelector('button[type=submit]')!);
+    fireEvent.click(screen.getByRole('button', { name: '+ Add a rule' }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Block/ }));
     fireEvent.change(screen.getByLabelText('Port'), { target: { value: '9101' } });
     submit();
     expect(await screen.findByText(/would cut off the dashboard/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Add a rule for 51413/udp' }));
     await waitFor(() => expect(screen.getByLabelText('Port')).toHaveValue('51413'));
+    fireEvent.click(screen.getByRole('radio', { name: /^Block/ }));
     fireEvent.change(screen.getByLabelText('From'), { target: { value: '198.51.100.0/24' } });
     submit();
     await waitFor(() => expect(fw.calls).toContain('add block 198.51.100.0/24 51413 in'));
     expect(await screen.findByText('198.51.100.0/24')).toBeInTheDocument();
 
-    // A preset opens a port for everyone.
-    fireEvent.click(screen.getByRole('button', { name: 'Web' }));
+    // A quick rule opens a port for everyone.
+    fireEvent.click(await screen.findByRole('button', { name: '+ Add a rule' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Web' }));
     expect(screen.getByLabelText('Port')).toHaveValue('80,443');
     submit();
     await waitFor(() => expect(fw.calls).toContain('add allow  80,443 in'));
@@ -3342,8 +3406,9 @@ describe('firewall', () => {
     // Outgoing: its own rules, and no limits.
     fireEvent.click(screen.getByRole('button', { name: /Outgoing/ }));
     expect(screen.getByText('tcp port 25')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '+ Add a rule' }));
     expect(screen.getByLabelText('To')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Limit' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /^Limit/ })).not.toBeInTheDocument();
   });
 
   it('asks which open ports to keep before dropping what no rule allows, then waits to be kept', async () => {

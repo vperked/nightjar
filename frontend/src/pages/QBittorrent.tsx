@@ -15,7 +15,7 @@ import { Actions, TorrentRow, useActions } from './qbittorrent/Torrents';
 
 type Filter = 'all' | Group;
 const FILTERS: Filter[] = ['all', 'downloading', 'stalled', 'seeding', 'paused'];
-const mbs = (v: number) => (v === 0 ? '0' : v.toFixed(v < 10 ? 1 : 0));
+const mbs = (v: number) => (v < 10 ? String(Number(v.toFixed(1))) : v.toFixed(0)); // "5", not "5.0", beside "10"
 
 function Body({ q, refresh }: { q: QBState; refresh: () => void }) {
   const now = useNow(5000);
@@ -68,11 +68,11 @@ function Body({ q, refresh }: { q: QBState; refresh: () => void }) {
       <div className="page-title">
         <div className="min0">
           <h1>qBittorrent</h1>
-          <MediaTabs current="/qbittorrent" />
           <div className="svc-target truncate">
             {q.version ? `${q.version} · ` : ''}
             {q.url}
           </div>
+          <MediaTabs current="/qbittorrent" />
         </div>
         <State status={q.updated === 0 ? 'unknown' : q.connected ? 'up' : 'down'} />
       </div>

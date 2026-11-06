@@ -241,6 +241,13 @@ func TestOriginCheckBehindAProxy(t *testing.T) {
 	if rec := put("203.0.113.5:40000", map[string]string{"Origin": "https://monitor.example.com", "X-Forwarded-Host": "monitor.example.com"}); rec.Code != http.StatusForbidden {
 		t.Fatalf("a forwarded host from elsewhere: %d", rec.Code)
 	}
+	// A plain proxy_pass passes on neither; the browser still says the page is the dashboard's own.
+	if rec := put("127.0.0.1:40000", map[string]string{"Origin": "https://monitor.example.com", "Sec-Fetch-Site": "same-origin"}); rec.Code == http.StatusForbidden {
+		t.Fatalf("a same-origin page behind a plain proxy was refused: %s", rec.Body)
+	}
+	if rec := put("127.0.0.1:40000", map[string]string{"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("a cross-site page: %d", rec.Code)
+	}
 }
 
 // The dashboard's stats leave the scanner's cached processes, which alerts read, as they were.

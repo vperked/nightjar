@@ -43,7 +43,16 @@ type LogInfo struct {
 }
 
 // rotatedBase is a rotated log's name without its rotation suffix: kern.log for kern.log.2.gz.
-func rotatedBase(name string) string { return rotatedLogRE.ReplaceAllString(name, "") }
+// Suffixes stack (dateext then compress gives auth.log-20240115.gz), so they come off until none is left.
+func rotatedBase(name string) string {
+	for {
+		base := rotatedLogRE.ReplaceAllString(name, "")
+		if base == name || base == "" {
+			return name
+		}
+		name = base
+	}
+}
 
 // looksLikeLog says whether a file name reads as a log rather than, say, a library (libc.so.6) or
 // a kernel module (*.ko.zst) that happens to end the way a rotated log does.

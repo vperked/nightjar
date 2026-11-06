@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"nightjar/internal/config"
 )
 
 // SSH is how Nightjar logs in to a host.
@@ -620,7 +622,8 @@ func (m *Monitor) AuthorizeKey(ctx context.Context, id string, login SSH, passwo
 		"-o", "PreferredAuthentications=password,keyboard-interactive",
 		"-o", "NumberOfPasswordPrompts=1",
 		"--", target, AuthorizeCommand(string(public)))
-	env := append(os.Environ(), "SSH_ASKPASS="+askpass, "SSH_ASKPASS_REQUIRE=force", "DISPLAY=nightjar:0", AskPassEnv+"=1", PasswordEnv+"="+password)
+	// The monitor's own secrets stay out of ssh's environment, as they do for repair scripts.
+	env := append(config.Environ(), "SSH_ASKPASS="+askpass, "SSH_ASKPASS_REQUIRE=force", "DISPLAY=nightjar:0", AskPassEnv+"=1", PasswordEnv+"="+password)
 	out, stderr, err := m.execIn(ctx, time.Minute, nil, env, "ssh", args...)
 	if err != nil {
 		if strings.Contains(stderr, "Permission denied") {

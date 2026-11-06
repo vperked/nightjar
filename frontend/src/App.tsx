@@ -14,6 +14,7 @@ import { SectionOff, type SectionID } from './components/Sections';
 import { Finder, SearchIcon, openFinder, shortcutLabel } from './components/Finder';
 import { HealthInTab, useProblems } from './components/HealthInTab';
 import { Skeleton } from './components/Skeleton';
+import { bootDone } from './boot';
 import { ToastProvider } from './components/Toasts';
 import { DemoBanner } from './components/ui';
 import { useNewBuild } from './freshness';
@@ -354,6 +355,12 @@ function Shell() {
   }, []);
 
   useEffect(() => onUnauthorized(() => setSignedOut(true)), []);
+  // The loading screen stays until the config says what to show: the dashboard, or a sign-in. The
+  // public status page lifts it itself, once its first answer is in.
+  const statusPage = location.pathname === '/status';
+  useEffect(() => {
+    if (config && !statusPage) bootDone();
+  }, [config, statusPage]);
   // Signing in or out reloads the config and restarts every poll.
   const signedIn = () => setAuthKey((k) => k + 1);
   const signOut = async () => {

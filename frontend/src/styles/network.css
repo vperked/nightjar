@@ -3,20 +3,26 @@
 .readout-link:hover {
   color: var(--ink);
 }
+/* The meter: download and upload side by side, the chart under them at full width. */
 .net-live {
   display: grid;
-  grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
-  gap: 28px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 22px;
   margin-top: 16px;
 }
 .net-dirs {
   display: grid;
-  gap: 22px;
-  align-content: start;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--rule);
+}
+.net-dir {
+  min-width: 0;
+  padding-right: 28px;
 }
 .net-dir + .net-dir {
-  padding-top: 20px;
-  border-top: 1px solid var(--rule);
+  padding: 0 0 0 28px;
+  border-left: 1px solid var(--rule);
 }
 .net-dir-head {
   display: flex;
@@ -34,6 +40,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  max-width: 360px;
   margin-top: 10px;
   font-size: 12px;
   color: var(--ink-3);
@@ -58,18 +65,19 @@
   transition: width 0.4s ease-out;
 }
 .net-stats {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 3px 14px;
-  margin: 12px 0 0;
-  font-size: 12.5px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 32px;
+  margin: 14px 0 0;
+  font-size: 13px;
 }
 .net-stats dt {
   color: var(--ink-3);
+  font-size: 11.5px;
 }
 .net-stats dd {
-  margin: 0;
-  text-align: right;
+  margin: 1px 0 0;
+  font-weight: 550;
 }
 .net-chart .section-head {
   margin-bottom: 8px;
@@ -87,7 +95,7 @@
 /* Interface cards: one per interface, the watched one outlined. */
 .ifaces {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 12px;
 }
 .iface {
@@ -131,10 +139,13 @@
   font-size: 12px;
   color: var(--ink-3);
 }
+/* Two fixed columns, so a rate growing a digit never moves the other or wraps the card. */
 .iface-rates {
-  display: flex;
-  gap: 14px;
-  font-size: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  white-space: nowrap;
+  font-size: 13.5px;
   font-weight: 500;
 }
 .iface-rates .swatch {
@@ -167,16 +178,34 @@
   .net-columns {
     grid-template-columns: minmax(0, 1fr);
   }
-  .net-dirs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
+  .net-dir {
+    padding-right: 16px;
   }
   .net-dir + .net-dir {
-    padding-top: 0;
-    border-top: 0;
+    padding-left: 16px;
   }
   .net-rate {
     font-size: 26px;
+  }
+}
+/* On a phone, each figure is a line: label left, value right. */
+@media (max-width: 560px) {
+  .net-stats {
+    display: grid;
+    gap: 3px;
+    font-size: 12.5px;
+  }
+  .net-stats > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .net-stats dt {
+    font-size: inherit;
+  }
+  .net-stats dd {
+    margin: 0;
+    font-weight: 500;
   }
 }
 .title-with-badge {
@@ -417,82 +446,155 @@
 .fw-action.limit {
   color: var(--warn);
 }
-.fw-add.limit {
-  grid-template-columns: auto minmax(0, 1.2fr) minmax(0, 0.7fr) minmax(0, 0.8fr) minmax(0, 1.1fr) minmax(0, 0.9fr) auto;
+/* The rule form: one question a row (a label, then its answer), the rule in words at the foot. */
+.fw-new {
+  margin-left: auto;
 }
-.fw-rate-row {
+.fw-form {
   display: grid;
-  grid-template-columns: minmax(48px, 0.6fr) minmax(0, 1fr);
-  gap: 6px;
-}
-.fw .table .btn-quiet {
-  padding: 2px 6px;
-  font-size: 12.5px;
-}
-.fw-add {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 10px;
-  padding: 12px 14px;
-  border: 1px solid var(--rule);
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--rule-strong);
   border-radius: var(--radius);
   background: var(--bg-sunk);
 }
-.fw-add .install-field .field {
-  width: 100%;
+.fw-form-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+}
+.fw-form-head strong {
+  font-size: 15px;
+}
+.fw-quick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.fw-step {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 14px;
+  margin: 0;
+  padding: 0;
+  border: 0;
   min-width: 0;
 }
-.fw-add .seg {
-  align-self: end;
-  margin-bottom: 2px;
+.fw-step > legend {
+  float: left;
+  padding: 0;
 }
-.fw-error,
-.fw-help,
-.fw-editing,
-.fw-presets {
-  grid-column: 1 / -1;
+.fw-step-label {
+  color: var(--ink-3);
+  font-size: 13px;
+}
+.fw-step .seg {
+  justify-self: start;
+}
+.fw-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.fw-actions.n2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.fw-actions .fw-choice {
+  align-content: start;
+  background: var(--surface);
+}
+.fw-choice.fw-act-allow {
+  --pick: var(--good);
+}
+.fw-choice.fw-act-block {
+  --pick: var(--crit);
+}
+.fw-choice.fw-act-limit {
+  --pick: var(--warn);
+}
+.fw-actions .fw-choice.on {
+  background: color-mix(in srgb, var(--pick) 9%, var(--surface));
+}
+.fw-actions .fw-choice.on strong {
+  color: var(--pick);
+}
+.fw-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+.fw-pick > .field {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.fw-pick > .fw-port-input {
+  flex: 1 1 140px;
+}
+.fw-pick > .fw-proto {
+  flex: 0 1 150px;
+}
+.fw-pick > .fw-count {
+  flex: 0 0 72px;
+}
+.fw-pick > select.field:not(.fw-proto) {
+  flex: 0 1 140px;
+}
+.fw-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.fw-form-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
+}
+.fw-preview {
+  flex: 1 1 280px;
   margin: 0;
+  font-size: 14px;
+}
+.fw-preview.unfinished {
+  color: var(--ink-3);
 }
 .fw-submit {
   display: flex;
   gap: 8px;
   align-items: center;
 }
-.fw-editing {
-  font-size: 13px;
-  font-weight: 600;
+.fw-error,
+.fw-help {
+  margin: 0;
 }
-.fw-presets {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-/* The form fits the section it is in: one row where there is room, stacked in a server page's column
-   or on a phone. */
+/* The form fits the section it is in: stacked in a server page's column or on a phone. */
 .fw {
   container-type: inline-size;
 }
-@container (max-width: 760px) {
-  .fw-add,
-  .fw-add.limit {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+@container (max-width: 640px) {
+  .fw-step {
+    grid-template-columns: minmax(0, 1fr);
   }
-  .fw-add .fw-rate {
-    grid-column: 1 / -1;
+  .fw-step > legend {
+    float: none;
+    margin-bottom: 6px;
   }
-  .fw-add .seg,
-  .fw-add .fw-source,
-  .fw-add .fw-note,
-  .fw-add .fw-submit {
-    grid-column: 1 / -1;
+  .fw-actions,
+  .fw-actions.n2 {
+    grid-template-columns: minmax(0, 1fr);
   }
-  .fw-add .fw-submit .btn {
+  .fw-submit,
+  .fw-submit .btn {
     flex: 1;
-  }
-  .fw-add .seg {
-    justify-self: start;
   }
 }
 /* The rules: an action, then who and which ports, its note, and Remove. */
@@ -666,12 +768,36 @@
   cursor: pointer;
 }
 .fw-choice strong {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--ink);
   font-size: 14px;
 }
+/* Chosen: a soft tint in the choice's colour and a filled dot, not a hard outline. --pick is the
+   colour: the ink by default, an action's own on the rule form. */
+.fw-choice {
+  --pick: var(--ink-2);
+}
+.fw-choice strong::before {
+  content: '';
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--ink-3);
+  border-radius: 50%;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
 .fw-choice.on {
-  border-color: var(--ink);
-  box-shadow: inset 0 0 0 1px var(--ink);
+  border-color: color-mix(in srgb, var(--pick) 45%, var(--rule));
+  background: color-mix(in srgb, var(--pick) 9%, var(--bg-sunk));
+}
+.fw-choice.on strong::before {
+  border-color: var(--pick);
+  background: var(--pick);
+  box-shadow: inset 0 0 0 2px var(--bg-sunk);
 }
 .fw-choice:disabled {
   cursor: default;

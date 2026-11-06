@@ -130,7 +130,10 @@ func (h *kernelChecks) checkCrashes(s *Snapshot) {
 	}
 	h.crashCounter = 0
 	now := s.Now
-	r := h.ctx.Kernel.CheckCrashes(cfg.KernelCheckSinceMinutes)
+	// journalctl and dmesg can take up to 40s between them: the watchdog hears from the loop meanwhile.
+	r := withTimeout(h.ctx, 2*time.Minute, kernel.CrashReport{}, "kernel crash check", func() kernel.CrashReport {
+		return h.ctx.Kernel.CheckCrashes(cfg.KernelCheckSinceMinutes)
+	})
 
 	if f := r.Flood; f != nil && now-h.lastFloodAlert >= floodEvery {
 		h.lastFloodAlert = now

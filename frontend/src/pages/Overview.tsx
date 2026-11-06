@@ -128,14 +128,16 @@ function ServicesSection() {
     );
   }
   const list = data.services;
-  const up = list.filter((s) => s.status === 'up').length;
+  // Counted as the health badge counts: paused checks are not watched, and only down is not up.
+  const watched = list.filter((s) => s.status !== 'paused');
+  const up = watched.filter((s) => s.status !== 'down').length;
   return (
     <Section
       label="Services"
       aside={
         <span className="small ink-3">
           <span className="num">
-            {up}/{list.length}
+            {up}/{watched.length}
           </span>{' '}
           up · <Link to="/services">all services →</Link>
         </span>

@@ -34,7 +34,6 @@ export function WeeklyReportPage() {
       <div className="page-title">
         <div className="min0">
           <h1>Weekly report</h1>
-          <IncidentsTabs current="/incidents/report" />
           <div className="page-sub">
             {!data
               ? ' '
@@ -42,6 +41,7 @@ export function WeeklyReportPage() {
                 ? `Sent every ${data.at}${data.next ? `; next on ${day(data.next)}` : ''}. This is the last seven days.`
                 : 'Off. Turn it on under Settings → Dashboard. This is the last seven days.'}
           </div>
+          <IncidentsTabs current="/incidents/report" />
         </div>
         <span className="title-actions">
           <Link className="btn-quiet" to="/settings?find=weekly">

@@ -65,6 +65,12 @@ func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 	}
+	// The browser's own word: it sets Sec-Fetch-Site, which no page can set or change, and says
+	// same-origin only for a request from a page of the address it is sending to. Behind a proxy that
+	// passes on neither the Host nor X-Forwarded-Host, that is the one sign the page is ours.
+	if r.Header.Get("Sec-Fetch-Site") == "same-origin" {
+		return true
+	}
 	msg := "Cross-origin changes are not allowed"
 	if behindProxy(r) {
 		msg += ". Behind a reverse proxy, have it pass on the Host it was asked for (nginx: proxy_set_header Host $host), or set DASHBOARD_URL"

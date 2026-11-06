@@ -72,13 +72,13 @@ export function CleanupPage() {
       <div className="page-title">
         <div className="min0">
           <h1>Cleanup</h1>
-          <MediaTabs current="/plex/cleanup" />
           {v && (
             <div className="page-sub">
               Never watched {v.days} days after being added → listed for {v.notice_days} days → torrents seeded to {v.ratio.toFixed(1)} (or {v.ratio_days} more days) → removed through{' '}
               {v.managers.length ? `${v.managers.join(' or ')}, else Plex` : 'Plex'}.
             </div>
           )}
+          <MediaTabs current="/plex/cleanup" />
         </div>
         <span className="title-actions">
           <Link className="btn-quiet" to="/settings?find=cleanup">

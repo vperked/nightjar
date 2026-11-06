@@ -153,11 +153,13 @@ const CLASSES: [string, string][] = [
   ['.status-top', 'title and intro'],
   ['.status-announcement', 'the banner (.info, .warning, .crit)'],
   ['.status-hero', 'the verdict (.operational, .degraded, .outage)'],
+  ['.status-notice', 'an ongoing incident or maintenance (.incident, .maint)'],
   ['.status-group', 'a group of checks'],
   ['.status-row', 'one check'],
   ['.status-state', 'its state (.up, .down, .paused)'],
   ['.day', 'a day bar (.good, .minor, .major, .none)'],
   ['.status-legend', 'what the bars mean'],
+  ['.status-incident', 'a resolved incident'],
   ['.status-custom-bottom', 'your bottom HTML'],
   ['.status-footer', 'the footer'],
 ];

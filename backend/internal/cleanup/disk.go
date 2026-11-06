@@ -641,6 +641,16 @@ func (c *Cleaner) SetupNginxLogs() {
 	}
 	uid, gid, owned := nginxOwner(o.NginxUserGroup)
 	for _, name := range []string{"error.log", "access.log"} {
+		// Anything but a plain file at a log's name (a symlink the web user planted while the folder
+		// was theirs) goes, so root nginx does not open some other file through it on the restart.
+		if info, err := r.Lstat(name); err == nil && !info.Mode().IsRegular() {
+			if err := r.Remove(name); err != nil {
+				diskLog.Error("could not remove a non-file at an nginx log's name; not restarting "+o.NginxServiceName, "file", name, "err", err)
+				r.Close()
+				return
+			}
+			diskLog.Warn("[CLEANUP] removed a link or other non-file at an nginx log's name", "file", name)
+		}
 		// O_EXCL never follows a link: an existing file, or a symlink in its place, is left alone.
 		f, err := r.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o640)
 		if err != nil {

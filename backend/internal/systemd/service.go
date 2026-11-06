@@ -52,12 +52,15 @@ Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 			fmt.Fprintf(&b, "EnvironmentFile=%s\n", envFile)
 		}
 	}
-	// Stopping waits up to 3s for the API, a minute for a check under way, 5s for the rest, then
-	// saves the minute in progress and closes the database; SIGKILL before then loses that minute.
+	// Stopping waits up to 3s for the API, a minute for a check under way, 15s for the rest, then
+	// closes the database, within TimeoutStopSec. An update under way (apt halfway through breaks the
+	// machine's packages) takes longer: Nightjar asks systemd for more time while it waits for one,
+	// which NotifyAccess lets it do.
 	fmt.Fprintf(&b, `ExecStart=%s
 Restart=always
 RestartSec=10
 TimeoutStopSec=90
+NotifyAccess=main
 KillMode=control-group
 KillSignal=SIGTERM
 StandardOutput=journal

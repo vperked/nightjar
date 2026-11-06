@@ -134,7 +134,8 @@ describe('Firewall manager', () => {
         <FirewallManager target={t} />
       </ToastProvider>,
     );
-    expect(await screen.findByLabelText('Port')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: '+ Add a rule' }));
+    expect(screen.getByLabelText('Port')).toBeInTheDocument();
   });
 
   it('leaves the protocol out once the port is cleared', async () => {
@@ -147,13 +148,63 @@ describe('Firewall manager', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Add a rule for 22/tcp' }));
     await waitFor(() => expect(screen.getByLabelText('Port')).toHaveValue('22'));
     expect(screen.getByLabelText('Protocol')).toHaveValue('tcp');
+    fireEvent.click(screen.getByRole('radio', { name: /^Block/ }));
     fireEvent.change(screen.getByLabelText('Port'), { target: { value: '' } });
     expect(screen.getByLabelText('Protocol')).toHaveValue('');
+    fireEvent.click(screen.getByLabelText('Every port'));
     fireEvent.change(screen.getByLabelText('From'), { target: { value: '203.0.113.7' } });
     fireEvent.click(screen.getByLabelText('Port').closest('form')!.querySelector('button[type=submit]')!);
     await waitFor(() => expect(added).toHaveLength(1));
     expect(added[0]).toMatchObject({ source: '203.0.113.7', port: '' });
     expect(added[0].proto).toBeUndefined();
+  });
+});
+
+describe('Firewall rule form', () => {
+  it('starts with nothing chosen, says what is missing, and puts the rule in words', async () => {
+    const st = { full: true, tool: 'ufw', policy: 'DROP', default: '', open: [], rules: [], listening: [] } as unknown as FirewallStatus;
+    const added: Partial<FirewallRule>[] = [];
+    const t: FirewallTarget = {
+      key: 'x',
+      name: 'x',
+      load: async () => st,
+      add: async (rule) => {
+        added.push(rule);
+        return st;
+      },
+      update: async () => st,
+      remove: async () => st,
+      order: async () => st,
+      setDefault: async () => st,
+      keep: async () => st,
+    };
+    render(
+      <ToastProvider>
+        <FirewallManager target={t} />
+      </ToastProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: '+ Add a rule' }));
+    const add = screen.getByRole('button', { name: 'Add rule' });
+    expect(add).toBeDisabled();
+    expect(screen.getByText('Pick what the rule does.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: /^Block/ }));
+    // Anyone on every port would block everything: it says so instead of greying the button out silently.
+    expect(screen.getByText(/would block everything, you included/)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Only', { selector: 'input[name="fw-who"]' }));
+    expect(screen.getByText(/Type who/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '203.0.113.7' } });
+    expect(screen.getByText(/block 203\.0\.113\.7 on every port/)).toBeInTheDocument();
+    // A limit needs a port, so choosing it asks for one.
+    fireEvent.click(screen.getByRole('radio', { name: /^Limit/ }));
+    expect(screen.getByLabelText('Every port')).toBeDisabled();
+    expect(screen.getByText(/Type the port/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Port'), { target: { value: '22' } });
+    expect(add).toBeEnabled();
+    fireEvent.click(add);
+    await waitFor(() => expect(added).toHaveLength(1));
+    expect(added[0]).toMatchObject({ action: 'limit', source: '203.0.113.7', port: '22', rate: '6/min' });
+    // It closes once added.
+    await waitFor(() => expect(screen.queryByRole('form', { name: 'Add a rule' })).not.toBeInTheDocument());
   });
 });
 

@@ -327,8 +327,8 @@ export function IncidentsPage() {
       <div className="page-title">
         <div className="min0">
           <h1>Incidents</h1>
-          <IncidentsTabs current="/incidents" />
           <div className="page-sub">What went wrong, what happened on the machine around it, and why.</div>
+          <IncidentsTabs current="/incidents" />
         </div>
         <Seg label="Time range" value={days} onChange={setDays} options={RANGES} />
       </div>

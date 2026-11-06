@@ -91,12 +91,36 @@ func rootPercent(s *Snapshot) float64 {
 	return 0
 }
 
+// logsPercent is how full the filesystem holding the logs is. Emptying logs frees space only there,
+// so that is what must set it off: with /var/log on a partition of its own, a full root is not
+// helped by emptying it, and a full log partition is, whatever root says.
+func logsPercent(ctx *Context, s *Snapshot) float64 {
+	dir := "/var/log"
+	if ctx.Cleaner != nil && ctx.Cleaner.Logs != nil && ctx.Cleaner.Logs.LogDir != "" {
+		dir = ctx.Cleaner.Logs.LogDir
+	}
+	mount, percent := "", -1.0
+	for _, p := range s.Partitions {
+		on := p.Mountpoint == "/" || dir == p.Mountpoint || strings.HasPrefix(dir, strings.TrimSuffix(p.Mountpoint, "/")+"/")
+		if on && len(p.Mountpoint) > len(mount) {
+			mount, percent = p.Mountpoint, p.Percent
+		}
+	}
+	if percent >= 0 {
+		return percent
+	}
+	if u, err := collect.DiskUsage(dir); err == nil {
+		return u.Percent
+	}
+	return rootPercent(s)
+}
+
 func (h *diskCleanup) check(s *Snapshot) {
 	cfg := h.ctx.Cfg
 	percent := rootPercent(s)
 	since := s.Now - h.lastCleanup
-	if percent >= cfg.DiskCleanupThreshold && since >= logCleanupInterval {
-		h.cleanLogs(s, percent)
+	if logs := logsPercent(h.ctx, s); logs >= cfg.DiskCleanupThreshold && since >= logCleanupInterval {
+		h.cleanLogs(s, logs)
 		since = 0
 	}
 	switch {

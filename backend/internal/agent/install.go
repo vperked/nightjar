@@ -79,6 +79,10 @@ type Settings struct {
 	// Firewall is the firewall install opened the port in, so uninstall can close it again; FirewallOff
 	// when install was told to leave the firewall alone (-firewall=false), which a reinstall keeps to.
 	Firewall string
+	// FirewallSet is the file having an AGENT_FIREWALL line at all. Agents installed before every
+	// install wrote one left it out both when told -firewall=false and when there was nothing to open,
+	// so without it a reinstall cannot tell whether the port may be opened, and leaves it as it is.
+	FirewallSet bool
 	// NoSmart is install having been told not to add smartmontools (-smart=false).
 	NoSmart bool
 	// Other are the file's other lines, such as AGENT_TRUSTED or AGENT_DEFEND added by hand, kept as
@@ -88,6 +92,10 @@ type Settings struct {
 
 // FirewallOff is AGENT_FIREWALL for an agent installed with -firewall=false.
 const FirewallOff = "off"
+
+// FirewallNone is AGENT_FIREWALL for an agent whose install could open its port but found no
+// firewall to open it in.
+const FirewallNone = "none"
 
 // Env writes the settings as the agent's settings file.
 func (s Settings) Env() string {
@@ -109,6 +117,9 @@ func (s Settings) Env() string {
 type Options struct {
 	Firewall bool
 	Smart    bool
+	// LeavePort is a reinstall that cannot tell whether the first install opened the port (see
+	// Settings.FirewallSet): iptables is still set up for the defense, but no port is opened.
+	LeavePort bool
 }
 
 // ListenAddress checks a -listen value: a port, or host:port.
@@ -178,12 +189,20 @@ func Install(listen, token string, plain bool, opt Options, out io.Writer) error
 		InstallSmart(out)
 	}
 	firewall := FirewallOff
-	if opt.Firewall {
+	if opt.Firewall && opt.LeavePort {
+		firewall = ""
+		fmt.Fprintln(out, "Leaving the firewall's open ports as they are: this agent's settings do not say whether its port was opened.")
+	} else if opt.Firewall {
 		firewall = OpenPort(listen, out)
-		if firewall == "" && saved.Firewall != FirewallOff {
+		if firewall == "" && saved.Firewall != FirewallOff && saved.Firewall != "" {
 			// The port an earlier install opened is still open; uninstall should still close it.
 			firewall = saved.Firewall
 		}
+		if firewall == "" {
+			firewall = FirewallNone
+		}
+	}
+	if opt.Firewall {
 		// Defending against attacks puts rules in iptables chains of the agent's own.
 		InstallIPTables(out)
 	}
@@ -222,7 +241,7 @@ func Uninstall(out io.Writer) error {
 		return errors.New("removing the agent needs root: run it with sudo")
 	}
 	exec.Command("systemctl", "disable", "--now", UnitName).Run()
-	if saved, ok := savedSettings(); ok && saved.Firewall != "" && saved.Firewall != FirewallOff {
+	if saved, ok := savedSettings(); ok && saved.Firewall != "" && saved.Firewall != FirewallOff && saved.Firewall != FirewallNone {
 		ClosePort(saved.Firewall, saved.Listen, out)
 	}
 	// The agent takes its chains out as it stops; these are for one that was killed or never got
@@ -290,7 +309,7 @@ func ParseSettings(env string) (s Settings, ok bool) {
 		case k == "AGENT_TLS":
 			s.Plain = v == "false"
 		case k == "AGENT_FIREWALL":
-			s.Firewall = v
+			s.Firewall, s.FirewallSet = v, true
 		case k == "AGENT_SMART":
 			s.NoSmart = v == "off"
 		default:
@@ -305,6 +324,9 @@ func ParseSettings(env string) (s Settings, ok bool) {
 func (s Settings) Reinstall(opt Options) Options {
 	if s.Firewall == FirewallOff {
 		opt.Firewall = false
+	}
+	if !s.FirewallSet {
+		opt.LeavePort = true
 	}
 	if s.NoSmart {
 		opt.Smart = false

@@ -75,7 +75,7 @@ function formatTick(t: number, step: number): string {
 }
 
 function formatHover(t: number, span: number): string {
-  const opts: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit' };
+  const opts: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' };
   if (span > 20 * 3600) Object.assign(opts, { month: 'short', day: 'numeric' });
   if (span < 3600) opts.second = '2-digit';
   return new Date(t * 1000).toLocaleString([], opts);

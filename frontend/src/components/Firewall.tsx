@@ -32,9 +32,9 @@ const portWords = (r: Pick<FirewallRule, 'port' | 'proto'>) => {
 };
 
 // describeRule puts a rule in words: "Block 203.0.113.7 on every port", "Limit anyone on tcp port 22
-// to 6 a minute each", "Block outgoing to anyone on port 25".
+// to 6 a minute each", "Block outgoing connections on port 25", "Allow outgoing to 192.0.2.25 on every port".
 export function describeRule(r: Pick<FirewallRule, 'action' | 'source' | 'port' | 'proto' | 'rate' | 'direction'>): string {
-  const who = `${r.direction === 'out' ? 'outgoing to ' : ''}${r.source || 'anyone'}`;
+  const who = r.direction === 'out' ? (r.source ? `outgoing to ${r.source}` : 'outgoing connections') : r.source || 'anyone';
   return `${ACTION[r.action]} ${who} on ${portWords(r)}${r.action === 'limit' ? ` to ${rateWords(r.rate)} each` : ''}`;
 }
 
@@ -93,8 +93,13 @@ export const hostFirewall = (h: { id: string; name: string }): FirewallTarget =>
 });
 
 interface Draft {
-  action: FirewallRule['action'];
+  // action is '' until one is picked: a new rule starts with no action, so nothing is chosen for you.
+  action: FirewallRule['action'] | '';
+  // who and ports say whether the rule is for anyone or every port, or for what is typed in source
+  // and port.
+  who: 'any' | 'some';
   source: string;
+  ports: 'all' | 'some';
   port: string;
   proto: '' | 'tcp' | 'udp';
   // count and unit are a limit's rate for each address.
@@ -103,11 +108,54 @@ interface Draft {
   note: string;
 }
 
-const EMPTY: Draft = { action: 'block', source: '', port: '', proto: '', count: '6', unit: 'min', note: '' };
+const EMPTY: Draft = { action: '', who: 'any', source: '', ports: 'all', port: '', proto: '', count: '6', unit: 'min', note: '' };
+
+// startDraft is a new rule's form filled with what is known: an address, a port, an action.
+const startDraft = (d: Partial<Draft>): Draft => ({ ...EMPTY, ...d, who: d.source ? 'some' : 'any', ports: d.port ? 'some' : 'all' });
 
 const draftOf = (r: FirewallRule): Draft => {
   const [count, unit] = (r.rate ?? '6/min').split('/');
-  return { action: r.action, source: r.source ?? '', port: (r.port ?? '').replaceAll(':', '-'), proto: r.proto ?? '', count, unit: (unit as Draft['unit']) || 'min', note: r.note ?? '' };
+  return {
+    action: r.action,
+    who: r.source ? 'some' : 'any',
+    source: r.source ?? '',
+    ports: r.port ? 'some' : 'all',
+    port: (r.port ?? '').replaceAll(':', '-'),
+    proto: r.proto ?? '',
+    count,
+    unit: (unit as Draft['unit']) || 'min',
+    note: r.note ?? '',
+  };
+};
+
+// ruleOf is the rule a draft makes, as the API takes it.
+const ruleOf = (draft: Draft, dir: 'in' | 'out'): Partial<FirewallRule> => {
+  const source = draft.who === 'some' ? draft.source.trim() : '';
+  const port = draft.ports === 'some' ? draft.port.trim() : '';
+  return {
+    action: draft.action || undefined,
+    direction: dir === 'out' ? 'out' : undefined,
+    source,
+    port,
+    // The protocol goes only with a port: a protocol alone is refused.
+    proto: (port && draft.proto) || undefined,
+    rate: draft.action === 'limit' ? `${draft.count.trim()}/${draft.unit}` : undefined,
+    note: draft.note.trim(),
+  };
+};
+
+// missing says what still keeps a draft from being a rule, in words, or '' when it is ready.
+const missing = (draft: Draft, dir: 'in' | 'out'): string => {
+  if (!draft.action) return 'Pick what the rule does.';
+  if (draft.who === 'some' && !draft.source.trim()) return `Type ${dir === 'out' ? 'where to' : 'who'}: an address such as 203.0.113.7, or a network such as 198.51.100.0/24.`;
+  if (draft.ports === 'some' && !draft.port.trim()) return 'Type the port: 22, a list such as 80,443, or a range such as 8000-8100.';
+  if (draft.action === 'limit' && draft.ports === 'all') return 'A limit is for a port: pick which one.';
+  if (draft.action === 'limit' && !Number(draft.count)) return 'Say how many each address may make.';
+  if (draft.who === 'any' && draft.ports === 'all')
+    return draft.action === 'block'
+      ? `That would block ${dir === 'out' ? 'everything this machine sends' : 'everything, you included'}: pick an address or a port.`
+      : `That would let ${dir === 'out' ? 'everything out' : 'everything in'}: pick an address or a port.`;
+  return '';
 };
 
 // Shortcuts for opening what a home server usually runs.
@@ -153,6 +201,8 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [editing, setEditing] = useState<FirewallRule>();
   const [formError, setFormError] = useState('');
+  // adding is whether the rule form is open: it opens from Add a rule, a port, a dropped address or Edit.
+  const [adding, setAdding] = useState(false);
   const [asking, setAsking] = useState(false);
   const busyRef = useRef('');
   busyRef.current = busy;
@@ -173,6 +223,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
     setSt(undefined);
     setDraft(EMPTY);
     setEditing(undefined);
+    setAdding(false);
     setAsking(false);
     refresh();
     const t = window.setInterval(() => {
@@ -198,52 +249,44 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
   };
 
   const form = useRef<HTMLFormElement>(null);
-  const toForm = () => {
-    form.current?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
-    form.current?.querySelector<HTMLInputElement>('input[name="who"]')?.focus({ preventScroll: true });
-  };
-  // ruleFor starts a rule: a port's from the open ports, or a block of an address that kept being dropped.
+  const toForm = () => form.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  // ruleFor opens the form on a new rule: empty from Add a rule, a port's from the open ports, or a
+  // block of an address that kept being dropped.
   const ruleFor = (d: Partial<Draft>, direction: 'in' | 'out' = 'in') => {
     setEditing(undefined);
     setFormError('');
     setDir(direction);
-    setDraft({ ...EMPTY, ...d });
+    setDraft(startDraft(d));
+    setAdding(true);
     setTimeout(toForm);
   };
   const edit = (r: FirewallRule) => {
     setEditing(r);
     setFormError('');
     setDraft(draftOf(r));
+    setAdding(true);
     setTimeout(toForm);
   };
   const cancelEdit = () => {
     setEditing(undefined);
     setDraft(EMPTY);
     setFormError('');
+    setAdding(false);
   };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (missing(draft, dir)) return;
     setBusy('form');
     setFormError('');
-    const rule: Partial<FirewallRule> = {
-      action: draft.action,
-      direction: dir === 'out' ? 'out' : undefined,
-      source: draft.source.trim(),
-      port: draft.port.trim(),
-      // The protocol goes only with a port: the control is greyed out without one, and a protocol
-      // alone is refused.
-      proto: (draft.port.trim() && draft.proto) || undefined,
-      rate: draft.action === 'limit' ? `${draft.count.trim()}/${draft.unit}` : undefined,
-      note: draft.note.trim(),
-      paused: editing?.paused,
-    };
+    const rule: Partial<FirewallRule> = { ...ruleOf(draft, dir), paused: editing?.paused };
     try {
       const s = editing ? await target.update(editing.id, rule) : await target.add(rule);
       if (s) setSt(withLists(s));
       notify({ tone: 'ok', title: `${editing ? 'Rule changed' : 'Rule added'} · ${target.name}`, body: describeRule(rule as FirewallRule) });
       setDraft(EMPTY);
       setEditing(undefined);
+      setAdding(false);
     } catch (err) {
       setFormError(errText(err));
     } finally {
@@ -311,22 +354,47 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
             </p>
           )}
           {!full && st.problem && <p className="note">{st.problem}</p>}
-          {full && (
+          {(full || canChange) && (
             <div className="fw-dir">
-              <Seg
-                label="Incoming or outgoing"
-                value={dir}
-                onChange={(d) => {
-                  setDir(d);
-                  cancelEdit();
-                }}
-                options={[
-                  { value: 'in', label: `Incoming${inCount ? ` ${inCount}` : ''}` },
-                  { value: 'out', label: `Outgoing${outCount ? ` ${outCount}` : ''}` },
-                ]}
-              />
-              {st.since ? <span className="small ink-3">counted since {formatAgo(st.since)}</span> : null}
+              {full && (
+                <Seg
+                  label="Incoming or outgoing"
+                  value={dir}
+                  onChange={(d) => {
+                    setDir(d);
+                    cancelEdit();
+                  }}
+                  options={[
+                    { value: 'in', label: `Incoming${inCount ? ` ${inCount}` : ''}` },
+                    { value: 'out', label: `Outgoing${outCount ? ` ${outCount}` : ''}` },
+                  ]}
+                />
+              )}
+              {full && st.since ? <span className="small ink-3">counted since {formatAgo(st.since)}</span> : null}
+              {canChange && !adding && (
+                <button type="button" className="btn fw-new" onClick={() => ruleFor({}, dir)}>
+                  + Add a rule
+                </button>
+              )}
             </div>
+          )}
+
+          {canChange && adding && (
+            <RuleForm
+              formRef={form}
+              st={st}
+              full={full}
+              tool={tool}
+              dir={dir}
+              setDir={setDir}
+              draft={draft}
+              setDraft={setDraft}
+              editing={editing}
+              busy={busy === 'form'}
+              error={formError}
+              onSubmit={submit}
+              onCancel={cancelEdit}
+            />
           )}
           {shown.length === 0 ? (
             <p className="note">
@@ -393,95 +461,6 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
             </ul>
           )}
 
-          {canChange && (
-            <form ref={form} className={`fw-add ${draft.action === 'limit' ? 'limit' : ''}`} onSubmit={submit} aria-label={editing ? 'Change the rule' : 'Add a rule'}>
-              {editing && <p className="fw-editing">Changing: {describeRule(editing)}</p>}
-              {full && dir === 'in' && !editing && (
-                <div className="fw-presets" role="group" aria-label="Open for">
-                  <span className="small ink-3">Open for</span>
-                  {presets(st).map((p) => (
-                    <button key={p.label} type="button" className="chip" onClick={() => setDraft({ ...EMPTY, action: 'allow', port: p.port, proto: p.proto, note: p.label })}>
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <Seg
-                label="Block, limit or allow"
-                value={draft.action}
-                onChange={(action) => setDraft({ ...draft, action })}
-                options={[{ value: 'block', label: 'Block' }, ...(dir === 'in' ? [{ value: 'limit' as const, label: 'Limit' }] : []), { value: 'allow', label: 'Allow' }]}
-              />
-              <label className="install-field fw-source">
-                <span>{dir === 'out' ? 'To' : 'From'}</span>
-                <input
-                  className="field mono"
-                  name="who"
-                  value={draft.source}
-                  onChange={(e) => setDraft({ ...draft, source: e.target.value })}
-                  placeholder="anyone, or an address"
-                  aria-label={dir === 'out' ? 'To' : 'From'}
-                  spellCheck={false}
-                />
-              </label>
-              <label className="install-field fw-port">
-                <span>Port</span>
-                <input className="field mono" value={draft.port} onChange={(e) => setDraft({ ...draft, port: e.target.value })} placeholder="all, or 22" aria-label="Port" spellCheck={false} />
-              </label>
-              <label className="install-field fw-proto">
-                <span>Over</span>
-                <select
-                  className="field"
-                  value={draft.port.trim() ? draft.proto : ''}
-                  onChange={(e) => setDraft({ ...draft, proto: e.target.value as Draft['proto'] })}
-                  aria-label="Protocol"
-                  disabled={!draft.port.trim()}
-                >
-                  <option value="">tcp and udp</option>
-                  <option value="tcp">tcp</option>
-                  <option value="udp">udp</option>
-                </select>
-              </label>
-              {draft.action === 'limit' && (
-                <div className="install-field fw-rate">
-                  <span>At most, each address</span>
-                  <div className="fw-rate-row">
-                    <input className="field mono" value={draft.count} onChange={(e) => setDraft({ ...draft, count: e.target.value.replace(/\D/g, '') })} aria-label="How many" inputMode="numeric" />
-                    <select className="field" value={draft.unit} onChange={(e) => setDraft({ ...draft, unit: e.target.value as Draft['unit'] })} aria-label="Per">
-                      <option value="sec">a second</option>
-                      <option value="min">a minute</option>
-                      <option value="hour">an hour</option>
-                    </select>
-                  </div>
-                </div>
-              )}
-              <label className="install-field fw-note">
-                <span>Note</span>
-                <input className="field" value={draft.note} onChange={(e) => setDraft({ ...draft, note: e.target.value })} placeholder="why, for later" aria-label="Note" maxLength={200} />
-              </label>
-              <div className="fw-submit">
-                {editing && (
-                  <button type="button" className="btn-quiet" onClick={cancelEdit}>
-                    Cancel
-                  </button>
-                )}
-                <button className="btn" type="submit" disabled={!!busy || (draft.action === 'limit' ? !draft.port.trim() || !Number(draft.count) : !draft.source.trim() && !draft.port.trim())}>
-                  {busy === 'form' ? 'Saving…' : editing ? 'Save' : ACTION[draft.action]}
-                </button>
-              </div>
-              {formError && <p className="form-error fw-error">{formError}</p>}
-              <p className="form-help fw-help">
-                {dir === 'out'
-                  ? 'An outgoing rule decides which new connections this machine may open: block one to stop it reaching an address or port, allow one above a block to make an exception.'
-                  : 'Nightjar refuses a block that would cut off this dashboard or whoever is logged in over SSH.'}
-                {dir === 'in' && draft.action === 'allow' && ' An allow opens the port here even if the machine’s own firewall would drop it.'}
-                {dir === 'in' &&
-                  draft.action === 'limit' &&
-                  ' Each address may open that many new connections (tcp) or send that many packets (udp); the rest are dropped until it slows down. 6 a minute on SSH stops password guessing.'}
-              </p>
-            </form>
-          )}
-
           {dir === 'in' && st.listening.length > 0 && <OpenPorts st={st} canChange={canChange} ruleFor={(p) => ruleFor({ port: String(p.port), proto: p.proto })} />}
         </div>
       </Section>
@@ -499,6 +478,213 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
         </Section>
       )}
     </>
+  );
+}
+
+// RuleForm adds or changes one rule, a question at a time: which way the traffic goes, what to do
+// with it, from whom, on which ports. It says the rule in words as it is filled in, and what is still
+// missing, so the button is never greyed out without a reason.
+function RuleForm({
+  formRef,
+  st,
+  full,
+  tool,
+  dir,
+  setDir,
+  draft,
+  setDraft,
+  editing,
+  busy,
+  error,
+  onSubmit,
+  onCancel,
+}: {
+  formRef: React.RefObject<HTMLFormElement>;
+  st: FirewallStatus;
+  full: boolean;
+  tool: string;
+  dir: 'in' | 'out';
+  setDir: (d: 'in' | 'out') => void;
+  draft: Draft;
+  setDraft: (d: Draft) => void;
+  editing?: FirewallRule;
+  busy: boolean;
+  error: string;
+  onSubmit: (e: React.FormEvent) => void;
+  onCancel: () => void;
+}) {
+  const set = (d: Partial<Draft>) => setDraft({ ...draft, ...d });
+  const out = dir === 'out';
+  const gap = missing(draft, dir);
+  const who = out ? 'To' : 'From';
+  const actions: { value: FirewallRule['action']; title: string; body: string }[] = out
+    ? [
+        { value: 'block', title: 'Block', body: 'Stop this machine connecting there.' },
+        { value: 'allow', title: 'Allow', body: 'Let it connect: an exception to a block further down.' },
+      ]
+    : [
+        { value: 'allow', title: 'Allow', body: `Let it in, even where ${tool} would drop it.` },
+        { value: 'block', title: 'Block', body: 'Drop it. A block that would cut off this dashboard or your SSH login is refused.' },
+        { value: 'limit', title: 'Limit', body: 'Let each address make only so many new connections, and drop the rest. Stops password guessing.' },
+      ];
+  const quick = full && !out && !editing ? presets(st) : [];
+
+  return (
+    <form ref={formRef} className="fw-form" onSubmit={onSubmit} aria-label={editing ? 'Change the rule' : 'Add a rule'}>
+      <div className="fw-form-head">
+        <strong>{editing ? 'Change the rule' : 'New rule'}</strong>
+        {editing && <span className="fw-editing small ink-3">Changing: {describeRule(editing)}</span>}
+      </div>
+
+      {quick.length > 0 && (
+        <div className="fw-quick" role="group" aria-label="Quick rules">
+          <span className="small ink-3">Quick:</span>
+          {quick.map((p) => (
+            <button key={p.label} type="button" className="chip" onClick={() => setDraft(startDraft({ action: 'allow', port: p.port, proto: p.proto, note: p.label }))}>
+              Open {p.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {full && !editing && (
+        <div className="fw-step">
+          <span className="fw-step-label">Traffic</span>
+          <Seg
+            label="Traffic"
+            value={dir}
+            onChange={(d) => {
+              setDir(d);
+              if (d === 'out' && draft.action === 'limit') set({ action: '' });
+            }}
+            options={[
+              { value: 'in', label: 'Coming in' },
+              { value: 'out', label: 'Going out' },
+            ]}
+          />
+        </div>
+      )}
+
+      <div className="fw-step">
+        <span className="fw-step-label">Do</span>
+        <div className={`fw-actions n${actions.length}`} role="radiogroup" aria-label="What the rule does">
+          {actions.map((a) => (
+            <button
+              key={a.value}
+              type="button"
+              role="radio"
+              aria-checked={draft.action === a.value}
+              className={`fw-choice fw-act-${a.value}${draft.action === a.value ? ' on' : ''}`}
+              onClick={() => set({ action: a.value, ...(a.value === 'limit' && draft.ports === 'all' ? { ports: 'some' as const } : {}) })}
+            >
+              <strong>{a.title}</strong>
+              <span>{a.body}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <fieldset className="fw-step">
+        <legend className="fw-step-label">{who}</legend>
+        <div className="fw-pick">
+          <label className="fw-radio">
+            <input type="radio" name="fw-who" checked={draft.who === 'any'} onChange={() => set({ who: 'any' })} />
+            {out ? 'Anywhere' : 'Anyone'}
+          </label>
+          <label className="fw-radio">
+            <input type="radio" name="fw-who" checked={draft.who === 'some'} onChange={() => set({ who: 'some' })} />
+            Only
+          </label>
+          <input
+            className="field mono"
+            name="who"
+            value={draft.source}
+            onChange={(e) => set({ source: e.target.value, ...(e.target.value.trim() ? { who: 'some' as const } : {}) })}
+            onFocus={() => set({ who: 'some' })}
+            placeholder="203.0.113.7 or 198.51.100.0/24"
+            aria-label={who}
+            spellCheck={false}
+          />
+        </div>
+      </fieldset>
+
+      <fieldset className="fw-step">
+        <legend className="fw-step-label">Port</legend>
+        <div className="fw-pick">
+          <label className="fw-radio">
+            <input type="radio" name="fw-ports" checked={draft.ports === 'all'} disabled={draft.action === 'limit'} onChange={() => set({ ports: 'all' })} />
+            Every port
+          </label>
+          <label className="fw-radio">
+            <input type="radio" name="fw-ports" checked={draft.ports === 'some'} onChange={() => set({ ports: 'some' })} />
+            Only
+          </label>
+          <input
+            className="field mono fw-port-input"
+            value={draft.port}
+            onChange={(e) => set({ port: e.target.value, ...(e.target.value.trim() ? { ports: 'some' as const } : {}) })}
+            onFocus={() => set({ ports: 'some' })}
+            placeholder="22, 80,443 or 8000-8100"
+            aria-label="Port"
+            spellCheck={false}
+          />
+          <select
+            className="field fw-proto"
+            value={draft.ports === 'some' && draft.port.trim() ? draft.proto : ''}
+            onChange={(e) => set({ proto: e.target.value as Draft['proto'] })}
+            aria-label="Protocol"
+            disabled={draft.ports !== 'some' || !draft.port.trim()}
+          >
+            <option value="">tcp and udp</option>
+            <option value="tcp">tcp only</option>
+            <option value="udp">udp only</option>
+          </select>
+        </div>
+      </fieldset>
+
+      {draft.action === 'limit' && (
+        <div className="fw-step">
+          <span className="fw-step-label">At most</span>
+          <div className="fw-pick">
+            <input className="field mono fw-count" value={draft.count} onChange={(e) => set({ count: e.target.value.replace(/\D/g, '') })} aria-label="How many" inputMode="numeric" />
+            <select className="field" value={draft.unit} onChange={(e) => set({ unit: e.target.value as Draft['unit'] })} aria-label="Per">
+              <option value="sec">a second</option>
+              <option value="min">a minute</option>
+              <option value="hour">an hour</option>
+            </select>
+            <span className="small ink-3">new connections (tcp) or packets (udp) from each address</span>
+          </div>
+        </div>
+      )}
+
+      <label className="fw-step">
+        <span className="fw-step-label">Note</span>
+        <input className="field" value={draft.note} onChange={(e) => set({ note: e.target.value })} placeholder="optional: why, for later" aria-label="Note" maxLength={200} />
+      </label>
+
+      <div className="fw-form-foot">
+        <p className={`fw-preview${gap ? ' unfinished' : ''}`} aria-live="polite" id="fw-preview">
+          {gap || (
+            <>
+              <span className="ink-3">This rule will </span>
+              {describeRule(ruleOf(draft, dir) as FirewallRule)
+                .replace(/^\w/, (c) => c.toLowerCase())}
+              .
+            </>
+          )}
+        </p>
+        <div className="fw-submit">
+          <button type="button" className="btn-quiet" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="btn" type="submit" disabled={busy || !!gap} aria-describedby="fw-preview">
+            {busy ? 'Saving…' : editing ? 'Save' : 'Add rule'}
+          </button>
+        </div>
+      </div>
+      {error && <p className="form-error fw-error">{error}</p>}
+      {out && <p className="form-help fw-help">An outgoing rule looks at new connections only, so replies to what reaches this machine always go out.</p>}
+    </form>
   );
 }
 

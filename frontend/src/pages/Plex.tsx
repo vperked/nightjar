@@ -64,11 +64,11 @@ function Body({ p, onChange }: { p: PlexState; onChange: (r: PlexResponse) => vo
       <div className="page-title">
         <div className="min0">
           <h1 className="truncate">{srv?.name || 'Plex'}</h1>
-          <MediaTabs current="/plex" />
           <div className="svc-target truncate">
             {srv ? `Plex Media Server ${srv.version} · ${srv.platform} · ` : ''}
             {p.url}
           </div>
+          <MediaTabs current="/plex" />
         </div>
         <State status={plexState(p.status)} />
       </div>
@@ -119,7 +119,7 @@ function Body({ p, onChange }: { p: PlexState; onChange: (r: PlexResponse) => vo
           <Section label="Concurrent streams" aside={<Legend series={streams} />}>
             <TrendChart series={streams} raw height={150} max={countMax} format={count} tip={(v) => `${Math.round(v)} ${Math.round(v) === 1 ? 'stream' : 'streams'}`} emptyText="collecting data…" />
             <div className="chart-note small ink-3 num">
-              peak {peakTotal} at once since {p.samples.length ? new Date(p.samples[0].ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
+              peak {peakTotal} at once since {p.samples.length ? new Date(p.samples[0].ts * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '—'}
             </div>
           </Section>
           <Section label="Bandwidth" aside={<span className="small ink-3">Mbps</span>}>

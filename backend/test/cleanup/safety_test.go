@@ -28,7 +28,8 @@ func TestOnlyLogNamesCountAsRotated(t *testing.T) {
 func TestSecurityArchivesAreNeverDeleted(t *testing.T) {
 	m, dir := newMonitor(t, 1000)
 	os.MkdirAll(filepath.Join(dir, "audit"), 0o755)
-	kept := []string{"auth.log.1", "auth.log.2.gz", "btmp.1", "wtmp.1", "secure-20240115", filepath.Join("audit", "audit.log.1")}
+	// auth.log-20240115.gz is logrotate dateext plus compress: two suffixes stacked.
+	kept := []string{"auth.log.1", "auth.log.2.gz", "auth.log-20240115.gz", "btmp.1", "wtmp.1", "secure-20240115", filepath.Join("audit", "audit.log.1")}
 	gone := filepath.Join(dir, "syslog.1")
 	past := time.Now().Add(-30 * 24 * time.Hour)
 	for _, n := range append(kept, "syslog.1") {

@@ -9,8 +9,201 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0a0a'/%3E%3Cpath d='M26 19.2A10.9 10.9 0 1 1 12.8 6a8.7 8.7 0 0 0 13.2 13.2z' fill='none' stroke='%23fff' stroke-width='2.6' stroke-linejoin='round'/%3E%3Ccircle cx='22.9' cy='7.6' r='1.9' fill='%23fff'/%3E%3C/svg%3E"
     />
     <title>Nightjar</title>
+    <script src="/boot.js"></script>
+    <!-- The loading screen: plain HTML and CSS, so it shows the moment the page arrives, before any
+         script or font. The app lifts it (src/boot.ts) once it knows what to show. -->
+    <style>
+      html {
+        background: #000;
+        color-scheme: dark;
+      }
+      html[data-theme='light'] {
+        background: #fff;
+        color-scheme: light;
+      }
+      #boot {
+        --boot-bg: #000;
+        --boot-ink: #f5f5f5;
+        --boot-dim: #8c8c8c;
+        --boot-faint: rgba(245, 245, 245, 0.08);
+        --boot-tile: #f5f5f5;
+        --boot-tile-ink: #000;
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: grid;
+        place-items: center;
+        background: var(--boot-bg);
+        color: var(--boot-ink);
+        font: 15px/1.4 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+        transition: opacity 0.35s ease;
+      }
+      html[data-theme='light'] #boot {
+        --boot-bg: #fff;
+        --boot-ink: #0a0a0a;
+        --boot-dim: #6b6b6b;
+        --boot-faint: rgba(10, 10, 10, 0.08);
+        --boot-tile: #0a0a0a;
+        --boot-tile-ink: #fff;
+      }
+      #boot.gone {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #boot .boot-inner {
+        display: grid;
+        justify-items: center;
+        gap: 18px;
+        /* A fast load never shows it: it fades in only after a moment. */
+        opacity: 0;
+        animation: boot-in 0.5s ease 0.25s forwards;
+      }
+      #boot .boot-tile {
+        position: relative;
+        display: grid;
+        place-items: center;
+        width: 64px;
+        height: 64px;
+        border-radius: 16px;
+        background: var(--boot-tile);
+        color: var(--boot-tile-ink);
+        animation: boot-float 4s ease-in-out infinite;
+      }
+      /* A soft ring that breathes out from the tile, like a watch light. */
+      #boot .boot-tile::before {
+        content: '';
+        position: absolute;
+        inset: -1px;
+        border-radius: inherit;
+        box-shadow: 0 0 0 0 var(--boot-faint);
+        animation: boot-ring 2.4s ease-out infinite;
+      }
+      #boot svg {
+        width: 38px;
+        height: 38px;
+      }
+      #boot .boot-star {
+        transform-origin: 17.2px 5.6px;
+        animation: boot-twinkle 2.4s ease-in-out infinite;
+      }
+      #boot .boot-name {
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      #boot .boot-name span {
+        color: var(--boot-dim);
+        font-weight: 400;
+      }
+      #boot .boot-bar {
+        position: relative;
+        width: 140px;
+        height: 2px;
+        overflow: hidden;
+        border-radius: 2px;
+        background: var(--boot-faint);
+      }
+      #boot .boot-bar::after {
+        content: '';
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 40%;
+        border-radius: inherit;
+        background: var(--boot-ink);
+        animation: boot-sweep 1.3s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+      }
+      #boot .boot-say {
+        display: grid;
+        max-width: min(320px, calc(100vw - 32px));
+        color: var(--boot-dim);
+        font-size: 13px;
+        text-align: center;
+      }
+      /* The first line gives way to the second if the dashboard takes long to answer. */
+      #boot .boot-say span {
+        grid-area: 1 / 1;
+      }
+      #boot .boot-say .boot-slow {
+        opacity: 0;
+        animation: boot-in 0.4s ease 10s forwards;
+      }
+      #boot .boot-say .boot-first {
+        animation: boot-out 0.4s ease 10s forwards;
+      }
+      @keyframes boot-in {
+        to {
+          opacity: 1;
+        }
+      }
+      @keyframes boot-out {
+        to {
+          opacity: 0;
+        }
+      }
+      @keyframes boot-float {
+        50% {
+          transform: translateY(-4px);
+        }
+      }
+      @keyframes boot-ring {
+        0% {
+          box-shadow: 0 0 0 0 var(--boot-faint);
+        }
+        70%,
+        100% {
+          box-shadow: 0 0 0 22px transparent;
+        }
+      }
+      @keyframes boot-twinkle {
+        0%,
+        100% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 0.35;
+          transform: scale(0.7);
+        }
+      }
+      @keyframes boot-sweep {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(250%);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot *,
+        #boot *::before,
+        #boot *::after {
+          animation-duration: 0.01s !important;
+          animation-iteration-count: 1 !important;
+        }
+        #boot .boot-bar::after {
+          width: 100%;
+          opacity: 0.4;
+        }
+      }
+    </style>
   </head>
   <body>
+    <div id="boot" role="status" aria-label="Loading Nightjar">
+      <div class="boot-inner">
+        <div class="boot-tile" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19.6 14.4A8.2 8.2 0 1 1 9.6 4.4a6.5 6.5 0 0 0 10 10z" />
+            <circle class="boot-star" cx="17.2" cy="5.6" r="1.35" fill="currentColor" stroke="none" />
+          </svg>
+        </div>
+        <div class="boot-name">night<span>jar</span></div>
+        <div class="boot-bar" aria-hidden="true"></div>
+        <div class="boot-say">
+          <span class="boot-first">Keeping watch…</span>
+          <span class="boot-slow">Taking longer than usual. Still trying to reach Nightjar…</span>
+        </div>
+      </div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

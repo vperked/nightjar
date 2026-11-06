@@ -14,11 +14,14 @@ const when = (ts: number) => new Date(ts * 1000).toLocaleString(undefined, { wee
 
 function Ranked({ list, unit }: { list: PlexCount[]; unit: 'hours' | 'plays' }) {
   if (!list.length) return <p className="note plex-stats-none">Nothing yet.</p>;
-  const most = Math.max(...list.map((c) => (unit === 'hours' ? (c.hours ?? 0) : c.n)), 1e-9);
+  const value = (c: PlexCount) => (unit === 'hours' ? (c.hours ?? 0) : c.n);
+  // A ranking reads top-down, so the biggest goes first whatever order it came in.
+  const ranked = [...list].sort((a, b) => value(b) - value(a));
+  const most = Math.max(...ranked.map(value), 1e-9);
   return (
     <ol className="plex-ranked">
-      {list.map((c) => {
-        const v = unit === 'hours' ? (c.hours ?? 0) : c.n;
+      {ranked.map((c) => {
+        const v = value(c);
         return (
           <li key={c.name}>
             <span className="truncate" title={c.name}>

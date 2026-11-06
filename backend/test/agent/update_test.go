@@ -280,4 +280,14 @@ func TestAReinstallKeepsTheSettingsAndChoicesOfTheFirstInstall(t *testing.T) {
 	if opt := old.Reinstall(agent.Options{Firewall: true, Smart: true}); !opt.Firewall || !opt.Smart || !old.Plain || old.Firewall != agent.FirewallUFW || len(old.Other) != 0 {
 		t.Fatalf("an older install: %+v %+v", old, opt)
 	}
+	if opt := old.Reinstall(agent.Options{Firewall: true}); opt.LeavePort {
+		t.Fatal("an install that says where it opened the port may open it again")
+	}
+
+	// One from before every install wrote AGENT_FIREWALL, told -firewall=false: the file does not say,
+	// so a reinstall leaves the port as it is rather than opening it to everyone.
+	legacy, _ := agent.ParseSettings(agent.Env(":9101", tok, false, ""))
+	if opt := legacy.Reinstall(agent.Options{Firewall: true, Smart: true}); !opt.LeavePort {
+		t.Fatalf("a reinstall of an agent with no firewall line would open its port: %+v", opt)
+	}
 }

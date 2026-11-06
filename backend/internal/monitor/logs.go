@@ -24,21 +24,17 @@ type logCleanup struct {
 func (h *logCleanup) check(s *Snapshot) {
 	cfg := h.ctx.Cfg
 	h.counter++
-	rootPercent := s.DiskPercent
-	for _, p := range s.Partitions {
-		if p.Mountpoint == "/" {
-			rootPercent = p.Percent
-		}
-	}
+	// The pressure that matters is on the filesystem the logs are on (see logsPercent).
+	percent := logsPercent(h.ctx, s)
 	interval := cfg.LogCheckInterval
-	if rootPercent >= cfg.DiskCleanupThreshold {
+	if percent >= cfg.DiskCleanupThreshold {
 		interval = pressureCheckInterval
 	}
 	if h.counter < interval {
 		return
 	}
 	h.counter = 0
-	h.checkLogs(s, rootPercent >= cfg.DiskAggressiveCleanupThreshold)
+	h.checkLogs(s, percent >= cfg.DiskAggressiveCleanupThreshold)
 	h.ctx.Heartbeat()
 }
 

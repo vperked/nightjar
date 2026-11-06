@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
 import type { NetInterface, NetSample, NetworkResponse, NetworkView, Sample } from '../api/types';
@@ -87,12 +87,18 @@ function Direction({ label, color, rate, avg, peak, total, speed }: { label: str
         </div>
       )}
       <dl className="net-stats num">
-        <dt>avg</dt>
-        <dd>{formatRate(avg)}</dd>
-        <dt>peak</dt>
-        <dd>{formatRate(peak)}</dd>
-        <dt>since boot</dt>
-        <dd>{formatBytes(total)}</dd>
+        <div>
+          <dt>avg</dt>
+          <dd>{formatRate(avg)}</dd>
+        </div>
+        <div>
+          <dt>peak</dt>
+          <dd>{formatRate(peak)}</dd>
+        </div>
+        <div>
+          <dt>since boot</dt>
+          <dd>{formatBytes(total)}</dd>
+        </div>
       </dl>
     </div>
   );
@@ -149,15 +155,51 @@ function InterfaceCard({ i, samples, current, onPick }: { i: NetInterface; sampl
   );
 }
 
-// active keeps the rows moving data (at least 1 B/s); with none, the five with most connections.
-function active<T extends { rx_bps: number; tx_bps: number; connections: number }>(rows: T[]): { shown: T[]; idle: number } {
-  const moving = rows.filter((r) => r.rx_bps + r.tx_bps >= 1);
-  const shown = moving.length ? moving.slice(0, 12) : [...rows].sort((a, b) => b.connections - a.connections).slice(0, 5);
-  return { shown, idle: rows.length - shown.length };
+// ifaceRank orders the cards: real links first, then virtual ones, loopback, and what is down last.
+function ifaceRank(i: NetInterface): number {
+  if (!i.up) return 3;
+  if (i.name === 'lo') return 2;
+  return i.virtual ? 1 : 0;
 }
+
+// HOLD is how long the program and host lists keep their order, and keep a row that went quiet.
+// The monitor re-sorts them every second, which would shuffle the rows under the reader's eye.
+const HOLD = 10_000;
+
+type Rate = { rx_bps: number; tx_bps: number; connections: number };
+
+// useSteady keeps rows moving data (at least 1 B/s), or with none, the five with most connections.
+// Rows keep their places for HOLD, new ones join at the bottom, and a row that stops stays that
+// long too; then the list is put in order again, busiest first.
+function useSteady<T extends Rate>(rows: T[], key: (r: T) => string): { shown: T[]; idle: number } {
+  const memo = useRef({ order: [] as string[], at: 0, seen: new Map<string, number>() });
+  return useMemo(() => {
+    const m = memo.current;
+    const now = Date.now();
+    for (const r of rows) if (r.rx_bps + r.tx_bps >= 1) m.seen.set(key(r), now);
+    for (const [k, t] of m.seen) if (now - t > HOLD) m.seen.delete(k);
+    let live = rows.filter((r) => m.seen.has(key(r)));
+    if (!live.length) live = [...rows].sort((a, b) => b.connections - a.connections).slice(0, 5);
+    const byKey = new Map(live.map((r) => [key(r), r]));
+    if (now - m.at > HOLD) {
+      m.order = live.map(key); // the monitor's order: busiest first
+      m.at = now;
+    } else {
+      m.order = [...m.order.filter((k) => byKey.has(k)), ...live.map(key).filter((k) => !m.order.includes(k))];
+    }
+    const shown = m.order.slice(0, 12).map((k) => byKey.get(k)!);
+    return { shown, idle: rows.length - shown.length };
+  }, [rows, key]);
+}
+
+const procKey = (p: { name: string }) => p.name;
+const hostKey = (h: { peer: string; process?: string }) => `${h.peer} ${h.process ?? ''}`;
 
 function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
   const [picked, setPicked] = useState<string>();
+  // The attack watch leads the page during an attack; while calm it waits at the foot.
+  const attacks = useLocalAttacks();
+  const cards = useMemo(() => [...net.interfaces].sort((a, b) => ifaceRank(a) - ifaceRank(b)), [net.interfaces]);
   const [range, setRange] = useState<Range>('live');
   const iface: NetInterface | undefined = net.interfaces.find((i) => i.name === picked) ?? net.interfaces[0];
   // Down virtual interfaces stay out of the menu, unless one is being watched (picked from its card).
@@ -172,9 +214,9 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
   }, [samples, history, range]);
   const maxProc = Math.max(1, ...net.processes.map((p) => Math.max(p.rx_bps, p.tx_bps)));
   const maxHost = Math.max(1, ...net.hosts.map((h) => Math.max(h.rx_bps, h.tx_bps)));
-  // Rows moving data come first; idle ones fold into a count unless nothing is moving at all.
-  const procs = active(net.processes);
-  const hosts = active(net.hosts);
+  // Rows moving data are shown, held in place a while; idle ones fold into a count.
+  const procs = useSteady(net.processes, procKey);
+  const hosts = useSteady(net.hosts, hostKey);
 
   // The meter has just woken and not read the interfaces yet: a moment, not "none".
   if (!iface) return Date.now() / 1000 - net.since < 10 ? <Skeleton kind="dashboard" /> : <p className="note">No network interfaces found.</p>;
@@ -193,7 +235,7 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
             <span className="mono">{iface.name}</span>
             {iface.speed_mbps ? ` · ${iface.speed_mbps >= 1000 ? `${iface.speed_mbps / 1000} Gbit/s` : `${iface.speed_mbps} Mbit/s`} link` : ''}
             {iface.default ? ' · default route' : ''}
-            {!iface.up ? ' · down' : ''} · live, every second
+            {!iface.up ? ' · down' : ''}
           </div>
           <NetworkTabs current="/network" />
         </div>
@@ -209,7 +251,7 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
         )}
       </div>
 
-      <LocalAttacks />
+      {attacks.attacking && attacks.node}
 
       <section className="panel net-live">
         <div className="net-dirs">
@@ -229,7 +271,7 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
               ]}
             />
           </div>
-          <TrendChart series={series} height={210} format={axis} tip={formatRate} emptyText="measuring…" />
+          <TrendChart series={series} height={220} format={axis} tip={formatRate} emptyText="measuring…" />
           <div className="chart-note small ink-3 num">
             {range === 'live' ? `${iface.rx_pps.toFixed(0)} packets/s in · ${iface.tx_pps.toFixed(0)} out` : 'all interfaces, every monitoring cycle'}
             {iface.new_errors || iface.new_drops ? (
@@ -264,8 +306,8 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
                       <div className="truncate" title={p.pids?.length ? `pid ${p.pids.join(', ')}` : undefined}>
                         {p.name}
                       </div>
-                      <div className="sub truncate">
-                        {[p.unit && `${p.unit}.service`, `${p.connections} conn`, p.source === 'qbittorrent' ? 'speeds from qBittorrent (includes uTP)' : ''].filter(Boolean).join(' · ')}
+                      <div className="sub truncate" title={p.source === 'qbittorrent' ? 'Speeds come from qBittorrent itself, so they include its uTP (UDP) traffic.' : undefined}>
+                        {[p.unit && `${p.unit}.service`, `${p.connections} conn`, p.source === 'qbittorrent' ? 'via qBittorrent' : ''].filter(Boolean).join(' · ')}
                       </div>
                     </td>
                     <td className="r num shrink">
@@ -324,21 +366,23 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
 
       <Section label="All interfaces" aside={<span className="small ink-3">click one to watch it</span>}>
         <div className="ifaces">
-          {net.interfaces.map((i) => (
+          {cards.map((i) => (
             <InterfaceCard key={i.name} i={i} samples={net.samples[i.name] ?? []} current={i.name === iface.name} onPick={() => setPicked(i.name)} />
           ))}
         </div>
       </Section>
+
+      {!attacks.attacking && attacks.node}
     </>
   );
 }
 
-// LocalAttacks is the watch for attacks on this machine, every 5 seconds.
-function LocalAttacks() {
+// useLocalAttacks is the watch for attacks on this machine, every 5 seconds, and whether one is on.
+function useLocalAttacks(): { node: ReactNode; attacking: boolean } {
   const { data, refresh } = usePoll(api.attacks, 5000);
   const now = useNow(5000);
   const notify = useToast();
-  if (!data?.enabled || !data.attacks) return null;
+  if (!data?.enabled || !data.attacks) return { node: null, attacking: false };
   const toggle = async (on: boolean) => {
     try {
       await api.setDefense(on);
@@ -361,7 +405,7 @@ function LocalAttacks() {
       notify({ tone: 'error', title: `Could not unblock ${address}`, body: (e as Error).message });
     }
   };
-  return <AttackWatch view={data.attacks} now={now} onToggle={toggle} onUnblock={unblock} />;
+  return { node: <AttackWatch view={data.attacks} now={now} onToggle={toggle} onUnblock={unblock} />, attacking: data.attacks.attacking };
 }
 
 export function NetworkPage() {

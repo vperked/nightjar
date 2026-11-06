@@ -342,6 +342,8 @@ func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 		return on
 	}
 	wh.hub.Maintenance = ctx.Maintenance.Holds
+	// The loop sends alerts itself: while one waits on a slow channel, the loop is busy, not stuck.
+	wh.hub.Waiting = ctx.Heartbeat
 	ctx.Activity = func(who, kind, target, detail string) {
 		db.AddActivity(storage.Activity{TS: float64(time.Now().Unix()), Who: who, Kind: kind, Action: detail, Target: target})
 	}
@@ -621,6 +623,26 @@ func run(cfg config.Settings, db *storage.Store, envFile string) (restart bool) 
 		log.Info("Shutdown signal received; stopping")
 	}
 	ctx.Watchdog.Stop()
+	// systemd kills a service that takes longer than TimeoutStopSec to stop, and with it apt or dpkg
+	// halfway through an update. While one is under way, ask it for more time.
+	extending := make(chan struct{})
+	defer close(extending)
+	go func() {
+		tick := time.NewTicker(20 * time.Second)
+		defer tick.Stop()
+		for {
+			if ctx.Updates != nil && ctx.Updates.Applying() != "" {
+				if err := systemd.Notify("EXTEND_TIMEOUT_USEC=60000000"); err != nil {
+					log.Debug("Could not ask systemd for more time to stop", "err", err)
+				}
+			}
+			select {
+			case <-extending:
+				return
+			case <-tick.C:
+			}
+		}
+	}()
 	if srv != nil {
 		sctx, scancel := context.WithTimeout(context.Background(), 3*time.Second)
 		srv.Shutdown(sctx)
@@ -628,7 +650,8 @@ func run(cfg config.Settings, db *storage.Store, envFile string) (restart bool) 
 	}
 	loop.Wait() // running uptime checks still record their results
 	<-remoteDone
-	if !waitFor(&background, 5*time.Second) {
+	// A media cleanup pass halfway through its removals gets a while to finish and save what it did.
+	if !waitFor(&background, 15*time.Second) {
 		log.Warn("Some background work had not stopped; closing the database without it")
 	}
 	ctx.Analytics.Flush() // the minute in progress

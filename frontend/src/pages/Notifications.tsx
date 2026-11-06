@@ -50,7 +50,7 @@ function day(ts: number): string {
   return d.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
 }
 
-const clockTime = (ts: number) => new Date(ts * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+const clockTime = (ts: number) => new Date(ts * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 
 const DELIVERY_TONE: Record<Notification['status'], string> = { sent: 'sent', digest: 'sent', held: 'held', muted: 'muted', failed: 'failed', kept: 'kept', throttled: 'muted', maintenance: 'muted' };
 

@@ -38,7 +38,7 @@ Under each incident, **Was that the cause?** takes a yes or no, what it really w
 
 ## Tell visitors
 
-When an incident affected checks on the [status page](/docs/status-page), **Tell visitors on the status page** opens a notice drafted for visitors: the names the page uses, how long, the cause in plain words ("a disk on the server filled up"), and whether it was fixed automatically. Nothing internal goes in it: no addresses, services or numbers. Edit it, then **Publish**. Published notices show under **Recent incidents** on the status page for 30 days, and an open incident's notice says when it ended once it has.
+When an incident affected checks on the [status page](/docs/status-page), **Tell visitors on the status page** opens a notice drafted for visitors: the names the page uses, how long, the cause in plain words ("a disk on the server filled up"), and whether it was fixed automatically. Nothing internal goes in it: no addresses, services or numbers. Edit it, then **Publish**. While the incident is open, its published notice shows at the top of the status page, under the headline. Once it ends, the notice moves to **Recent incidents** at the foot, marked _Resolved_ with when it started and ended, and stays there for 30 days.
 
 ## Planned maintenance
 

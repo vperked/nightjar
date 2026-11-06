@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,6 +176,46 @@ func TestALaterAlertWithTheSameTitleIsNotARetry(t *testing.T) {
 	h := history(db)
 	if len(h) != 3 || h[0].Status != "sent" || h[1].Status != "failed" || h[2].Status != "failed" {
 		t.Fatalf("the same alert long after is a new record, and the old failures stay failed, got %+v", h)
+	}
+}
+
+// A recovery in between makes the next identical alert a new outage, not a retry of the first
+// one's failed delivery: otherwise the second outage would only update the first's record.
+func TestASecondOutageAfterARecoveryIsItsOwnRecord(t *testing.T) {
+	c := &fake{name: "Discord", fail: true}
+	hub, db := newHub(t, notify.Destination{Channel: c})
+	now := at("10:00")
+	hub.Now = func() time.Time { return now }
+	r := discord.About(hub.Route("uptime"), "check:plex")
+	r.SendEmbed("is down", "connection refused", discord.Critical, nil, "")
+	c.fail = false
+	now = now.Add(10 * time.Minute)
+	r.SendEmbed("is back up", "", discord.OK, nil, "")
+	now = now.Add(30 * time.Minute)
+	r.SendEmbed("is down", "connection refused", discord.Critical, nil, "")
+	h := history(db)
+	if len(h) != 3 {
+		t.Fatalf("each outage and the recovery keep a record of their own, got %+v", h)
+	}
+	if h[2].Status != "failed" || h[0].Status != "sent" || h[0].Title != "is down" {
+		t.Fatalf("the first outage stays failed and the second is sent, got %+v", h)
+	}
+}
+
+// The monitoring loop sends alerts itself; while one waits on a slow channel the hub says so, so the
+// loop's watchdog does not take a slow plugin or webhook for a hung monitor.
+func TestTheHubSaysItIsWaitingOnASlowChannel(t *testing.T) {
+	notify.WaitBeat = 20 * time.Millisecond
+	t.Cleanup(func() { notify.WaitBeat = 5 * time.Second })
+	c := &fake{name: "slow", delay: 150 * time.Millisecond}
+	hub, _ := newHub(t, notify.Destination{Channel: c})
+	var beats atomic.Int32
+	hub.Waiting = func() { beats.Add(1) }
+	if !hub.Route("resources").SendEmbed("CPU Usage Alert", "", discord.Warning, nil, "") {
+		t.Fatal("the slow channel delivered")
+	}
+	if beats.Load() < 2 {
+		t.Fatalf("the hub said it was waiting %d times in 150ms", beats.Load())
 	}
 }
 

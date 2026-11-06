@@ -206,6 +206,10 @@ type Hub struct {
 	// Maintenance, when set, says whether planned downtime holds back an alert about subject:
 	// such alerts are kept, marked maintenance, and sent nowhere.
 	Maintenance func(subject string, now time.Time) bool
+	// Waiting, when set, is called every few seconds while an alert waits on slow channels. The
+	// monitoring loop sends alerts itself, so this tells its watchdog the loop is busy, not stuck: a
+	// plugin or webhook that takes its full time must not look like a hung monitor.
+	Waiting func()
 
 	mu     sync.Mutex
 	prefs  Prefs
@@ -329,6 +333,9 @@ func (h *Hub) send(a Alert, area, subject string, throttle bool) bool {
 			rec.Status, rec.Error = "throttled", "paused while this flaps"
 		}
 	}
+	h.mu.Lock()
+	h.forgetFailedLocked(rec, now)
+	h.mu.Unlock()
 	h.store.AddNotification(rec)
 	return true
 }
@@ -362,7 +369,7 @@ func (h *Hub) deliver(rec storage.Notification, targets []target, a Alert) bool 
 			}
 		}()
 	}
-	wg.Wait()
+	h.wait(&wg)
 	var problems []string
 	for i, t := range targets {
 		if ok[i] {
@@ -377,16 +384,11 @@ func (h *Hub) deliver(rec storage.Notification, targets []target, a Alert) bool 
 	}
 
 	// Only the same alert sent again soon after is a retry; anything else is a new record.
-	key := strings.Join([]string{rec.Area, rec.Subject, rec.Title, rec.Body}, "\x00")
+	key := failedKey(rec)
 	now := h.Now()
 	h.mu.Lock()
 	f, retry := h.failed[key]
-	delete(h.failed, key)
-	for k, f := range h.failed {
-		if now.Sub(f.at) > RetryWindow {
-			delete(h.failed, k)
-		}
-	}
+	h.forgetFailedLocked(rec, now)
 	h.mu.Unlock()
 	id := f.id
 	if retry && now.Sub(f.at) <= RetryWindow {
@@ -400,6 +402,47 @@ func (h *Hub) deliver(rec storage.Notification, targets []target, a Alert) bool 
 		h.mu.Unlock()
 	}
 	return rec.Status == "sent"
+}
+
+// failedKey identifies an alert for the retry link: the same area, subject, title and body.
+func failedKey(rec storage.Notification) string {
+	return strings.Join([]string{rec.Area, rec.Subject, rec.Title, rec.Body}, "\x00")
+}
+
+// forgetFailedLocked ends the retry link of every failed delivery that rec follows: its own, any
+// other for the same subject (a recovery, or a different alert, means the next one is news, not a
+// retry), and any older than RetryWindow. Without it a second outage within the hour would only
+// update the first one's record and vanish from history.
+func (h *Hub) forgetFailedLocked(rec storage.Notification, now time.Time) {
+	prefix := rec.Area + "\x00" + rec.Subject + "\x00"
+	for k, f := range h.failed {
+		if now.Sub(f.at) > RetryWindow || (rec.Subject != "" && strings.HasPrefix(k, prefix)) || k == failedKey(rec) {
+			delete(h.failed, k)
+		}
+	}
+}
+
+// WaitBeat is how often Waiting is called while an alert waits on its channels; tests shorten it.
+var WaitBeat = 5 * time.Second
+
+// wait waits for wg, calling Waiting every WaitBeat meanwhile.
+func (h *Hub) wait(wg *sync.WaitGroup) {
+	if h.Waiting == nil {
+		wg.Wait()
+		return
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	beat := time.NewTicker(WaitBeat)
+	defer beat.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-beat.C:
+			h.Waiting()
+		}
+	}
 }
 
 // mutedBy returns the first of subjects muted at now, or "".
