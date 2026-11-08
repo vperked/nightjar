@@ -25,7 +25,8 @@
         --boot-bg: #000;
         --boot-ink: #f5f5f5;
         --boot-dim: #8c8c8c;
-        --boot-faint: rgba(245, 245, 245, 0.08);
+        --boot-faint: rgba(245, 245, 245, 0.1);
+        --boot-glow: rgba(150, 170, 255, 0.13);
         --boot-tile: #f5f5f5;
         --boot-tile-ink: #000;
         position: fixed;
@@ -33,16 +34,23 @@
         z-index: 9999;
         display: grid;
         place-items: center;
-        background: var(--boot-bg);
+        overflow: hidden;
+        background: radial-gradient(ellipse 60% 45% at 50% 46%, var(--boot-glow), transparent 70%), var(--boot-bg);
         color: var(--boot-ink);
-        font: 15px/1.4 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
-        transition: opacity 0.35s ease;
+        font:
+          15px/1.4 'IBM Plex Sans',
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          sans-serif;
+        transition: opacity 0.4s ease;
       }
       html[data-theme='light'] #boot {
         --boot-bg: #fff;
         --boot-ink: #0a0a0a;
         --boot-dim: #6b6b6b;
-        --boot-faint: rgba(10, 10, 10, 0.08);
+        --boot-faint: rgba(10, 10, 10, 0.1);
+        --boot-glow: rgba(120, 140, 220, 0.12);
         --boot-tile: #0a0a0a;
         --boot-tile-ink: #fff;
       }
@@ -50,85 +58,183 @@
         opacity: 0;
         pointer-events: none;
       }
+      /* The night sky: two layers of stars, each twinkling on its own beat, and now and then one
+         falls. Day (the light theme) has a clear sky. Pure CSS, so it shows before any script. */
+      #boot::before,
+      #boot::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        pointer-events: none;
+      }
+      #boot::before {
+        background-image:
+          radial-gradient(1px 1px at 45.4% 55.7%, #fff 50%, transparent 100%), radial-gradient(1px 1px at 45.4% 84.1%, #fff 50%, transparent 100%),
+          radial-gradient(1.2px 1.2px at 19.7% 51.1%, #fff 50%, transparent 100%), radial-gradient(1px 1px at 60.9% 19.9%, #fff 50%, transparent 100%),
+          radial-gradient(1.2px 1.2px at 31.1% 10.7%, #fff 50%, transparent 100%), radial-gradient(1px 1px at 62.9% 59.2%, #fff 50%, transparent 100%),
+          radial-gradient(1.2px 1.2px at 94.6% 64.8%, #fff 50%, transparent 100%), radial-gradient(1.2px 1.2px at 64.4% 61.8%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 8.1% 5.4%, #fff 50%, transparent 100%), radial-gradient(1px 1px at 59.6% 76.7%, #fff 50%, transparent 100%),
+          radial-gradient(1.2px 1.2px at 44.3% 82.9%, #fff 50%, transparent 100%), radial-gradient(1px 1px at 24.4% 30.2%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 65.6% 45.9%, #fff 50%, transparent 100%), radial-gradient(1px 1px at 41.1% 54.9%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 69.9% 32.3%, #fff 50%, transparent 100%), radial-gradient(1.2px 1.2px at 51.2% 4.9%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 75.6% 40.4%, #fff 50%, transparent 100%), radial-gradient(1.2px 1.2px at 39.1% 94%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 2.1% 22.1%, #fff 50%, transparent 100%), radial-gradient(1px 1px at 47.1% 96.1%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 42.3% 56.4%, #fff 50%, transparent 100%), radial-gradient(1px 1px at 76.7% 27.9%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 31.9% 3.5%, #fff 50%, transparent 100%), radial-gradient(1px 1px at 74.8% 13.3%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 69.9% 3.1%, #fff 50%, transparent 100%), radial-gradient(1.2px 1.2px at 78.5% 19.1%, #fff 50%, transparent 100%),
+          radial-gradient(1.2px 1.2px at 20.1% 50.9%, #fff 50%, transparent 100%), radial-gradient(1px 1px at 75.9% 42.2%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 13.2% 42.4%, #fff 50%, transparent 100%), radial-gradient(1.2px 1.2px at 2% 85%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 31.2% 86.9%, #fff 50%, transparent 100%), radial-gradient(1.2px 1.2px at 20% 97.6%, #fff 50%, transparent 100%),
+          radial-gradient(1px 1px at 63.6% 11.6%, #fff 50%, transparent 100%), radial-gradient(1.2px 1.2px at 22.5% 26.8%, #fff 50%, transparent 100%);
+        animation:
+          boot-in 1.2s ease 0.2s forwards,
+          boot-stars 5s ease-in-out 1.4s infinite alternate;
+      }
+      #boot::after {
+        background-image:
+          radial-gradient(1.6px 1.6px at 33.6% 30.4%, #fff 50%, transparent 100%), radial-gradient(1.6px 1.6px at 9% 10.7%, #fff 50%, transparent 100%),
+          radial-gradient(1.6px 1.6px at 57.9% 25.3%, #fff 50%, transparent 100%), radial-gradient(1.6px 1.6px at 59.7% 37.7%, #fff 50%, transparent 100%),
+          radial-gradient(1.6px 1.6px at 45.5% 94.1%, #fff 50%, transparent 100%), radial-gradient(1.6px 1.6px at 48.4% 57.2%, #fff 50%, transparent 100%),
+          radial-gradient(1.6px 1.6px at 85.2% 19.6%, #fff 50%, transparent 100%), radial-gradient(1.6px 1.6px at 16.8% 89.2%, #fff 50%, transparent 100%),
+          radial-gradient(1.6px 1.6px at 80.5% 26%, #fff 50%, transparent 100%), radial-gradient(1.6px 1.6px at 20.2% 73%, #fff 50%, transparent 100%),
+          radial-gradient(1.6px 1.6px at 92.3% 20.9%, #fff 50%, transparent 100%), radial-gradient(1.6px 1.6px at 93.2% 86.7%, #fff 50%, transparent 100%);
+        animation:
+          boot-in 1.2s ease 0.5s forwards,
+          boot-stars 3.6s ease-in-out 1.7s infinite alternate-reverse;
+      }
+      html[data-theme='light'] #boot::before,
+      html[data-theme='light'] #boot::after,
+      html[data-theme='light'] #boot .boot-meteor {
+        display: none;
+      }
+      #boot .boot-meteor {
+        position: absolute;
+        top: 22%;
+        left: 12%;
+        width: 130px;
+        height: 1.5px;
+        border-radius: 2px;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.6) 70%, #fff);
+        opacity: 0;
+        transform: rotate(22deg);
+        animation: boot-meteor 7s cubic-bezier(0.4, 0, 0.2, 1) 1.6s infinite;
+      }
       #boot .boot-inner {
+        position: relative;
         display: grid;
         justify-items: center;
-        gap: 18px;
+        gap: 20px;
         /* A fast load never shows it: it fades in only after a moment. */
         opacity: 0;
-        animation: boot-in 0.5s ease 0.25s forwards;
+        animation: boot-rise 0.6s cubic-bezier(0.22, 0.8, 0.24, 1) 0.25s forwards;
+      }
+      /* The mark, with a faint orbit around it and a light going round it, like a watch keeping time. */
+      #boot .boot-mark {
+        position: relative;
+        display: grid;
+        place-items: center;
+        width: 132px;
+        height: 132px;
+      }
+      #boot .boot-orbit {
+        position: absolute;
+        inset: 0;
+        border: 1px solid var(--boot-faint);
+        border-radius: 50%;
+        animation: boot-spin 6s linear infinite;
+      }
+      #boot .boot-orbit::after {
+        content: '';
+        position: absolute;
+        top: -3.5px;
+        left: calc(50% - 3.5px);
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--boot-ink);
+        box-shadow: 0 0 10px 2px var(--boot-ink);
       }
       #boot .boot-tile {
         position: relative;
         display: grid;
         place-items: center;
-        width: 64px;
-        height: 64px;
-        border-radius: 16px;
+        width: 76px;
+        height: 76px;
+        border-radius: 20px;
         background: var(--boot-tile);
         color: var(--boot-tile-ink);
+        box-shadow:
+          0 0 0 1px var(--boot-faint),
+          0 18px 50px -12px var(--boot-glow);
         animation: boot-float 4s ease-in-out infinite;
       }
-      /* A soft ring that breathes out from the tile, like a watch light. */
-      #boot .boot-tile::before {
-        content: '';
-        position: absolute;
-        inset: -1px;
-        border-radius: inherit;
-        box-shadow: 0 0 0 0 var(--boot-faint);
-        animation: boot-ring 2.4s ease-out infinite;
-      }
-      #boot svg {
-        width: 38px;
-        height: 38px;
+      #boot svg.boot-moon {
+        width: 44px;
+        height: 44px;
       }
       #boot .boot-star {
         transform-origin: 17.2px 5.6px;
         animation: boot-twinkle 2.4s ease-in-out infinite;
       }
       #boot .boot-name {
-        font-size: 20px;
+        font-size: 26px;
         font-weight: 600;
-        letter-spacing: -0.01em;
+        letter-spacing: -0.02em;
       }
       #boot .boot-name span {
         color: var(--boot-dim);
         font-weight: 400;
       }
-      #boot .boot-bar {
-        position: relative;
-        width: 140px;
-        height: 2px;
-        overflow: hidden;
-        border-radius: 2px;
-        background: var(--boot-faint);
+      /* A heartbeat trace: the line sits faint, and a bright pulse runs along it. */
+      #boot svg.boot-pulse {
+        width: 168px;
+        height: 30px;
+        overflow: visible;
       }
-      #boot .boot-bar::after {
-        content: '';
-        position: absolute;
-        inset: 0 auto 0 0;
-        width: 40%;
-        border-radius: inherit;
-        background: var(--boot-ink);
-        animation: boot-sweep 1.3s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+      #boot .boot-pulse path {
+        fill: none;
+        stroke-width: 1.6;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
+      #boot .boot-pulse .trace {
+        stroke: var(--boot-faint);
+      }
+      #boot .boot-pulse .beat {
+        stroke: var(--boot-ink);
+        stroke-dasharray: 22 100;
+        stroke-dashoffset: 122;
+        filter: drop-shadow(0 0 3px var(--boot-ink));
+        animation: boot-beat 1.6s cubic-bezier(0.45, 0, 0.3, 1) infinite;
+      }
+      /* What it is doing: a line every couple of seconds, then the last one stays. If the dashboard
+         takes long to answer, that gives way to saying so. */
       #boot .boot-say {
         display: grid;
         max-width: min(320px, calc(100vw - 32px));
+        min-height: 1.4em;
         color: var(--boot-dim);
-        font-size: 13px;
+        font-size: 13.5px;
         text-align: center;
       }
-      /* The first line gives way to the second if the dashboard takes long to answer. */
       #boot .boot-say span {
         grid-area: 1 / 1;
+        opacity: 0;
+      }
+      #boot .boot-say .s1 {
+        animation: boot-line 2.2s ease 0.3s both;
+      }
+      #boot .boot-say .s2 {
+        animation: boot-line 2.2s ease 2.5s both;
+      }
+      #boot .boot-say .s3 {
+        animation:
+          boot-in 0.4s ease 4.7s forwards,
+          boot-out 0.4s ease 10s forwards;
       }
       #boot .boot-say .boot-slow {
-        opacity: 0;
-        animation: boot-in 0.4s ease 10s forwards;
-      }
-      #boot .boot-say .boot-first {
-        animation: boot-out 0.4s ease 10s forwards;
+        animation: boot-in 0.4s ease 10.4s forwards;
       }
       @keyframes boot-in {
         to {
@@ -140,18 +246,61 @@
           opacity: 0;
         }
       }
-      @keyframes boot-float {
-        50% {
+      @keyframes boot-rise {
+        from {
+          opacity: 0;
+          transform: translateY(10px) scale(0.98);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @keyframes boot-line {
+        0% {
+          opacity: 0;
+          transform: translateY(4px);
+        }
+        15%,
+        80% {
+          opacity: 1;
+          transform: none;
+        }
+        100% {
+          opacity: 0;
           transform: translateY(-4px);
         }
       }
-      @keyframes boot-ring {
-        0% {
-          box-shadow: 0 0 0 0 var(--boot-faint);
+      @keyframes boot-stars {
+        from {
+          opacity: 0.35;
         }
-        70%,
+        to {
+          opacity: 0.9;
+        }
+      }
+      @keyframes boot-meteor {
+        0% {
+          opacity: 0;
+          transform: translate(0, 0) rotate(22deg);
+        }
+        2% {
+          opacity: 1;
+        }
+        11%,
         100% {
-          box-shadow: 0 0 0 22px transparent;
+          opacity: 0;
+          transform: translate(320px, 130px) rotate(22deg);
+        }
+      }
+      @keyframes boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes boot-float {
+        50% {
+          transform: translateY(-4px);
         }
       }
       @keyframes boot-twinkle {
@@ -165,41 +314,70 @@
           transform: scale(0.7);
         }
       }
-      @keyframes boot-sweep {
-        0% {
-          transform: translateX(-100%);
-        }
-        100% {
-          transform: translateX(250%);
+      @keyframes boot-beat {
+        to {
+          stroke-dashoffset: 0;
         }
       }
+      @media (max-width: 480px) {
+        #boot .boot-mark {
+          width: 116px;
+          height: 116px;
+        }
+        #boot .boot-tile {
+          width: 68px;
+          height: 68px;
+          border-radius: 18px;
+        }
+      }
+      /* Reduced motion: everything settles where it ends, nothing loops. */
       @media (prefers-reduced-motion: reduce) {
         #boot *,
         #boot *::before,
-        #boot *::after {
+        #boot *::after,
+        #boot::before,
+        #boot::after {
           animation-duration: 0.01s !important;
           animation-iteration-count: 1 !important;
+          animation-delay: 0s !important;
         }
-        #boot .boot-bar::after {
-          width: 100%;
-          opacity: 0.4;
+        #boot .boot-meteor,
+        #boot .boot-orbit::after {
+          display: none;
+        }
+        #boot .boot-pulse .beat {
+          stroke-dasharray: none;
+          opacity: 0.5;
+        }
+        #boot .boot-say .s1,
+        #boot .boot-say .s2 {
+          display: none;
         }
       }
     </style>
   </head>
   <body>
     <div id="boot" role="status" aria-label="Loading Nightjar">
+      <span class="boot-meteor" aria-hidden="true"></span>
       <div class="boot-inner">
-        <div class="boot-tile" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19.6 14.4A8.2 8.2 0 1 1 9.6 4.4a6.5 6.5 0 0 0 10 10z" />
-            <circle class="boot-star" cx="17.2" cy="5.6" r="1.35" fill="currentColor" stroke="none" />
-          </svg>
+        <div class="boot-mark" aria-hidden="true">
+          <span class="boot-orbit"></span>
+          <div class="boot-tile">
+            <svg class="boot-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19.6 14.4A8.2 8.2 0 1 1 9.6 4.4a6.5 6.5 0 0 0 10 10z" />
+              <circle class="boot-star" cx="17.2" cy="5.6" r="1.35" fill="currentColor" stroke="none" />
+            </svg>
+          </div>
         </div>
         <div class="boot-name">night<span>jar</span></div>
-        <div class="boot-bar" aria-hidden="true"></div>
+        <svg class="boot-pulse" viewBox="0 0 168 30" aria-hidden="true">
+          <path class="trace" d="M2 15H58l7-11 9 22 7-15 5 4h80" pathLength="100" />
+          <path class="beat" d="M2 15H58l7-11 9 22 7-15 5 4h80" pathLength="100" />
+        </svg>
         <div class="boot-say">
-          <span class="boot-first">Keeping watch…</span>
+          <span class="s1">Waking up…</span>
+          <span class="s2">Checking on your servers…</span>
+          <span class="s3">Keeping watch…</span>
           <span class="boot-slow">Taking longer than usual. Still trying to reach Nightjar…</span>
         </div>
       </div>

@@ -110,14 +110,23 @@
 :root[data-style='cards'] .columns {
   gap: 0 12px;
 }
-:root[data-style='cards'] .section-head .label,
+/* Titles read as words, in sentence case: a panel's in the ink, a reading's quieter. */
+:root[data-style='cards'] .section-head .label {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  text-transform: none;
+  color: var(--ink);
+}
 :root[data-style='cards'] .readout > .label,
 :root[data-style='cards'] .readout-head .label,
 :root[data-style='cards'] .stats-row .label {
   font-family: var(--sans);
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--ink-2);
 }
 :root[data-style='cards'] .readouts,
@@ -214,6 +223,12 @@
 :root[data-style='cards'] .table th,
 :root[data-style='cards'] .subtabs {
   font-family: var(--sans);
+}
+:root[data-style='cards'] .table th {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
 }
 :root[data-style='cards'] .subtabs {
   font-size: 13.5px;
@@ -451,4 +466,98 @@
 }
 :root[data-charts='lines'] .plex-days .core > span {
   background: var(--ink-3);
+}
+
+/* ---------- Cards speak in one voice ---------- */
+
+/* Cards are sentence-case sans throughout. The Ruled look's mono capitals and square tags, which
+   the incident pages, the log's diagnosis and a few labels kept, become quiet sans text, rounded
+   pills and rounded banners here. Code, logs, addresses and paths stay mono. */
+:root[data-style='cards']
+  :is(
+    .inc-when,
+    .inc-state,
+    .inc-confidence,
+    .inc-kind,
+    .inc-hit span,
+    .inc-peaks,
+    .inc-toggle,
+    .inc-at,
+    .inc-role,
+    .inc-flag,
+    .inc-readings-head .label,
+    .latest-when,
+    .repair-when,
+    .repair-result,
+    .chip-btn,
+    .inc-notice-form .label,
+    .maint-meta,
+    .report-meta,
+    .dx-panel-label,
+    .dx-likely,
+    .dx-fix-label,
+    .plex-stats-label,
+    .stream-kind,
+    .activity-when,
+    .sections-group-label,
+    .tp-col-head,
+    .live-badge,
+    .inbox-day-head
+  ) {
+  font-family: var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+}
+/* Tags: pills, a touch larger now they are lower case. */
+:root[data-style='cards'] :is(.inc-state, .inc-confidence, .inc-kind, .inc-flag, .repair-result, .dx-likely, .stream-kind, .chip-btn) {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+:root[data-style='cards'] :is(.inc-state, .inc-kind, .inc-flag, .chip-btn) {
+  padding: 2px 10px;
+}
+:root[data-style='cards'] .inc-hit {
+  border-radius: 999px;
+}
+/* What happened when, and around it: quiet sans, read after the words it belongs to. */
+:root[data-style='cards'] :is(.inc-when, .inc-peaks, .inc-at, .inc-hit span, .latest-when, .repair-when, .maint-meta, .report-meta, .activity-when) {
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+:root[data-style='cards'] .inc-toggle {
+  font-size: 13px;
+}
+/* Labels over a block: small, strong, in sentence case. */
+:root[data-style='cards'] :is(.inc-role, .inc-readings-head .label, .dx-panel-label, .dx-fix-label, .plex-stats-label, .sections-group-label, .inbox-day-head, .inc-notice-form .label) {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+/* The latest incident on the overview is a rounded card like the boxes around it. */
+:root[data-style='cards'] .latest-incident {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+:root[data-style='cards'] .latest-incident.ongoing {
+  border-color: color-mix(in srgb, var(--crit) 35%, var(--rule));
+  background: color-mix(in srgb, var(--crit) 5%, var(--surface));
+}
+:root[data-style='cards'] .latest-incident:hover {
+  border-color: var(--ink-3);
+}
+/* Words written in lower case for the Ruled look's capitals take a capital first letter here. */
+:root[data-style='cards'] :is(.inc-role, .inc-flag, .inc-confidence, .dx-likely, .stream-kind) {
+  display: inline-block;
+}
+:root[data-style='cards'] :is(.inc-role, .inc-flag, .inc-confidence, .dx-likely, .stream-kind)::first-letter {
+  text-transform: uppercase;
+}
+/* A page's subtitle line is sans like every other subtitle, even when it holds an address. */
+:root[data-style='cards'] .page-title .svc-target {
+  font-family: var(--sans);
+  font-size: 13.5px;
+  letter-spacing: 0;
 }

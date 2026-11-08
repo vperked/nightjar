@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { isDemo } from '../api/client';
 import { useConfig } from '../api/ConfigContext';
@@ -19,9 +19,22 @@ export function Section({ label, aside, children }: { label: string; aside?: Rea
 
 const WORD: Record<ServiceStatus, string> = { up: 'Up', down: 'Down', unknown: 'Pending', paused: 'Paused', maintenance: 'Maintenance' };
 
-// State is a square mark plus a word, so colour never carries the status alone.
+// State is a square mark plus a word, so colour never carries the status alone. When the status
+// changes while it is on screen, it flashes once (.changed, motion.css), so a change is not missed.
 export function State({ status }: { status: ServiceStatus }) {
-  return <span className={`state ${status}`}>{WORD[status]}</span>;
+  const last = useRef(status);
+  const [changes, setChanges] = useState(0);
+  useEffect(() => {
+    if (last.current === status) return;
+    last.current = status;
+    setChanges((n) => n + 1);
+  }, [status]);
+  // A new key per change remounts the mark, which restarts its flash.
+  return (
+    <span key={changes} className={`state ${status}${changes ? ' changed' : ''}`}>
+      {WORD[status]}
+    </span>
+  );
 }
 
 // Ticks shows the last `slots` checks, oldest on the left, padded with empty slots.
@@ -55,9 +68,61 @@ export function Bar({ percent, label }: { percent: number; label: string }) {
   );
 }
 
+// slide moves a highlight (thumb) under the element `on` inside box, gliding from where it was
+// unless asked to jump. It works in offsets, so the box may scroll.
+function slide(thumb: HTMLElement | null, on: HTMLElement | null | undefined, jump: boolean) {
+  if (!thumb) return;
+  if (!on) {
+    thumb.style.opacity = '0';
+    return;
+  }
+  if (jump) thumb.style.transition = 'none';
+  thumb.style.opacity = '1';
+  thumb.style.width = `${on.offsetWidth}px`;
+  thumb.style.transform = `translateX(${on.offsetLeft}px)`;
+  if (jump) {
+    void thumb.offsetWidth; // apply the jump before turning the glide back on
+    thumb.style.transition = '';
+  }
+}
+
+// onResize calls fn when el's size changes, but not for the observer's first report, which only
+// says the size it started at: answering that would cut short a glide that has just begun.
+function onResize(el: HTMLElement, fn: () => void): () => void {
+  if (typeof ResizeObserver === 'undefined') return () => undefined;
+  let size = '';
+  const ro = new ResizeObserver(([e]) => {
+    const now = `${Math.round(e.contentRect.width)}x${Math.round(e.contentRect.height)}`;
+    if (size && now !== size) fn();
+    size = now;
+  });
+  ro.observe(el);
+  return () => ro.disconnect();
+}
+
+// useSlide keeps a thumb under a group's chosen item (found by `selector`), gliding on each change
+// and jumping when the group itself changes size (fonts arriving, a window resize).
+function useSlide<E extends HTMLElement>(selector: string, deps: readonly unknown[]) {
+  const box = useRef<E>(null);
+  const thumb = useRef<HTMLSpanElement>(null);
+  const placed = useRef(false);
+  useLayoutEffect(() => {
+    slide(thumb.current, box.current?.querySelector<HTMLElement>(selector), !placed.current);
+    placed.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+  useEffect(() => {
+    const el = box.current;
+    return el ? onResize(el, () => slide(thumb.current, el.querySelector<HTMLElement>(selector), true)) : undefined;
+  }, [selector]);
+  return { box, thumb };
+}
+
 export function Seg<T extends string | number>({ options, value, onChange, label }: { options: { value: T; label: ReactNode }[]; value: T; onChange: (v: T) => void; label: string }) {
+  const { box, thumb } = useSlide<HTMLDivElement>('button.active', [value, options.length]);
   return (
-    <div className="seg" role="group" aria-label={label}>
+    <div className="seg slides" role="group" aria-label={label} ref={box}>
+      <span className="seg-thumb" ref={thumb} aria-hidden="true" />
       {options.map((o) => (
         <button type="button" key={String(o.value)} className={o.value === value ? 'active' : ''} aria-pressed={o.value === value} onClick={() => onChange(o.value)}>
           {o.label}
@@ -79,9 +144,40 @@ export function DemoBanner() {
 
 // SubTabs switches between pages that share one nav tab (Services: checks and system services;
 // Media: Plex and qBittorrent).
+// Each group of sub-tabs is a new element on each page, so where its underline last stood is kept
+// here, by group: on the next page the underline starts there and glides to the new tab.
+const lastTab = new Map<string, { left: number; width: number }>();
+
 export function SubTabs({ label, items, current }: { label: string; items: { to: string; label: string }[]; current: string }) {
+  const box = useRef<HTMLElement>(null);
+  const ink = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const el = ink.current;
+    const on = box.current?.querySelector<HTMLElement>('a.active');
+    if (!el || !on) return;
+    const from = lastTab.get(label);
+    if (from && (from.left !== on.offsetLeft || from.width !== on.offsetWidth)) {
+      el.style.transition = 'none';
+      el.style.width = `${from.width}px`;
+      el.style.transform = `translateX(${from.left}px)`;
+      void el.offsetWidth;
+      el.style.transition = '';
+    }
+    slide(el, on, !from);
+    lastTab.set(label, { left: on.offsetLeft, width: on.offsetWidth });
+  }, [label, current]);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    return onResize(el, () => {
+      const on = el.querySelector<HTMLElement>('a.active');
+      slide(ink.current, on, true);
+      if (on) lastTab.set(label, { left: on.offsetLeft, width: on.offsetWidth });
+    });
+  }, [label]);
   return (
-    <nav className="subtabs" aria-label={label}>
+    <nav className="subtabs slides" aria-label={label} ref={box}>
+      <span className="subtabs-ink" ref={ink} aria-hidden="true" />
       {items.map((i) => (
         <Link key={i.to} className={i.to === current ? 'active' : ''} to={i.to} aria-current={i.to === current ? 'page' : undefined}>
           {i.label}

@@ -12,6 +12,7 @@ import { usePoll } from '../hooks/usePoll';
 import { AddTorrents } from './qbittorrent/AddTorrents';
 import { ORDER, group, type Group } from './qbittorrent/states';
 import { Actions, TorrentRow, useActions } from './qbittorrent/Torrents';
+import { useArrivals } from '../hooks/useArrivals';
 
 type Filter = 'all' | Group;
 const FILTERS: Filter[] = ['all', 'downloading', 'stalled', 'seeding', 'paused'];
@@ -43,6 +44,11 @@ function Body({ q, refresh }: { q: QBState; refresh: () => void }) {
       .filter((t) => (filter === 'all' || group(t.state) === filter) && (t.name + ' ' + t.category).toLowerCase().includes(needle))
       .sort((a, b) => ORDER.indexOf(group(a.state)) - ORDER.indexOf(group(b.state)) || b.dlspeed + b.upspeed - (a.dlspeed + a.upspeed) || a.name.localeCompare(b.name));
   }, [q.torrents, filter, query]);
+  // A torrent added while the page is open (here or elsewhere) slides in.
+  const arrived = useArrivals(
+    shown.map((t) => ({ key: t.hash, at: t.added_on })),
+    `${filter}\u0000${query}`,
+  );
   const speeds = useMemo(
     () => [
       { label: 'Download', color: 'var(--series-1)', points: q.history.map((s) => ({ t: s.ts, v: s.dl / 1048576 })) },
@@ -209,6 +215,7 @@ function Body({ q, refresh }: { q: QBState; refresh: () => void }) {
                   open={open === t.hash}
                   onToggle={() => setOpen((o) => (o === t.hash ? undefined : t.hash))}
                   actions={actions}
+                  arrived={arrived.has(t.hash)}
                 />
               ))}
             </tbody>

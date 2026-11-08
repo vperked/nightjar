@@ -39,6 +39,8 @@ type Settings struct {
 	WeeklyReportAt          string
 	StatusPageEnabled       bool
 	StatusPageTitle         string
+	StatusPageDomain        string // a host name of its own, showing only the status page
+	StatusPagePath          string // where it is on the dashboard's own address
 	HiddenSections          []string
 
 	WebhookURL            string
@@ -211,7 +213,7 @@ var liveKeys = keySet(
 	"STALLED_TORRENT_RETRY_BACKOFF", "STALLED_TORRENT_MAX_RECOVERY_ATTEMPTS",
 	"SEEDING_RATIO_LIMIT", "SEEDING_RATIO_ACTION_COOLDOWN", "SEEDING_RATIO_RETRY_BACKOFF", "SEEDING_RATIO_DELETE_FILES", "INACTIVE_TORRENT_AUTO_REMOVE",
 	"PLEX_NOTIFY_STREAMS", "PLEX_TRANSCODE_ALERT",
-	"STATUS_PAGE_ENABLED", "STATUS_PAGE_TITLE", "LOG_LEVEL", "DASHBOARD_HIDDEN",
+	"STATUS_PAGE_ENABLED", "STATUS_PAGE_TITLE", "STATUS_PAGE_DOMAIN", "STATUS_PAGE_PATH", "LOG_LEVEL", "DASHBOARD_HIDDEN",
 	"SERVICE_WATCH_ENABLED", "SERVICE_WATCH_INTERVAL", "SERVICE_WATCH_IGNORE", "SERVICE_RESTART_ALERT",
 	"SMART_MONITOR_ENABLED", "SMART_CHECK_INTERVAL", "SMART_HDD_TEMP_LIMIT", "SMART_SSD_TEMP_LIMIT",
 )
@@ -405,11 +407,13 @@ func (s *Settings) declare() []Field {
 			text(&s.WeeklyReportAt, "WEEKLY_REPORT_AT", "Mon 09:00").describe("Send it", "", `A day and a time, such as "Mon 09:00".`),
 			boolean(&s.StatusPageEnabled, "STATUS_PAGE_ENABLED", false).describe("Public status page", "", "Names, status and uptime at /status, without the token."),
 			text(&s.StatusPageTitle, "STATUS_PAGE_TITLE", "Service Status").describe("Status page title", "", ""),
+			hostName(&s.StatusPageDomain, "STATUS_PAGE_DOMAIN").describe("Status page domain", "", "A domain of its own, such as status.example.com: there it is the whole site, and the dashboard is never shown. Point the domain and your reverse proxy at this machine (Settings → Status page can set up nginx)."),
+			pagePath(&s.StatusPagePath, "STATUS_PAGE_PATH", "/status").describe("Status page path", "", "Where it is on the dashboard's own address, such as /uptime. /status always works too."),
 			list(&s.HiddenSections, "DASHBOARD_HIDDEN", "").describe("Hidden sections", "", "Dashboard areas turned off under Settings → Sections. Monitoring carries on; only the dashboard hides them."),
 			boolean(&s.WebUIEnabled, "WEB_UI_ENABLED", true).describe("Dashboard", "", "").startup(),
 			text(&s.WebHost, "WEB_HOST", "127.0.0.1").describe("Listen address", "", "Every address needs the admin account to sign in; 127.0.0.1 keeps the dashboard to this machine and its reverse proxy.").startup(),
 			integer(&s.WebPort, "WEB_PORT", 8080, 1, 65535).describe("Port", "", "").startup(),
-			secret(&s.WebAuthToken, "WEB_AUTH_TOKEN").describe("API token", "", "Lets scripts use the API without signing in, as a Bearer token. People sign in with the admin account.").startup(),
+			secret(&s.WebAuthToken, "WEB_AUTH_TOKEN").atLeast(MinAuthTokenLength).describe("API token", "", "Lets scripts use the API without signing in, as a Bearer token, at least 16 characters (openssl rand -hex 24 makes one). People sign in with the admin account.").startup(),
 			text(&s.WebAllowedOrigin, "WEB_ALLOWED_ORIGIN", "").describe("Allowed CORS origin", "", "Another site that may read this dashboard's API answers, such as https://home.example.com. Empty for none.").startup(),
 			text(&s.FrontendDir, "FRONTEND_DIR", "").describe("Frontend directory", "", "Serve the UI from disk instead of the binary.").startup(),
 		),
@@ -450,6 +454,9 @@ func MapLookup(m map[string]string) Lookup {
 	return func(key string) (string, bool) { v, ok := m[key]; return v, ok }
 }
 
+// MinAuthTokenLength is the shortest WEB_AUTH_TOKEN accepted; a shorter one is ignored as unset.
+const MinAuthTokenLength = 16
+
 // LoadFrom reads and cross-validates every setting. Invalid values fall back to the default with a
 // warning, and adjustments are logged.
 func LoadFrom(lookup Lookup) Settings {
@@ -457,7 +464,11 @@ func LoadFrom(lookup Lookup) Settings {
 	for _, f := range s.Fields() {
 		raw, _ := lookup(f.Key)
 		if err := f.Set(raw); err != nil {
-			log.Warn("Invalid setting, using default", "key", f.Key, "value", raw, "err", err.Error(), "default", f.Default)
+			shown := raw
+			if f.Kind == KindSecret {
+				shown = "(hidden)" // a rejected token is still the owner's token
+			}
+			log.Warn("Invalid setting, using default", "key", f.Key, "value", shown, "err", err.Error(), "default", f.Default)
 			f.Set("")
 		}
 	}

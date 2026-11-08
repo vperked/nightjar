@@ -5,6 +5,8 @@ import App from '../src/App';
 import { scopeCSS } from '../src/customCode';
 import { useNewBuild } from '../src/freshness';
 import { usePoll } from '../src/hooks/usePoll';
+import { useArrivals } from '../src/hooks/useArrivals';
+import { State } from '../src/components/ui';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -88,6 +90,52 @@ describe('usePoll refresh', () => {
     await act(async () => answers[1]('after'));
     await waitFor(() => expect(result.current.data).toBe('after'));
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('live-data motion', () => {
+  it('marks only rows that arrive while the list is shown', () => {
+    type Rows = { key: string; at?: number }[];
+    const { result, rerender } = renderHook(({ rows, scope }: { rows: Rows; scope: string }) => useArrivals(rows, scope), {
+      initialProps: {
+        rows: [
+          { key: 'b', at: 20 },
+          { key: 'a', at: 10 },
+        ],
+        scope: 'all',
+      },
+    });
+    expect([...result.current]).toEqual([]); // there at first: not new
+    rerender({
+      rows: [
+        { key: 'c', at: 30 },
+        { key: 'b', at: 20 },
+        { key: 'a', at: 10 },
+      ],
+      scope: 'all',
+    });
+    expect([...result.current]).toEqual(['c']);
+    // An older one brought in (Show older) is not news.
+    rerender({
+      rows: [
+        { key: 'c', at: 30 },
+        { key: 'b', at: 20 },
+        { key: 'a', at: 10 },
+        { key: 'z', at: 1 },
+      ],
+      scope: 'all',
+    });
+    expect([...result.current]).toEqual(['c']);
+    // A new filter is a first showing again.
+    rerender({ rows: [{ key: 'd', at: 40 }], scope: 'errors' });
+    expect([...result.current]).toEqual([]);
+  });
+
+  it('flashes a status that changes on screen, and not one that first appears', () => {
+    const { container, rerender } = render(<State status="up" />);
+    expect(container.querySelector('.state')).not.toHaveClass('changed');
+    rerender(<State status="down" />);
+    expect(container.querySelector('.state')).toHaveClass('down', 'changed');
   });
 });
 
@@ -178,6 +226,26 @@ describe('app config', () => {
   });
 });
 
+describe('status page address', () => {
+  // On its own domain, or at a path the owner chose, the server marks the page: it shows the status
+  // page wherever it is, and asks for nothing of the dashboard (which that domain does not serve).
+  it('shows the status page wherever the server marked it', async () => {
+    document.documentElement.dataset.page = 'status';
+    onTestFinished(() => {
+      delete document.documentElement.dataset.page;
+    });
+    const asked: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      asked.push(String(input));
+      if (String(input) === '/api/status') return ok({ title: 'Acme status', overall: 'operational', updated: Date.now() / 1000, services: [] });
+      return new Response('', { status: 404 });
+    });
+    render(<App />);
+    expect(await screen.findByText('Acme status')).toBeInTheDocument();
+    expect(asked.filter((u) => u.startsWith('/api/') && u !== '/api/status')).toEqual([]);
+  });
+});
+
 describe('new builds', () => {
   const stale = () => {
     const script = document.createElement('script');
@@ -226,5 +294,17 @@ describe('new builds', () => {
     await reinstall;
     rerender({ path: '/' });
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('pageNumbers', () => {
+  it('shows the ends and the pages around the current one, with gaps', async () => {
+    const { pageNumbers } = await import('../src/components/Pager');
+    expect(pageNumbers(0, 1)).toEqual([0]);
+    expect(pageNumbers(0, 3)).toEqual([0, 1, 2]);
+    expect(pageNumbers(5, 12)).toEqual([0, null, 4, 5, 6, null, 11]);
+    // A gap of a single page shows that page instead of "…".
+    expect(pageNumbers(3, 12)).toEqual([0, 1, 2, 3, 4, null, 11]);
+    expect(pageNumbers(11, 12)).toEqual([0, null, 10, 11]);
   });
 });

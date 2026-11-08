@@ -188,7 +188,7 @@
   background: var(--surface);
   box-shadow: var(--shadow);
   transition:
-    transform 0.18s cubic-bezier(0.3, 0.8, 0.25, 1),
+    transform 0.18s var(--ease-out),
     box-shadow 0.18s;
 }
 .app-card:hover {
@@ -302,7 +302,7 @@
   background: var(--surface);
   box-shadow: var(--shadow-lift);
   scrollbar-width: thin;
-  animation: sheet-in 0.18s cubic-bezier(0.2, 0.7, 0.2, 1);
+  animation: sheet-in 0.18s var(--ease-out);
 }
 /* A fade and a hair of scale: no slide. */
 @keyframes sheet-in {
@@ -439,4 +439,109 @@
 }
 .sheet .app-summary {
   flex: none;
+}
+
+/* ---------- Filters, groups and facts ---------- */
+
+/* Each category chip carries how many apps it holds. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.chip-count {
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+.chip.active .chip-count {
+  color: inherit;
+  opacity: 0.65;
+}
+/* Installed or not, and the search, share the row's end. */
+.store-filters-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+/* The grid in two groups: what is on this machine, then what could be. */
+.app-group + .app-group {
+  margin-top: 26px;
+}
+.app-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 12px;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.app-group-head .num {
+  color: var(--ink-3);
+}
+/* A card that opens its sheet says so under the pointer. */
+.app-card.opens {
+  cursor: pointer;
+}
+.app-card.opens:hover {
+  border-color: var(--rule-strong);
+}
+.store-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 26px 0;
+}
+.store-empty .note {
+  margin: 0;
+}
+/* What an install does, or what is installed, as label and value rows. */
+.app-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 18px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+  font-size: 13px;
+}
+.app-facts dt {
+  color: var(--ink-3);
+}
+.app-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.app-facts dd.mono,
+.app-facts .mono {
+  font-size: 12.5px;
+}
+@media (max-width: 760px) {
+  .store-filters-end {
+    flex-basis: 100%;
+  }
+  .store-filters-end .seg {
+    flex: 1 1 100%;
+  }
+  /* On a phone the chips scroll sideways in one row rather than taking half the screen. */
+  .store-filters .chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    margin: 0 -16px;
+    padding: 0 16px 4px;
+    scrollbar-width: none;
+  }
+  .store-filters .chips::-webkit-scrollbar {
+    display: none;
+  }
+  .chip {
+    flex: none;
+  }
 }

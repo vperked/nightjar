@@ -4,10 +4,7 @@ import type { Finding } from '../api/types';
 // What went wrong, read out of the logs: each finding says what happened, what it means and what
 // to do, with the log line it came from. The first recognised one is the likely cause.
 
-const MARK: Record<Finding['severity'], string> = {
-  critical: 'M8 8l8 8M16 8l-8 8',
-  warning: 'M12 7v6M12 16.5v.5',
-};
+const MARK: Record<Finding['severity'], string> = { critical: 'M8 8l8 8M16 8l-8 8', warning: 'M12 7v6M12 16.5v.5' };
 
 // withCode turns `backticked` parts of a fix into inline code.
 function withCode(text: string): ReactNode {

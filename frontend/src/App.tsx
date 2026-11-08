@@ -14,14 +14,14 @@ import { SectionOff, type SectionID } from './components/Sections';
 import { Finder, SearchIcon, openFinder, shortcutLabel } from './components/Finder';
 import { HealthInTab, useProblems } from './components/HealthInTab';
 import { Skeleton } from './components/Skeleton';
-import { bootDone } from './boot';
+import { bootDone, onStatusPage } from './boot';
 import { ToastProvider } from './components/Toasts';
 import { DemoBanner } from './components/ui';
 import { useNewBuild } from './freshness';
 import { formatAgo } from './format';
 import { useNow } from './hooks/useNow';
 import { Overview } from './pages/Overview';
-import { revealTheme, useEdgeLight, useTitleDecode } from './motion';
+import { revealTheme, useCountUp, useEdgeLight, useTitleDecode } from './motion';
 import { startingTheme, type Theme } from './theme';
 import { chartsOf, useAppearance } from './appearance';
 
@@ -114,9 +114,7 @@ function useTheme(): [Theme, () => void] {
     } catch {
       /* storage unavailable */
     }
-    const doc = document as Document & {
-      startViewTransition?: (cb: () => void) => { ready?: Promise<unknown> } | undefined;
-    };
+    const doc = document as Document & { startViewTransition?: (cb: () => void) => { ready?: Promise<unknown> } | undefined };
     // The new theme spreads in a circle from where it was asked for.
     if (doc.startViewTransition && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) revealTheme(doc.startViewTransition(apply)?.ready);
     else apply();
@@ -153,52 +151,22 @@ function useNavIndicator(deps: unknown[]) {
   return nav;
 }
 
-// Tab icons: 24px grid, 1.8px strokes, drawn in currentColor.
+// Tab icons: 24px grid, 1.8px strokes, drawn in currentColor. pathLength lets motion.css draw each
+// one along its stroke, whatever its real length.
 const icon = (d: string) => () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <path d={d} />
+    <path d={d} pathLength={1} />
   </svg>
 );
 // Five tabs; pages that belong together share one (Services, Media, Apps), with sub-tabs on the page.
 // `also` lists the other paths a tab is active on.
 const TABS: { to: string; label: string; end?: boolean; also?: string[]; media?: boolean; badge?: boolean; section?: SectionID; Icon: () => JSX.Element }[] = [
-  {
-    to: '/',
-    label: 'Overview',
-    end: true,
-    Icon: icon('M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z'),
-  },
-  {
-    to: '/services',
-    label: 'Services',
-    also: ['/system'],
-    Icon: icon('M3 12h4l3-8 4 16 3-8h4'),
-  },
-  {
-    to: '/incidents',
-    label: 'Incidents',
-    Icon: icon('M12 3l9.5 16.5h-19zM12 10v4M12 17h.01'),
-  },
-  {
-    to: '/servers',
-    label: 'Servers',
-    section: 'servers',
-    Icon: icon('M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01'),
-  },
-  {
-    to: '/network',
-    label: 'Network',
-    section: 'network',
-    Icon: icon('M7 20V4M3.5 7.5 7 4l3.5 3.5M17 4v16m-3.5-3.5L17 20l3.5-3.5'),
-  },
-  {
-    to: '/plex',
-    label: 'Media',
-    media: true,
-    section: 'media',
-    also: ['/qbittorrent', '/plex/cleanup'],
-    Icon: icon('M4 6h16v12H4zM10 9.5v5l4-2.5z'),
-  },
+  { to: '/', label: 'Overview', end: true, Icon: icon('M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z') },
+  { to: '/services', label: 'Services', also: ['/system'], Icon: icon('M3 12h4l3-8 4 16 3-8h4') },
+  { to: '/incidents', label: 'Incidents', Icon: icon('M12 3l9.5 16.5h-19zM12 10v4M12 17h.01') },
+  { to: '/servers', label: 'Servers', section: 'servers', Icon: icon('M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01') },
+  { to: '/network', label: 'Network', section: 'network', Icon: icon('M7 20V4M3.5 7.5 7 4l3.5 3.5M17 4v16m-3.5-3.5L17 20l3.5-3.5') },
+  { to: '/plex', label: 'Media', media: true, section: 'media', also: ['/qbittorrent', '/plex/cleanup'], Icon: icon('M4 6h16v12H4zM10 9.5v5l4-2.5z') },
   { to: '/apps', label: 'Apps', badge: true, section: 'apps', also: ['/updates'], Icon: icon('M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 17h6M17 14v6') },
 ];
 
@@ -324,10 +292,16 @@ function Shell() {
   const navRef = useNavIndicator([location.pathname, signedOut, config]);
   useEdgeLight();
   useTitleDecode(location.pathname);
+  useCountUp(location.pathname);
+  const turn = useRef({ path: location.pathname, dir: '' });
 
+  // The public status page is all a visitor there sees: it needs none of the dashboard's config,
+  // which its own domain does not even serve.
+  const statusPage = onStatusPage(location.pathname);
   // A config that does not come (the monitor still starting after a restart, say) is asked for
   // again, less often each time, so the tab does not run the whole session without it.
   useEffect(() => {
+    if (statusPage) return;
     let done = false;
     let timer = 0;
     const load = (tries: number) =>
@@ -346,7 +320,7 @@ function Shell() {
       done = true;
       window.clearTimeout(timer);
     };
-  }, [authKey, configKey]);
+  }, [authKey, configKey, statusPage]);
   // Settings that change what the dashboard shows (sections) ask for the config again.
   useEffect(() => {
     const reload = () => setConfigKey((k) => k + 1);
@@ -357,7 +331,6 @@ function Shell() {
   useEffect(() => onUnauthorized(() => setSignedOut(true)), []);
   // The loading screen stays until the config says what to show: the dashboard, or a sign-in. The
   // public status page lifts it itself, once its first answer is in.
-  const statusPage = location.pathname === '/status';
   useEffect(() => {
     if (config && !statusPage) bootDone();
   }, [config, statusPage]);
@@ -369,8 +342,8 @@ function Shell() {
   };
 
   // The public status page needs none of the dashboard's pages.
-  usePrefetchPages(location.pathname !== '/status');
-  if (location.pathname === '/status')
+  usePrefetchPages(!statusPage);
+  if (statusPage)
     return (
       <Suspense fallback={null}>
         <StatusPage />
@@ -382,6 +355,19 @@ function Shell() {
   const tabs = TABS.filter((t) => (!t.section || shown(t.section)) && (!t.media || config?.plex_enabled || config?.qbittorrent_enabled)).map((t) =>
     t.media && !config?.plex_enabled ? { ...t, to: '/qbittorrent', also: ['/plex'] } : t,
   );
+  // Which way the page turns: toward the side of the masthead its tab sits on (Settings and its
+  // pages are right of every tab). Worked out once per path change; a second render of the same path
+  // (strict mode) keeps it.
+  const tabOf = (path: string) => {
+    const i = tabs.findIndex((t) => (t.end ? path === t.to : path === t.to || path.startsWith(`${t.to}/`) || !!t.also?.some((p) => path.startsWith(p))));
+    if (i >= 0) return i;
+    return ['/settings', '/setup', '/status-page', '/plugins'].some((p) => path.startsWith(p)) ? tabs.length : -1;
+  };
+  if (turn.current.path !== location.pathname) {
+    const from = tabOf(turn.current.path);
+    const to = tabOf(location.pathname);
+    turn.current = { path: location.pathname, dir: from < 0 || to < 0 || from === to ? '' : to > from ? ' turn-forward' : ' turn-back' };
+  }
   // A fresh install shows nothing until the admin account exists; after that, nothing until signed in.
   // Which of the two only the config says, so until it comes the gate waits for it.
   const gate = !config ? <Loading /> : config.account && !config.account.configured ? <CreateAdmin onDone={signedIn} /> : <SignIn onDone={signedIn} />;
@@ -465,7 +451,7 @@ function Shell() {
             <div className="app" id="content" tabIndex={-1}>
               <Suspense fallback={<Loading />}>
                 {/* Keyed by page, so each page arrives with a short entrance. */}
-                <div className="page" key={location.pathname}>
+                <div className={`page${turn.current.dir}`} key={location.pathname}>
                   <Routes>
                     <Route path="/services" element={gated(<ServicesPage />)} />
                     <Route path="/incidents" element={gated(<IncidentsPage />)} />

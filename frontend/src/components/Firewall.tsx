@@ -3,6 +3,7 @@ import { api, ApiError } from '../api/client';
 import type { FirewallDrop, FirewallPort, FirewallRule, FirewallStatus } from '../api/types';
 import { formatAgo, formatBytes, plural } from '../format';
 import { useNow } from '../hooks/useNow';
+import { Pager, usePaged } from './Pager';
 import { useToast } from './Toasts';
 import { Section, Seg } from './ui';
 
@@ -16,6 +17,21 @@ export const TOOL: Record<FirewallStatus['tool'], string> = { ufw: 'ufw', firewa
 const errText = (e: unknown) => (e instanceof ApiError || e instanceof Error ? e.message : String(e));
 
 const ACTION: Record<FirewallRule['action'], string> = { allow: 'Allow', block: 'Block', limit: 'Limit' };
+
+// ActionIcon marks what a rule does at a glance: a check lets in, a bar across blocks, a gauge limits.
+const ACTION_PATH: Record<FirewallRule['action'], string> = {
+  allow: 'M5 12.5l4.5 4.5L19 7.5',
+  block: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM5.6 5.6l12.8 12.8',
+  limit: 'M4 15a8 8 0 0 1 16 0M12 15l4-5',
+};
+const ActionIcon = ({ action }: { action: FirewallRule['action'] }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d={ACTION_PATH[action]} />
+  </svg>
+);
+
+// caught is how many packets a rule (or the default, by "default") has caught.
+const caught = (hits: FirewallStatus['hits'], id: string) => hits?.[id]?.packets ?? 0;
 
 // UNIT says a rate's unit in words: "6/min" is "6 a minute".
 const UNIT: Record<string, string> = { sec: 'a second', min: 'a minute', hour: 'an hour' };
@@ -296,6 +312,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
 
   const rules = st?.rules ?? [];
   const shown = rules.filter((r) => (dir === 'out') === (r.direction === 'out'));
+  const rulePages = usePaged(shown, 10, dir);
   // move swaps a rule with the one before or after it in the same direction.
   const move = (r: FirewallRule, by: -1 | 1) => {
     const i = shown.indexOf(r);
@@ -335,8 +352,12 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
   const inCount = rules.filter((r) => r.direction !== 'out').length;
   const outCount = rules.length - inCount;
 
+  // Hit bars are on a log scale: an allow rule lets in tens of thousands where a block drops hundreds,
+  // and both should still show.
+  const busiest = Math.log1p(Math.max(1, ...shown.map((r) => caught(st.hits, r.id))));
   return (
     <>
+      {full && <Glance st={st} rules={rules} tool={tool} />}
       {full && (
         <Section label="Firewall" aside={<span className="small ink-3">{aside}</span>}>
           <div className="fw">
@@ -404,10 +425,14 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
             </p>
           ) : (
             <ul className="fw-rule-list">
-              {shown.map((r, i) => (
-                <li key={r.id} className={`fw-rule${r.paused ? ' paused' : ''}${editing?.id === r.id ? ' editing' : ''}`}>
+              {/* i is the rule's place among all the rules in this direction, not just this page's. */}
+              {rulePages.items.map((r, j, _, i = rulePages.offset + j) => (
+                <li key={r.id} className={`fw-rule fw-is-${r.action}${r.paused ? ' paused' : ''}${editing?.id === r.id ? ' editing' : ''}`}>
                   {full && (
                     <span className="fw-move">
+                      <span className="fw-order num" title="Checked in this order">
+                        {i + 1}
+                      </span>
                       <button type="button" className="icon-btn" aria-label={`Move up: ${describeRule(r)}`} disabled={!!busy || i === 0 || !canChange} onClick={() => move(r, -1)}>
                         ↑
                       </button>
@@ -416,18 +441,30 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
                       </button>
                     </span>
                   )}
-                  <span className={`fw-action ${r.action}`}>{ACTION[r.action]}</span>
+                  <span className={`fw-action ${r.action}`}>
+                    <ActionIcon action={r.action} />
+                    {ACTION[r.action]}
+                  </span>
                   <span className="fw-rule-text min0">
-                    <span className="fw-rule-who mono">
-                      {r.direction === 'out' && <span className="fw-to">to </span>}
-                      {r.source || 'Anyone'}
-                    </span>
-                    <span className="fw-rule-what">
-                      {portWords(r)}
-                      {r.action === 'limit' && ` · at most ${rateWords(r.rate)} each`}
+                    <span className="fw-rule-head">
+                      <span className="fw-rule-who mono">
+                        {r.direction === 'out' && <span className="fw-to">to </span>}
+                        {r.source || 'Anyone'}
+                      </span>
+                      <span className="fw-tag">{portWords(r)}</span>
+                      {r.action === 'limit' && <span className="fw-tag">at most {rateWords(r.rate)} each</span>}
                     </span>
                     {r.note && <span className="fw-rule-note">{r.note}</span>}
-                    {full && <span className="fw-rule-hits">{r.paused ? 'paused: not in place' : hitWords(r, st.hits)}</span>}
+                    {full && (
+                      <span className="fw-rule-hits">
+                        {!r.paused && (
+                          <span className="fw-hitbar" aria-hidden="true">
+                            <span style={{ width: `${(Math.log1p(caught(st.hits, r.id)) / busiest) * 100}%` }} />
+                          </span>
+                        )}
+                        {r.paused ? 'paused: not in place' : hitWords(r, st.hits)}
+                      </span>
+                    )}
                   </span>
                   <span className="fw-rule-acts">
                     {full && (
@@ -449,7 +486,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
                     )}
                     <button
                       type="button"
-                      className="btn-quiet"
+                      className="btn-quiet fw-remove"
                       disabled={!!busy || !canChange}
                       onClick={() => run(r.id, () => target.remove(r.id), { title: `Rule removed · ${target.name}`, body: describeRule(r) })}
                     >
@@ -460,6 +497,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
               ))}
             </ul>
           )}
+          <Pager paged={rulePages} label="Pages of rules" noun="rules" />
 
           {dir === 'in' && st.listening.length > 0 && <OpenPorts st={st} canChange={canChange} ruleFor={(p) => ruleFor({ port: String(p.port), proto: p.proto })} />}
         </div>
@@ -667,9 +705,7 @@ function RuleForm({
           {gap || (
             <>
               <span className="ink-3">This rule will </span>
-              {describeRule(ruleOf(draft, dir) as FirewallRule)
-                .replace(/^\w/, (c) => c.toLowerCase())}
-              .
+              {describeRule(ruleOf(draft, dir) as FirewallRule).replace(/^\w/, (c) => c.toLowerCase())}.
             </>
           )}
         </p>
@@ -685,6 +721,51 @@ function RuleForm({
       {error && <p className="form-error fw-error">{error}</p>}
       {out && <p className="form-help fw-help">An outgoing rule looks at new connections only, so replies to what reaches this machine always go out.</p>}
     </form>
+  );
+}
+
+// Glance is the firewall in four figures: what happens to traffic no rule decides, the rules in
+// place, what was dropped, and how many ports anyone can reach.
+function Glance({ st, rules, tool }: { st: FirewallStatus; rules: FirewallRule[]; tool: string }) {
+  const dropping = st.default === 'drop' || (!st.default && st.policy === 'DROP');
+  const live = rules.filter((r) => !r.paused);
+  const paused = rules.length - live.length;
+  const ins = live.filter((r) => r.direction !== 'out').length;
+  const stopped = rules.filter((r) => r.action !== 'allow');
+  const dropped = caught(st.hits, 'default') + stopped.reduce((n, r) => n + caught(st.hits, r.id), 0);
+  const droppedBytes = (st.hits?.default?.bytes ?? 0) + stopped.reduce((n, r) => n + (st.hits?.[r.id]?.bytes ?? 0), 0);
+  const reachable = st.listening.filter((p) => !p.local && (p.allowed || st.default !== 'drop'));
+  return (
+    <div className="stats-row fw-glance">
+      <div className={dropping ? 'fw-glance-good' : 'fw-glance-warn'}>
+        <span className="label">Unmatched incoming</span>
+        <div className="readout-value fw-glance-word">{dropping ? 'Dropped' : st.policy === 'ACCEPT' ? 'Let in' : 'Up to ' + tool}</div>
+        <div className="readout-sub">{st.default === 'drop' ? 'set here' : `${tool}’s default`}</div>
+      </div>
+      <div>
+        <span className="label">Rules</span>
+        <div className="readout-value">{live.length}</div>
+        <div className="readout-sub">
+          {ins} in · {live.length - ins} out
+          {paused ? ` · ${paused} paused` : ''}
+        </div>
+      </div>
+      <div>
+        <span className="label">Dropped</span>
+        <div className="readout-value">{dropped.toLocaleString()}</div>
+        <div className="readout-sub">
+          {formatBytes(droppedBytes)}
+          {st.since ? ` since ${formatAgo(st.since)}` : ''}
+        </div>
+      </div>
+      <div className={reachable.length ? '' : 'fw-glance-good'}>
+        <span className="label">Open to anyone</span>
+        <div className="readout-value">{reachable.length}</div>
+        <div className="readout-sub truncate" title={reachable.map((p) => `${p.port}/${p.proto}`).join(', ')}>
+          {reachable.length ? reachable.map((p) => p.port).join(' · ') : 'no ports reachable'}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -829,31 +910,36 @@ function DefaultChoice({
 // to a rule for it.
 function OpenPorts({ st, canChange, ruleFor }: { st: FirewallStatus; canChange: boolean; ruleFor: (p: FirewallPort) => void }) {
   const dropping = st.default === 'drop';
+  const paged = usePaged(st.listening, 12);
   return (
     <div className="fw-ports">
       <span className="label">Open ports</span>
       <ul>
-        {st.listening.map((p) => (
-          <li key={`${p.proto}${p.port}`} className={p.local ? 'local' : dropping && !p.allowed ? 'closed' : ''}>
-            <span className="mono num">
-              {p.port}/{p.proto}
-            </span>
-            <span className="ink-2 min0 truncate">{p.program || '—'}</span>
-            {p.local ? (
-              <span className="small ink-3">this machine only</span>
-            ) : (
-              <span className="fw-port-end">
-                {st.full && <span className={`small ${p.allowed ? 'ink-3' : dropping ? 'fw-closed' : 'ink-3'}`}>{p.allowed ? 'open to anyone' : dropping ? 'closed by the default' : ''}</span>}
-                {canChange && (
-                  <button type="button" className="btn-quiet fw-port-rule" onClick={() => ruleFor(p)} aria-label={`Add a rule for ${p.port}/${p.proto}`}>
-                    Add rule
-                  </button>
-                )}
+        {paged.items.map((p) => {
+          // How the network sees the port: only from here, let in by a rule, shut by the default, or
+          // left to the machine's own firewall.
+          const state = p.local ? 'local' : p.allowed ? 'open' : dropping ? 'closed' : 'tool';
+          const words = { local: 'this machine only', open: 'open to anyone', closed: 'closed by the default', tool: `up to ${TOOL[st.tool]}` }[state];
+          return (
+            <li key={`${p.proto}${p.port}`} className={`fw-port ${state}`}>
+              <span className="fw-port-num mono num">
+                {p.port}
+                <span className="fw-port-proto">/{p.proto}</span>
               </span>
-            )}
-          </li>
-        ))}
+              <span className="fw-port-prog truncate" title={p.program}>
+                {p.program || '—'}
+              </span>
+              {(st.full || p.local) && <span className="fw-port-state">{words}</span>}
+              {canChange && !p.local && (
+                <button type="button" className="btn-quiet fw-port-rule" onClick={() => ruleFor(p)} aria-label={`Add a rule for ${p.port}/${p.proto}`}>
+                  + Rule
+                </button>
+              )}
+            </li>
+          );
+        })}
       </ul>
+      <Pager paged={paged} label="Pages of open ports" noun="ports" />
     </div>
   );
 }
@@ -862,8 +948,8 @@ function OpenPorts({ st, canChange, ruleFor }: { st: FirewallStatus; canChange: 
 // shortcut to block them.
 function Dropped({ st, rules, canChange, block }: { st: FirewallStatus; rules: FirewallRule[]; canChange: boolean; block: (source: string) => void }) {
   const now = useNow(30000);
-  const [all, setAll] = useState(false);
   const drops = st.drops ?? [];
+  const paged = usePaged(drops, 10);
   const byId = useMemo(() => new Map(rules.map((r) => [r.id, r])), [rules]);
   const top = useMemo(() => {
     const n = new Map<string, number>();
@@ -879,7 +965,6 @@ function Dropped({ st, rules, canChange, block }: { st: FirewallStatus; rules: F
     const r = byId.get(d.rule);
     return r ? describeRule(r) : 'a rule since removed';
   };
-  const shown = all ? drops : drops.slice(0, 12);
   const defaultHits = st.hits?.default?.packets ?? 0;
   return (
     <Section label="Dropped lately" aside={<span className="small ink-3">a sample, at most 10 a minute for each rule</span>}>
@@ -901,13 +986,16 @@ function Dropped({ st, rules, canChange, block }: { st: FirewallStatus; rules: F
                   {top.map(([source, count]) => (
                     <li key={source}>
                       <span className="mono min0 truncate">{source}</span>
-                      <span className="small ink-3 num">{count}×</span>
+                      <span className="fw-top-bar" aria-hidden="true">
+                        <span style={{ width: `${(count / top[0][1]) * 100}%` }} />
+                      </span>
+                      <span className="small ink-2 num">{count}×</span>
                       {canChange && !blocked(source) ? (
                         <button type="button" className="btn-quiet" onClick={() => block(source)} aria-label={`Block ${source}`}>
                           Block
                         </button>
                       ) : (
-                        <span className="small ink-3">{blocked(source) ? 'blocked' : ''}</span>
+                        <span className={blocked(source) ? 'fw-blocked' : ''}>{blocked(source) ? 'blocked' : ''}</span>
                       )}
                     </li>
                   ))}
@@ -915,26 +1003,24 @@ function Dropped({ st, rules, canChange, block }: { st: FirewallStatus; rules: F
               </div>
             )}
             <ul className="fw-drops">
-              {shown.map((d, i) => (
-                <li key={`${d.at}-${i}`}>
+              {paged.items.map((d, i) => (
+                <li key={`${d.at}-${paged.offset + i}`}>
                   <span className="small ink-3 num fw-drop-at">{formatAgo(d.at, now)}</span>
+                  <span className={`fw-drop-dot ${d.rule === 'default' ? 'default' : (byId.get(d.rule)?.action ?? 'default')}`} aria-hidden="true" />
                   <span className="fw-drop-what min0">
                     <span className="mono">{d.direction === 'out' ? `→ ${d.dest}` : d.source}</span>
-                    <span className="ink-2">
-                      {' '}
-                      {d.proto ?? ''}
-                      {d.port ? ` ${d.port}` : ''}
-                    </span>
+                    {(d.proto || d.port) && (
+                      <span className="fw-tag">
+                        {d.proto ?? ''}
+                        {d.port ? ` ${d.port}` : ''}
+                      </span>
+                    )}
                     <span className="fw-drop-why">{why(d)}</span>
                   </span>
                 </li>
               ))}
             </ul>
-            {drops.length > 12 && (
-              <button type="button" className="btn-quiet fw-more" onClick={() => setAll(!all)}>
-                {all ? 'Show fewer' : `Show all ${drops.length}`}
-              </button>
-            )}
+            <Pager paged={paged} label="Pages of dropped packets" noun="drops" />
           </>
         )}
       </div>

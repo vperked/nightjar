@@ -432,19 +432,56 @@
 .fw .note {
   margin: 0;
 }
+/* What a rule does, as a small pill in its colour with its mark (a check, a bar across, a gauge).
+   --tone carries the colour to the row's accent bar and hit bar too. */
+.fw-is-allow,
+.fw-action.allow,
+.fw-drop-dot.allow {
+  --tone: var(--good);
+}
+.fw-is-block,
+.fw-action.block,
+.fw-drop-dot.block {
+  --tone: var(--crit);
+}
+.fw-is-limit,
+.fw-action.limit,
+.fw-drop-dot.limit {
+  --tone: var(--warn);
+}
 .fw-action {
-  display: inline-block;
-  min-width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  justify-self: start;
+  min-width: 76px;
+  padding: 3px 9px 3px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tone) 14%, transparent);
+  color: var(--tone);
+  font-family: var(--mono);
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
-.fw-action.block {
-  color: var(--crit);
+.fw-action svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
-.fw-action.allow {
-  color: var(--good);
-}
-.fw-action.limit {
-  color: var(--warn);
+/* A rule's ports, its rate, a dropped packet's port: a quiet chip beside the address. */
+.fw-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--bg-sunk);
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 /* The rule form: one question a row (a label, then its answer), the rule in words at the foot. */
 .fw-new {
@@ -597,44 +634,130 @@
     flex: 1;
   }
 }
-/* The rules: an action, then who and which ports, its note, and Remove. */
+/* The rules, in the order they are checked: their place and the arrows to move them, what each
+   does, who and which ports, its note, what it caught, and its buttons. An accent bar in the rule's
+   colour runs down its left edge. */
 .fw-rule-list {
   display: grid;
+  gap: 6px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 .fw-rule {
+  position: relative;
   display: grid;
-  grid-template-columns: 4.2em minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
-  gap: 2px 12px;
-  padding: 10px 0;
-  border-top: 1px solid var(--rule);
+  gap: 4px 14px;
+  padding: 12px 12px 12px 16px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.fw-rule::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--tone, var(--ink-3));
 }
 .fw-rule:has(.fw-move) {
-  grid-template-columns: auto 4.2em minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+}
+.fw-rule.paused::before {
+  background: var(--ink-3);
+  opacity: 0.5;
 }
 .fw-rule.paused > :not(.fw-rule-acts):not(.fw-move) {
   opacity: 0.5;
 }
 .fw-rule.editing {
-  box-shadow: inset 3px 0 0 var(--ink);
-  padding-left: 10px;
+  border-color: var(--ink-3);
+  background: color-mix(in srgb, var(--ink) 4%, var(--bg-sunk));
 }
 .fw-move {
-  display: flex;
-  gap: 2px;
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 4px;
+}
+.fw-order {
+  grid-row: span 2;
+  min-width: 18px;
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: right;
 }
 .fw-move .icon-btn {
-  min-width: 26px;
-  height: 26px;
+  width: 22px;
+  min-width: 22px;
+  height: 18px;
   padding: 0;
-  font-size: 13px;
+  font-size: 11px;
+  line-height: 1;
 }
 .fw-move .icon-btn:disabled {
-  opacity: 0.25;
+  opacity: 0.2;
   cursor: default;
+}
+.fw-rule .fw-action {
+  margin-top: 1px;
+}
+.fw-rule-text {
+  display: grid;
+  gap: 5px;
+}
+.fw-rule-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+.fw-rule-who {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.fw-to {
+  color: var(--ink-3);
+  font-family: var(--sans);
+}
+.fw-rule-note {
+  color: var(--ink-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+/* What the rule caught: a bar against the busiest rule shown, then the count. */
+.fw-rule-hits {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.fw-hitbar {
+  flex: 0 0 90px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--rule);
+}
+.fw-hitbar > span {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--tone, var(--ink-3));
+  transition: width 0.5s var(--ease-out);
 }
 .fw-rule-acts {
   display: flex;
@@ -642,108 +765,142 @@
   justify-content: flex-end;
   gap: 2px;
 }
-.fw-rule-hits {
-  color: var(--ink-3);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
+.fw-rule .btn-quiet {
+  padding: 3px 8px;
+  font-size: 12.5px;
 }
-.fw-to {
-  color: var(--ink-3);
-  font-family: var(--sans);
+/* With a pointer the buttons stay quiet until the row is pointed at; on a touch screen they are
+   always plain to see. */
+@media (hover: hover) {
+  .fw-rule:hover {
+    border-color: var(--rule-strong);
+  }
+  .fw-rule-acts .btn-quiet {
+    color: var(--ink-3);
+  }
+  .fw-rule:hover .fw-rule-acts .btn-quiet:not(:disabled),
+  .fw-rule-acts .btn-quiet:focus-visible {
+    color: var(--ink-2);
+  }
+  .fw-rule-acts .fw-remove:not(:disabled):hover {
+    color: var(--crit);
+  }
 }
-/* On a phone the buttons go under the rule's words. */
+/* On a phone the buttons go under the rule's words, and the arrows sit beside its place. */
 @container (max-width: 560px) {
   .fw-rule,
   .fw-rule:has(.fw-move) {
-    grid-template-columns: 4.2em minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 12px 10px 10px 14px;
+  }
+  .fw-rule .fw-action {
+    grid-column: 1;
+    grid-row: 1;
   }
   .fw-rule .fw-move {
-    grid-column: 1;
-    grid-row: 2;
-    align-self: start;
+    grid-column: 2;
+    grid-row: 1;
+    grid-template-columns: auto auto auto;
+    grid-template-rows: auto;
+  }
+  .fw-order {
+    grid-row: auto;
+  }
+  .fw-move .icon-btn {
+    height: 26px;
+    width: 30px;
+  }
+  .fw-rule-text {
+    grid-column: 1 / -1;
   }
   .fw-rule-acts {
-    grid-column: 2;
+    grid-column: 1 / -1;
     justify-content: flex-start;
-    margin-left: -6px;
+    margin: 2px 0 0 -8px;
+  }
+  .fw-hitbar {
+    flex-basis: 64px;
   }
 }
-.fw-rule:first-child {
-  border-top: 0;
-  padding-top: 2px;
-}
-.fw-rule .fw-action {
-  min-width: 0;
-  padding-top: 1px;
-}
-.fw-rule-text {
-  display: grid;
-  gap: 2px;
-}
-.fw-rule-who {
-  overflow-wrap: anywhere;
-}
-.fw-rule-what {
-  color: var(--ink-2);
-  font-size: 13px;
-}
-.fw-rule-note {
-  color: var(--ink-3);
-  font-size: 12.5px;
-  overflow-wrap: anywhere;
-}
-.fw-rule .btn-quiet {
-  padding: 2px 6px;
-  font-size: 12.5px;
-}
+/* The open ports as tiles: the port large, what listens on it, and how the network sees it, marked
+   by a dot (green let in by a rule, amber left to the machine's firewall, red shut by the default,
+   grey only from this machine). */
 .fw-ports ul {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 2px 18px;
-  margin: 6px 0 0;
+  grid-template-columns: repeat(auto-fill, minmax(min(190px, 42%), 1fr));
+  gap: 8px;
+  margin: 8px 0 0;
   padding: 0;
   list-style: none;
 }
-.fw-ports li {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+.fw-port {
+  --dot: var(--warn-mark);
+  position: relative;
+  display: grid;
+  gap: 2px;
+  align-content: start;
   min-width: 0;
-  padding: 4px 0;
-  border-bottom: 1px solid var(--rule);
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
   font-size: 13px;
 }
-.fw-ports li.local {
-  opacity: 0.7;
+.fw-port.open {
+  --dot: var(--good);
 }
-.fw-ports li > .ink-2 {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.fw-port.closed {
+  --dot: var(--crit-mark);
 }
-.fw-port-rule,
-.fw-ports li > .small,
-.fw-port-end {
-  flex: none;
-  margin-left: auto;
+.fw-port.local {
+  --dot: var(--ink-3);
 }
-.fw-port-end {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+.fw-port-num {
+  padding-right: 54px;
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
 }
-.fw-closed {
-  color: var(--warn);
+.fw-port-proto {
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
 }
-.fw-ports li.closed .mono {
+.fw-port.closed .fw-port-num {
   color: var(--ink-3);
   text-decoration: line-through;
 }
-.fw-port-rule {
-  padding: 1px 6px;
-  font-size: 12.5px;
+.fw-port-prog {
+  color: var(--ink-2);
 }
-
+.fw-port-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.fw-port-state::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dot);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot) 18%, transparent);
+}
+.fw-port.closed .fw-port-state {
+  color: var(--crit);
+}
+.fw-port-rule {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 7px;
+  font-size: 12px;
+}
 /* The default for traffic no rule decides: two choices, what stays open, and the change waiting. */
 .fw-default {
   display: grid;
@@ -865,29 +1022,83 @@
   padding: 0;
   list-style: none;
 }
+/* Who was dropped most: their address, a bar against the most dropped, the count, and Block. */
 .fw-top li {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: baseline;
-  gap: 10px;
-  padding: 4px 0;
+  grid-template-columns: minmax(110px, 180px) minmax(40px, 1fr) auto minmax(4.5em, auto);
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
   border-bottom: 1px solid var(--rule);
   font-size: 13px;
 }
+.fw-top li > .num {
+  text-align: right;
+}
+.fw-top-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--rule);
+}
+.fw-top-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--crit-mark);
+  opacity: 0.8;
+}
 .fw-top .btn-quiet {
-  padding: 1px 6px;
+  justify-self: end;
+  padding: 2px 8px;
   font-size: 12.5px;
 }
+.fw-blocked {
+  justify-self: end;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--crit) 12%, transparent);
+  color: var(--crit);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+@container (max-width: 480px) {
+  .fw-top li {
+    grid-template-columns: minmax(0, 1fr) auto minmax(4.5em, auto);
+  }
+  .fw-top-bar {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    margin-top: -2px;
+  }
+}
+/* The latest drops: when, a dot in the colour of what dropped it (grey for the default), and what. */
 .fw-drops li {
   display: grid;
-  grid-template-columns: 6.5em minmax(0, 1fr);
+  grid-template-columns: 5.5em auto minmax(0, 1fr);
+  align-items: baseline;
   gap: 10px;
-  padding: 6px 0;
+  padding: 8px 0;
   border-bottom: 1px solid var(--rule);
   font-size: 13px;
 }
 .fw-drops li:last-child {
   border-bottom: 0;
+}
+.fw-drop-dot {
+  --tone: var(--ink-3);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tone);
+  transform: translateY(-1px);
+}
+.fw-drop-what .fw-tag {
+  margin-left: 8px;
+  padding: 0 6px;
+  font-size: 11.5px;
 }
 .fw-drop-what {
   overflow-wrap: anywhere;
@@ -899,9 +1110,6 @@
 }
 .fw-default-hits {
   margin: 0;
-}
-.fw-more {
-  justify-self: start;
 }
 .fw-native summary {
   cursor: pointer;
@@ -923,4 +1131,22 @@
   margin: 0;
   font-size: 13.5px;
   color: var(--ink-2);
+}
+/* The firewall at a glance, above its sections: the figure tinted green where it is reassuring
+   (unmatched traffic dropped, no port open to anyone), amber where it asks for a look. */
+.fw-glance {
+  margin: 4px 0 20px;
+}
+.fw-glance .fw-glance-word {
+  font-family: var(--sans);
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.4;
+}
+.fw-glance-good .readout-value {
+  color: var(--good);
+}
+.fw-glance-warn .readout-value {
+  color: var(--warn);
 }

@@ -211,3 +211,114 @@ textarea.sd-code.over {
     gap: 0;
   }
 }
+
+/* Address: the path, its own domain, and nginx for that domain. */
+.sd-address-save {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 4px;
+}
+.sd-proxy {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.sd-proxy-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+  font-size: 13.5px;
+}
+.sd-proxy-state a {
+  color: var(--ink);
+  font-weight: 550;
+  text-underline-offset: 3px;
+}
+.sd-proxy-note {
+  margin: 0;
+  padding: 0;
+}
+.sd-proxy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.sd-proxy-actions .field {
+  flex: 1 1 220px;
+  max-width: 320px;
+}
+.sd-steps {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+.sd-steps li {
+  display: grid;
+  gap: 2px;
+  padding-left: 22px;
+  position: relative;
+  animation: reveal var(--dur) var(--ease-out) backwards;
+}
+.sd-steps li::before {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-weight: 700;
+}
+.sd-steps li.ok::before {
+  content: '✓';
+  color: var(--good);
+}
+.sd-steps li.failed::before {
+  content: '✕';
+  color: var(--crit);
+}
+.sd-steps li:nth-child(2) {
+  animation-delay: 60ms;
+}
+.sd-steps li:nth-child(3) {
+  animation-delay: 120ms;
+}
+.sd-steps li:nth-child(4) {
+  animation-delay: 180ms;
+}
+.sd-steps li:nth-child(n + 5) {
+  animation-delay: 240ms;
+}
+.sd-steps .mono {
+  color: var(--ink-3);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+.sd-proxy-manual summary {
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.sd-proxy-manual pre {
+  margin: 8px 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunk);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.sd-proxy-manual .note {
+  margin: 8px 0 0;
+  padding: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sd-steps li {
+    animation: none;
+  }
+}

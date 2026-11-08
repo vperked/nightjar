@@ -8,7 +8,11 @@ The monitor writes one tidy line per event: level, component, message, then deta
 
 ## In the dashboard
 
-**[Monitor log](/logs)** (in the account menu) shows the last 3,000 entries, following new ones live. Filter by level, component or text, and download what you see.
+**[Monitor log](/logs)** (in the account menu) shows the last 3,000 entries, following new ones live. Filter by level, component or text (what the search matched is highlighted), and download what you see.
+
+- **Click a line** to copy it, show only its component, or, from a filtered view, **Show in context**: the filters clear and the line is brought to the middle, among the lines around it.
+- A dashed divider marks a quiet spell of 10 minutes or more between two lines, with how long it was.
+- Scroll up to read and the view stays put while new lines arrive; a button at the bottom says how many have come in and takes you back down.
 
 Above the entries, **Problems in this log** reads every warning and error the log keeps and says what they mean: a recognised cause with its fix, or a repeated error grouped with its count. The same reading explains failed [system services](/docs/system-services#what-went-wrong).
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { type KeyboardEvent, useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
 import type { PlexPlay, PlexResponse, PlexState } from '../api/types';
@@ -16,12 +16,18 @@ const count = (v: number) => String(Math.round(v));
 const mbps = (v: number) => (v === 0 ? '0' : v.toFixed(v < 10 ? 1 : 0));
 const KIND: Record<string, string> = { movie: 'movies', show: 'shows', artist: 'artists', photo: 'photos' };
 
-function Recent({ plays, now }: { plays: PlexPlay[]; now: number }) {
+// Recent lists the streams that finished; each opens how it was delivered.
+function Recent({ plays, now, onOpen }: { plays: PlexPlay[]; now: number; onOpen: (p: PlexPlay) => void }) {
+  const open = (e: KeyboardEvent, p: PlexPlay) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    onOpen(p);
+  };
   return (
     <table className="table">
       <tbody>
         {plays.slice(0, 15).map((p) => (
-          <tr key={`${p.started}${p.user}${p.title}`}>
+          <tr key={`${p.started}${p.user}${p.title}`} className="link" tabIndex={0} aria-label={`${p.title}, watched by ${p.user}`} onClick={() => onOpen(p)} onKeyDown={(e) => open(e, p)}>
             <td className="num ink-3 shrink">{formatAgo(p.ended, now)}</td>
             <td className="shrink">{p.user}</td>
             <td className="fill">
@@ -30,7 +36,7 @@ function Recent({ plays, now }: { plays: PlexPlay[]; now: number }) {
               </span>
             </td>
             <td className="shrink hide-sm">
-              <Decision stream={{ decision: p.decision, hw_transcode: false }} />
+              <Decision stream={{ decision: p.decision, hw_transcode: p.last?.hw_transcode ?? false }} />
             </td>
             <td className="r num ink-3 shrink">{Math.round(p.progress)}%</td>
           </tr>
@@ -43,6 +49,7 @@ function Recent({ plays, now }: { plays: PlexPlay[]; now: number }) {
 function Body({ p, onChange }: { p: PlexState; onChange: (r: PlexResponse) => void }) {
   const now = useNow(5000);
   const [managing, setManaging] = useState<string>();
+  const [viewing, setViewing] = useState<PlexPlay>();
   const streams = useMemo(
     () => [
       { label: 'Direct', color: 'var(--series-1)', points: p.samples.map((s) => ({ t: s.ts, v: s.direct })) },
@@ -127,7 +134,7 @@ function Body({ p, onChange }: { p: PlexState; onChange: (r: PlexResponse) => vo
           </Section>
           <Section label="Recently finished" aside={<span className="small ink-3">since the monitor started</span>}>
             {p.recent.length ? (
-              <Recent plays={p.recent} now={now} />
+              <Recent plays={p.recent} now={now} onOpen={setViewing} />
             ) : (
               <p className="note" style={{ padding: '4px 0 0' }}>
                 No finished streams yet.
@@ -176,6 +183,7 @@ function Body({ p, onChange }: { p: PlexState; onChange: (r: PlexResponse) => vo
           </Section>
         </div>
       </div>
+      {viewing && <PlexStreamSheet play={viewing} onClose={() => setViewing(undefined)} />}
       {managing && <PlexStreamSheet stream={p.streams.find((s) => s.id === managing)} onClose={() => setManaging(undefined)} onStopped={onChange} />}
     </>
   );

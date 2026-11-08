@@ -690,13 +690,7 @@ function ReinstallNow({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
 }
 
 // AGENT_UPDATE says how keeping an agent on this dashboard's build is going.
-const AGENT_UPDATE: Record<AgentUpdate['state'], string> = {
-  current: 'up to date',
-  updating: 'updating…',
-  updated: 'updated',
-  failed: 'update failed',
-  manual: 'reinstall to auto-update',
-};
+const AGENT_UPDATE: Record<AgentUpdate['state'], string> = { current: 'up to date', updating: 'updating…', updated: 'updated', failed: 'update failed', manual: 'reinstall to auto-update' };
 
 const NEW_KEY = '\u0000new';
 const OWN_KEY = '\u0000own';
@@ -1343,7 +1337,24 @@ function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
             {r ? ` · ${osLine(r)}` : ''}
           </div>
         </div>
-        <MuteButton subject={`host:${h.id}`} label={h.name} />
+        <div className="toolbar server-actions">
+          {h.kind === 'agent' && (
+            <Link className="btn-quiet" to={`/network/firewall?server=${encodeURIComponent(h.id)}`}>
+              Firewall
+            </Link>
+          )}
+          <a
+            className="btn-quiet"
+            href="#manage"
+            onClick={(e) => {
+              e.preventDefault();
+              document.getElementById('manage')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }}
+          >
+            Manage ↓
+          </a>
+          <MuteButton subject={`host:${h.id}`} label={h.name} />
+        </div>
       </div>
 
       {h.status === 'offline' && (
@@ -1420,6 +1431,49 @@ function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
               )}
             </Section>
           )}
+          {r && (
+            <Section label="Storage">
+              <div className="storage">
+                {r.disks.map((p) => (
+                  <div key={p.mountpoint} className="storage-row">
+                    <div className="storage-line">
+                      <span className="mono truncate" title={`${p.device} · ${p.fstype}`}>
+                        {p.mountpoint}
+                      </span>
+                      <span className="num ink-3 small" style={{ whiteSpace: 'nowrap' }}>
+                        <span style={{ color: 'var(--ink)' }}>{p.percent.toFixed(0)}%</span> of {formatBytes(p.total)}
+                      </span>
+                    </div>
+                    <Bar percent={p.percent} label={`${p.mountpoint} usage`} />
+                  </div>
+                ))}
+              </div>
+            </Section>
+          )}
+          {cores.length > 1 && (
+            <Section label="Cores" aside={<span className="small ink-3">% busy, now</span>}>
+              <div className="cores">
+                {cores.map((v, i) => (
+                  <div key={i} className="core" title={`core ${i}: ${v.toFixed(1)}%`}>
+                    <span style={{ height: `${Math.max(1, Math.min(100, v))}%` }} />
+                  </div>
+                ))}
+              </div>
+              {/* Few enough cores to name: each one's figure under its bar; more, just the ends. */}
+              {cores.length <= 16 ? (
+                <div className="core-figures num">
+                  {cores.map((v, i) => (
+                    <span key={i}>{Math.round(v)}%</span>
+                  ))}
+                </div>
+              ) : (
+                <div className="core-axis">
+                  <span>0</span>
+                  <span>{cores.length - 1}</span>
+                </div>
+              )}
+            </Section>
+          )}
         </div>
         <div className="col">
           {r && (
@@ -1470,47 +1524,20 @@ function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
               </dl>
             </Section>
           )}
-          {cores.length > 1 && (
-            <Section label="Cores" aside={<span className="small ink-3">% busy, now</span>}>
-              <div className="cores">
-                {cores.map((v, i) => (
-                  <div key={i} className="core" title={`core ${i}: ${v.toFixed(1)}%`}>
-                    <span style={{ height: `${Math.max(1, Math.min(100, v))}%` }} />
-                  </div>
-                ))}
-              </div>
-              <div className="core-axis">
-                <span>0</span>
-                <span>{cores.length - 1}</span>
-              </div>
-            </Section>
-          )}
-          {r && (
-            <Section label="Storage">
-              <div className="storage">
-                {r.disks.map((p) => (
-                  <div key={p.mountpoint} className="storage-row">
-                    <div className="storage-line">
-                      <span className="mono truncate" title={`${p.device} · ${p.fstype}`}>
-                        {p.mountpoint}
-                      </span>
-                      <span className="num ink-3 small" style={{ whiteSpace: 'nowrap' }}>
-                        <span style={{ color: 'var(--ink)' }}>{p.percent.toFixed(0)}%</span> of {formatBytes(p.total)}
-                      </span>
-                    </div>
-                    <Bar percent={p.percent} label={`${p.mountpoint} usage`} />
-                  </div>
-                ))}
-              </div>
-            </Section>
-          )}
           <ServicesOn h={h} />
           {r?.attacks && <AttackWatch view={r.attacks} now={now} onToggle={toggleDefense} onUnblock={unblock} />}
           {h.kind === 'agent' && <FirewallSummary h={h} />}
+        </div>
+      </div>
+
+      {/* Changing how it is reached, and logging in to it: kept apart from what it reports. */}
+      <section className="server-manage" id="manage" aria-label="Manage">
+        <h2 className="server-manage-head">Manage</h2>
+        <div className="server-manage-cols">
           <EditServer h={h} onSaved={refresh} onRemoved={() => navigate('/servers')} />
           <SSHAccess h={h} refresh={refresh} />
         </div>
-      </div>
+      </section>
     </main>
   );
 }

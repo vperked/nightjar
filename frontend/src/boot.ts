@@ -10,3 +10,9 @@ export function bootDone(): void {
   // In case no transition runs (reduced motion, a hidden tab).
   window.setTimeout(remove, 600);
 }
+
+// onStatusPage reports whether this address shows the public status page: /status, or wherever the
+// server marked the page as the status page (its own domain, or the path the owner chose).
+export function onStatusPage(path: string): boolean {
+  return path === '/status' || document.documentElement.dataset.page === 'status';
+}

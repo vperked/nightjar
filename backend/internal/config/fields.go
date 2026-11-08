@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -199,6 +200,18 @@ func secret(dst *string, key string) Field {
 	return f
 }
 
+// atLeast refuses a non-empty value shorter than n characters (a guessable token).
+func (f Field) atLeast(n int) Field {
+	parse := f.parse
+	f.parse = func(raw string) error {
+		if raw != "" && len([]rune(raw)) < n {
+			return fmt.Errorf("must be at least %d characters", n)
+		}
+		return parse(raw)
+	}
+	return f
+}
+
 func list(dst *[]string, key, def string) Field {
 	f := Field{Key: key, Kind: KindList, Default: def}
 	f.parse = func(raw string) error {
@@ -226,4 +239,75 @@ func splitList(raw string) []string {
 		}
 	}
 	return out
+}
+
+var hostNameRE = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$`)
+
+// CheckHostName reports whether name is a plain, fully qualified host name (status.example.com):
+// no scheme, port, path or wildcard. It goes into nginx's configuration and certbot's command line
+// as it is, so nothing else may.
+func CheckHostName(name string) error {
+	if len(name) > 253 || !hostNameRE.MatchString(name) {
+		return fmt.Errorf("%q is not a domain name such as status.example.com (no https://, port or path)", name)
+	}
+	return nil
+}
+
+// hostName is a text setting holding a host name, kept in lower case; empty means none.
+func hostName(dst *string, key string) Field {
+	f := text(dst, key, "")
+	f.parse = func(raw string) error {
+		raw = strings.TrimSuffix(strings.ToLower(raw), ".")
+		// A pasted address loses its scheme and any trailing slash: https://status.example.com/ is meant.
+		raw = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(raw, "https://"), "http://"), "/")
+		if raw != "" {
+			if err := CheckHostName(raw); err != nil {
+				return err
+			}
+		}
+		*dst = raw
+		return nil
+	}
+	return f
+}
+
+// reservedPaths are the dashboard's own pages and files, which a status page path may not take.
+var reservedPaths = []string{"api", "assets", "health", "services", "incidents", "system", "plex", "network", "servers", "qbittorrent",
+	"updates", "apps", "logs", "docs", "notifications", "settings", "setup", "status-page", "plugins", "boot.js", "favicon.ico", "index.html"}
+
+var pagePathRE = regexp.MustCompile(`^/[a-z0-9][a-z0-9-]{0,39}$`)
+
+// CheckPagePath reports whether p can be the status page's path: one segment of lower-case letters,
+// digits and hyphens (/uptime), and not one of the dashboard's own pages.
+func CheckPagePath(p string) error {
+	if !pagePathRE.MatchString(p) {
+		return fmt.Errorf("%q is not a path such as /uptime: one word of lower-case letters, digits and hyphens after the /", p)
+	}
+	if slices.Contains(reservedPaths, strings.TrimPrefix(p, "/")) {
+		return fmt.Errorf("%s is one of the dashboard's own pages", p)
+	}
+	return nil
+}
+
+// pagePath is a text setting holding a status page path ("/uptime"); a missing leading slash is added.
+func pagePath(dst *string, key, def string) Field {
+	f := text(dst, key, def)
+	f.parse = func(raw string) error {
+		if raw == "/" {
+			return fmt.Errorf("/ is the dashboard itself; give the status page a path of its own, such as /uptime")
+		}
+		raw = strings.ToLower(strings.TrimSuffix(raw, "/"))
+		if raw == "" {
+			raw = def
+		}
+		if !strings.HasPrefix(raw, "/") {
+			raw = "/" + raw
+		}
+		if err := CheckPagePath(raw); err != nil {
+			return err
+		}
+		*dst = raw
+		return nil
+	}
+	return f
 }

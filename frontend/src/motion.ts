@@ -149,3 +149,83 @@ export function useTitleDecode(page: string) {
     };
   }, [page]);
 }
+
+// The page's headline figures: the overview's readings, each page's stat cards, each server's meters.
+const FIGURES = '.page main :is(.readout-value, .host-metric-value)';
+// A figure is counted only when it starts with its number ("99.61%", "1,909", "58m"), not when a
+// number sits inside words ("since Oct 31").
+const LEADING = /^(\s*)(\d[\d,]*(?:\.\d+)?)/;
+
+// countUp runs a figure's leading number up from zero to what React wrote. Like decode it writes
+// only to React's own text node, and stops the moment React changes that node, so live data always
+// wins. It returns a cancel function.
+function countUp(el: HTMLElement): () => void {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let node: Text | null = null;
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if ((n.nodeValue ?? '').trim()) {
+      node = n as Text;
+      break;
+    }
+  }
+  const text = node?.nodeValue ?? '';
+  const m = LEADING.exec(text);
+  if (!node || !m) return () => undefined;
+  const target = Number(m[2].replace(/,/g, ''));
+  if (!Number.isFinite(target) || target === 0) return () => undefined;
+  const decimals = m[2].split('.')[1]?.length ?? 0;
+  const grouped = m[2].includes(',');
+  const rest = text.slice(m[0].length);
+  const show = (v: number) => m[1] + (grouped ? v.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals }) : v.toFixed(decimals)) + rest;
+  const duration = 650;
+  const start = performance.now();
+  let written = text;
+  let frame = 0;
+  let stopped = false;
+  const step = (now: number) => {
+    if (node!.nodeValue !== written) {
+      stopped = true; // React wrote a new value: it stands.
+      return;
+    }
+    const p = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - p, 3);
+    node!.nodeValue = written = p < 1 ? show(target * eased) : text;
+    if (p < 1) frame = requestAnimationFrame(step);
+    else stopped = true;
+  };
+  node.nodeValue = written = show(0);
+  frame = requestAnimationFrame(step);
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    cancelAnimationFrame(frame);
+    if (node!.nodeValue === written) node!.nodeValue = text;
+  };
+}
+
+// useCountUp counts each headline figure up from zero the first time it appears on a page. Figures
+// come with the page's data, a moment after the page, so it watches for them for a few seconds;
+// each is counted once, and later updates are left to the live data.
+export function useCountUp(page: string) {
+  useEffect(() => {
+    if (reducedMotion() || typeof MutationObserver === 'undefined') return;
+    const counted = new WeakSet<Element>();
+    const cancels: (() => void)[] = [];
+    const scan = () => {
+      for (const el of document.querySelectorAll<HTMLElement>(FIGURES)) {
+        if (counted.has(el)) continue;
+        counted.add(el);
+        cancels.push(countUp(el));
+      }
+    };
+    scan();
+    const watch = new MutationObserver(scan);
+    watch.observe(document.body, { childList: true, subtree: true });
+    const giveUp = setTimeout(() => watch.disconnect(), 3000);
+    return () => {
+      watch.disconnect();
+      clearTimeout(giveUp);
+      for (const c of cancels) c();
+    };
+  }, [page]);
+}

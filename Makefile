@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 GOFLAGS := -trimpath
 
 .DEFAULT_GOAL := build
-.PHONY: build ui frontend backend agent run dev dev-backend dev-frontend demo test test-backend test-frontend lint release docker install-service clean help
+.PHONY: build ui frontend backend agent run dev dev-backend dev-frontend demo test test-backend test-frontend format lint release docker install-service clean help
 
 help: ## Show this help
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  \033[1m%-16s\033[0m %s\n", $$1, $$2}'
@@ -46,7 +46,7 @@ dev-backend:
 	cd backend && go run ./cmd/nightjar -env ../.env
 
 dev-frontend: frontend/node_modules
-	cd frontend && npm run dev
+	cd frontend && npm run dev:live
 
 demo: frontend/node_modules ## UI only, on demo data (no Go or backend needed)
 	cd frontend && npm run demo
@@ -58,6 +58,15 @@ test-backend:
 
 test-frontend: frontend/node_modules
 	cd frontend && npm run typecheck && npm test
+
+format: frontend/node_modules ## Format the Go code (gofmt) and the frontend (Prettier)
+	cd backend && gofmt -w .
+	cd frontend && npm run format
+
+lint: frontend/node_modules ## Check formatting, go vet and tsc, changing nothing
+	@cd backend && test -z "$$(gofmt -l .)" || { echo "gofmt would change:"; gofmt -l .; exit 1; }
+	cd backend && go vet ./...
+	cd frontend && npm run format:check && npm run typecheck
 
 release: frontend agent ## Cross-compile linux amd64 + arm64 into dist/
 	mkdir -p dist

@@ -134,6 +134,7 @@ export function TorrentRow({
   open,
   onToggle,
   actions,
+  arrived = false,
 }: {
   t: QBTorrent;
   selected: boolean;
@@ -141,6 +142,7 @@ export function TorrentRow({
   open: boolean;
   onToggle: () => void;
   actions: ReturnType<typeof useActions>;
+  arrived?: boolean;
 }) {
   const now = useNow(30000);
   const g = group(t.state);
@@ -149,7 +151,7 @@ export function TorrentRow({
   const sub = [t.category, formatBytes(t.size), !done && t.eta > 0 && t.eta < UNKNOWN_ETA ? `${formatDuration(t.eta)} left` : ''].filter(Boolean).join(' · ');
   return (
     <>
-      <tr className={`qb-row ${selected ? 'selected' : ''} ${open ? 'open' : ''}`}>
+      <tr className={`qb-row ${selected ? 'selected' : ''} ${open ? 'open' : ''}${arrived ? ' arrive' : ''}`}>
         <td className="shrink qb-check">
           <input type="checkbox" className="select-box" aria-label={`Select ${t.name}`} checked={selected} onChange={(e) => onSelect(e.target.checked)} />
         </td>

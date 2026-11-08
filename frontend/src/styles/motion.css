@@ -1,15 +1,22 @@
 /* Finish: motion and depth */
 
-/* Pages fade in, their blocks a step apart. Only opacity changes, which costs nothing to animate;
-   nothing slides or blurs. */
+/* Pages rise into place as they fade in, their blocks a step apart. Only opacity and a small
+   transform change, which the compositor animates without layout or paint. */
 @keyframes enter {
   from {
     opacity: 0;
+    transform: translateY(8px);
   }
 }
 .page > main > *,
 .page > .skeleton {
-  animation: enter 0.3s ease-out backwards;
+  animation: enter 0.4s var(--ease-out) backwards;
+}
+/* A skeleton waits a moment before showing: a page whose data comes quickly goes straight to its
+   content, rather than flashing a skeleton and then fading in a second time. */
+.page > .skeleton,
+.page > main > .skeleton {
+  animation-delay: 0.16s;
 }
 .page > main > *:nth-child(2) {
   animation-delay: 40ms;
@@ -168,12 +175,12 @@
   }
 }
 .chart .plot {
-  animation: plot-draw 0.6s cubic-bezier(0.3, 0.7, 0.2, 1) both;
+  animation: plot-draw 0.6s var(--ease-out) both;
 }
 
 /* Uptime rows wipe in from the left once, as one piece, rather than animating every tick. */
 .ticks {
-  animation: plot-draw 0.5s cubic-bezier(0.3, 0.7, 0.2, 1) both;
+  animation: plot-draw 0.5s var(--ease-out) both;
 }
 
 /* The mark: a shooting star crosses its sky on hover, and the moon's star twinkles. */
@@ -245,6 +252,360 @@
     transition: none;
   }
   :is(.iface, .attention-chip, .setup-pick):hover {
+    transform: none;
+  }
+}
+
+/* ---------- Press ---------- */
+
+/* Buttons, chips and cards give a little under the pointer, so a press is felt before its answer
+   arrives. Only transform changes, on the compositor. */
+:is(.btn, .btn-quiet, .btn-ghost, .icon-btn, .account-btn, .seg > button, .health-chip, .attention-chip) {
+  transition:
+    opacity var(--dur-quick),
+    background-color var(--dur-quick),
+    color var(--dur-quick),
+    border-color var(--dur-quick),
+    box-shadow var(--dur-quick),
+    transform 0.12s var(--ease-out);
+}
+:is(.btn, .btn-quiet, .btn-ghost, .icon-btn, .account-btn, .seg > button, .health-chip, .attention-chip):active:not(:disabled) {
+  transform: scale(0.96);
+  transition-duration: 0.05s;
+}
+:is(.host-card, .app-card, .docs-card, .iface, .latest-incident):active {
+  transform: scale(0.99);
+  transition-duration: 0.05s;
+}
+
+/* ---------- Problems breathe ---------- */
+
+/* What needs attention glows red, slowly, so it is seen at a glance from across the room: an
+   incident under way, services that stopped, a server that stopped answering. The glow is a still
+   shadow on a layer of its own whose opacity rises and falls, which costs no repainting. */
+@keyframes breathe {
+  50% {
+    opacity: 1;
+  }
+}
+:is(.latest-incident.ongoing, .attention, .host-card.offline) {
+  position: relative;
+}
+:is(.latest-incident.ongoing, .attention, .host-card.offline)::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--crit-mark) 45%, transparent),
+    0 0 24px -4px color-mix(in srgb, var(--crit-mark) 45%, transparent);
+  opacity: 0.15;
+  pointer-events: none;
+  animation: breathe 3.2s ease-in-out infinite;
+}
+
+/* ---------- Opening a row's details ---------- */
+
+/* Details that open under a row (an alert, an update, a service, an incident's timeline) grow
+   open, pushing what is below down smoothly, instead of appearing at full height at once. Browsers
+   that cannot animate to a height of auto fade them in instead. */
+@keyframes reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+.page :is(.inbox-detail, .upd-details, .inc-detail) {
+  animation: reveal var(--dur) var(--ease-out);
+}
+@supports (interpolate-size: allow-keywords) {
+  @keyframes reveal-open {
+    from {
+      height: 0;
+      padding-top: 0;
+      padding-bottom: 0;
+      opacity: 0;
+      overflow: clip;
+    }
+    60% {
+      opacity: 1;
+    }
+    to {
+      height: auto;
+      overflow: clip;
+    }
+  }
+  .page :is(.inbox-detail, .upd-details, .inc-detail) {
+    interpolate-size: allow-keywords;
+    animation: reveal-open 0.34s var(--ease-out);
+  }
+}
+
+/* ---------- Highlights that slide ---------- */
+
+/* Segmented controls: the chosen option's highlight is one piece that glides between options
+   (ui.tsx places it), rather than jumping from one button to the next. */
+.seg.slides {
+  position: relative;
+}
+.seg.slides > button {
+  position: relative;
+  z-index: 1;
+}
+.seg.slides > button.active {
+  background: none;
+  box-shadow: none;
+}
+.seg-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  width: 0;
+  opacity: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow:
+    0 0 0 1px var(--card-rule),
+    0 1px 3px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+  transition:
+    transform 0.3s var(--ease-out),
+    width 0.3s var(--ease-out),
+    opacity 0.15s;
+}
+/* Sub-tabs: one underline, which glides from the tab you came from to the one you are on. */
+.subtabs.slides {
+  position: relative;
+}
+.subtabs.slides a.active {
+  border-bottom-color: transparent;
+}
+.subtabs-ink {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  height: 2px;
+  opacity: 0;
+  background: var(--ink);
+  pointer-events: none;
+  transition:
+    transform 0.35s var(--ease-out),
+    width 0.35s var(--ease-out);
+}
+
+/* ---------- Live data ---------- */
+
+/* Bars fill in from empty when they first appear, then glide to each new reading. clip-path keeps
+   the dotted bars' dots round while they grow, where a scale would stretch them. */
+@keyframes fill-x {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+}
+@keyframes fill-y {
+  from {
+    clip-path: inset(100% 0 0 0);
+  }
+}
+:is(.bar, .progress, .net-bar, .net-link-bar, .upd-batch-bar) > span {
+  animation: fill-x 0.8s var(--ease-out) 0.1s backwards;
+  transition: width 0.6s var(--ease-out);
+}
+.core > span {
+  animation: fill-y 0.8s var(--ease-out) 0.1s backwards;
+  transition: height 0.6s var(--ease-out);
+}
+
+/* A row that arrives while the list is on screen (a new alert, log line, incident or torrent)
+   slides in and glows for a moment (useArrivals). */
+@keyframes arrive {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+@keyframes arrive-glow {
+  from {
+    background-color: color-mix(in srgb, var(--series-1) 13%, transparent);
+  }
+}
+.arrive {
+  animation:
+    arrive 0.4s var(--ease-out) backwards,
+    arrive-glow 2.4s ease-out;
+}
+tr.arrive > td {
+  animation: arrive-glow 2.4s ease-out;
+}
+
+/* A status that changes on screen flashes once in its new colour, its dot popping. */
+@keyframes state-changed {
+  0% {
+    background: color-mix(in srgb, currentColor 20%, transparent);
+    box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 20%, transparent);
+  }
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+@keyframes state-pop {
+  40% {
+    transform: scale(1.9);
+  }
+}
+.state.changed {
+  border-radius: 4px;
+  animation: state-changed 1.8s ease-out;
+}
+.state.changed::before {
+  animation: state-pop 0.6s var(--ease-out);
+}
+.state.down.changed::before {
+  animation:
+    state-pop 0.6s var(--ease-out),
+    pulse 1.6s ease-in-out 0.6s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seg-thumb,
+  .subtabs-ink,
+  :is(.bar, .progress, .net-bar, .net-link-bar, .upd-batch-bar) > span,
+  .core > span {
+    transition: none;
+  }
+  :is(.bar, .progress, .net-bar, .net-link-bar, .upd-batch-bar) > span,
+  .core > span,
+  .page :is(.inbox-detail, .upd-details, .inc-detail),
+  :is(.latest-incident.ongoing, .attention, .host-card.offline)::before,
+  .arrive,
+  tr.arrive > td,
+  .state.changed,
+  .state.changed::before {
+    animation: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  :is(.btn, .btn-quiet, .btn-ghost, .icon-btn, .account-btn, .seg > button, .health-chip, .attention-chip):active,
+  :is(.host-card, .app-card, .docs-card, .iface, .latest-incident):active {
+    transform: none;
+  }
+  /* Still marked, just not moving. */
+  :is(.latest-incident.ongoing, .attention, .host-card.offline)::before {
+    opacity: 0.6;
+  }
+}
+
+/* ---------- Turning the page ---------- */
+
+/* Moving between the masthead's tabs, the new page slides in a little from the side the tab sits
+   on (App.tsx sets turn-forward or turn-back on it). Only the arriving page moves, by transform and
+   opacity, so nothing is pictured or resized and the old page simply goes. */
+.page.turn-forward {
+  --turn: 1;
+}
+.page.turn-back {
+  --turn: -1;
+}
+.page:is(.turn-forward, .turn-back) {
+  animation: page-in 0.3s var(--ease-out) backwards;
+}
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateX(calc(var(--turn) * 24px));
+  }
+}
+@media (max-width: 760px) {
+  .page:is(.turn-forward, .turn-back) {
+    animation-duration: 0.24s;
+  }
+  @keyframes page-in {
+    from {
+      opacity: 0;
+      transform: translateX(calc(var(--turn) * 14px));
+    }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page:is(.turn-forward, .turn-back) {
+    animation: none;
+  }
+}
+
+/* ---------- Icons that draw themselves ---------- */
+
+/* A tab's icon draws itself along its stroke when you point at it, and again when it becomes the
+   page you are on. */
+@keyframes icon-draw {
+  from {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0;
+  }
+}
+.nav a.active svg path {
+  animation: icon-draw 0.55s var(--ease-out) both;
+}
+/* Settings' gear turns a notch, and Find's glass leans in. Pointing is only for a real pointer: on
+   a touch screen :hover sticks after a tap, which would leave the gear turned. */
+.nav-utils svg {
+  transition: transform 0.45s var(--ease-out);
+}
+@media (hover: hover) {
+  .nav a:not(.active):hover svg path {
+    animation: icon-draw 0.55s var(--ease-out) both;
+  }
+  .nav-utils a[href='/settings']:hover svg {
+    transform: rotate(60deg);
+  }
+  .finder-btn:hover svg {
+    transform: rotate(-12deg) scale(1.1);
+  }
+}
+
+/* ---------- Check history ---------- */
+
+/* The newest check pops in at the right end as it arrives (its key is its time, so only a new one
+   mounts), and a check you point at stands out from its row. */
+@keyframes tick-in {
+  from {
+    transform: scale(0);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.35);
+  }
+}
+.tick:not(.pad):last-child {
+  animation: tick-in 0.45s var(--ease-out) 0.35s backwards;
+}
+.tick {
+  transition: transform 0.15s var(--ease-out);
+}
+@media (hover: hover) {
+  .tick:not(.pad):hover {
+    transform: scale(1.45);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav a svg path,
+  .tick:not(.pad):last-child {
+    animation: none;
+  }
+  .nav-utils svg,
+  .tick {
+    transition: none;
+  }
+  .nav-utils a[href='/settings']:hover svg,
+  .finder-btn:hover svg,
+  .tick:not(.pad):hover {
     transform: none;
   }
 }

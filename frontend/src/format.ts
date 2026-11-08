@@ -1,12 +1,13 @@
+// formatBytes keeps to three figures: 1.5 KB, 61.6 MB, 770 KB, and 1.0 MB rather than 1020 KB.
 export function formatBytes(n: number): string {
   if (!n) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
   let i = 0;
-  while (n >= 1024 && i < units.length - 1) {
+  while (n >= 1000 && i < units.length - 1) {
     n /= 1024;
     i++;
   }
-  return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  return `${n.toFixed(i === 0 || n >= 99.95 ? 0 : 1)} ${units[i]}`;
 }
 
 export function formatRate(n: number): string {

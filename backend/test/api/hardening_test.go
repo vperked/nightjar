@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"nightjar/internal/accounts"
 	"nightjar/internal/api"
@@ -123,6 +124,38 @@ func TestMadeUpProxyHeaderCannotLockOutSomeoneElse(t *testing.T) {
 				t.Fatalf("the owner is locked out by someone else's guesses: %d", rec.Code)
 			}
 		})
+	}
+}
+
+// What the proxy was seen to leave out survives a restart, so a made-up header cannot lock the owner
+// out in the time before the proxy's next plain request.
+func TestLearnedProxyHeadersOutliveARestart(t *testing.T) {
+	const owner, attacker = "198.51.100.4", "203.0.113.66"
+	db := storage.Open(filepath.Join(t.TempDir(), "p.db"))
+	t.Cleanup(db.Close)
+	acc := accounts.New(db)
+	if err := acc.Create("jay", "correct horse battery", acc.SetupCode()); err != nil {
+		t.Fatal(err)
+	}
+	start := func() *api.Server {
+		ctx := &monitor.Context{Processes: collect.NewProcessScanner(), Sensors: collect.NewSensors(), GPU: &collect.GPUReader{}, Bandwidth: &collect.BandwidthMeter{}}
+		return api.New(api.Config{Host: "127.0.0.1", Port: "0", Accounts: accounts.New(db), Store: db, FrontendDir: t.TempDir()}, ctx)
+	}
+	serve(start(), "GET", "/api/config", "", "127.0.0.1:5000", map[string]string{"X-Real-IP": owner}, nil)
+	for deadline := time.Now().Add(5 * time.Second); db.Meta("proxy.unset_headers") == ""; {
+		if time.Now().After(deadline) {
+			t.Fatal("what the proxy leaves out was not saved")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	s := start() // restarted: no plain request through the proxy yet
+	bad := map[string]string{"X-Real-IP": attacker, "X-Forwarded-For": owner}
+	for range 10 {
+		serve(s, "POST", "/api/auth/login", `{"username":"jay","password":"a wrong guess"}`, "127.0.0.1:5000", bad, nil)
+	}
+	if rec := serve(s, "POST", "/api/auth/login", `{"username":"jay","password":"correct horse battery"}`, "127.0.0.1:5000", map[string]string{"X-Real-IP": owner}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("after a restart the owner is locked out by someone else's guesses: %d", rec.Code)
 	}
 }
 

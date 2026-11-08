@@ -3,7 +3,7 @@ import { ApiError, api, waitForRestart } from '../api/client';
 import type { AppJob, AppsResponse, StoreApp } from '../api/types';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
-import { AppsTabs } from '../components/ui';
+import { AppsTabs, Seg } from '../components/ui';
 
 // The app store: torrent, media and home-server apps installed from their official releases, each
 // as its own systemd service. Apps swizzin or a package already installed show as installed and are left alone.
@@ -54,10 +54,20 @@ function StateLine({ a }: { a: StoreApp }) {
   );
 }
 
+// opens says whether an app has a sheet to open: one to install, or one the store manages.
+const opens = (a: StoreApp) => (a.installed ? a.by === 'store' : a.available);
+
 function AppCard({ a, busy, onOpen }: { a: StoreApp; busy: boolean; onOpen: () => void }) {
   const url = address(a);
+  const clickable = opens(a) && !busy;
   return (
-    <article className={`app-card ${a.installed ? 'is-installed' : ''}`}>
+    // The whole card opens the app's sheet; its own links and buttons keep doing what they say.
+    <article
+      className={`app-card ${a.installed ? 'is-installed' : ''}${clickable ? ' opens' : ''}`}
+      onClick={(e) => {
+        if (clickable && !(e.target as Element).closest('a, button')) onOpen();
+      }}
+    >
       <div className="app-card-head">
         <Tile a={a} />
         <div className="min0">
@@ -243,10 +253,18 @@ function InstallSheet({ a, job, user, onClose, onStarted }: { a: StoreApp; job: 
                 <input type="checkbox" checked={check} onChange={(e) => setCheck(e.target.checked)} /> Add an uptime check for it
               </label>
             )}
-            <p className="form-help">
-              Downloads the latest official release to <span className="mono">/opt/{a.id}</span>, keeps its settings in <span className="mono">/var/lib/{a.id}</span>, and runs it as the{' '}
-              <span className="mono">{a.id}.service</span> systemd service under the <span className="mono">{user}</span> account.
-            </p>
+            <dl className="app-facts">
+              <dt>Comes from</dt>
+              <dd>its latest official release</dd>
+              <dt>Installs to</dt>
+              <dd className="mono">/opt/{a.id}</dd>
+              <dt>Settings in</dt>
+              <dd className="mono">/var/lib/{a.id}</dd>
+              <dt>Runs as</dt>
+              <dd>
+                <span className="mono">{a.id}.service</span>, under the <span className="mono">{user}</span> account
+              </dd>
+            </dl>
             {error && <p className="form-error">{error}</p>}
             <button className="btn" onClick={install}>
               Install {a.name}
@@ -254,7 +272,31 @@ function InstallSheet({ a, job, user, onClose, onStarted }: { a: StoreApp; job: 
           </div>
         ) : (
           <div className="install-form">
-            <p className="form-help">Installed from the store{a.version ? `, version ${a.version}` : ''}. Reinstalling fetches the latest release and keeps its settings.</p>
+            <dl className="app-facts">
+              <dt>Status</dt>
+              <dd>
+                <StateLine a={a} />
+              </dd>
+              {a.version && (
+                <>
+                  <dt>Version</dt>
+                  <dd className="mono">{a.version}</dd>
+                </>
+              )}
+              {address(a) && (
+                <>
+                  <dt>Address</dt>
+                  <dd>
+                    <a href={address(a)} target="_blank" rel="noreferrer">
+                      {address(a)} ↗
+                    </a>
+                  </dd>
+                </>
+              )}
+              <dt>Service</dt>
+              <dd className="mono">{a.unit || `${a.id}.service`}</dd>
+            </dl>
+            <p className="form-help">Reinstalling fetches the latest release and keeps its settings.</p>
             {a.sign_in && <p className="form-help">{a.sign_in}</p>}
             {a.id === 'ntfy' && <NtfyHookup a={a} />}
             {error && <p className="form-error">{error}</p>}
@@ -291,6 +333,7 @@ export function AppsPage() {
   const [data, setData] = useState<AppsResponse>();
   const [error, setError] = useState('');
   const [category, setCategory] = useState('All');
+  const [have, setHave] = useState<'all' | 'installed' | 'not'>('all');
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState<string>();
   const [job, setJob] = useState<AppJob | null>(null);
@@ -354,8 +397,16 @@ export function AppsPage() {
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (data?.apps ?? []).filter((a) => (category === 'All' || a.category === category) && (!q || `${a.name} ${a.summary} ${a.category}`.toLowerCase().includes(q)));
-  }, [data, category, query]);
+    return (data?.apps ?? []).filter(
+      (a) => (category === 'All' || a.category === category) && (have === 'all' || a.installed === (have === 'installed')) && (!q || `${a.name} ${a.summary} ${a.category}`.toLowerCase().includes(q)),
+    );
+  }, [data, category, have, query]);
+  // How many apps each category holds, for its chip.
+  const perCategory = useMemo(() => {
+    const n = new Map<string, number>();
+    for (const a of data?.apps ?? []) n.set(a.category, (n.get(a.category) ?? 0) + 1);
+    return n;
+  }, [data]);
 
   if (error) return <main className="alert">{error}</main>;
   if (!data) return <Skeleton kind="dashboard" />;
@@ -415,21 +466,64 @@ export function AppsPage() {
 
       <div className="store-filters">
         <div className="chips" role="group" aria-label="Category">
-          {CATEGORIES.map((c) => (
+          {CATEGORIES.filter((c) => c === 'All' || perCategory.has(c)).map((c) => (
             <button key={c} className={`chip ${category === c ? 'active' : ''}`} aria-pressed={category === c} onClick={() => setCategory(c)}>
               {c}
+              <span className="chip-count num">{c === 'All' ? data.apps.length : perCategory.get(c)}</span>
             </button>
           ))}
         </div>
-        <input className="search" type="search" placeholder="Search apps…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search apps" />
+        <div className="store-filters-end">
+          <Seg
+            label="Installed or not"
+            value={have}
+            onChange={setHave}
+            options={[
+              { value: 'all', label: 'All' },
+              { value: 'installed', label: `Installed ${installed}` },
+              { value: 'not', label: `Not installed ${data.apps.length - installed}` },
+            ]}
+          />
+          <input className="search" type="search" placeholder="Search apps…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search apps" />
+        </div>
       </div>
 
-      <div className="app-grid">
-        {shown.map((a) => (
-          <AppCard key={a.id} a={a} busy={running} onOpen={() => setOpen(a.id)} />
-        ))}
-        {shown.length === 0 && <p className="note">No app matches.</p>}
-      </div>
+      {shown.length === 0 ? (
+        <div className="store-empty">
+          <p className="note">No app matches.</p>
+          <button
+            type="button"
+            className="btn-quiet"
+            onClick={() => {
+              setCategory('All');
+              setHave('all');
+              setQuery('');
+            }}
+          >
+            Clear filters
+          </button>
+        </div>
+      ) : (
+        // What is on this machine first, then what could be: each group under its own heading.
+        [
+          { title: 'On this machine', apps: shown.filter((a) => a.installed) },
+          { title: 'More apps', apps: shown.filter((a) => !a.installed) },
+        ]
+          .filter((g) => g.apps.length > 0)
+          .map((g) => (
+            <section key={g.title} className="app-group" aria-label={g.title}>
+              <h2 className="app-group-head">
+                {g.title}
+                <span className="num">{g.apps.length}</span>
+              </h2>
+              <div className="app-grid">
+                {g.apps.map((a) => (
+                  <AppCard key={a.id} a={a} busy={running} onOpen={() => setOpen(a.id)} />
+                ))}
+              </div>
+            </section>
+          ))
+      )}
 
       {current && <InstallSheet a={current} job={job} user={data.user} onClose={() => setOpen(undefined)} onStarted={setJob} />}
     </main>

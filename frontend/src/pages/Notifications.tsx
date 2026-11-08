@@ -13,6 +13,7 @@ import { useToast } from '../components/Toasts';
 import { Seg, SubTabs } from '../components/ui';
 import { formatAgo, plural } from '../format';
 import { useNow } from '../hooks/useNow';
+import { useArrivals } from '../hooks/useArrivals';
 
 // The notification center: every alert the monitor raised (inbox), and where alerts go (rules,
 // quiet hours and mutes).
@@ -54,12 +55,12 @@ const clockTime = (ts: number) => new Date(ts * 1000).toLocaleTimeString(undefin
 
 const DELIVERY_TONE: Record<Notification['status'], string> = { sent: 'sent', digest: 'sent', held: 'held', muted: 'muted', failed: 'failed', kept: 'kept', throttled: 'muted', maintenance: 'muted' };
 
-function InboxRow({ n, now, open, onToggle, onRead }: { n: Notification; now: number; open: boolean; onToggle: () => void; onRead: (read: boolean) => void }) {
+function InboxRow({ n, now, open, arrived, onToggle, onRead }: { n: Notification; now: number; open: boolean; arrived: boolean; onToggle: () => void; onRead: (read: boolean) => void }) {
   const link = linkFor(n);
   const muteSubject = n.subject ?? `area:${n.area}`;
   const muteLabel = n.subject ? subjectLabel(n.subject) : (AREAS[n.area] ?? n.area);
   return (
-    <li className={`inbox-row ${n.read ? '' : 'unread'} ${open ? 'open' : ''}`}>
+    <li className={`inbox-row ${n.read ? '' : 'unread'} ${open ? 'open' : ''} ${arrived ? 'arrive' : ''}`}>
       <button type="button" className="inbox-main" aria-expanded={open} onClick={onToggle}>
         <SeverityIcon severity={n.severity} />
         <span className="min0">
@@ -183,6 +184,11 @@ function InboxView() {
     refresh();
   };
 
+  // An alert that comes in while the inbox is open slides in at the top.
+  const arrived = useArrivals(
+    (items ?? []).map((n) => ({ key: String(n.id), at: n.ts })),
+    items ? JSON.stringify(filters) : '',
+  );
   const groups = useMemo(() => {
     const out: { day: string; items: Notification[] }[] = [];
     for (const n of items ?? []) {
@@ -277,6 +283,7 @@ function InboxView() {
                     n={n}
                     now={now}
                     open={openId === n.id}
+                    arrived={arrived.has(String(n.id))}
                     onToggle={() => {
                       setOpenId(openId === n.id ? undefined : n.id);
                       if (!n.read && openId !== n.id) mark([n.id], true);

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Attack, AttackDefense, AttackFinding, AttackMethod, AttackSource, AttackView } from '../api/types';
 import { formatAgo, formatRate } from '../format';
 import { Section } from './ui';
+import { Pager, usePaged } from './Pager';
 
 // The methods, for agents' views (which leave the list out) and before the first answer.
 export const ATTACK_METHODS: AttackMethod[] = [
@@ -95,6 +96,7 @@ function Defense({
   onUnblock?: (address: string) => Promise<void>;
 }) {
   const [busy, setBusy] = useState('');
+  const blockedPages = usePaged(d.blocked, 10);
   const act = async (key: string, fn: () => Promise<void>) => {
     setBusy(key);
     try {
@@ -140,7 +142,7 @@ function Defense({
         <div className="attack-blocks">
           <div className="attack-list-head">Blocked</div>
           <ul className="attack-list">
-            {d.blocked.slice(0, 50).map((b) => (
+            {blockedPages.items.map((b) => (
               <li key={b.address} className="attack-row">
                 <span className="attack-row-who min0">
                   <span className="mono">{b.address}</span>
@@ -156,7 +158,7 @@ function Defense({
               </li>
             ))}
           </ul>
-          {d.blocked.length > 50 && <p className="small ink-3">and {d.blocked.length - 50} more</p>}
+          <Pager paged={blockedPages} label="Pages of blocked addresses" noun="addresses" />
         </div>
       )}
       {!!d.cannot?.length && (
@@ -189,6 +191,7 @@ export function AttackWatch({
   const methods = view.methods?.length ? view.methods : ATTACK_METHODS;
   const blocked = new Set(view.defense?.blocked.map((b) => b.address));
   const explained = view.findings.filter((f) => f.expected);
+  const pastPages = usePaged(view.history, 8);
   const status = view.attacking ? 'Under attack' : view.learning ? 'Calm · still learning what is normal here' : 'Calm';
   return (
     <Section label={label} aside={<span className={`attack-status ${view.attacking ? 'on' : ''}`}>{status}</span>}>
@@ -240,7 +243,7 @@ export function AttackWatch({
         <div className="attack-history">
           <span className="label">Past attacks</span>
           <ul>
-            {view.history.slice(0, 10).map((a) => (
+            {pastPages.items.map((a) => (
               <li key={a.id}>
                 <span>
                   {describe(a, methods)}
@@ -253,6 +256,7 @@ export function AttackWatch({
               </li>
             ))}
           </ul>
+          <Pager paged={pastPages} label="Pages of past attacks" noun="attacks" />
         </div>
       )}
     </Section>

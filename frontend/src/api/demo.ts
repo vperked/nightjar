@@ -991,7 +991,19 @@ function plex(summaryView: boolean): PlexResponse {
     ...over,
   });
   const all = [
-    stream('1', { address: '192.168.1.42', title: 'Severance', kind: 'episode', subtitle: 'S02E03 · Who Is Alive?', duration_ms: 3_300_000, offset_ms: 1_900_000, progress: 58, started_at: t - 1900 }),
+    stream('1', {
+      address: '192.168.1.42',
+      title: 'Severance',
+      kind: 'episode',
+      subtitle: 'S02E03 · Who Is Alive?',
+      duration_ms: 3_300_000,
+      offset_ms: 1_900_000,
+      progress: 58,
+      started_at: t - 1900,
+      source: { video: 'H.264', audio: 'Dolby Digital Plus 5.1', container: 'MKV', resolution: '1080p' },
+      audio_track: 'English (EAC3 5.1)',
+      peak_kbps: 14800,
+    }),
     stream('2', {
       user: 'alex',
       title: 'Heat',
@@ -1007,8 +1019,16 @@ function plex(summaryView: boolean): PlexResponse {
       fix: "The player's remote quality is set below the file's, or the server's upload limit is too low: raise either (Plex Settings → Remote Access).",
       audio_decision: 'copy',
       hw_transcode: true,
+      hw_decode: 'Intel (VA-API)',
+      hw_encode: 'Intel (VA-API)',
       throttled: true,
       speed: 2.4,
+      source: { video: 'HEVC', audio: 'Dolby TrueHD 7.1', container: 'MKV', resolution: '4K' },
+      output: { video: 'H.264', audio: 'Dolby TrueHD 7.1', container: 'MPEGTS', resolution: '720p' },
+      audio_track: 'English (TRUEHD 7.1)',
+      subtitle_track: 'English (SRT)',
+      subtitle_decision: 'copy',
+      peak_kbps: 6100,
       quality: '4K',
       bitrate_kbps: 4000,
       bandwidth_kbps: 4400,
@@ -1030,6 +1050,7 @@ function plex(summaryView: boolean): PlexResponse {
       quality: '',
       bitrate_kbps: 320,
       bandwidth_kbps: 330,
+      source: { audio: 'FLAC stereo', container: 'FLAC' },
       duration_ms: 330_000,
       offset_ms: 120_000,
       progress: 36,
@@ -1044,13 +1065,94 @@ function plex(summaryView: boolean): PlexResponse {
     const transcode = noise(Math.floor(ts / 900), 4) > 0.55 ? 1 : 0;
     return { ts, direct, transcode, bandwidth_kbps: Math.round(direct * 8200 + transcode * 4300 + noise(ts, 5) * 900) };
   });
+  // Finished streams, kept as they were last seen.
+  const andor = stream('p1', {
+    title: 'Andor',
+    kind: 'episode',
+    subtitle: 'S02E01 · One Year Later',
+    address: '192.168.1.42',
+    source: { video: 'HEVC', audio: 'Dolby Digital Plus 5.1', container: 'MKV', resolution: '4K' },
+    audio_track: 'English (EAC3 5.1)',
+    quality: '4K',
+    bitrate_kbps: 18400,
+    bandwidth_kbps: 19100,
+    peak_kbps: 24300,
+    duration_ms: 2_880_000,
+    offset_ms: 2_822_000,
+    progress: 98,
+  });
+  const dune = stream('p2', {
+    user: 'alex',
+    title: 'Dune: Part Two',
+    subtitle: '2024',
+    player: 'iPhone',
+    product: 'Plex for iOS',
+    platform: 'iOS',
+    local: false,
+    address: '203.0.113.58',
+    decision: 'transcode',
+    video_decision: 'transcode',
+    audio_decision: 'transcode',
+    subtitle_decision: 'burn',
+    reason: 'Burning in subtitles',
+    fix: 'Pick a text subtitle (SRT), or turn subtitles off: picture subtitles (PGS, VobSub) have to be drawn into the video.',
+    hw_transcode: true,
+    hw_decode: 'Intel (VA-API)',
+    hw_encode: 'Intel (VA-API)',
+    source: { video: 'HEVC', audio: 'Dolby TrueHD 7.1', container: 'MKV', resolution: '4K' },
+    output: { video: 'H.264', audio: 'AAC stereo', container: 'MPEGTS', resolution: '1080p' },
+    audio_track: 'English (TRUEHD 7.1)',
+    subtitle_track: 'English (PGS)',
+    quality: '4K',
+    bitrate_kbps: 8000,
+    bandwidth_kbps: 7600,
+    peak_kbps: 11200,
+    duration_ms: 9_960_000,
+    offset_ms: 9_960_000,
+    progress: 100,
+  });
+  const spirited = stream('p3', {
+    user: 'kim',
+    title: 'Spirited Away',
+    subtitle: '2001',
+    player: 'Bedroom',
+    product: 'Plex for LG',
+    platform: 'webOS',
+    address: '192.168.1.31',
+    decision: 'direct stream',
+    video_decision: 'copy',
+    audio_decision: 'copy',
+    source: { video: 'H.264', audio: 'DTS 5.1', container: 'MKV', resolution: '1080p' },
+    output: { video: 'H.264', audio: 'DTS 5.1', container: 'MPEGTS', resolution: '1080p' },
+    audio_track: 'Japanese (DTS 5.1)',
+    subtitle_track: 'English (SRT)',
+    subtitle_decision: 'copy',
+    bandwidth_kbps: 11200,
+    peak_kbps: 12900,
+    duration_ms: 7_500_000,
+    offset_ms: 5_550_000,
+    progress: 74,
+  });
+  const ended = (s: PlexStream, started: number, at: number): PlexPlay => ({
+    user: s.user,
+    kind: s.kind,
+    title: s.title,
+    subtitle: s.subtitle,
+    player: s.player,
+    decision: s.decision,
+    started,
+    ended: at,
+    progress: s.progress,
+    local: s.local,
+    duration_ms: s.duration_ms,
+    reason: s.reason,
+    last: { ...s, started_at: started },
+  });
   const plays: PlexPlay[] = [
-    ...all
-      .filter((s) => demoStopped.has(s.id))
-      .map((s) => ({ user: s.user, title: s.title, subtitle: s.subtitle, player: s.player, decision: s.decision, started: s.started_at, ended: demoStopped.get(s.id)!, progress: s.progress })),
-    { user: 'sam', title: 'Andor', subtitle: 'S02E01 · One Year Later', player: 'Living Room', decision: 'direct play', started: t - 9000, ended: t - 6300, progress: 98 },
-    { user: 'alex', title: 'Dune: Part Two', subtitle: '2024', player: 'iPhone', decision: 'transcode', started: t - 20000, ended: t - 11000, progress: 100 },
-    { user: 'kim', title: 'Spirited Away', subtitle: '2001', player: 'Bedroom', decision: 'direct stream', started: t - 40000, ended: t - 33000, progress: 74 },
+    ...all.filter((s) => demoStopped.has(s.id)).map((s) => ended(s, s.started_at, demoStopped.get(s.id)!)),
+    ended(andor, t - 9000, t - 6300),
+    ended(dune, t - 20000, t - 11000),
+    ended(spirited, t - 40000, t - 33000),
   ];
   return {
     enabled: true,
@@ -1085,14 +1187,7 @@ function plex(summaryView: boolean): PlexResponse {
 
 type FieldDef = Omit<SettingField, 'value' | 'set' | 'source'>;
 
-const f = (group: string, key: string, label: string, kind: SettingField['kind'], def: string, extra: Partial<FieldDef> = {}): FieldDef => ({
-  key,
-  group,
-  label,
-  kind,
-  default: def,
-  ...extra,
-});
+const f = (group: string, key: string, label: string, kind: SettingField['kind'], def: string, extra: Partial<FieldDef> = {}): FieldDef => ({ key, group, label, kind, default: def, ...extra });
 
 // Which demo settings apply without a restart, and which are folded away as advanced, as in the backend.
 const DEMO_LIVE = new Set([
@@ -1151,6 +1246,8 @@ const FIELDS: FieldDef[] = [
   f('Plex', 'PLEX_TOKEN', 'Token', 'secret', '', { help: 'X-Plex-Token of a server admin.' }),
   f('Dashboard', 'DASHBOARD_HIDDEN', 'Hidden sections', 'list', '', { help: 'Dashboard areas turned off under Settings → Sections.' }),
   f('Dashboard', 'STATUS_PAGE_ENABLED', 'Public status page', 'bool', 'false', { help: 'Names, status and uptime at /status, without the token.' }),
+  f('Dashboard', 'STATUS_PAGE_DOMAIN', 'Status page domain', 'text', '', { help: 'A domain of its own, such as status.example.com.' }),
+  f('Dashboard', 'STATUS_PAGE_PATH', 'Status page path', 'text', '/status', { help: "Where it is on the dashboard's own address." }),
   f('Dashboard', 'WEB_HOST', 'Listen address', 'text', '127.0.0.1', { startup: true, help: 'Every address needs the admin account to sign in.' }),
   f('Dashboard', 'WEB_PORT', 'Port', 'int', '8080', { startup: true }),
   f('Storage and logging', 'LOG_LEVEL', 'Log level', 'text', 'INFO', { options: ['DEBUG', 'INFO', 'WARNING', 'ERROR'] }),
@@ -1777,7 +1874,8 @@ function demoFirewall(id: string): FirewallStatus {
       hits: { r1: { packets: 1204, bytes: 72240 }, r2: { packets: 38, bytes: 2280 }, r3: { packets: 91822, bytes: 7_340_000 }, r4: { packets: 3, bytes: 180 } },
       since: now() - 6 * 3600,
       drops: [
-        ...[0, 1, 2, 3, 4].map((i) => ({ at: now() - 60 - i * 340, rule: 'r1', source: `45.142.120.${11 + (i % 2) * 26}`, dest: '192.168.1.10', proto: 'tcp', port: 22 })),
+        // A few hours of one network scanning SSH: enough drops to fill several pages.
+        ...Array.from({ length: 34 }, (_, i) => ({ at: now() - 60 - i * 340, rule: 'r1', source: `45.142.120.${[11, 37, 11, 52, 37, 11, 90][i % 7]}`, dest: '192.168.1.10', proto: 'tcp', port: 22 })),
         { at: now() - 900, rule: 'r4', direction: 'out' as const, source: '192.168.1.10', dest: '192.0.2.25', proto: 'tcp', port: 25 },
         { at: now() - 1300, rule: 'r2', source: '203.0.113.50', dest: '192.168.1.10', proto: 'tcp', port: 22 },
       ].sort((a, b) => b.at - a.at),
@@ -2331,12 +2429,14 @@ function route(method: string, url: URL, body: unknown): Response {
       case '/api/config':
         return json({
           auth_required: true,
-          authorized: true,
+          authorized: !demoSignedOut,
           account: { configured: true, username: 'demo', service: 'nightjar', two_factor: demoTwoFactor().on, recovery_left: demoTwoFactor().left },
           hidden: (state.settings.DASHBOARD_HIDDEN ?? '').split(',').filter(Boolean),
           appearance: demoAppearance(),
           status_page_enabled: true,
           status_page_title: 'Demo status',
+          status_page_domain: state.settings.STATUS_PAGE_DOMAIN ?? '',
+          status_page_path: state.settings.STATUS_PAGE_PATH || '/status',
           plex_enabled: true,
           qbittorrent_enabled: true,
           version: 'demo',
@@ -2414,6 +2514,8 @@ function route(method: string, url: URL, body: unknown): Response {
         return json({ available: true, containers: demoContainers });
       case '/api/report':
         return json({ report: demoReport(state.checks.map(summary)), enabled: true, at: 'Mon 09:00', next: nextMonday() });
+      case '/api/statuspage/proxy':
+        return json(demoProxy());
       case '/api/statuspage':
         return json({
           enabled: true,
@@ -2512,6 +2614,25 @@ function route(method: string, url: URL, body: unknown): Response {
     state.appearance = { ...a, css: a.css.trim() };
     save();
     return json({ appearance: state.appearance });
+  }
+  if ((method === 'POST' || method === 'DELETE') && path === '/api/statuspage/proxy') {
+    const domain = state.settings.STATUS_PAGE_DOMAIN ?? '';
+    if (!domain) return error(400, "set the status page's domain first");
+    demoProxyOn = method === 'POST';
+    const steps =
+      method === 'POST'
+        ? [
+            { name: 'Write the site', ok: true, detail: `/etc/nginx/sites-available/nightjar-status-${domain}.conf` },
+            { name: 'Enable the site', ok: true, detail: `/etc/nginx/sites-enabled/nightjar-status-${domain}.conf` },
+            { name: "Check nginx's configuration", ok: true },
+            { name: 'Reload nginx', ok: true },
+            { name: 'Get an HTTPS certificate', ok: true, detail: 'certbot renews it on its own' },
+          ]
+        : [
+            { name: 'Remove the site', ok: true, detail: `/etc/nginx/sites-available/nightjar-status-${domain}.conf` },
+            { name: 'Reload nginx', ok: true },
+          ];
+    return json({ ok: true, steps, state: demoProxy().state });
   }
   if (method === 'PUT' && path === '/api/statuspage') {
     state.statusDesign = body as StatusDesign;
@@ -2623,7 +2744,6 @@ function route(method: string, url: URL, body: unknown): Response {
     return json({ job: startDemoJob(appAction[1], appAction[2] as AppJob['action']) }, 202);
   }
   if (method === 'POST' && path === '/api/auth/password') return json({ changed: true });
-  if (method === 'POST' && path === '/api/auth/logout') return new Response(null, { status: 204 });
   if (method === 'POST' && path === '/api/notifications/read') {
     const b = body as { ids?: number[]; all?: boolean; unread?: boolean };
     for (const n of demoNotify.items) if (b.all || b.ids?.includes(n.id)) n.read = !b.unread;
@@ -2668,10 +2788,62 @@ function route(method: string, url: URL, body: unknown): Response {
   return error(404, 'Not Found');
 }
 
+// The demo's admin account: sign in as demo, password demo. The sign-in screen says so in the demo.
+export const DEMO_LOGIN = { username: 'demo', password: 'demo' };
+
+// Signed in or out, as the demo has it: kept for the tab, so a reload stays the way it was. A
+// signed-out demo answers only what the real monitor answers without a session.
+const SIGNED_OUT_KEY = 'nightjar.demo.signedOut';
+let demoSignedOut = (() => {
+  try {
+    return sessionStorage.getItem(SIGNED_OUT_KEY) === '1';
+  } catch {
+    return false;
+  }
+})();
+function setDemoSignedOut(out: boolean) {
+  demoSignedOut = out;
+  try {
+    if (out) sessionStorage.setItem(SIGNED_OUT_KEY, '1');
+    else sessionStorage.removeItem(SIGNED_OUT_KEY);
+  } catch {
+    /* storage unavailable: it lasts until a reload */
+  }
+}
+const PUBLIC = new Set(['/api/config', '/api/status', '/health']);
+
+// demoSignIn checks the demo account, and with two-factor sign-in on, asks for a code as the
+// monitor does (any six digits, or a recovery code, will do).
+function demoSignIn(body: Record<string, string> | undefined): Response {
+  if ((body?.username ?? '').trim() !== DEMO_LOGIN.username || body?.password !== DEMO_LOGIN.password) return error(401, 'wrong username or password');
+  if (demoTwoFactor().on) {
+    const code = (body?.code ?? '').trim();
+    if (!code) return error(401, 'enter the code from your authenticator app', { code: 'needed' });
+    if (!/^\d{6}$/.test(code) && code.length < 8) return error(401, 'that code is not right');
+  }
+  setDemoSignedOut(false);
+  return json({ username: DEMO_LOGIN.username });
+}
+
 // demoFetch answers API requests from the demo data, after a short, realistic delay.
 export async function demoFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, window.location.origin);
   const body = typeof init.body === 'string' ? JSON.parse(init.body) : undefined;
+  const method = (init.method ?? 'GET').toUpperCase();
   await new Promise((r) => setTimeout(r, 60 + Math.random() * 120));
-  return route((init.method ?? 'GET').toUpperCase(), url, body);
+  if (method === 'POST' && url.pathname === '/api/auth/login') return demoSignIn(body);
+  if (method === 'POST' && url.pathname === '/api/auth/logout') {
+    setDemoSignedOut(true);
+    return new Response(null, { status: 204 });
+  }
+  if (demoSignedOut && !PUBLIC.has(url.pathname)) return error(401, 'sign in first');
+  return route(method, url, body);
+}
+
+// The status page's domain in nginx, in the demo: set up or not, in this tab only.
+let demoProxyOn = false;
+function demoProxy() {
+  const domain = state.settings.STATUS_PAGE_DOMAIN ?? '';
+  const site = `# Written by Nightjar for its public status page.\nserver {\n    listen 80;\n    server_name ${domain};\n\n    location / {\n        proxy_pass http://127.0.0.1:8080;\n        proxy_set_header Host $host;\n    }\n}\n`;
+  return { domain, state: domain ? { nginx: true, certbot: true, installed: demoProxyOn, https: demoProxyOn, site } : undefined };
 }

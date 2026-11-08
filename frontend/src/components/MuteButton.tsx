@@ -45,10 +45,7 @@ export function MuteButton({ subject, label, compact = false }: { subject: strin
       const edge = 8;
       const left = b.right - m.width >= edge ? b.right - m.width : b.left;
       const below = b.bottom + gap + m.height <= window.innerHeight - edge;
-      setPlace({
-        left: Math.max(edge, Math.min(left, window.innerWidth - m.width - edge)),
-        top: below ? b.bottom + gap : Math.max(edge, b.top - gap - m.height),
-      });
+      setPlace({ left: Math.max(edge, Math.min(left, window.innerWidth - m.width - edge)), top: below ? b.bottom + gap : Math.max(edge, b.top - gap - m.height) });
     };
     position();
     menu.current?.querySelector('button')?.focus({ preventScroll: true });

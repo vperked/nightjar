@@ -4,14 +4,7 @@ import type { UpdateKind, UpdateSpec } from '../api/types';
 import { useToast } from '../components/Toasts';
 import { Seg } from '../components/ui';
 
-export const KIND_LABEL: Record<UpdateKind, string> = {
-  system: 'OS packages',
-  snap: 'snaps',
-  apt: 'apt package',
-  arr: 'Sonarr-style app',
-  git: 'git checkout',
-  release: 'GitHub release',
-};
+export const KIND_LABEL: Record<UpdateKind, string> = { system: 'OS packages', snap: 'snaps', apt: 'apt package', arr: 'Sonarr-style app', git: 'git checkout', release: 'GitHub release' };
 
 const KIND_HELP: Record<UpdateKind, string> = {
   system: 'Every package from apt, dnf, yum or pacman.',

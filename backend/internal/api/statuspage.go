@@ -2,6 +2,7 @@ package api
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"nightjar/internal/services"
+	"nightjar/internal/statusproxy"
 )
 
 // The public status page is designed in the dashboard: a title and intro, an optional
@@ -398,4 +400,59 @@ func overall(rows []publicService) string {
 		return "degraded"
 	}
 	return "operational"
+}
+
+// statusProxyOptions are the nginx set-up for the status page's domain as saved in the settings.
+func (s *Server) statusProxyOptions(email string) statusproxy.Options {
+	cfg := s.ctx.Config()
+	o := statusproxy.Options{Domain: cfg.StatusPageDomain, Port: cfg.WebPort, Email: email}
+	if s.cfg.StatusProxy != nil {
+		s.cfg.StatusProxy(&o)
+	}
+	return o
+}
+
+// statusProxy says what is set up in nginx for the status page's domain, with the server block to
+// use by hand instead.
+func (s *Server) statusProxy(w http.ResponseWriter, r *http.Request) {
+	o := s.statusProxyOptions("")
+	if o.Domain == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"domain": ""})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"domain": o.Domain, "state": statusproxy.Inspect(o)})
+}
+
+// setUpStatusProxy puts the status page's domain into nginx and gets it a certificate.
+func (s *Server) setUpStatusProxy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body"))
+		return
+	}
+	body.Email = strings.TrimSpace(body.Email)
+	if body.Email != "" && (len(body.Email) > 254 || !strings.Contains(body.Email, "@") || strings.ContainsAny(body.Email, " \t\n'\"")) {
+		writeJSON(w, http.StatusBadRequest, errBody("that is not an email address"))
+		return
+	}
+	o := s.statusProxyOptions(body.Email)
+	if o.Domain == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("set the status page's domain first"))
+		return
+	}
+	steps, err := statusproxy.Install(context.WithoutCancel(r.Context()), o)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": err == nil, "steps": steps, "state": statusproxy.Inspect(o)})
+}
+
+// removeStatusProxy takes the status page's site out of nginx.
+func (s *Server) removeStatusProxy(w http.ResponseWriter, r *http.Request) {
+	o := s.statusProxyOptions("")
+	if o.Domain == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("no status page domain is set"))
+		return
+	}
+	steps, err := statusproxy.Remove(context.WithoutCancel(r.Context()), o)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": err == nil, "steps": steps, "state": statusproxy.Inspect(o)})
 }

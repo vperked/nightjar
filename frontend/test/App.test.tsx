@@ -83,6 +83,9 @@ describe('format', () => {
   it('formats bytes and percents', () => {
     expect(formatBytes(0)).toBe('0 B');
     expect(formatBytes(1536)).toBe('1.5 KB');
+    expect(formatBytes(770 * 1024)).toBe('770 KB');
+    expect(formatBytes(1020 * 1024)).toBe('1.0 MB');
+    expect(formatBytes(999)).toBe('999 B');
     expect(formatPercent(null)).toBe('--');
     expect(formatPercent(12.345)).toBe('12.3%');
   });
@@ -298,6 +301,39 @@ describe('plex', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Plex refused to stop the stream');
     rerender(<PlexStreamSheet stream={undefined} onClose={() => {}} onStopped={() => {}} />);
     expect(screen.getByText('This stream has ended.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop stream' })).not.toBeInTheDocument();
+  });
+  it('shows a finished stream as it was delivered', () => {
+    const last = stream({
+      decision: 'transcode',
+      video_decision: 'transcode',
+      audio_decision: 'copy',
+      subtitle_decision: 'burn',
+      hw_decode: 'Intel (VA-API)',
+      hw_encode: 'Intel (VA-API)',
+      source: { video: 'HEVC', audio: 'Dolby TrueHD 7.1', container: 'MKV', resolution: '4K' },
+      output: { video: 'H.264', audio: 'Dolby TrueHD 7.1', container: 'MPEGTS', resolution: '1080p' },
+      audio_track: 'English (TRUEHD 7.1)',
+      subtitle_track: 'English (PGS)',
+      peak_kbps: 11200,
+    });
+    const t = Date.now() / 1000;
+    render(
+      <PlexStreamSheet
+        play={{ user: last.user, title: last.title, subtitle: '', player: last.player, decision: 'transcode', started: t - 7200, ended: t - 600, progress: 100, duration_ms: 3_600_000, last }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText('Ended')).toBeInTheDocument();
+    expect(screen.getByText('watched for 1h')).toBeInTheDocument();
+    expect(screen.getByText('11 Mbps')).toBeInTheDocument();
+    expect(screen.getByText('Finished')).toBeInTheDocument();
+    expect(screen.getByText('Intel (VA-API)')).toBeInTheDocument();
+    const formats = screen.getByRole('table', { name: 'Formats' });
+    expect(formats).toHaveTextContent('HEVC · 4K');
+    expect(formats).toHaveTextContent('H.264 · 1080p');
+    expect(formats).toHaveTextContent('Dolby TrueHD 7.1 · English');
+    expect(formats).toHaveTextContent('Burned in');
     expect(screen.queryByRole('button', { name: 'Stop stream' })).not.toBeInTheDocument();
   });
 });
@@ -1321,7 +1357,24 @@ describe('network', () => {
   });
 
   it('keeps program rows in place while the monitor re-sorts them every second', async () => {
-    const nic = { name: 'eth0', up: true, default: true, virtual: false, rx_bps: 1000, tx_bps: 0, rx_pps: 0, tx_pps: 0, rx_peak: 0, tx_peak: 0, rx_avg: 0, tx_avg: 0, rx_total: 0, tx_total: 0, errors: 0, drops: 0 };
+    const nic = {
+      name: 'eth0',
+      up: true,
+      default: true,
+      virtual: false,
+      rx_bps: 1000,
+      tx_bps: 0,
+      rx_pps: 0,
+      tx_pps: 0,
+      rx_peak: 0,
+      tx_peak: 0,
+      rx_avg: 0,
+      tx_avg: 0,
+      rx_total: 0,
+      tx_total: 0,
+      errors: 0,
+      drops: 0,
+    };
     const proc = (name: string, rx: number) => ({ name, connections: 1, rx_bps: rx, tx_bps: 0 });
     let calls = 0;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
@@ -1329,9 +1382,10 @@ describe('network', () => {
       calls++;
       // Busiest first, as the monitor sends them: b overtakes a, and c goes quiet for a moment.
       const processes = calls === 1 ? [proc('a', 900), proc('b', 500), proc('c', 100)] : [proc('b', 950), proc('a', 800), proc('c', 0)];
-      return new Response(JSON.stringify({ enabled: true, history: [], network: { interfaces: [nic], samples: { eth0: [{ ts: calls, rx: 1, tx: 1 }] }, processes, hosts: [], connections: 3, since: 90 } }), {
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({ enabled: true, history: [], network: { interfaces: [nic], samples: { eth0: [{ ts: calls, rx: 1, tx: 1 }] }, processes, hosts: [], connections: 3, since: 90 } }),
+        { headers: { 'Content-Type': 'application/json' } },
+      );
     });
     render(
       <MemoryRouter>
@@ -1889,6 +1943,17 @@ describe('monitor log', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Errors/ }));
     await waitFor(() => expect(screen.queryByText('Failed sign-in')).not.toBeInTheDocument());
     expect(screen.getByText('Listener died')).toBeInTheDocument();
+
+    // A line's actions: from a filtered view, the line can be seen among the lines around it.
+    fireEvent.click(screen.getByText('Listener died'));
+    expect(screen.getByRole('button', { name: 'Copy line' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show in context' }));
+    expect(await screen.findByText('Failed sign-in')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true');
+
+    // A search marks what it matched.
+    fireEvent.change(screen.getByLabelText('Search the log'), { target: { value: 'sign' } });
+    await waitFor(() => expect(document.querySelector('mark.log-hit')).toHaveTextContent('sign'));
   });
 });
 
@@ -2059,10 +2124,7 @@ describe('servers', () => {
       if (url === '/api/hosts') return json({ hosts: [host], port: 9101 });
       if (url === '/api/hosts/a1') return json({ host });
       if (url === '/api/hosts/token') return json({ token: 'f'.repeat(48), port: 9101 });
-      if (url === '/api/services')
-        return json({
-          services: [svc({ name: 'rsync', target: 'nas.local:873', server: 'a1', latency_ms: 4 }), svc({ name: 'website', target: 'https://example.com' })],
-        });
+      if (url === '/api/services') return json({ services: [svc({ name: 'rsync', target: 'nas.local:873', server: 'a1', latency_ms: 4 }), svc({ name: 'website', target: 'https://example.com' })] });
       return json({}, 404);
     });
     const { unmount } = render(
@@ -2755,17 +2817,7 @@ describe('plugins', () => {
 describe('SSH for a watched server', () => {
   it('picks a key, shows its public line, saves the login and tests it', async () => {
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-    const host = {
-      id: 'h1',
-      name: 'vps',
-      address: 'https://vps.example.net:9101',
-      added: 0,
-      kind: 'agent',
-      status: 'online',
-      readings: null,
-      history: [],
-      problems: [],
-    };
+    const host = { id: 'h1', name: 'vps', address: 'https://vps.example.net:9101', added: 0, kind: 'agent', status: 'online', readings: null, history: [], problems: [] };
     let ssh: unknown = null;
     const calls: string[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
@@ -2773,9 +2825,7 @@ describe('SSH for a watched server', () => {
       const method = init?.method ?? 'GET';
       calls.push(`${method} ${url}`);
       if (url === '/api/ssh/keys')
-        return json({
-          keys: [{ path: '/srv/nightjar/ssh/nightjar', name: 'nightjar', type: 'ED25519', fingerprint: 'SHA256:abc', public: 'ssh-ed25519 AAAATEST nightjar@box', own: true }],
-        });
+        return json({ keys: [{ path: '/srv/nightjar/ssh/nightjar', name: 'nightjar', type: 'ED25519', fingerprint: 'SHA256:abc', public: 'ssh-ed25519 AAAATEST nightjar@box', own: true }] });
       const saved = () => ({
         ...host,
         ssh: { port: 22, user: 'admin', key: '/srv/nightjar/ssh/nightjar' },
@@ -3355,7 +3405,9 @@ describe('firewall', () => {
     );
     expect(await screen.findByText('45.142.120.0/24')).toBeInTheDocument();
     expect(screen.getByText('kept scanning SSH')).toBeInTheDocument();
-    expect(screen.getByText('tcp port 22 · at most 6 a minute each')).toBeInTheDocument();
+    // The limit rule shows its ports and its rate as two tags.
+    const limit = screen.getByText('at most 6 a minute each').closest('li')!;
+    expect(within(limit).getByText('tcp port 22')).toBeInTheDocument();
     expect(screen.getByText(/dropped 1,204/)).toBeInTheDocument();
     expect(screen.getByText('this machine only')).toBeInTheDocument();
     // The outgoing rule waits on its own tab.
@@ -3393,11 +3445,11 @@ describe('firewall', () => {
     expect(screen.getByRole('button', { name: /Move up: Limit anyone/ })).toBeDisabled();
 
     // Editing loads the rule into the form and saves it in place.
-    fireEvent.click(within(screen.getByText('tcp port 22 · at most 6 a minute each').closest('li')!).getByRole('button', { name: 'Edit' }));
+    fireEvent.click(within(screen.getByText('at most 6 a minute each').closest('li')!).getByRole('button', { name: 'Edit' }));
     expect(screen.getByText('Changing: Limit anyone on tcp port 22 to 6 a minute each')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('How many'), { target: { value: '10' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect(await screen.findByText('tcp port 22 · at most 10 a minute each')).toBeInTheDocument();
+    expect(await screen.findByText('at most 10 a minute each')).toBeInTheDocument();
     expect(fw.get().rules.find((r) => r.id === 'r0')?.rate).toBe('10/min');
 
     fireEvent.click(within(screen.getByText('198.51.100.0/24').closest('li')!).getByRole('button', { name: 'Remove' }));

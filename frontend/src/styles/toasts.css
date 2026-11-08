@@ -29,7 +29,7 @@
   font-size: 13px;
   overflow: hidden;
   transform-origin: top right;
-  animation: toast-in 0.2s cubic-bezier(0.2, 0.7, 0.2, 1);
+  animation: toast-in 0.2s var(--ease-out);
 }
 .toast.ok {
   --tone: var(--good);

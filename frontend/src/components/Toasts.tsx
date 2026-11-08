@@ -24,12 +24,7 @@ const MAX = 4;
 // How long a toast takes to fade out; matches toast-out in toasts.css.
 const LEAVE_MS = 160;
 
-const GLYPH: Record<Tone, string> = {
-  ok: 'M7.5 12.5l3 3 6-6.5',
-  info: 'M12 11v5.5M12 7.5v.5',
-  warning: 'M12 7v6M12 16.5v.5',
-  error: 'M8 8l8 8M16 8l-8 8',
-};
+const GLYPH: Record<Tone, string> = { ok: 'M7.5 12.5l3 3 6-6.5', info: 'M12 11v5.5M12 7.5v.5', warning: 'M12 7v6M12 16.5v.5', error: 'M8 8l8 8M16 8l-8 8' };
 
 // ToastItem counts down its own time, paused while the pointer is over it, and shows what is left as a hairline.
 function ToastItem({ toast, onDone }: { toast: Toast; onDone: (id: number) => void }) {

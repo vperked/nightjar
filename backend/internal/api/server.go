@@ -26,6 +26,7 @@ import (
 	"nightjar/internal/collect"
 	"nightjar/internal/logx"
 	"nightjar/internal/monitor"
+	"nightjar/internal/statusproxy"
 	"nightjar/internal/storage"
 	"nightjar/internal/updates"
 	"nightjar/internal/web"
@@ -50,7 +51,10 @@ type Config struct {
 	AuthToken     string
 	AllowedOrigin string
 	FrontendDir   string
-	Version       string
+	// StatusProxy adjusts the nginx set-up for the status page's domain; tests point it at a
+	// temporary nginx folder and fake commands.
+	StatusProxy func(*statusproxy.Options)
+	Version     string
 	// Store holds dashboard settings; Restart applies them (nil in tests).
 	Store   *storage.Store
 	Restart func()
@@ -107,6 +111,7 @@ func tooSoon(w http.ResponseWriter, wait time.Duration) {
 
 func New(cfg Config, ctx *monitor.Context) *Server {
 	s := &Server{cfg: cfg, ctx: ctx, failures: map[string][]time.Time{}, hashing: make(chan struct{}, maxHashing), statsTTL: 2 * time.Second}
+	s.recallProxy()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /api/config", s.config)
@@ -152,6 +157,10 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("PUT /api/appearance", s.writable(s.saveAppearance))
 	mux.Handle("GET /api/statuspage", s.auth(s.statusPageDesign))
 	mux.Handle("PUT /api/statuspage", s.writableUpTo(maxDesignBody, s.saveStatusPageDesign))
+	mux.Handle("GET /api/statuspage/proxy", s.auth(s.statusProxy))
+	// Testing nginx, reloading it and certbot's challenge take a while.
+	mux.Handle("POST /api/statuspage/proxy", s.writable(slow(5*time.Minute, s.setUpStatusProxy)))
+	mux.Handle("DELETE /api/statuspage/proxy", s.writable(slow(time.Minute, s.removeStatusProxy)))
 	mux.Handle("GET /api/stats", s.auth(s.serveStats))
 	mux.Handle("GET /api/logs", s.auth(s.logs))
 	mux.Handle("GET /api/apps", s.auth(s.needApps(s.listApps)))
@@ -252,7 +261,7 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("/", s.frontend())
 	s.http = &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),
-		Handler:           compress(s.headers(mux)),
+		Handler:           compress(s.headers(s.statusHostOnly(mux))),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -335,7 +344,7 @@ func (s *Server) headers(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.learnProxy(r)
 		h := w.Header()
-		if r.URL.Path == "/status" || r.URL.Path == "/status-page" {
+		if r.URL.Path == "/status-page" || s.isStatusPage(r) {
 			h.Set("Content-Security-Policy", custom)
 		} else {
 			h.Set("Content-Security-Policy", csp)
@@ -405,11 +414,48 @@ func (s *Server) learnProxy(r *http.Request) {
 		return
 	}
 	realIP, forwarded := r.Header.Get("X-Real-IP") != "", len(r.Header.Values("X-Forwarded-For")) > 0
+	learned := false
 	switch {
 	case realIP && !forwarded:
-		s.noForwarded.Store(true)
+		learned = s.noForwarded.CompareAndSwap(false, true)
 	case forwarded && !realIP:
-		s.noRealIP.Store(true)
+		learned = s.noRealIP.CompareAndSwap(false, true)
+	}
+	if learned && s.cfg.Store != nil {
+		// Kept, so a restart does not reopen the window in which a made-up header counts failures
+		// against someone else's address until the proxy shows itself again.
+		value := s.proxyMeta()
+		go s.cfg.Store.SetMeta(proxyKey, value)
+	}
+}
+
+// proxyKey is the meta key holding what learnProxy found out, as proxyMeta writes it.
+const proxyKey = "proxy.unset_headers"
+
+// proxyMeta is the headers the proxy is known to leave out, comma-separated.
+func (s *Server) proxyMeta() string {
+	var unset []string
+	if s.noRealIP.Load() {
+		unset = append(unset, "x-real-ip")
+	}
+	if s.noForwarded.Load() {
+		unset = append(unset, "x-forwarded-for")
+	}
+	return strings.Join(unset, ",")
+}
+
+// recallProxy restores what learnProxy found out before the last restart.
+func (s *Server) recallProxy() {
+	if s.cfg.Store == nil {
+		return
+	}
+	for _, h := range strings.Split(s.cfg.Store.Meta(proxyKey), ",") {
+		switch h {
+		case "x-real-ip":
+			s.noRealIP.Store(true)
+		case "x-forwarded-for":
+			s.noForwarded.Store(true)
+		}
 	}
 }
 
@@ -662,6 +708,8 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 		"account":             s.account(signedIn),
 		"status_page_enabled": s.ctx.Config().StatusPageEnabled,
 		"status_page_title":   s.ctx.Config().StatusPageTitle,
+		"status_page_domain":  s.ctx.Config().StatusPageDomain,
+		"status_page_path":    s.ctx.Config().StatusPagePath,
 		"needs_setup":         false,
 		"hidden":              []string{},
 		"appearance":          s.publicAppearance(signedIn),
@@ -936,6 +984,16 @@ func (s *Server) frontend() http.Handler {
 			return
 		}
 		w.Header().Set("Cache-Control", "no-cache")
+		// The status page, wherever it is, says so in its HTML (see markStatusPage).
+		if s.isStatusPage(r) {
+			if index, err := fs.ReadFile(files, "index.html"); err == nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				if r.Method != http.MethodHead {
+					w.Write(markStatusPage(index))
+				}
+				return
+			}
+		}
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = "/"
 		fileServer.ServeHTTP(w, r2)

@@ -1,0 +1,7 @@
+# Built output and installed packages.
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+# The guides are prose: their wording and line breaks are kept as written.
+src/docs/*.md

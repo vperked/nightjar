@@ -683,6 +683,9 @@ func DirSize(path string, timeout time.Duration) (size int64, partial bool) {
 	return dirSize(path, timeout, nil, 0)
 }
 
+// fileID names a file by device and inode, so hardlinks to it can be told apart from other files.
+type fileID struct{ dev, ino uint64 }
+
 // abandoned counts, per path, the walks dirSize gave up waiting for that are still running.
 var abandoned = struct {
 	sync.Mutex
@@ -706,6 +709,7 @@ func dirSize(path string, timeout time.Duration, mounts map[string]uint64, dev u
 		defer cancel()
 	}
 	var total atomic.Int64
+	linked := map[fileID]struct{}{} // only the walk goroutine touches it
 	done := make(chan struct{})
 	// finished and left are guarded by abandoned's lock: whichever of the walk ending and the
 	// caller giving up comes second settles the count.
@@ -736,6 +740,15 @@ func dirSize(path string, timeout time.Duration, mounts map[string]uint64, dev u
 				return nil
 			}
 			if info, err := d.Info(); err == nil {
+				// A hardlinked file (an *arr import of a seeding torrent) is one set of blocks:
+				// count it once, as du does, or a media folder reads far bigger than its disk.
+				if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
+					id := fileID{uint64(st.Dev), st.Ino}
+					if _, dup := linked[id]; dup {
+						return nil
+					}
+					linked[id] = struct{}{}
+				}
 				total.Add(info.Size())
 			}
 			return nil

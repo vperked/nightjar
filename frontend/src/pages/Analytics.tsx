@@ -5,6 +5,7 @@ import type { AnalyticsPoint, AnalyticsRangeName, HostAnalytics } from '../api/t
 import { Skeleton } from '../components/Skeleton';
 import { TrendChart, withGaps, type Point } from '../components/TrendChart';
 import { Section, Seg, ServersTabs } from '../components/ui';
+import { Pager, usePaged } from '../components/Pager';
 import { formatBytes, formatDuration } from '../format';
 import { usePoll } from '../hooks/usePoll';
 
@@ -241,24 +242,28 @@ function Trends({ hosts, step }: { hosts: HostAnalytics[]; step: number }) {
 
 function Outages({ hosts, label }: { hosts: HostAnalytics[]; label: string }) {
   const all = hosts.flatMap((h) => h.incidents.map((i) => ({ ...i, host: h }))).sort((a, b) => b.start - a.start);
+  const paged = usePaged(all, 15, label);
   return (
     <Section label="Outages" aside={<span className="small ink-3">a server missing most of a minute's checks</span>}>
       {all.length === 0 ? (
         <p className="note">No outages in the last {label}.</p>
       ) : (
-        <table className="table">
-          <tbody>
-            {all.slice(0, 50).map((i) => (
-              <tr key={`${i.host.id}-${i.start}`}>
-                <td>
-                  <Link to={link(i.host)}>{i.host.name}</Link>
-                </td>
-                <td className="num small">{when(i.start)}</td>
-                <td className="r num small">{i.ongoing ? <span className="state crit">down now</span> : `down ${formatDuration(i.end - i.start)}`}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <>
+          <table className="table">
+            <tbody>
+              {paged.items.map((i) => (
+                <tr key={`${i.host.id}-${i.start}`}>
+                  <td>
+                    <Link to={link(i.host)}>{i.host.name}</Link>
+                  </td>
+                  <td className="num small">{when(i.start)}</td>
+                  <td className="r num small">{i.ongoing ? <span className="state crit">down now</span> : `down ${formatDuration(i.end - i.start)}`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <Pager paged={paged} label="Pages of outages" noun="outages" />
+        </>
       )}
     </Section>
   );

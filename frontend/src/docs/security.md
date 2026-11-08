@@ -29,7 +29,7 @@ Ten recovery codes are shown once, when you turn it on: each signs you in once w
 
 ## Scripts and the API
 
-Scripts can use the [API](/docs/api) without signing in. Set `WEB_AUTH_TOKEN` in `.env` and send it as `Authorization: Bearer <token>`.
+Scripts can use the [API](/docs/api) without signing in. Set `WEB_AUTH_TOKEN` in `.env` and send it as `Authorization: Bearer <token>`. It must be at least 16 characters (`openssl rand -hex 24` makes a good one); a shorter token is ignored, and the log says so at startup.
 
 ## Reaching the dashboard from elsewhere
 

@@ -98,7 +98,7 @@ export function AccountMenu({ theme, onToggleTheme, onSignOut }: { theme: 'light
             <span>Help and docs</span>
           </Item>
           {config?.status_page_enabled && (
-            <Item href="/status" onClick={() => setOpen(false)}>
+            <Item href={config.status_page_path || '/status'} onClick={() => setOpen(false)}>
               {icon(GLOBE)}
               <span>Public status page</span>
               <span className="account-hint">↗</span>

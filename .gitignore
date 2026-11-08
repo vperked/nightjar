@@ -24,3 +24,6 @@ coverage/
 /plugins/
 # SSH keys Nightjar makes to log in to other servers, private halves included.
 /ssh/
+
+# Kernel monitor state (KERNEL_TRACKING_FILE), written while the monitor runs.
+.nightjar_kernel_tracking.json

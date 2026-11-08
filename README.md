@@ -312,13 +312,17 @@ Agents installed before the rename keep running under their old names, but they 
 make dev                       # backend + Vite hot reload
 make demo                      # UI only, on demo data: no Go or backend needed
 make test                      # go vet, go test, tsc, vitest
+make format                    # gofmt the Go code, Prettier the frontend
+make lint                      # check formatting, go vet and tsc, changing nothing
 cd backend && go test -race ./...
 ```
 
-Frontend work does not need the backend: `make demo` (`npm run demo`) serves the UI on generated demo
-data (`frontend/src/api/demo.ts`), and `npm run dev` falls back to it when no backend answers. A banner
-says so, edits to checks and settings last for the browser tab, and production builds leave the demo
-data out entirely.
+Frontend work does not need the backend: `npm run dev` (also `npm run demo`, `make demo`) serves the UI
+on generated demo data (`frontend/src/api/demo.ts`). A banner says so, edits to checks and settings last
+for the browser tab, and production builds leave the demo data out entirely. Sign in as `demo` with the
+password `demo`; signing out and in again works as it does on a real monitor. To work against a real
+backend instead, `npm run dev:live` proxies the API to it (`BACKEND_URL`, by default
+http://127.0.0.1:8080) and falls back to demo data when none answers; `make dev` starts both.
 
 ### Where things are
 

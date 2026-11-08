@@ -1,7 +1,8 @@
-import { useId, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { ApiError, api } from '../api/client';
+import { ApiError, api, isDemo } from '../api/client';
 import { useConfig } from '../api/ConfigContext';
+import { reducedMotion } from '../motion';
 import { SettingsGroup } from './SettingsGroup';
 import { configChanged } from './Sections';
 import { useToast } from './Toasts';
@@ -28,7 +29,28 @@ function Password({ label, value, onChange, autoComplete, autoFocus }: { label: 
   );
 }
 
+// The night sky behind the sign-in card: stars scattered the same way on every visit (a fixed seed),
+// each twinkling in its own time, as x and y in percent, a size in px and a delay and period in s.
+const STARS = (() => {
+  let seed = 7;
+  const rand = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
+  return Array.from({ length: 70 }, () => ({ x: rand() * 100, y: rand() * 100, size: rand() < 0.15 ? 2.5 : rand() < 0.5 ? 1.5 : 1, delay: rand() * 6, period: 3 + rand() * 4 }));
+})();
+
+function NightSky() {
+  return (
+    <div className="auth-sky" aria-hidden="true">
+      {STARS.map((s, i) => (
+        <span key={i} className="auth-star" style={{ left: `${s.x}%`, top: `${s.y}%`, width: s.size, height: s.size, animationDelay: `${s.delay}s`, animationDuration: `${s.period}s` }} />
+      ))}
+      <span className="auth-meteor" />
+      <span className="auth-meteor late" />
+    </div>
+  );
+}
+
 // help is where "Help with this" leads, or with helpNote, a sentence of its own around the link.
+// Each time shake changes to a new truthy value (a failed try), the card shakes its head.
 function AuthCard({
   title,
   intro,
@@ -36,6 +58,7 @@ function AuthCard({
   onSubmit,
   help,
   helpNote,
+  shake,
 }: {
   title: string;
   intro: ReactNode;
@@ -43,10 +66,17 @@ function AuthCard({
   onSubmit: (e: FormEvent) => void;
   help: string;
   helpNote?: { before: string; link: string; after: string };
+  shake?: number;
 }) {
+  const card = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (!shake || reducedMotion()) return;
+    card.current?.animate?.({ transform: ['translateX(0)', 'translateX(-9px)', 'translateX(7px)', 'translateX(-5px)', 'translateX(3px)', 'translateX(0)'] }, { duration: 420, easing: 'ease-out' });
+  }, [shake]);
   return (
     <main className="auth">
-      <form className="signin" onSubmit={onSubmit}>
+      <NightSky />
+      <form className="signin" onSubmit={onSubmit} ref={card}>
         <div className="auth-mark" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <rect x="5" y="11" width="14" height="9" rx="2" />
@@ -165,6 +195,7 @@ export function SignIn({ onDone }: { onDone: () => void }) {
   // With two-factor sign-in on, the password is followed by a code from the authenticator.
   const [askCode, setAskCode] = useState(false);
   const [code, setCode] = useState('');
+  const [fails, setFails] = useState(0);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -179,6 +210,7 @@ export function SignIn({ onDone }: { onDone: () => void }) {
         setAskCode(true);
       } else {
         setError(err instanceof ApiError ? err.message : String(err));
+        setFails((n) => n + 1);
       }
       if (!needsCode) setPassword('');
       setCode('');
@@ -188,7 +220,21 @@ export function SignIn({ onDone }: { onDone: () => void }) {
   };
 
   return (
-    <AuthCard title="Sign in" intro="Sign in with the admin account." onSubmit={submit} help="/docs/troubleshooting#can-t-sign-in">
+    <AuthCard
+      title="Sign in"
+      intro={
+        isDemo() ? (
+          <>
+            Demo data: sign in as <code>demo</code> with the password <code>demo</code>.
+          </>
+        ) : (
+          'Sign in with the admin account.'
+        )
+      }
+      onSubmit={submit}
+      help="/docs/troubleshooting#can-t-sign-in"
+      shake={fails}
+    >
       <label className="auth-field">
         <span>Username</span>
         <input className="field" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus={!username} required />

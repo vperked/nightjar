@@ -15,7 +15,7 @@ If the page can't get its data, it says so and tries again every 30 seconds.
 
 ## Turn it on
 
-Set `STATUS_PAGE_ENABLED` under **[Settings → Dashboard](/settings)**. The page is then at `/status` on this dashboard's address, and the account menu links to it.
+Set `STATUS_PAGE_ENABLED` under **[Settings → Dashboard](/settings)**, or use the **Public** switch in the designer. The page is then at `/status` on this dashboard's address (or the path you choose, below), and the account menu links to it.
 
 ## Design it
 
@@ -40,6 +40,25 @@ The page takes scripts, frames, forms and event handlers like `onclick` out of y
 
 The CSS can be up to 50,000 characters, and each HTML box up to 20,000.
 
+## Its address
+
+**Address**, at the top of the designer, says where visitors find the page:
+
+- **Path**: where it is on the dashboard's own address, such as `/uptime` (`STATUS_PAGE_PATH`). `/status` always works too. The path is one word, and can't be one of the dashboard's own pages.
+- **Its own domain**, such as `status.example.com` (`STATUS_PAGE_DOMAIN`). There the status page is the whole site, at `/`: visitors get the page, its styles and its data, and nothing of the dashboard. Its sign-in, settings and API can't be reached through that domain, even with a token.
+
+### Putting the domain online
+
+First point the domain's DNS at this machine (an A record to its public address, and AAAA for IPv6). Then, in the designer:
+
+- **Set up nginx and HTTPS** (when nginx is installed): Nightjar adds a site for the domain, checks nginx accepts it, reloads nginx, and asks certbot for a Let's Encrypt certificate, which certbot then renews on its own. Each step is listed as it goes. If nginx refuses the configuration, the site is taken out again, so nginx keeps running as it was. If certbot can't get a certificate yet (the DNS hasn't spread, or port 80 is closed), the page works over HTTP meanwhile; run it again later. An email address for certificate notices is optional.
+- **Take it out of nginx** removes that site again. The certificate stays with certbot (`certbot delete --cert-name status.example.com` removes it).
+- **Set it up yourself** shows the nginx server block to use instead, for another reverse proxy or a hand-kept nginx. Whatever the proxy, it must pass the host it was asked for (nginx: `proxy_set_header Host $host`), which is how Nightjar knows to show only the status page.
+
+Nightjar never overwrites or removes a site it didn't write, and won't add one for a domain another site already serves. Setting up nginx needs Nightjar to run as root, as the installed service does.
+
+Behind Cloudflare's proxy, certbot's check over port 80 still works, unless **Always Use HTTPS** is on for the domain. Turn it off while the certificate is issued, or use Cloudflare's own certificate with SSL set to Full.
+
 ## Sharing it
 
-The dashboard listens only on this machine by default. To share the status page, make the dashboard reachable, ideally behind a reverse proxy with HTTPS (see [Account and security](/docs/security)). Visitors who aren't signed in can open `/status` and nothing else.
+The dashboard listens only on this machine by default. To share only the status page, give it its own domain (above) and expose just that. To share the dashboard as well, put it behind a reverse proxy with HTTPS (see [Account and security](/docs/security)); visitors who aren't signed in can open the status page and nothing else.

@@ -4,6 +4,7 @@ import { ApiError, api, UnauthorizedError, waitForRestart } from '../api/client'
 import type { Finding, Unit, UnitAction, UnitsResponse } from '../api/types';
 import { CauseLine, Diagnosis } from '../components/Diagnosis';
 import { MuteButton, MutedTag } from '../components/MuteButton';
+import { Pager, usePaged } from '../components/Pager';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { Seg, SubTabs } from '../components/ui';
@@ -252,6 +253,14 @@ export function SystemServicesPage() {
   const shown = list.filter(
     (u) => (filter === 'all' || (filter === 'problems' ? isProblem(u) : u.active === 'active' && u.sub === 'running')) && `${u.name} ${u.description}`.toLowerCase().includes(query.toLowerCase()),
   );
+  const paged = usePaged(shown, 25, `${filter}:${query}`);
+  // A service opened by link (?open=) is on whichever page holds it: show that page once it loads.
+  const linked = params.get('open');
+  const linkedAt = linked ? shown.findIndex((u) => u.name === linked) : -1;
+  const { setPage } = paged;
+  useEffect(() => {
+    if (linkedAt >= 0) setPage(Math.floor(linkedAt / 25));
+  }, [linked, linkedAt >= 0]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <main>
       <div className="page-title">
@@ -293,20 +302,23 @@ export function SystemServicesPage() {
       ) : shown.length === 0 ? (
         <p className="note">{filter === 'problems' ? 'Every service is healthy.' : 'No services match.'}</p>
       ) : (
-        <ul className="upd-list">
-          {shown.map((u) => (
-            <UnitRow
-              key={u.name}
-              u={u}
-              focus={open === u.name && params.get('open') === u.name}
-              self={data.self}
-              now={now}
-              open={open === u.name}
-              onToggle={() => setOpen((o) => (o === u.name ? undefined : u.name))}
-              onChanged={poll.refresh}
-            />
-          ))}
-        </ul>
+        <>
+          <ul className="upd-list">
+            {paged.items.map((u) => (
+              <UnitRow
+                key={u.name}
+                u={u}
+                focus={open === u.name && params.get('open') === u.name}
+                self={data.self}
+                now={now}
+                open={open === u.name}
+                onToggle={() => setOpen((o) => (o === u.name ? undefined : u.name))}
+                onChanged={poll.refresh}
+              />
+            ))}
+          </ul>
+          <Pager paged={paged} label="Pages of services" noun="services" />
+        </>
       )}
     </main>
   );

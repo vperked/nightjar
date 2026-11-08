@@ -244,8 +244,9 @@ export function CodeBlock({ lang, text }: { lang: string; text: string }) {
 
 // ---------- notes ----------
 
-// A quote that opens with **Tip:**, **Note:** or **Warning:** becomes that kind of note.
-const NOTE = /^\*\*(Tip|Note|Warning|Important):\*\*\s*/;
+// A quote that opens with **Tip:**, **Note:** or **Warning:** (or GitHub's [!TIP], [!NOTE],
+// [!WARNING], [!IMPORTANT], [!CAUTION]) becomes that kind of note.
+const NOTE = /^(?:\*\*(Tip|Note|Warning|Important|Caution):\*\*|\[!(TIP|NOTE|WARNING|IMPORTANT|CAUTION)\])\s*/i;
 const NOTE_ICON: Record<string, string> = {
   tip: 'M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z',
   note: 'M12 8v.01M11 12h1v5h1M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z',
@@ -255,16 +256,18 @@ const NOTE_ICON: Record<string, string> = {
 function Note({ blocks }: { blocks: Block[] }) {
   const first = blocks[0];
   const m = first?.kind === 'para' ? first.text.match(NOTE) : null;
-  const kind = (m?.[1] ?? 'Note').toLowerCase();
-  const tone = kind === 'warning' || kind === 'important' ? 'warning' : kind === 'tip' ? 'tip' : 'note';
-  const rest = m && first.kind === 'para' ? [{ ...first, text: first.text.replace(NOTE, '') }, ...blocks.slice(1)] : blocks;
+  const kind = (m?.[1] ?? m?.[2] ?? 'Note').toLowerCase();
+  const label = kind.charAt(0).toUpperCase() + kind.slice(1);
+  const tone = kind === 'warning' || kind === 'important' || kind === 'caution' ? 'warning' : kind === 'tip' ? 'tip' : 'note';
+  const lead = m && first.kind === 'para' ? first.text.replace(NOTE, '') : '';
+  const rest = m && first.kind === 'para' ? [...(lead ? [{ ...first, text: lead }] : []), ...blocks.slice(1)] : blocks;
   return (
     <aside className={`doc-note ${tone}`}>
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d={NOTE_ICON[tone]} />
       </svg>
       <div className="min0">
-        {m && <strong className="doc-note-label">{m[1]}</strong>}
+        {m && <strong className="doc-note-label">{label}</strong>}
         <Blocks blocks={rest} />
       </div>
     </aside>

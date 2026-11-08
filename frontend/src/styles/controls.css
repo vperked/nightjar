@@ -235,3 +235,79 @@
   cursor: default;
   opacity: 0.4;
 }
+
+/* ---------- Pager ---------- */
+
+/* Under a long list: which items show on the left, the pages on the right. The current page is a
+   filled pill; the rest are quiet until pointed at. */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+.pager-count {
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+.pager-pages {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.pager-btn {
+  display: grid;
+  place-items: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s,
+    border-color 0.15s;
+}
+.pager-btn:hover:not(:disabled):not(.on) {
+  border-color: var(--rule);
+  color: var(--ink);
+}
+.pager-btn.on {
+  background: var(--ink);
+  color: var(--bg);
+  font-weight: 600;
+  cursor: default;
+}
+.pager-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.pager-gap {
+  min-width: 18px;
+  color: var(--ink-3);
+  text-align: center;
+}
+/* A phone: bigger targets, and the pages take their own line. */
+@media (max-width: 760px) {
+  .pager-pages {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+  .pager-count {
+    flex: 1 1 100%;
+    text-align: center;
+  }
+  .pager-btn {
+    min-width: 36px;
+    height: 36px;
+  }
+}

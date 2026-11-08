@@ -1,0 +1,11 @@
+{
+  "singleQuote": true,
+  "printWidth": 200,
+  "objectWrap": "collapse",
+  "overrides": [
+    {
+      "files": ["*.json", "*.config.ts"],
+      "options": { "objectWrap": "preserve" }
+    }
+  ]
+}

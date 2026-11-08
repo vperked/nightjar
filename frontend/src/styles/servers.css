@@ -734,3 +734,57 @@ main.choosing-servers {
     padding-bottom: 150px;
   }
 }
+
+/* ---------- A server's page ---------- */
+
+/* Shortcuts beside Mute: its firewall, and down to managing it. */
+.server-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+/* Each core's figure under its bar, spread as the bars are. */
+.core-figures {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.core-figures > span {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+/* Managing the server, under what it reports: how it is reached, and logging in, side by side. */
+.server-manage {
+  margin-top: 34px;
+  padding-top: 18px;
+  border-top: 1px solid var(--rule);
+  scroll-margin-top: 70px;
+}
+.server-manage-head {
+  margin: 0;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.server-manage-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 24px;
+  align-items: start;
+}
+.server-manage-cols > .section {
+  margin-top: 14px;
+}
+@media (max-width: 960px) {
+  .server-manage-cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

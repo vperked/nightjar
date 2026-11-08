@@ -1,11 +1,14 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
 import type { LogEntry, LogLevel, LogsResponse } from '../api/types';
 import { Diagnosis } from '../components/Diagnosis';
 import { Select } from '../components/Select';
 import { Skeleton } from '../components/Skeleton';
+import { useToast } from '../components/Toasts';
 import { Seg } from '../components/ui';
+import { formatDuration } from '../format';
+import { useArrivals } from '../hooks/useArrivals';
 
 // The monitor's own log, live: what it checked, what it changed, and what went wrong.
 
@@ -29,21 +32,66 @@ const asText = (e: LogEntry) =>
     ...(e.attrs ?? []).map((a) => `${a.key}=${/\s/.test(a.value) ? JSON.stringify(a.value) : a.value}`),
   ].join(' ');
 
-function LogLine({ e, showDate }: { e: LogEntry; showDate: boolean }) {
+// hit marks every place text contains needle (any case), for a search the log was narrowed by.
+function hit(text: string, needle: string) {
+  if (!needle) return text;
+  const lower = text.toLowerCase();
+  const n = needle.toLowerCase();
+  const out: ReactNode[] = [];
+  let from = 0;
+  for (let at = lower.indexOf(n); at >= 0; at = lower.indexOf(n, from)) {
+    if (at > from) out.push(text.slice(from, at));
+    out.push(
+      <mark key={at} className="log-hit">
+        {text.slice(at, at + n.length)}
+      </mark>,
+    );
+    from = at + n.length;
+  }
+  if (!out.length) return text;
+  if (from < text.length) out.push(text.slice(from));
+  return out;
+}
+
+// GAP is the quiet spell between two lines that gets a divider saying how long it was.
+const GAP = 10 * 60 * 1000;
+
+function LogLine({
+  e,
+  showDate,
+  arrived,
+  needle,
+  picked,
+  focused,
+  onPick,
+}: {
+  e: LogEntry;
+  showDate: boolean;
+  arrived: boolean;
+  needle: string;
+  picked: boolean;
+  focused: boolean;
+  onPick: () => void;
+}) {
+  // A click picks the line (for its actions), but not one that ends selecting text to copy.
+  const click = () => {
+    if (window.getSelection?.()?.toString()) return;
+    onPick();
+  };
   return (
-    <div className={`log-line ${e.level}`}>
+    <div className={`log-line ${e.level}${arrived ? ' arrive' : ''}${picked ? ' picked' : ''}${focused ? ' focused' : ''}`} data-seq={e.seq} onClick={click} aria-expanded={picked}>
       <span className="log-time num" title={new Date(e.time).toLocaleString()}>
         {showDate && <span className="log-date">{new Date(e.time).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} </span>}
         {clock(e.time)}
       </span>
       <span className="log-level">{LEVEL_WORD[e.level]}</span>
-      <span className="log-component truncate">{e.component}</span>
+      <span className="log-component truncate">{e.component && hit(e.component, needle)}</span>
       <span className="log-text">
-        <span className="log-message">{e.message}</span>
+        <span className="log-message">{hit(e.message, needle)}</span>
         {e.attrs?.map((a, i) => (
           <span key={i} className="log-attr">
-            <span className="log-key">{a.key}</span>
-            {a.value}
+            <span className="log-key">{hit(a.key, needle)}</span>
+            {hit(a.value, needle)}
           </span>
         ))}
       </span>
@@ -64,6 +112,12 @@ export function LogsPage() {
   const box = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const [scrolledUp, setScrolledUp] = useState(false);
+  // The newest line in view when you scrolled up: anything after it is new to you.
+  const [readTo, setReadTo] = useState(0);
+  // The line picked for its actions, and one to bring into view once the log has loaded.
+  const [picked, setPicked] = useState<number>();
+  const [focus, setFocus] = useState<number>();
+  const notify = useToast();
 
   useEffect(() => {
     const id = setTimeout(() => setSearch(query.trim()), 250);
@@ -111,17 +165,55 @@ export function LogsPage() {
   // While following, the view stays pinned to the newest line, unless you scrolled up to read.
   useLayoutEffect(() => {
     const el = box.current;
-    if (el && follow && atBottom.current) el.scrollTop = el.scrollHeight;
-  }, [entries, follow]);
+    if (el && follow && atBottom.current && focus === undefined) el.scrollTop = el.scrollHeight;
+  }, [entries, follow, focus]);
+  // A line asked for in context is brought to the middle of the view once it has loaded.
+  useLayoutEffect(() => {
+    if (focus === undefined || !entries) return;
+    const el = box.current;
+    const line = el?.querySelector<HTMLElement>(`[data-seq="${focus}"]`);
+    if (!el || !line) return;
+    atBottom.current = false;
+    setScrolledUp(true);
+    setReadTo(entries.at(-1)?.seq ?? 0);
+    // Only the log scrolls; the page stays where it is.
+    const at = line.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    el.scrollTop += at - el.clientHeight / 2 + line.offsetHeight / 2;
+    const id = setTimeout(() => setFocus(undefined), 2400);
+    return () => clearTimeout(id);
+  }, [focus, entries]);
   const onScroll = () => {
     const el = box.current;
     if (!el) return;
-    atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    setScrolledUp(!atBottom.current);
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (!bottom && atBottom.current) setReadTo(entries?.at(-1)?.seq ?? 0);
+    atBottom.current = bottom;
+    setScrolledUp(!bottom);
   };
   const toBottom = () => {
     atBottom.current = true;
+    setScrolledUp(false);
     box.current?.scrollTo({ top: box.current.scrollHeight, behavior: 'smooth' });
+  };
+  const unread = scrolledUp && follow ? (entries ?? []).filter((e) => e.seq > readTo).length : 0;
+
+  const filtered = !!(search || show !== 'all' || component);
+  const copy = async (e: LogEntry) => {
+    try {
+      await navigator.clipboard.writeText(asText(e));
+      notify({ tone: 'ok', title: 'Line copied' });
+    } catch {
+      notify({ tone: 'error', title: 'Could not copy', body: 'The browser did not allow it. Select the line and copy it instead.' });
+    }
+  };
+  // inContext drops every filter and brings the line to the middle, among those around it.
+  const inContext = (e: LogEntry) => {
+    setQuery('');
+    setSearch('');
+    setShow('all');
+    setComponent('');
+    setPicked(e.seq);
+    setFocus(e.seq);
   };
 
   const counts = useMemo(() => {
@@ -130,6 +222,11 @@ export function LogsPage() {
     return c;
   }, [entries]);
   // Dates appear only when the view spans more than one day.
+  // Lines written while the page is open slide in as they come.
+  const arrived = useArrivals(
+    (entries ?? []).map((e) => ({ key: String(e.seq), at: e.seq })),
+    entries ? JSON.stringify(filters) : '',
+  );
   const multiDay = !!entries?.length && new Date(entries[0].time).toDateString() !== new Date(entries[entries.length - 1].time).toDateString();
 
   const download = () => {
@@ -190,10 +287,7 @@ export function LogsPage() {
           options={[
             { value: 'all', label: 'All' },
             { value: 'info', label: 'Info +' },
-            {
-              value: 'warn',
-              label: <>Warnings{counts.warn + counts.error > 0 && show !== 'error' && <span className="seg-count warn">{counts.warn + counts.error}</span>}</>,
-            },
+            { value: 'warn', label: <>Warnings{counts.warn + counts.error > 0 && show !== 'error' && <span className="seg-count warn">{counts.warn + counts.error}</span>}</> },
             { value: 'error', label: <>Errors{counts.error > 0 && <span className="seg-count crit">{counts.error}</span>}</> },
           ]}
         />
@@ -215,19 +309,58 @@ export function LogsPage() {
             {entries.length === 0 ? (
               <div className="log-empty">{search || show !== 'all' || component ? 'Nothing in the log matches.' : 'Nothing logged yet.'}</div>
             ) : (
-              entries.map((e) => <LogLine key={e.seq} e={e} showDate={multiDay} />)
+              entries.map((e, i) => {
+                const gap = i > 0 ? e.time - entries[i - 1].time : 0;
+                return (
+                  <Fragment key={e.seq}>
+                    {gap >= GAP && (
+                      <div className="log-gap" role="separator">
+                        <span>{formatDuration(gap / 1000)} later</span>
+                      </div>
+                    )}
+                    <LogLine
+                      e={e}
+                      showDate={multiDay}
+                      arrived={arrived.has(String(e.seq))}
+                      needle={search}
+                      picked={picked === e.seq}
+                      focused={focus === e.seq}
+                      onPick={() => setPicked(picked === e.seq ? undefined : e.seq)}
+                    />
+                    {picked === e.seq && (
+                      <div className="log-actions">
+                        <button type="button" className="btn-quiet" onClick={() => copy(e)}>
+                          Copy line
+                        </button>
+                        {filtered && (
+                          <button type="button" className="btn-quiet" onClick={() => inContext(e)}>
+                            Show in context
+                          </button>
+                        )}
+                        {e.component && e.component !== component && (
+                          <button type="button" className="btn-quiet" onClick={() => setComponent(e.component!)}>
+                            Only {e.component}
+                          </button>
+                        )}
+                        <span className="log-actions-when num">{new Date(e.time).toLocaleString()}</span>
+                      </div>
+                    )}
+                  </Fragment>
+                );
+              })
             )}
           </div>
           <div className="log-foot">
             <span className="num">
               {entries.length.toLocaleString()} {entries.length === 1 ? 'entry' : 'entries'}
             </span>
-            {follow && scrolledUp && (
-              <button className="btn-quiet" onClick={toBottom}>
-                Jump to newest ↓
-              </button>
-            )}
+            <span className="log-foot-hint">Click a line to copy it{filtered ? ' or see it in context' : ''}.</span>
           </div>
+          {follow && scrolledUp && (
+            <button type="button" className={`log-newest ${unread ? 'has-new' : ''}`} onClick={toBottom}>
+              {unread ? `${unread.toLocaleString()} new ${unread === 1 ? 'line' : 'lines'}` : 'Jump to newest'} ↓
+            </button>
+          )}
         </div>
       )}
     </main>

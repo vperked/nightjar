@@ -37,6 +37,8 @@ var actions = map[string][2]string{
 	"PUT /api/settings":                            {"settings", "Changed settings"},
 	"PUT /api/appearance":                          {"settings", "Changed the appearance"},
 	"PUT /api/statuspage":                          {"status page", "Changed the status page"},
+	"POST /api/statuspage/proxy":                   {"status page", "Set up nginx for the status page's domain"},
+	"DELETE /api/statuspage/proxy":                 {"status page", "Took the status page's domain out of nginx"},
 	"PUT /api/incidents/{id}/feedback":             {"incident", "Gave feedback on an incident"},
 	"PUT /api/incidents/{id}/notice":               {"status page", "Saved an incident notice"},
 	"DELETE /api/incidents/{id}/notice":            {"status page", "Took down an incident notice"},

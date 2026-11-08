@@ -42,41 +42,15 @@ export interface HostInfo {
 export interface Stats {
   timestamp: number;
   system: HostInfo;
-  cpu: {
-    percent: number;
-    per_core: number[] | null;
-    cores: number;
-    freq: { current: number; min: number; max: number };
-    load: number[] | null;
-  };
+  cpu: { percent: number; per_core: number[] | null; cores: number; freq: { current: number; min: number; max: number }; load: number[] | null };
   memory: Memory;
   swap: Memory;
-  disk: {
-    total: { total: number; used: number; free: number; percent: number; partitions: number };
-    partitions: Partition[];
-  };
-  gpu: {
-    name: string;
-    utilization: number;
-    memory_percent: number;
-    memory_used_mb: number;
-    memory_total_mb: number;
-    temperature: number;
-    power_draw: number;
-    power_limit: number;
-  } | null;
+  disk: { total: { total: number; used: number; free: number; percent: number; partitions: number }; partitions: Partition[] };
+  gpu: { name: string; utilization: number; memory_percent: number; memory_used_mb: number; memory_total_mb: number; temperature: number; power_draw: number; power_limit: number } | null;
   temperature: number | null;
   fans: { label: string; speed_rpm: number }[];
-  network: {
-    bandwidth: { bytes_sent_per_sec: number; bytes_recv_per_sec: number } | null;
-    interfaces: { name: string; addresses: string[] | null; is_up: boolean; speed: number }[] | null;
-  };
-  processes: {
-    total: number;
-    by_status: Record<string, number>;
-    top_cpu: Process[] | null;
-    top_memory: Process[] | null;
-  };
+  network: { bandwidth: { bytes_sent_per_sec: number; bytes_recv_per_sec: number } | null; interfaces: { name: string; addresses: string[] | null; is_up: boolean; speed: number }[] | null };
+  processes: { total: number; by_status: Record<string, number>; top_cpu: Process[] | null; top_memory: Process[] | null };
   history: Sample[];
 }
 
@@ -506,6 +480,8 @@ export interface AppConfig {
   account?: { configured: boolean; username?: string; service?: string; two_factor?: boolean; recovery_left?: number }; // the admin account; not configured on a fresh install
   status_page_enabled: boolean;
   status_page_title: string;
+  status_page_domain?: string; // its own domain, where it is the whole site
+  status_page_path?: string; // where it is on the dashboard's address, besides /status
   plex_enabled?: boolean;
   qbittorrent_enabled?: boolean;
   needs_setup?: boolean; // no alert channel or no uptime check yet
@@ -551,6 +527,21 @@ export interface PlexStream {
   progress: number;
   started_at: number;
   address?: string;
+  source?: PlexFormat; // the file as it is
+  output?: PlexFormat; // what the player is sent, when Plex converts or repackages it
+  audio_track?: string; // "English (TRUEHD 7.1)"
+  subtitle_track?: string;
+  subtitle_decision?: string; // burn, transcode, copy
+  hw_decode?: string; // the hardware decoding a transcode; none is the CPU
+  hw_encode?: string;
+  peak_kbps?: number;
+}
+
+export interface PlexFormat {
+  video?: string;
+  audio?: string;
+  container?: string;
+  resolution?: string;
 }
 
 export interface PlexLibrary {
@@ -572,6 +563,7 @@ export interface PlexSample {
 
 export interface PlexPlay {
   user: string;
+  kind?: string;
   title: string;
   subtitle: string;
   player: string;
@@ -579,6 +571,10 @@ export interface PlexPlay {
   started: number;
   ended: number;
   progress: number;
+  local?: boolean;
+  duration_ms?: number;
+  reason?: string;
+  last?: PlexStream; // the stream as last seen playing
 }
 
 export interface PlexState {
@@ -588,13 +584,7 @@ export interface PlexState {
   since: number;
   checked_at: number;
   latency_ms: number | null;
-  server: {
-    name: string;
-    version: string;
-    platform: string;
-    platform_version: string;
-    update_available?: string;
-  } | null;
+  server: { name: string; version: string; platform: string; platform_version: string; update_available?: string } | null;
   streams: PlexStream[];
   direct: number;
   transcode: number;
@@ -1446,4 +1436,33 @@ export interface FirewallStatus {
 export interface AgentFirewall {
   firewall: FirewallStatus;
   defense?: AttackDefense;
+}
+
+// ---------- status page address ----------
+
+export interface StatusProxyStep {
+  name: string;
+  ok: boolean;
+  detail?: string;
+}
+
+// StatusProxyState is what is set up in nginx for the status page's domain.
+export interface StatusProxyState {
+  nginx: boolean;
+  certbot: boolean;
+  installed: boolean;
+  https: boolean;
+  file?: string;
+  site: string; // the server block, for setting it up by hand
+}
+
+export interface StatusProxyResponse {
+  domain: string;
+  state?: StatusProxyState;
+}
+
+export interface StatusProxyResult {
+  ok: boolean;
+  steps: StatusProxyStep[];
+  state: StatusProxyState;
 }

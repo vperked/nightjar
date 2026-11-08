@@ -10,7 +10,7 @@ Connect Plex in the [setup guide](/setup), which finds a local server and its to
 - **Now playing**: who is watching what, on which player, and how: direct play, direct stream or transcode, with hardware transcoding and throttling flagged. Also progress, quality, and bandwidth split between local and remote.
 - **Charts** of concurrent streams and bandwidth.
 - **Libraries** with their item counts.
-- **Recently finished** streams.
+- **Recently finished** streams. Select one to see how it was delivered, the same details as a stream playing now.
 
 The Overview's _Now playing_ card shows the current streams too.
 
@@ -27,8 +27,11 @@ Nightjar keeps every stream it sees finish, for as long as `HISTORY_RETENTION_DA
 Select a stream under _Now playing_, or its **Manage** button, to open it up close:
 
 - **Who and where**: the user, the player and app, the platform, and whether it plays on your network or remotely, with the player's IP address.
-- **How it is delivered**: direct play, direct stream or transcode, and for a transcode whether the GPU does it, what it re-encodes (video, audio or both) and how far ahead of playback it is.
-- **Quality and bandwidth**: the source quality and bitrate, and what the stream uses now.
+- **How it is delivered**: direct play, direct stream or transcode, and for a transcode the hardware that does it (the GPU's name, or the CPU), what it re-encodes (video, audio or both) and how far ahead of playback it is.
+- **The file and what the player gets**: the video codec and resolution, the audio codec, channels and language, the container and the subtitles, next to what Plex sends the player. What it converts is marked, so _HEVC · 4K_ → _H.264 · 1080p_ or subtitles _Burned in_ shows at a glance where a transcode comes from.
+- **Quality and bandwidth**: the source quality and bitrate, what the stream uses now, and its peak.
+
+A finished stream under _Recently finished_ opens the same way, as it was last seen before it ended, with when it started, how long it was watched and the most bandwidth it used. Nightjar keeps these details for the last 50 streams since the monitor started.
 
 **Stop stream** ends playback and shows a message on the player: pick one of the ready-made ones or write your own, up to 200 characters. Leave it empty and the viewer sees _The server owner stopped this stream_. The dashboard asks once more before it stops anything.
 

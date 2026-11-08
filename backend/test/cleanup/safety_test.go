@@ -133,6 +133,23 @@ func TestDirSizeAndLargestSubdirs(t *testing.T) {
 	}
 }
 
+// An *arr import hardlinks the seeding download into the library: both names are one file on
+// disk, so the folder is as big as du says, not twice that.
+func TestDirSizeCountsHardlinksOnce(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "downloads"), 0o755)
+	os.MkdirAll(filepath.Join(root, "movies"), 0o755)
+	src := filepath.Join(root, "downloads", "film.mkv")
+	os.WriteFile(src, make([]byte, 5000), 0o644)
+	if err := os.Link(src, filepath.Join(root, "movies", "film.mkv")); err != nil {
+		t.Skip("no hardlinks here:", err)
+	}
+	os.WriteFile(filepath.Join(root, "movies", "other.mkv"), make([]byte, 100), 0o644)
+	if size, partial := cleanup.DirSize(root, 5*time.Second); size != 5100 || partial {
+		t.Fatalf("size %d partial %v, want 5100", size, partial)
+	}
+}
+
 // openSUSE's btrfs layout: / and /var are subvolumes of one pool, each with its own device number,
 // so a full / is helped by cleaning /var/log. A tmpfs and a second disk are apart.
 func TestBtrfsSubvolumesCountAsOneFilesystem(t *testing.T) {

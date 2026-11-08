@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router';
 import { Markdown, plain, slug as anchor } from '../components/Markdown';
 import { DOC_GROUPS, DOCS, type DocEntry } from '../docs';
@@ -186,6 +186,78 @@ function useSection(ids: string[], key: string): string {
   return current;
 }
 
+// useReadingProgress stretches bar across the top of the window as article is read: empty at its
+// top, full once its end is on screen. It writes the bar's style straight away rather than through
+// state, so scrolling never re-renders the page.
+function useReadingProgress(article: RefObject<HTMLElement>, bar: RefObject<HTMLElement>, key: string) {
+  useEffect(() => {
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      const a = article.current;
+      const b = bar.current;
+      if (!a || !b) return;
+      const r = a.getBoundingClientRect();
+      const total = r.height - window.innerHeight;
+      const p = total <= 0 ? 1 : Math.min(1, Math.max(0, -r.top / total));
+      b.style.transform = `scaleX(${p})`;
+    };
+    const soon = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    measure();
+    window.addEventListener('scroll', soon, { passive: true });
+    window.addEventListener('resize', soon);
+    return () => {
+      window.removeEventListener('scroll', soon);
+      window.removeEventListener('resize', soon);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [article, bar, key]);
+}
+
+// OnThisPage is the outline as a small menu beside the page's group, for screens too narrow for the
+// outline column. Picking a section closes it.
+function OnThisPage({ outline, current }: { outline: string[]; current: string }) {
+  const box = useRef<HTMLDetailsElement>(null);
+  // Like any menu, it closes on a press elsewhere and on Escape.
+  useEffect(() => {
+    const close = () => box.current?.removeAttribute('open');
+    const press = (e: PointerEvent) => {
+      if (box.current?.open && !box.current.contains(e.target as Node)) close();
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && box.current?.open) {
+        close();
+        box.current.querySelector('summary')?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', press);
+    document.addEventListener('keydown', key);
+    return () => {
+      document.removeEventListener('pointerdown', press);
+      document.removeEventListener('keydown', key);
+    };
+  }, []);
+  return (
+    <details className="docs-toc" ref={box}>
+      <summary>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 6h16M4 12h10M4 18h13" />
+        </svg>
+        On this page
+      </summary>
+      <nav aria-label="On this page">
+        {outline.map((h) => (
+          <a key={h} href={`#${anchor(h)}`} className={current === anchor(h) ? 'active' : ''} onClick={() => box.current?.removeAttribute('open')}>
+            {h}
+          </a>
+        ))}
+      </nav>
+    </details>
+  );
+}
+
 // SearchBox is the docs' search, in the sidebar and on the home page; Enter opens the best match.
 function SearchBox({ query, setQuery, onPick, big = false }: { query: string; setQuery: (q: string) => void; onPick: () => void; big?: boolean }) {
   const navigate = useNavigate();
@@ -265,6 +337,7 @@ export function DocsPage() {
   const [query, setQuery] = useState('');
   const [menu, setMenu] = useState(false);
   const article = useRef<HTMLElement>(null);
+  const progress = useRef<HTMLDivElement>(null);
   const home = slug === '';
   const index = DOCS.findIndex((d) => d.slug === slug);
   const doc = DOCS[index];
@@ -288,6 +361,12 @@ export function DocsPage() {
     if (target) target.scrollIntoView?.({ block: 'start' });
     else (document.scrollingElement ?? document.documentElement).scrollTo?.({ top: 0 });
   }, [location.pathname, location.hash, searching]);
+
+  // Results start at their top, wherever the page was scrolled to when the search began.
+  useEffect(() => {
+    if (searching) (document.scrollingElement ?? document.documentElement).scrollTo?.({ top: 0 });
+  }, [searching]);
+  useReadingProgress(article, progress, `${slug}:${searching}`);
 
   const pick = () => {
     setQuery('');
@@ -319,12 +398,14 @@ export function DocsPage() {
           </div>
         ) : (
           <>
+            <div className="docs-progress" ref={progress} aria-hidden="true" />
             <div className="docs-meta">
               <span className="docs-eyebrow">
                 <GroupIcon name={doc.group} />
                 {doc.group}
               </span>
               <span>{readingTime(body)} min read</span>
+              {outline.length > 1 && <OnThisPage outline={outline} current={current} />}
             </div>
             <Markdown source={body} />
             <nav className="docs-pager" aria-label="Previous and next page">

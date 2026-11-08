@@ -4,7 +4,8 @@
 // policy allows no inline script.
 (function () {
   var d = document.documentElement;
-  var status = location.pathname === '/status';
+  // The status page: at /status, or wherever the server marked it (its own domain, a chosen path).
+  var status = location.pathname === '/status' || d.dataset.page === 'status';
   var theme = 'dark';
   try {
     var saved = localStorage.getItem('nightjar.theme');

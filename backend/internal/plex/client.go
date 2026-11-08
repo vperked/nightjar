@@ -198,6 +198,27 @@ type Stream struct {
 	Address string `json:"address,omitempty"`
 	// SessionID is Plex's id for the playback session, which stopping it takes; the dashboard names streams by ID.
 	SessionID string `json:"-"`
+	// Source is the file as it is; Output is what the player is sent, when Plex converts or repackages it.
+	Source *Format `json:"source,omitempty"`
+	Output *Format `json:"output,omitempty"`
+	// The audio and subtitle tracks playing, as Plex names them: "English (TrueHD 7.1)".
+	AudioTrack    string `json:"audio_track,omitempty"`
+	SubtitleTrack string `json:"subtitle_track,omitempty"`
+	// SubtitleDecision is what Plex does with the subtitles: burn, transcode or copy.
+	SubtitleDecision string `json:"subtitle_decision,omitempty"`
+	// HWDecode and HWEncode name the hardware doing each half of a transcode; "" is the CPU.
+	HWDecode string `json:"hw_decode,omitempty"`
+	HWEncode string `json:"hw_encode,omitempty"`
+	// PeakKbps is the most bandwidth the stream has used so far.
+	PeakKbps int `json:"peak_kbps,omitempty"`
+}
+
+// Format is a stream's video, audio and container, as they read: "HEVC", "Dolby TrueHD 7.1", "MKV", "4K".
+type Format struct {
+	Video      string `json:"video,omitempty"`
+	Audio      string `json:"audio,omitempty"`
+	Container  string `json:"container,omitempty"`
+	Resolution string `json:"resolution,omitempty"`
 }
 
 const (
@@ -249,6 +270,10 @@ type rawSession struct {
 		SourceContainer      string `json:"sourceContainer"`
 		Container            string `json:"container"`
 		Height               num    `json:"height"`
+		Width                num    `json:"width"`
+		AudioChannels        num    `json:"audioChannels"`
+		HwDecodingTitle      string `json:"transcodeHwDecodingTitle"`
+		HwEncodingTitle      string `json:"transcodeHwEncodingTitle"`
 	}
 	Media []struct {
 		VideoResolution string `json:"videoResolution"`
@@ -256,7 +281,15 @@ type rawSession struct {
 		Height          num    `json:"height"`
 		VideoCodec      string `json:"videoCodec"`
 		AudioCodec      string `json:"audioCodec"`
+		AudioChannels   num    `json:"audioChannels"`
 		Container       string `json:"container"`
+		Part            []struct {
+			Stream []struct {
+				StreamType   num    `json:"streamType"`
+				Selected     flag   `json:"selected"`
+				DisplayTitle string `json:"displayTitle"`
+			}
+		}
 	}
 }
 
@@ -292,14 +325,57 @@ func (r rawSession) stream() Stream {
 		m := r.Media[0]
 		s.BitrateKbps = int(m.Bitrate)
 		s.Quality = resolution(m.VideoResolution)
+		s.Source = &Format{Video: codecOr(m.VideoCodec), Audio: audio(m.AudioCodec, int(m.AudioChannels)), Container: upper(m.Container), Resolution: s.Quality}
+		for _, p := range m.Part {
+			for _, st := range p.Stream {
+				// Plex lists the tracks playing, and marks the chosen one when there are several.
+				switch {
+				case st.StreamType == 2 && (bool(st.Selected) || s.AudioTrack == ""):
+					s.AudioTrack = st.DisplayTitle
+				case st.StreamType == 3 && bool(st.Selected):
+					s.SubtitleTrack = st.DisplayTitle
+				}
+			}
+		}
 	}
 	if t := r.TranscodeSession; t != nil {
-		s.VideoDecision, s.AudioDecision = t.VideoDecision, t.AudioDecision
+		s.VideoDecision, s.AudioDecision, s.SubtitleDecision = t.VideoDecision, t.AudioDecision, t.SubtitleDecision
 		s.Throttled, s.Speed = bool(t.Throttled), float64(t.Speed)
 		s.Decision = DirectStream
 		if t.VideoDecision == "transcode" || t.AudioDecision == "transcode" {
 			s.Decision = Transcode
 			s.HWTranscode = t.TranscodeHwEncoding != "" || t.TranscodeHwDecoding != "" || bool(t.TranscodeHwRequested)
+			s.HWDecode = hardware(t.HwDecodingTitle, t.TranscodeHwDecoding)
+			s.HWEncode = hardware(t.HwEncodingTitle, t.TranscodeHwEncoding)
+		}
+		if s.Source == nil {
+			s.Source = &Format{}
+		}
+		// The transcoder's own word on the source is the surer one.
+		if t.SourceVideoCodec != "" {
+			s.Source.Video = codec(t.SourceVideoCodec)
+		}
+		if t.SourceAudioCodec != "" && !strings.HasPrefix(s.Source.Audio, codec(t.SourceAudioCodec)) {
+			s.Source.Audio = codec(t.SourceAudioCodec)
+		}
+		if t.SourceContainer != "" {
+			s.Source.Container = upper(t.SourceContainer)
+		}
+		out := *s.Source
+		if t.VideoDecision == "transcode" {
+			out.Video, out.Resolution = codecOr(t.VideoCodec), cmp.Or(size(int(t.Width), int(t.Height)), out.Resolution)
+		}
+		if t.AudioDecision == "transcode" {
+			out.Audio = audio(t.AudioCodec, int(t.AudioChannels))
+		}
+		if t.Container != "" {
+			out.Container = upper(t.Container)
+		}
+		if t.VideoDecision == "" && t.AudioDecision == "" {
+			out = Format{}
+		}
+		if out != (Format{}) {
+			s.Output = &out
 		}
 		var src struct {
 			height                  int
@@ -312,6 +388,9 @@ func (r rawSession) stream() Stream {
 		s.Reason, s.Fix = why(t.SubtitleDecision, t.VideoDecision, t.AudioDecision, cmp.Or(t.SourceVideoCodec, src.video), t.VideoCodec,
 			cmp.Or(t.SourceAudioCodec, src.audio), cmp.Or(t.SourceContainer, src.container), t.Container, src.height, int(t.Height), s.Local)
 	}
+	if s.Source != nil && *s.Source == (Format{}) {
+		s.Source = nil
+	}
 	return s
 }
 
@@ -320,6 +399,63 @@ var codecName = map[string]string{"hevc": "HEVC", "h265": "HEVC", "av1": "AV1", 
 	"truehd": "Dolby TrueHD", "dca": "DTS", "dts": "DTS", "eac3": "Dolby Digital Plus", "ac3": "Dolby Digital", "flac": "FLAC", "aac": "AAC", "opus": "Opus", "mp3": "MP3"}
 
 func codec(c string) string { return cmp.Or(codecName[strings.ToLower(c)], strings.ToUpper(c)) }
+
+// codecOr is a codec's name, or "" for none.
+func codecOr(c string) string {
+	if c == "" {
+		return ""
+	}
+	return codec(c)
+}
+
+func upper(s string) string { return strings.ToUpper(s) }
+
+// audio is a codec with its channels: "Dolby TrueHD 7.1", "AAC stereo".
+func audio(c string, channels int) string {
+	name := codecOr(c)
+	if name == "" {
+		return ""
+	}
+	switch {
+	case channels == 1:
+		return name + " mono"
+	case channels == 2:
+		return name + " stereo"
+	case channels > 2:
+		return fmt.Sprintf("%s %d.1", name, channels-1)
+	}
+	return name
+}
+
+// size names a picture size the way Plex's resolutions read, by width first so wide films
+// (1920×800) still count as 1080p.
+func size(w, h int) string {
+	switch {
+	case w >= 3200 || h >= 2000:
+		return "4K"
+	case w >= 1800 || h >= 1000:
+		return "1080p"
+	case w >= 1200 || h >= 700:
+		return "720p"
+	case h > 0:
+		return fmt.Sprintf("%dp", h)
+	}
+	return ""
+}
+
+// hwName is how the hardware APIs Plex names read, when it gives no title of its own.
+var hwName = map[string]string{"vaapi": "VA-API", "qsv": "Intel Quick Sync", "nvdec": "NVIDIA", "nvenc": "NVIDIA", "cuda": "NVIDIA",
+	"videotoolbox": "VideoToolbox", "mediacodec": "MediaCodec", "dxva2": "DirectX", "d3d11va": "DirectX", "mf": "Media Foundation"}
+
+func hardware(title, api string) string {
+	if title != "" {
+		return title
+	}
+	if api == "" {
+		return ""
+	}
+	return cmp.Or(hwName[strings.ToLower(api)], api)
+}
 
 // why says why Plex is converting a stream, and what would let it play as it is. Plex does not
 // say outright; this reads its decisions the way the usual causes show in them.

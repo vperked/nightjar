@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { ApiError, api } from '../api/client';
 import { useServices } from '../api/ServicesContext';
-import type { PublicService, PublicStatus, StatusDesign, StatusDesignResponse } from '../api/types';
+import type { PublicService, PublicStatus, StatusDesign, StatusDesignResponse, StatusProxyResponse, StatusProxyStep } from '../api/types';
+import { useConfig } from '../api/ConfigContext';
 import { Select } from '../components/Select';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
@@ -165,6 +166,173 @@ const CLASSES: [string, string][] = [
 ];
 
 // CodePanel is the owner's own CSS and HTML, one at a time.
+// AddressPanel is where the page is: a path on the dashboard's own address, and a domain of its own
+// where it is the whole site. For the domain, it can set up nginx and HTTPS, or show the server
+// block to set up by hand.
+function AddressPanel() {
+  const config = useConfig();
+  const notify = useToast();
+  const savedDomain = config?.status_page_domain ?? '';
+  const savedPath = config?.status_page_path || '/status';
+  const [domain, setDomain] = useState(savedDomain);
+  const [path, setPath] = useState(savedPath);
+  const [saving, setSaving] = useState(false);
+  const [proxy, setProxy] = useState<StatusProxyResponse>();
+  const [email, setEmail] = useState('');
+  const [busy, setBusy] = useState<'' | 'install' | 'remove'>('');
+  const [steps, setSteps] = useState<StatusProxyStep[]>();
+  // The fields follow the saved values when the config arrives or changes elsewhere.
+  useEffect(() => setDomain(savedDomain), [savedDomain]);
+  useEffect(() => setPath(savedPath), [savedPath]);
+  useEffect(() => {
+    if (!savedDomain) {
+      setProxy(undefined);
+      return;
+    }
+    api.statusProxy().then(setProxy, () => setProxy(undefined));
+  }, [savedDomain]);
+
+  const changed = domain.trim().toLowerCase() !== savedDomain || (path.trim() || '/status') !== savedPath;
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.saveSettings({ STATUS_PAGE_DOMAIN: domain.trim(), STATUS_PAGE_PATH: path.trim() || '/status' });
+      window.dispatchEvent(new Event('config-changed'));
+      setSteps(undefined);
+      notify({ tone: 'ok', title: 'Address saved' });
+    } catch (err) {
+      notify({ tone: 'error', title: 'Could not save the address', body: (err as Error).message });
+    } finally {
+      setSaving(false);
+    }
+  };
+  const run = async (what: 'install' | 'remove') => {
+    setBusy(what);
+    setSteps(undefined);
+    try {
+      const r = what === 'install' ? await api.setUpStatusProxy(email.trim()) : await api.removeStatusProxy();
+      setSteps(r.steps);
+      setProxy({ domain: savedDomain, state: r.state });
+      const https = r.steps.find((st) => st.name.startsWith('Get an HTTPS'));
+      notify(
+        !r.ok
+          ? { tone: 'error', title: what === 'install' ? 'nginx was not set up' : 'Could not take it out', body: r.steps.at(-1)?.detail }
+          : what === 'remove'
+            ? { tone: 'ok', title: `${savedDomain} is out of nginx` }
+            : https && !https.ok
+              ? { tone: 'warning', title: `${savedDomain} works over HTTP`, body: 'HTTPS could not be set up yet; see the steps.' }
+              : { tone: 'ok', title: `${savedDomain} is live`, body: 'nginx serves it, with HTTPS.' },
+      );
+    } catch (err) {
+      notify({ tone: 'error', title: 'Could not reach Nightjar', body: (err as Error).message });
+    } finally {
+      setBusy('');
+    }
+  };
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      notify({ tone: 'ok', title: 'Copied' });
+    } catch {
+      notify({ tone: 'error', title: 'Could not copy', body: 'Select the text and copy it instead.' });
+    }
+  };
+  const st = proxy?.state;
+  const origin = typeof window === 'undefined' ? '' : window.location.origin;
+
+  return (
+    <section className="panel sd-address" aria-label="Address">
+      <div className="section-head">
+        <span className="label">Address</span>
+        <span className="small ink-3">where visitors find it</span>
+      </div>
+      <Field label="Path" hint={`On this dashboard's address: ${origin}${path.trim() || '/status'}. /status always works too.`}>
+        <input className="field mono" value={path} placeholder="/status" onChange={(e) => setPath(e.target.value)} aria-label="Status page path" />
+      </Field>
+      <Field label="Its own domain" hint="Optional. There the status page is the whole site, and the dashboard can't be reached. Point the domain's DNS at this machine first.">
+        <input className="field mono" value={domain} placeholder="status.example.com" onChange={(e) => setDomain(e.target.value)} aria-label="Status page domain" />
+      </Field>
+      {changed && (
+        <div className="sd-address-save">
+          <button type="button" className="btn" onClick={save} disabled={saving}>
+            {saving ? 'Saving…' : 'Save address'}
+          </button>
+          <button type="button" className="btn-quiet" onClick={() => (setDomain(savedDomain), setPath(savedPath))}>
+            Undo
+          </button>
+        </div>
+      )}
+
+      {savedDomain && !changed && st && (
+        <div className="sd-proxy">
+          {st.installed ? (
+            <div className="sd-proxy-state">
+              <span className={`state ${st.https ? 'up' : 'maintenance'}`}>{st.https ? 'HTTPS' : 'HTTP only'}</span>
+              <span>
+                nginx serves{' '}
+                <a href={`${st.https ? 'https' : 'http'}://${savedDomain}/`} target="_blank" rel="noreferrer">
+                  {savedDomain} ↗
+                </a>
+                {st.https ? ', and certbot renews its certificate.' : '. Set it up again to get a certificate.'}
+              </span>
+            </div>
+          ) : (
+            <p className="note sd-proxy-note">
+              {st.nginx
+                ? `nginx isn't serving ${savedDomain} yet. Nightjar can add the site, check nginx takes it, reload nginx and get an HTTPS certificate from Let's Encrypt.`
+                : `nginx isn't installed. Put the server block below in your reverse proxy, or install nginx and set it up from here.`}
+            </p>
+          )}
+          {st.nginx && (
+            <div className="sd-proxy-actions">
+              {(!st.installed || !st.https) && (
+                <>
+                  <input
+                    className="field"
+                    type="email"
+                    value={email}
+                    placeholder="Email for certificate notices (optional)"
+                    onChange={(e) => setEmail(e.target.value)}
+                    aria-label="Email for certificate notices"
+                  />
+                  <button type="button" className="btn" onClick={() => run('install')} disabled={!!busy}>
+                    {busy === 'install' ? 'Setting up…' : st.installed ? 'Set up HTTPS' : 'Set up nginx and HTTPS'}
+                  </button>
+                </>
+              )}
+              {st.installed && (
+                <button type="button" className="btn-quiet danger" onClick={() => run('remove')} disabled={!!busy}>
+                  {busy === 'remove' ? 'Taking it out…' : 'Take it out of nginx'}
+                </button>
+              )}
+            </div>
+          )}
+          {steps && (
+            <ol className="sd-steps" aria-label="What was done">
+              {steps.map((x, i) => (
+                <li key={i} className={x.ok ? 'ok' : 'failed'}>
+                  <strong>{x.name}</strong>
+                  {x.detail && <span className="mono">{x.detail}</span>}
+                </li>
+              ))}
+            </ol>
+          )}
+          <details className="sd-proxy-manual">
+            <summary>Set it up yourself</summary>
+            <p className="note">
+              This nginx server block forwards the domain to Nightjar and passes the host on, which is how Nightjar knows to show only the status page. Any reverse proxy works the same way.
+            </p>
+            <pre className="mono">{st.site}</pre>
+            <button type="button" className="btn-quiet" onClick={() => copy(st.site)}>
+              Copy
+            </button>
+          </details>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function CodePanel({ design, set }: { design: StatusDesign; set: (k: CodeKey, v: string) => void }) {
   const [tab, setTab] = useState<CodeKey>('css');
   const spec = CODE[tab];
@@ -233,6 +401,7 @@ export function StatusDesignerPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const notify = useToast();
+  const config = useConfig();
   const { data: live } = useServices();
 
   useEffect(() => {
@@ -340,14 +509,17 @@ export function StatusDesignerPage() {
             <Link to="/settings">Settings</Link> /
           </div>
           <h1>Status page</h1>
-          <div className="page-sub">A public page with the checks you choose, at /status. Targets and error details are never shown.</div>
+          <div className="page-sub">
+            A public page with the checks you choose, at {config?.status_page_path || '/status'}
+            {config?.status_page_domain ? ` and on ${config.status_page_domain}` : ''}. Targets and error details are never shown.
+          </div>
         </div>
         <div className="toolbar">
           <label className="check">
             <input type="checkbox" checked={enabled} onChange={(e) => toggleEnabled(e.target.checked)} /> {enabled ? 'Public' : 'Off'}
           </label>
           {enabled && (
-            <a className="btn-quiet" href="/status" target="_blank" rel="noreferrer">
+            <a className="btn-quiet" href={config?.status_page_path || '/status'} target="_blank" rel="noreferrer">
               Open ↗
             </a>
           )}
@@ -356,6 +528,7 @@ export function StatusDesignerPage() {
 
       <div className="sd-layout">
         <div className="sd-editor">
+          <AddressPanel />
           <section className="panel">
             <div className="section-head">
               <span className="label">Page</span>

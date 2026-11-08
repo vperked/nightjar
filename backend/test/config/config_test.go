@@ -227,3 +227,15 @@ func TestEnvironLeavesOutSecrets(t *testing.T) {
 		t.Fatalf("environment for scripts: %s", env)
 	}
 }
+
+// A short API token is easy to guess, so it is not taken; a long one is.
+func TestShortAuthTokenIsIgnored(t *testing.T) {
+	short := config.LoadFrom(config.MapLookup(map[string]string{"WEB_AUTH_TOKEN": "t0ken"}))
+	if short.WebAuthToken != "" {
+		t.Fatalf("a 5-character token was accepted")
+	}
+	long := strings.Repeat("a1", config.MinAuthTokenLength/2)
+	if got := config.LoadFrom(config.MapLookup(map[string]string{"WEB_AUTH_TOKEN": long})).WebAuthToken; got != long {
+		t.Fatalf("a %d-character token was refused", len(long))
+	}
+}

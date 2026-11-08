@@ -10,6 +10,7 @@ import { Seg, SubTabs } from '../components/ui';
 import { formatDuration, plural } from '../format';
 import { useNow } from '../hooks/useNow';
 import { usePoll } from '../hooks/usePoll';
+import { useArrivals } from '../hooks/useArrivals';
 
 // Incidents are built from every alert Nightjar raised and the machine's own readings: each
 // stretch of trouble, what happened in the minutes before and during it, and the likely cause.
@@ -262,7 +263,7 @@ function NoticeEditor({ inc, onSaved }: { inc: Incident; onSaved: () => void }) 
   );
 }
 
-function IncidentCard({ inc, now, open: startOpen, onChanged }: { inc: Incident; now: number; open: boolean; onChanged: () => void }) {
+function IncidentCard({ inc, now, open: startOpen, arrived, onChanged }: { inc: Incident; now: number; open: boolean; arrived: boolean; onChanged: () => void }) {
   const [open, setOpen] = useState(startOpen);
   const ongoing = inc.ended === null;
   const peaks = [
@@ -271,7 +272,7 @@ function IncidentCard({ inc, now, open: startOpen, onChanged }: { inc: Incident;
     inc.peaks.disk !== null && `disk ${Math.round(inc.peaks.disk)}%`,
   ].filter(Boolean);
   return (
-    <article className={`section incident sev-${inc.severity} ${ongoing ? 'ongoing' : ''}`}>
+    <article className={`section incident sev-${inc.severity} ${ongoing ? 'ongoing' : ''}${arrived ? ' arrive' : ''}`}>
       <header className="inc-head">
         <span className={`inc-state ${ongoing ? 'open' : 'closed'}`}>{ongoing ? 'Ongoing' : fixedByNightjar(inc) ? 'Fixed by Nightjar' : 'Resolved'}</span>
         <h2>{inc.title}</h2>
@@ -317,6 +318,11 @@ export function IncidentsPage() {
   const { data, error, refresh } = usePoll(fetch, 30000);
   const now = useNow(10000);
   const list = data?.incidents ?? [];
+  // An incident that opens while the page is up slides in at the top.
+  const arrived = useArrivals(
+    list.map((i) => ({ key: String(i.id), at: i.started })),
+    data ? String(days) : '',
+  );
   const open = list.filter((i) => i.ended === null).length;
   const down = list.reduce((n, i) => n + length(i, now), 0);
   const kinds = list.reduce<Record<string, number>>((m, i) => (i.cause && i.cause.kind !== 'first' ? { ...m, [i.cause.kind]: (m[i.cause.kind] ?? 0) + 1 } : m), {});
@@ -366,7 +372,7 @@ export function IncidentsPage() {
               Everything Nightjar watches stayed up. When something breaks, it shows here with what led up to it.
             </div>
           ) : (
-            list.map((inc, i) => <IncidentCard key={inc.id} inc={inc} now={now} open={i === 0} onChanged={refresh} />)
+            list.map((inc, i) => <IncidentCard key={inc.id} inc={inc} now={now} open={i === 0} arrived={arrived.has(String(inc.id))} onChanged={refresh} />)
           )}
         </>
       )}

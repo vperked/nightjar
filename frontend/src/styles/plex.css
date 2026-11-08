@@ -368,6 +368,57 @@
   font-size: 12px;
 }
 
+/* Formats: the file next to what the player is sent, one track a line. */
+.stream-formats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  margin: 0;
+  border: 1px solid var(--card-rule);
+  border-radius: var(--radius);
+  overflow: hidden;
+  font-size: 13px;
+}
+.stream-formats.two {
+  grid-template-columns: auto 1fr 1fr;
+}
+.stream-formats-head,
+.stream-format {
+  display: contents;
+}
+.stream-formats-head > span,
+.stream-format > span {
+  min-width: 0;
+  padding: 10px 16px 10px 0;
+  overflow-wrap: anywhere;
+}
+.stream-formats-head > span:first-child,
+.stream-format > span:first-child {
+  padding-left: 16px;
+}
+.stream-formats-head > span {
+  padding-top: 9px;
+  padding-bottom: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-3);
+  background: var(--bg-sunk);
+}
+.stream-format > span {
+  border-top: 1px solid var(--rule);
+  font-weight: 500;
+}
+.stream-format > span:first-child {
+  font-weight: 400;
+  color: var(--ink-3);
+}
+.stream-format > .same {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+.stream-format > .changed {
+  color: var(--warn);
+}
+
 /* The message: a short list to pick one from. */
 .stream-messages {
   margin: 0;

@@ -125,3 +125,87 @@
   justify-content: flex-end;
   gap: 12px;
 }
+
+/* The night sky behind the card, in the dark theme: stars twinkle, each in its own time, and now and
+   then one falls (a nightjar's hours). In the light theme it is day and the sky stays clear. */
+.auth {
+  position: relative;
+  isolation: isolate;
+}
+.auth-sky {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  background: radial-gradient(ellipse 70% 55% at 50% 0%, color-mix(in srgb, var(--series-1) 9%, transparent), transparent 70%);
+}
+:root[data-theme='light'] .auth-sky {
+  display: none;
+}
+.auth-star {
+  position: absolute;
+  border-radius: 50%;
+  background: #fff;
+  opacity: 0.25;
+  animation: star-twinkle 4s ease-in-out infinite;
+}
+@keyframes star-twinkle {
+  50% {
+    opacity: 0.85;
+    transform: scale(1.3);
+  }
+}
+.auth-meteor {
+  position: absolute;
+  top: 12%;
+  left: 18%;
+  width: 120px;
+  height: 1.5px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55) 70%, #fff);
+  opacity: 0;
+  transform: rotate(24deg);
+  animation: meteor 9s cubic-bezier(0.4, 0, 0.2, 1) 2s infinite;
+}
+.auth-meteor.late {
+  top: 30%;
+  left: 58%;
+  width: 90px;
+  animation-delay: 6.5s;
+  animation-duration: 13s;
+}
+/* Most of each cycle the sky is still; the streak takes the first few percent of it. */
+@keyframes meteor {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) rotate(24deg);
+  }
+  1% {
+    opacity: 1;
+  }
+  7% {
+    opacity: 0;
+    transform: translate(260px, 116px) rotate(24deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(260px, 116px) rotate(24deg);
+  }
+}
+/* The padlock's shackle lifts a touch while you fill the card in, as if about to open. */
+.auth-mark path {
+  transition: transform 0.35s var(--ease-out);
+}
+.signin:focus-within .auth-mark path {
+  transform: translateY(-1.5px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .auth-star,
+  .auth-meteor {
+    animation: none;
+  }
+  .auth-mark path {
+    transition: none;
+  }
+}

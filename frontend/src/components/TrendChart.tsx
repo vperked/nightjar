@@ -288,6 +288,13 @@ export function TrendChart({ series, height = 180, compact = false, raw = false,
     return { t0, t1, x, y, pad, base, paths, yTicks, time, pitch, top, mirror, mid };
   }, [series, width, height, max, compact, raw, format, dots]);
 
+  // A chart that starts showing a different stretch of time (another range picked) draws itself in
+  // again. Live readings only move the window along, which keeps its length, so they do not.
+  const view = useRef({ span: 0, n: 0 });
+  const span = model ? model.t1 - model.t0 : 0;
+  if (span && view.current.span && Math.abs(span - view.current.span) / view.current.span > 0.3) view.current.n++;
+  if (span) view.current.span = span;
+
   if (!model) {
     return (
       <div ref={ref} className={`chart-empty ${compact ? 'compact' : ''}`} style={{ height }}>
@@ -349,8 +356,8 @@ export function TrendChart({ series, height = 180, compact = false, raw = false,
             </text>
           );
         })}
-        {/* The plot draws itself in from the left the first time it appears. */}
-        <g className="plot">
+        {/* The plot draws itself in from the left when it first appears, and on a new range. */}
+        <g className="plot" key={view.current.n}>
           {paths.map((p, i) => (
             <g key={i}>
               {/* A full chart fills dots under its first series only; the others are lines over it. */}

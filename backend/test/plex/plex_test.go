@@ -495,3 +495,67 @@ func TestEverWatchedReadsAllOrFails(t *testing.T) {
 		t.Fatal("history read short should fail")
 	}
 }
+
+// A stream says what the file is, what the player is sent, which tracks play, and what hardware
+// converts it; a finished one keeps all that, with the most bandwidth it used.
+func TestStreamDetails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"MediaContainer":{"Metadata":[
+ {"sessionKey":"1","type":"movie","title":"Dune","User":{"title":"a"},"Player":{"title":"Phone","local":false},"Session":{"id":"s1"},
+  "Media":[{"videoResolution":"4k","height":2160,"videoCodec":"hevc","audioCodec":"truehd","audioChannels":8,"container":"mkv",
+   "Part":[{"Stream":[{"streamType":1,"displayTitle":"4K (HEVC Main 10)"},{"streamType":2,"selected":true,"displayTitle":"English (TRUEHD 7.1)"},
+    {"streamType":3,"selected":true,"displayTitle":"English (PGS)"}]}]}],
+  "TranscodeSession":{"videoDecision":"transcode","audioDecision":"transcode","subtitleDecision":"burn","sourceVideoCodec":"hevc","videoCodec":"h264",
+   "audioCodec":"aac","audioChannels":2,"container":"mpegts","sourceContainer":"mkv","width":1920,"height":800,
+   "transcodeHwDecoding":"vaapi","transcodeHwEncoding":"vaapi","transcodeHwEncodingTitle":"Intel (VA-API)"}},
+ {"sessionKey":"2","type":"movie","title":"Heat","User":{"title":"b"},"Player":{"title":"TV","local":true},"Session":{"id":"s2"},
+  "Media":[{"videoResolution":"1080","videoCodec":"h264","audioCodec":"ac3","audioChannels":6,"container":"mp4",
+   "Part":[{"Stream":[{"streamType":2,"displayTitle":"English (AC3 5.1)"},{"streamType":3,"displayTitle":"French (SRT)"}]}]}]}]}}`))
+	}))
+	defer srv.Close()
+	c, _ := plex.New(srv.URL, "secret", true, 2*time.Second)
+	streams, err := c.Sessions()
+	if err != nil || len(streams) != 2 {
+		t.Fatal(streams, err)
+	}
+	dune, heat := streams[0], streams[1]
+	if dune.Source == nil || *dune.Source != (plex.Format{Video: "HEVC", Audio: "Dolby TrueHD 7.1", Container: "MKV", Resolution: "4K"}) {
+		t.Errorf("source %+v", dune.Source)
+	}
+	if dune.Output == nil || *dune.Output != (plex.Format{Video: "H.264", Audio: "AAC stereo", Container: "MPEGTS", Resolution: "1080p"}) {
+		t.Errorf("output %+v", dune.Output)
+	}
+	if dune.AudioTrack != "English (TRUEHD 7.1)" || dune.SubtitleTrack != "English (PGS)" || dune.SubtitleDecision != "burn" {
+		t.Errorf("tracks %q %q %q", dune.AudioTrack, dune.SubtitleTrack, dune.SubtitleDecision)
+	}
+	if dune.HWDecode != "VA-API" || dune.HWEncode != "Intel (VA-API)" {
+		t.Errorf("hardware %q %q", dune.HWDecode, dune.HWEncode)
+	}
+	// Played as it is: the file, no output, and a subtitle track nobody turned on is not named.
+	if heat.Decision != plex.DirectPlay || heat.Output != nil || heat.Source == nil || heat.Source.Audio != "Dolby Digital 5.1" || heat.SubtitleTrack != "" || heat.AudioTrack != "English (AC3 5.1)" {
+		t.Errorf("direct play %+v source %+v", heat, heat.Source)
+	}
+}
+
+func TestFinishedStreamKeepsItsDetails(t *testing.T) {
+	src := &plex.Format{Video: "HEVC", Resolution: "4K"}
+	f := &fake{streams: []plex.Stream{{ID: "1", Title: "A", Decision: plex.Transcode, BandwidthKbps: 3000, HWEncode: "NVIDIA", Source: src}}}
+	m := plex.NewMonitor(f, 10, 1)
+	m.Poll(0)
+	f.streams[0].BandwidthKbps = 9000
+	m.Poll(10)
+	f.streams[0].BandwidthKbps = 2000
+	m.Poll(20)
+	if s := m.Snapshot(false).Streams[0]; s.PeakKbps != 9000 {
+		t.Fatalf("peak while playing: %d", s.PeakKbps)
+	}
+	f.streams = nil
+	e := m.Poll(30)
+	if len(e) != 1 || e[0].Play.Last == nil {
+		t.Fatalf("end event %+v", e)
+	}
+	last := m.Snapshot(false).Recent[0].Last
+	if last == nil || last.PeakKbps != 9000 || last.BandwidthKbps != 2000 || last.HWEncode != "NVIDIA" || last.Source.Video != "HEVC" || last.StartedAt != 0 {
+		t.Fatalf("finished stream %+v", last)
+	}
+}

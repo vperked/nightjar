@@ -9,12 +9,7 @@ import { AREA_SHORT, delivery, linkFor, plain } from './notifications';
 
 // The header's bell: how many alerts are unread, and a panel with the latest few.
 
-const GLYPH: Record<Severity, string> = {
-  critical: 'M8 8l8 8M16 8l-8 8',
-  warning: 'M12 7v6M12 16.5v.5',
-  ok: 'M7.5 12.5l3 3 6-6.5',
-  info: 'M12 11v5.5M12 7.5v.5',
-};
+const GLYPH: Record<Severity, string> = { critical: 'M8 8l8 8M16 8l-8 8', warning: 'M12 7v6M12 16.5v.5', ok: 'M7.5 12.5l3 3 6-6.5', info: 'M12 11v5.5M12 7.5v.5' };
 
 export const SeverityIcon = ({ severity }: { severity: Severity }) => (
   <span className={`sev-icon ${severity}`} aria-label={severity === 'ok' ? 'recovered' : severity} role="img">

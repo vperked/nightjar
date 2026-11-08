@@ -17,11 +17,7 @@ const VERDICT = {
   outage: { title: 'Major outage', sub: 'Services are down. We are on it.' },
 } as const;
 
-const ICON = {
-  operational: 'M8 12.5l2.7 2.7L16 9.5',
-  degraded: 'M12 7.5v5.5M12 16.5h.01',
-  outage: 'M9 9l6 6M15 9l-6 6',
-} as const;
+const ICON = { operational: 'M8 12.5l2.7 2.7L16 9.5', degraded: 'M12 7.5v5.5M12 16.5h.01', outage: 'M9 9l6 6M15 9l-6 6' } as const;
 
 const STATE: Record<ServiceStatus, string> = { up: 'Operational', down: 'Down', unknown: 'Checking', paused: 'Paused', maintenance: 'Maintenance' };
 

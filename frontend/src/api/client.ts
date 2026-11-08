@@ -1,5 +1,7 @@
 import type {
   Finding,
+  StatusProxyResponse,
+  StatusProxyResult,
   AlertTestResult,
   AnalyticsRangeName,
   AgentFirewall,
@@ -97,8 +99,9 @@ let demo = false;
 // isDemo reports whether the dashboard is showing demo data instead of a real backend.
 export const isDemo = () => demo;
 
-// Demo data stands in for the backend with `npm run demo`, and with `npm run dev` when no backend
-// answers. Both flags are build-time constants, so production builds drop the demo code entirely.
+// Demo data stands in for the backend with `npm run dev` (and its alias `npm run demo`), always,
+// and with `npm run dev:live` when no backend answers. Both flags are build-time constants, so
+// production builds drop the demo code entirely.
 const demoAllowed = import.meta.env.DEV || import.meta.env.VITE_DEMO === 'true';
 
 // connect picks the transport before the app first renders.
@@ -145,13 +148,7 @@ async function request<T>(path: string, init: { method?: string; body?: unknown 
   const write = method !== 'GET';
   if (write) writing++;
   try {
-    const res = await transport(path, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: controller.signal,
-      cache: 'no-store',
-    });
+    const res = await transport(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal, cache: 'no-store' });
     // A refused sign-in is an answer to show, not a sign that the session ended.
     if (res.status === 401 && !path.startsWith('/api/auth/')) {
       unauthorizedHandler();
@@ -236,6 +233,11 @@ export const api = {
   saveAppearance: (a: Appearance) => request<{ appearance: Appearance }>('/api/appearance', { method: 'PUT', body: a }),
   statusDesign: () => request<StatusDesignResponse>('/api/statuspage'),
   saveStatusDesign: (d: StatusDesign) => request<{ design: StatusDesign }>('/api/statuspage', { method: 'PUT', body: d }),
+  // The status page's domain in nginx: what is set up, setting it up (nginx and certbot take a while),
+  // and taking it out.
+  statusProxy: () => request<StatusProxyResponse>('/api/statuspage/proxy'),
+  setUpStatusProxy: (email: string) => request<StatusProxyResult>('/api/statuspage/proxy', { method: 'POST', body: { email } }, 5.5 * 60 * 1000),
+  removeStatusProxy: () => request<StatusProxyResult>('/api/statuspage/proxy', { method: 'DELETE' }, 90 * 1000),
   checks: () => request<ChecksResponse>('/api/checks'),
   // saveCheck creates a check, or replaces (and may rename) the one called `original`.
   saveCheck: (spec: CheckSpec, original?: string) =>

@@ -61,6 +61,8 @@ type Play struct {
 	DurationMS int64 `json:"duration_ms"`
 	// Reason is why it was converted, if it was.
 	Reason string `json:"reason,omitempty"`
+	// Last is the stream as it was last seen playing: how it was delivered, its formats, the player.
+	Last *Stream `json:"last,omitempty"`
 }
 
 // Event is a state change the caller may want to notify about.
@@ -166,8 +168,9 @@ func (m *Monitor) Poll(now float64) []Event {
 	for i := range streams {
 		s := &streams[i]
 		seen[s.ID] = true
+		s.PeakKbps = s.BandwidthKbps
 		if prev, ok := m.active[s.ID]; ok {
-			s.StartedAt = prev.StartedAt
+			s.StartedAt, s.PeakKbps = prev.StartedAt, max(prev.PeakKbps, s.BandwidthKbps)
 		} else {
 			s.StartedAt = now
 			if m.seeded {
@@ -185,7 +188,8 @@ func (m *Monitor) Poll(now float64) []Event {
 	for id, s := range m.active {
 		if !seen[id] {
 			delete(m.active, id)
-			play := Play{User: s.User, Kind: s.Kind, Title: s.Title, Subtitle: s.Subtitle, Player: s.Player,
+			last := s
+			play := Play{Last: &last, User: s.User, Kind: s.Kind, Title: s.Title, Subtitle: s.Subtitle, Player: s.Player,
 				Decision: s.Decision, Started: s.StartedAt, Ended: now, Progress: s.Progress, Local: s.Local, DurationMS: s.DurationMS, Reason: s.Reason}
 			m.recent = append([]Play{play}, m.recent...)
 			events = append(events, Event{Kind: EventStreamEnd, Play: play})
