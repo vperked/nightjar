@@ -206,6 +206,10 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("POST /api/hosts/{id}/firewall/default/keep", s.writable(slow(hostFirewallBudget, s.needRemote(s.keepHostDefault))))
 	mux.Handle("PUT /api/hosts/{id}/defense", s.writable(slow(hostFirewallBudget, s.needRemote(s.setHostDefense))))
 	mux.Handle("DELETE /api/hosts/{id}/blocked/{address}", s.writable(slow(hostFirewallBudget, s.needRemote(s.unblockHost))))
+	mux.Handle("GET /api/hosts/{id}/sshd", s.admin(slow(hostFirewallBudget, s.needRemote(s.hostSSHD))))
+	mux.Handle("POST /api/hosts/{id}/sshd/keys", s.writable(slow(hostSSHDBudget, s.needRemote(s.addHostSSHKey))))
+	mux.Handle("PUT /api/hosts/{id}/sshd/keys-only", s.writable(slow(hostSSHDBudget, s.needRemote(s.setHostKeysOnly))))
+	mux.Handle("POST /api/hosts/{id}/sshd/keys-only/keep", s.writable(slow(hostSSHDBudget, s.needRemote(s.keepHostKeysOnly))))
 	mux.Handle("GET /api/ssh/keys", s.admin(s.needRemote(s.sshKeys)))
 	mux.Handle("POST /api/ssh/keys", s.writable(s.needRemote(s.newSSHKey)))
 	mux.Handle("POST /api/ssh/authorize", s.writable(slow(sshAuthorizeBudget, s.needRemote(s.authorizeSSHKey))))
@@ -257,6 +261,11 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("PUT /api/firewall/order", s.writable(s.orderLocalRules))
 	mux.Handle("PUT /api/firewall/default", s.writable(s.setLocalDefault))
 	mux.Handle("POST /api/firewall/default/keep", s.writable(s.keepLocalDefault))
+	// Account names and key fingerprints are for admins, like the dashboard's own SSH keys.
+	mux.Handle("GET /api/sshd", s.admin(s.localSSHD))
+	mux.Handle("POST /api/sshd/keys", s.writable(s.addLocalSSHKey))
+	mux.Handle("PUT /api/sshd/keys-only", s.writable(slow(sshdBudget, s.setLocalKeysOnly)))
+	mux.Handle("POST /api/sshd/keys-only/keep", s.writable(slow(sshdBudget, s.keepLocalKeysOnly)))
 	mux.Handle("GET /api/updates", s.auth(s.updates))
 	mux.Handle("POST /api/updates", s.writable(s.needUpdates(s.saveUpdateTarget)))
 	mux.Handle("POST /api/updates/check", s.writable(s.needUpdates(s.checkUpdates)))
@@ -284,6 +293,9 @@ const sshBudget = 30*time.Second + 5*time.Minute
 
 // hostFirewallBudget is the longest a call to a server's agent about its firewall takes.
 const hostFirewallBudget = 30 * time.Second
+
+// hostSSHDBudget is the longest a change of a server's SSH logins through its agent takes.
+const hostSSHDBudget = time.Minute
 
 // sshAuthorizeBudget is the longest putting a key on a server takes: checking its host key (a scan
 // and fingerprinting each key it presents), then a minute's password login.

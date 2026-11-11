@@ -326,6 +326,51 @@ describe('servers', () => {
     await waitFor(() => expect(added).toEqual({ kind: 'ssh', name: '', ssh: { key: key.path, user: 'admin', port: 2222, host: 'vps.example.net' } }));
   });
 
+  it('adds firewall rules to every selected server with an agent, Secure web or only Nightjar on the agent port', async () => {
+    const host = (id: string, kind: 'agent' | 'ssh') => ({ id, name: id, address: id, added: 0, kind, status: 'online', readings: null, history: [], problems: [] });
+    const added: { id: string; rule: unknown }[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/api/hosts') return json({ hosts: [host('nas', 'agent'), host('web1', 'agent'), host('vps', 'ssh')], port: 9101 });
+      const m = url.match(/^\/api\/hosts\/(\w+)\/firewall(\/rules)?$/);
+      if (m && init?.method === 'POST') {
+        added.push({ id: m[1], rule: sent(init) });
+        return json({ firewall: { tool: 'iptables', rules: [], listening: [] } });
+      }
+      if (m) return json({ firewall: { tool: 'iptables', rules: [], listening: [], open: [{ port: 9101, what: 'this agent' }] }, dashboard: '198.51.100.10' });
+      return json({}, 404);
+    });
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <ServersPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Select' }));
+    for (const name of ['nas', 'web1', 'vps']) fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(`^${name}:`) }));
+    // The SSH-only server has no firewall to manage: the button says how many it reaches.
+    fireEvent.click(screen.getByRole('button', { name: 'Firewall (2)…' }));
+    const panel = within(screen.getByRole('region', { name: 'Add firewall rules to the selected servers' }));
+    fireEvent.click(panel.getByRole('button', { name: 'Add to 2 servers' }));
+    await waitFor(() => expect(added).toHaveLength(6));
+    expect(added.filter((a) => a.id === 'nas').map((a) => (a.rule as { port: string }).port)).toEqual(['80,443', '443', '3306,5432,6379,9200,11211,27017']);
+    expect(added.some((a) => a.id === 'vps')).toBe(false);
+    expect(await screen.findByRole('region', { name: 'Secure web results' })).toBeInTheDocument();
+
+    // Only Nightjar on the agent's port: each server's own address for Nightjar, then a block.
+    added.length = 0;
+    fireEvent.click(screen.getByRole('button', { name: 'Firewall (2)…' }));
+    const again = within(screen.getByRole('region', { name: 'Add firewall rules to the selected servers' }));
+    fireEvent.click(again.getByRole('radio', { name: /Only Nightjar reaches the agent/ }));
+    fireEvent.click(again.getByRole('button', { name: 'Add to 2 servers' }));
+    await waitFor(() => expect(added).toHaveLength(4));
+    expect(added.filter((a) => a.id === 'web1').map((a) => a.rule)).toEqual([
+      { action: 'allow', source: '198.51.100.10', port: '9101', proto: 'tcp', note: 'Nightjar only' },
+      { action: 'block', port: '9101', proto: 'tcp', note: 'everyone but Nightjar' },
+    ]);
+  });
+
   it('hides a new agent token as it is typed', async () => {
     const host = { id: 'h1', name: 'nas', address: 'https://nas:9101', added: 0, kind: 'agent', status: 'online', readings: null, history: [], problems: [] };
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => (String(input) === '/api/hosts/h1' ? json({ host }) : json({}, 404)));

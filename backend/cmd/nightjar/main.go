@@ -52,6 +52,7 @@ import (
 	"nightjar/internal/selfcheck"
 	"nightjar/internal/services"
 	"nightjar/internal/smart"
+	"nightjar/internal/sshd"
 	"nightjar/internal/storage"
 	"nightjar/internal/systemd"
 	"nightjar/internal/units"
@@ -365,6 +366,7 @@ func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 		ctx.Firewall = &firewall.Manager{Load: func() []byte { return []byte(rules) }, Save: func(b []byte) error { return db.SetMeta(firewallKey, string(b)) },
 			Open: dashboardOpen(cfg.WebPort)}
 	}
+	ctx.SSHD = &sshd.Manager{}
 	// A monitor restarting itself to apply settings already announced services that were failed.
 	ctx.Units.AnnounceExisting = os.Getenv(restartedEnv) == ""
 	monitor.LoadDrives(ctx)
@@ -601,6 +603,9 @@ func run(cfg config.Settings, db *storage.Store, envFile string) (restart bool) 
 	if ctx.Firewall != nil {
 		background.Go(func() { ctx.Firewall.Start(stop) })
 	}
+	// Keys-only SSH left waiting to be kept by the last run goes back now; a new one goes back unless
+	// kept in time.
+	background.Go(func() { ctx.SSHD.Run(stop) })
 	// Something once took the monitor's right to switch users while it ran, which broke apt and git;
 	// say so, and when, if it happens again.
 	background.Go(func() {

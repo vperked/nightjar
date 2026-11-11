@@ -25,6 +25,7 @@ import type {
   LoginTest,
   SSHAction,
   SSHKey,
+  SSHAccess,
   LogsResponse,
   NetworkResponse,
   Mute,
@@ -302,6 +303,16 @@ export const api = {
   keepHostDefault: (id: string, keep: boolean) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/default/keep`, { method: 'POST', body: { keep } }, 40000),
   setHostDefense: (id: string, on: boolean) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/defense`, { method: 'PUT', body: { on } }, 40000),
   unblockHost: (id: string, address: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/blocked/${encodeURIComponent(address)}`, { method: 'DELETE' }, 40000),
+  // How this machine's SSH server lets people in, and each agent server's through it: add a key to an
+  // account, turn passwords off (they come back by themselves unless kept) or on again.
+  sshd: () => request<SSHAccess>('/api/sshd'),
+  addSSHDKey: (user: string, key: string) => request<SSHAccess>('/api/sshd/keys', { method: 'POST', body: { user, key } }),
+  setKeysOnly: (on: boolean, user?: string) => request<SSHAccess>('/api/sshd/keys-only', { method: 'PUT', body: { on, user } }),
+  keepKeysOnly: (keep: boolean) => request<SSHAccess>('/api/sshd/keys-only/keep', { method: 'POST', body: { keep } }),
+  hostSSHD: (id: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd`, undefined, 40000),
+  addHostSSHDKey: (id: string, user: string, key: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys`, { method: 'POST', body: { user, key } }, 40000),
+  setHostKeysOnly: (id: string, on: boolean, user?: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys-only`, { method: 'PUT', body: { on, user } }, 40000),
+  keepHostKeysOnly: (id: string, keep: boolean) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys-only/keep`, { method: 'POST', body: { keep } }, 40000),
   network: (since?: number) => request<NetworkResponse>(since === undefined ? '/api/network' : `/api/network?since=${since}`, {}, 5000),
   // logs is the monitor's own recent log; with `after` only newer entries, for following it.
   logs: (q: { after?: number; level?: string; component?: string; q?: string; limit?: number }) => {

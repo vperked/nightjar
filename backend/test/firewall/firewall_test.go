@@ -958,3 +958,123 @@ func TestABlockStillGoesBeforeABroaderAllow(t *testing.T) {
 		t.Fatalf("order: %+v", got)
 	}
 }
+
+// A port kept open (the agent's) is still shut by a block for everyone ahead of it, since the rules
+// come first; the addresses allowed before that block are the only ones let in.
+func TestAKeptOpenPortFollowsTheRulesAheadOfIt(t *testing.T) {
+	agentPort := firewall.Port{Port: 9101, Proto: "tcp"}
+	open := []firewall.Open{{Port: 9101, What: "this agent"}}
+	allowed, blocked, only := firewall.Reachable(agentPort, nil, open)
+	if !allowed || blocked || only != nil {
+		t.Fatalf("no rules: %v %v %v", allowed, blocked, only)
+	}
+	rules := []firewall.Rule{
+		{ID: "a", Action: "allow", Source: "45.33.1.2", Port: "9101", Proto: "tcp"},
+		{ID: "b", Action: "block", Port: "9101", Proto: "tcp"},
+	}
+	allowed, blocked, only = firewall.Reachable(agentPort, rules, open)
+	if allowed || !blocked || !slices.Equal(only, []string{"45.33.1.2"}) {
+		t.Fatalf("only the dashboard: %v %v %v", allowed, blocked, only)
+	}
+	if firewall.Allowed(agentPort, rules, open) {
+		t.Fatal("Allowed still says anyone")
+	}
+	// Paused, the block decides nothing, and the port is kept open again.
+	rules[1].Paused = true
+	if allowed, blocked, _ = firewall.Reachable(agentPort, rules, open); !allowed || blocked {
+		t.Fatalf("block paused: %v %v", allowed, blocked)
+	}
+	// A block alone shuts it for everyone.
+	allowed, blocked, only = firewall.Reachable(agentPort, []firewall.Rule{{ID: "b", Action: "block", Port: "9101"}}, open)
+	if allowed || !blocked || only != nil {
+		t.Fatalf("block alone: %v %v %v", allowed, blocked, only)
+	}
+}
+
+// The dashboard's "Secure email" rules: mail from other servers on 25, sending and reading mail over
+// TLS limited per address (465, 587, 993), and plain-text POP3 and IMAP blocked (110, 143).
+func TestTheSecureEmailRulesGoIn(t *testing.T) {
+	f := &fake{}
+	var saved []byte
+	m := newManager(t, f, &saved)
+	ctx := context.Background()
+	for _, r := range []firewall.Rule{
+		{Action: "allow", Port: "25", Proto: "tcp", Note: "email"},
+		{Action: "limit", Port: "465,587,993", Proto: "tcp", Rate: "30/min", Note: "email"},
+		{Action: "block", Port: "110,143", Proto: "tcp", Note: "email"},
+	} {
+		if _, err := m.Add(ctx, r, nil); err != nil {
+			t.Fatalf("%+v: %v", r, err)
+		}
+	}
+	v4 := f.v4Now()
+	for _, want := range []string{"--dport 25 ", "--dports 465,587,993", "--dports 110,143"} {
+		if !strings.Contains(v4, want) {
+			t.Errorf("no %q in:\n%s", want, v4)
+		}
+	}
+}
+
+// The dashboard's "Secure web" rules: the site open over TCP and HTTP/3, the databases and caches
+// behind a web app shut, and none of it catching the dashboard.
+func TestTheSecureWebRulesGoIn(t *testing.T) {
+	f := &fake{}
+	var saved []byte
+	m := newManager(t, f, &saved)
+	ctx := context.Background()
+	dashboard := []firewall.Reach{{Address: "45.33.1.2", Ports: []uint16{8080, 9101}, What: "the dashboard"}}
+	for _, r := range []firewall.Rule{
+		{Action: "allow", Port: "80,443", Proto: "tcp", Note: "web"},
+		{Action: "allow", Port: "443", Proto: "udp", Note: "web"},
+		{Action: "block", Port: "3306,5432,6379,9200,11211,27017", Proto: "tcp", Note: "web"},
+	} {
+		if _, err := m.Add(ctx, r, dashboard); err != nil {
+			t.Fatalf("%+v: %v", r, err)
+		}
+	}
+	v4 := f.v4Now()
+	for _, want := range []string{"--dports 80,443", "-p udp --dport 443", "--dports 3306,5432,6379,9200,11211,27017"} {
+		if !strings.Contains(v4, want) {
+			t.Errorf("no %q in:\n%s", want, v4)
+		}
+	}
+}
+
+// A new allow that is an exception to a block goes just before it, so it takes effect: another server
+// of yours let into PostgreSQL after "Secure web" shut the databases. One that is not an exception
+// still goes last.
+func TestANewAllowGoesAheadOfTheBlockItIsAnExceptionTo(t *testing.T) {
+	f := &fake{}
+	var saved []byte
+	m := newManager(t, f, &saved)
+	ctx := context.Background()
+	web, err := m.Add(ctx, firewall.Rule{Action: "allow", Port: "80,443", Proto: "tcp"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbs, err := m.Add(ctx, firewall.Rule{Action: "block", Port: "3306,5432,6379", Proto: "tcp"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine, err := m.Add(ctx, firewall.Rule{Action: "allow", Source: "10.0.0.5", Port: "5432", Proto: "tcp", Note: "my app server"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plex, err := m.Add(ctx, firewall.Rule{Action: "allow", Port: "32400", Proto: "tcp"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range m.Status(ctx).Rules {
+		got = append(got, r.ID)
+	}
+	// The new block went before nothing it meets (the web allow is for other ports), so it is last of
+	// the first two; the exception sits just before it; the unrelated allow goes last.
+	idx := func(id string) int { return slices.Index(got, id) }
+	if idx(mine.ID) != idx(dbs.ID)-1 || idx(plex.ID) != len(got)-1 || idx(web.ID) < 0 {
+		t.Fatalf("order %v: web %s, dbs %s, mine %s, plex %s", got, web.ID, dbs.ID, mine.ID, plex.ID)
+	}
+	if allowed, blocked, only := firewall.Reachable(firewall.Port{Port: 5432, Proto: "tcp"}, m.Status(ctx).Rules, nil); allowed || !blocked || !slices.Equal(only, []string{"10.0.0.5"}) {
+		t.Fatalf("5432: %v %v %v", allowed, blocked, only)
+	}
+}

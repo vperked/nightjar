@@ -30,7 +30,8 @@ const (
 
 // Unit is the agent's systemd service. It runs as root because SMART needs raw access to the drives,
 // and is otherwise locked down: it can read the machine but write nothing on it outside its own
-// state folder, where its program lives so the dashboard can update it.
+// state folder, where its program lives so the dashboard can update it, and what managing SSH logins
+// needs (home folders for keys, and sshd_config.d).
 func Unit() string {
 	return `[Unit]
 Description=Nightjar agent (reports this machine's readings to the dashboard)
@@ -44,11 +45,13 @@ ExecStart=` + ExePath + `
 StateDirectory=nightjar-agent
 # iptables (the legacy kind) takes this lock to change rules, when defending or setting firewall rules.
 ReadWritePaths=-/run/xtables.lock
+# SSH logins managed from the dashboard: keys go in each account's ~/.ssh, and keys-only is a file
+# of the agent's own in sshd_config.d.
+ReadWritePaths=-/etc/ssh/sshd_config.d -/root -/home
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

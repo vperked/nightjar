@@ -555,7 +555,7 @@
 }
 .fw-actions .fw-choice {
   align-content: start;
-  background: var(--surface);
+  --card: var(--surface);
 }
 .fw-choice.fw-act-allow {
   --pick: var(--good);
@@ -567,7 +567,7 @@
   --pick: var(--warn);
 }
 .fw-actions .fw-choice.on {
-  background: color-mix(in srgb, var(--pick) 9%, var(--surface));
+  --card: color-mix(in srgb, var(--pick) 9%, var(--surface));
 }
 .fw-actions .fw-choice.on strong {
   color: var(--pick);
@@ -867,6 +867,10 @@
 .fw-port.closed {
   --dot: var(--crit-mark);
 }
+/* Shut for everyone but the addresses a rule lets in ahead of the block. */
+.fw-port.some {
+  --dot: var(--warn-mark);
+}
 .fw-port.local {
   --dot: var(--ink-3);
 }
@@ -950,26 +954,40 @@
    colour: the ink by default, an action's own on the rule form. */
 .fw-choice {
   --pick: var(--ink-2);
+  /* --card is the card's own background, which the dot's gap shows. */
+  --card: var(--bg-sunk);
+  background: var(--card);
 }
+/* The dot is drawn like the page's radio dots (forms.css): a ring the colour fills from the middle. */
 .fw-choice strong::before {
   content: '';
   flex: none;
-  width: 10px;
-  height: 10px;
-  border: 1.5px solid var(--ink-3);
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--rule-strong);
   border-radius: 50%;
+  background: var(--pick);
+  box-shadow: inset 0 0 0 8px var(--card);
   transition:
-    background 0.15s,
-    border-color 0.15s;
+    border-color 0.15s,
+    box-shadow 0.18s var(--ease-out);
+}
+.fw-choice:not(.on):not(:disabled):hover strong::before {
+  border-color: var(--ink-3);
 }
 .fw-choice.on {
+  --card: color-mix(in srgb, var(--pick) 9%, var(--bg-sunk));
   border-color: color-mix(in srgb, var(--pick) 45%, var(--rule));
-  background: color-mix(in srgb, var(--pick) 9%, var(--bg-sunk));
 }
 .fw-choice.on strong::before {
   border-color: var(--pick);
-  background: var(--pick);
-  box-shadow: inset 0 0 0 2px var(--bg-sunk);
+  box-shadow: inset 0 0 0 3.5px var(--card);
+}
+@media (prefers-reduced-motion: reduce) {
+  .fw-choice strong::before {
+    transition: none;
+  }
 }
 .fw-choice:disabled {
   cursor: default;
@@ -1164,4 +1182,79 @@
 }
 .fw-glance-warn .readout-value {
   color: var(--warn);
+}
+/* Block SSH: SSH's login state and the buttons share the row's end; the panel reuses the rule form's
+   look, with a list of keys whose long fingerprints may break anywhere on a phone. */
+.fw-new {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.fw-ssh-state {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+.fw-ssh-state .confirm {
+  padding-left: 2px;
+}
+/* On a phone the state takes its own line, and the two buttons share the next. */
+@container (max-width: 560px) {
+  .fw-new {
+    flex: 1 1 100%;
+    justify-content: stretch;
+  }
+  .fw-ssh-state {
+    flex: 1 1 100%;
+  }
+  .fw-new > .btn,
+  .fw-new > .btn-ghost {
+    flex: 1;
+    justify-content: center;
+  }
+}
+.fw-ssh-keys-only {
+  color: var(--good);
+  font-weight: 500;
+}
+.fw-ssh-q {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+}
+.fw-ssh-keys {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+/* A key's line can wrap (long fingerprints), so the dot sits on its first line rather than the
+   middle; a drawn dot has no text baseline to align by. */
+.fw-ssh-key {
+  align-items: flex-start;
+}
+.fw-ssh-key input {
+  margin-top: 2px;
+}
+.fw-ssh-key .mono {
+  overflow-wrap: anywhere;
+}
+.fw-ssh-key .fw-tag {
+  margin-left: 6px;
+}
+.fw-ssh-paste {
+  min-height: 72px;
+  font-size: 12.5px;
+  resize: vertical;
+}
+
+/* A Secure preset's list of rules: one per line, set off from the text around it. */
+.fw-secure ul {
+  gap: 6px;
+  padding-left: 16px;
+  list-style: disc;
+  color: var(--ink-2);
 }

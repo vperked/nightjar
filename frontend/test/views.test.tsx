@@ -2,13 +2,13 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { useState } from 'react';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate, type NavigateFunction } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../src/api/client';
+import { api, ApiError } from '../src/api/client';
 import { ConfigContext } from '../src/api/ConfigContext';
 import { ServicesProvider } from '../src/api/ServicesContext';
-import type { ActivityEntry, AnalyticsResponse, AttackView, FirewallRule, FirewallStatus, Service } from '../src/api/types';
+import type { ActivityEntry, AnalyticsResponse, AttackView, FirewallRule, FirewallStatus, Service, SSHAccess } from '../src/api/types';
 import { ActivityPanel } from '../src/components/ActivityPanel';
 import { AttackWatch } from '../src/components/Attacks';
-import { FirewallManager, type FirewallTarget } from '../src/components/Firewall';
+import { FirewallManager, type FirewallTarget, type SSHTarget } from '../src/components/Firewall';
 import { Select, type Option } from '../src/components/Select';
 import { TimePicker } from '../src/components/TimePicker';
 import { ToastProvider } from '../src/components/Toasts';
@@ -191,6 +191,92 @@ describe('Firewall manager', () => {
     expect(screen.queryByRole('radio', { name: /^Nightjar/ })).not.toBeInTheDocument();
   });
 
+  it('says a port a rule shuts is open only to those allowed ahead of it, naming Nightjar', async () => {
+    const { t } = target({
+      dashboard: '198.51.100.10',
+      listening: [
+        { port: 9101, proto: 'tcp', program: 'nightjar-agent', blocked: true, only: ['198.51.100.10'] },
+        { port: 8080, proto: 'tcp', program: 'web', blocked: true },
+        { port: 49622, proto: 'tcp', program: 'sshd', allowed: true },
+      ],
+    });
+    render(
+      <ToastProvider>
+        <FirewallManager target={t} />
+      </ToastProvider>,
+    );
+    expect(await screen.findByText('only Nightjar')).toBeInTheDocument();
+    expect(screen.getByText('closed by a rule')).toBeInTheDocument();
+    expect(screen.getAllByText('open to anyone')).toHaveLength(1);
+  });
+
+  it('offers Secure: SSH… (Block SSH) and, on a server, Agent (only Nightjar on the agent port)', async () => {
+    const { t, added } = target({
+      dashboard: '198.51.100.10',
+      open: [
+        { port: 22, what: 'SSH' },
+        { port: 9101, what: 'this agent' },
+      ],
+    });
+    render(
+      <ToastProvider>
+        <FirewallManager target={t} />
+      </ToastProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: '+ Add a rule' }));
+    const secure = () => within(screen.getByRole('group', { name: 'Secure' }));
+    fireEvent.click(secure().getByRole('button', { name: 'Agent' }));
+    expect(screen.getByLabelText('Port')).toHaveValue('9101');
+    expect(screen.getByRole('radio', { name: /^Nightjar/ })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: /Keep everyone else out/ })).toBeChecked();
+    fireEvent.click(screen.getByLabelText('Port').closest('form')!.querySelector('button[type=submit]')!);
+    await waitFor(() => expect(added).toHaveLength(2));
+    expect(added[0]).toMatchObject({ action: 'allow', source: '198.51.100.10', port: '9101', proto: 'tcp' });
+    expect(added[1]).toMatchObject({ action: 'block', port: '9101', proto: 'tcp' });
+
+    fireEvent.click(await screen.findByRole('button', { name: '+ Add a rule' }));
+    fireEvent.click(secure().getByRole('button', { name: 'SSH…' }));
+    expect(await screen.findByText('Who should still get in over SSH?')).toBeInTheDocument();
+  });
+
+  it('Secure email adds the mail rules: 25 open, TLS ports limited, plain-text IMAP and POP3 blocked', async () => {
+    const { t, added } = target();
+    render(
+      <ToastProvider>
+        <FirewallManager target={t} />
+      </ToastProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: '+ Add a rule' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Secure' })).getByRole('button', { name: 'Email…' }));
+    const box = within(screen.getByRole('group', { name: 'Secure email' }));
+    expect(box.getByText(/Block ports 110 and 143/)).toBeInTheDocument();
+    fireEvent.click(box.getByRole('button', { name: 'Add these rules' }));
+    await waitFor(() => expect(added).toHaveLength(3));
+    expect(added[0]).toMatchObject({ action: 'allow', port: '25', proto: 'tcp' });
+    expect(added[1]).toMatchObject({ action: 'limit', port: '465,587,993', proto: 'tcp', rate: '30/min' });
+    expect(added[2]).toMatchObject({ action: 'block', port: '110,143', proto: 'tcp' });
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Secure email' })).not.toBeInTheDocument());
+  });
+
+  it('Secure web opens the site (80/443, HTTP/3) and shuts the databases behind it', async () => {
+    const { t, added } = target();
+    render(
+      <ToastProvider>
+        <FirewallManager target={t} />
+      </ToastProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: '+ Add a rule' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Secure' })).getByRole('button', { name: 'Web…' }));
+    const box = within(screen.getByRole('group', { name: 'Secure web' }));
+    expect(box.getByText(/PostgreSQL \(5432\)/)).toBeInTheDocument();
+    fireEvent.click(box.getByRole('button', { name: 'Add these rules' }));
+    await waitFor(() => expect(added).toHaveLength(3));
+    expect(added[0]).toMatchObject({ action: 'allow', port: '80,443', proto: 'tcp' });
+    expect(added[1]).toMatchObject({ action: 'allow', port: '443', proto: 'udp' });
+    expect(added[2]).toMatchObject({ action: 'block', port: '3306,5432,6379,9200,11211,27017', proto: 'tcp' });
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Secure web' })).not.toBeInTheDocument());
+  });
+
   it('leaves the protocol out once the port is cleared', async () => {
     const { t, added } = target();
     render(
@@ -274,6 +360,168 @@ describe('Firewall manager', () => {
     });
     expect(await screen.findByText(/Could not read the firewall again \(agent offline\)/)).toBeInTheDocument();
     expect(screen.getByLabelText('Port')).toHaveValue('8443');
+  });
+
+  describe('Block SSH', () => {
+    // sshTarget is a machine's SSH logins that behaves like the agent: keys counted per account,
+    // keys only waiting two minutes to be kept.
+    function sshTarget(over: Partial<SSHAccess> = {}) {
+      let a: SSHAccess = {
+        ports: [22],
+        password_login: true,
+        keys_only: false,
+        users: [
+          { name: 'alex', keys: 0 },
+          { name: 'root', keys: 1 },
+        ],
+        ...over,
+      };
+      const calls: string[] = [];
+      const ssh: SSHTarget = {
+        load: async () => a,
+        addKey: async (user, key) => {
+          calls.push(`key ${user} ${key}`);
+          a = { ...a, users: a.users.map((u) => (u.name === user ? { ...u, keys: u.keys + 1 } : u)) };
+          return a;
+        },
+        keysOnly: async (on, user) => {
+          calls.push(`keys-only ${on} ${user ?? ''}`);
+          a = on ? { ...a, password_login: false, keys_only: true, pending: { until: Date.now() / 1000 + 120 } } : { ...a, password_login: true, keys_only: false, pending: undefined };
+          return a;
+        },
+        keep: async (keep) => {
+          calls.push(`keep ${keep}`);
+          a = keep ? { ...a, pending: undefined } : { ...a, password_login: true, keys_only: false, pending: undefined };
+          return a;
+        },
+      };
+      return { ssh, calls };
+    }
+    const nightjarKey = {
+      path: '/k/nightjar',
+      name: 'nightjar',
+      type: 'ED25519',
+      fingerprint: 'SHA256:abc',
+      public: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHk3m9Zq2T0bWc7yPj1sVx nightjar@box',
+      own: true,
+    };
+
+    it('lets only one address reach SSH: an allow from it, then a block for everyone on the SSH port', async () => {
+      const { t, added } = target({ dashboard: '198.51.100.10' });
+      t.ssh = sshTarget({ ports: [2222] }).ssh;
+      render(
+        <ToastProvider>
+          <FirewallManager target={t} />
+        </ToastProvider>,
+      );
+      expect(await screen.findByText('passwords on')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Block SSH…' }));
+      expect(screen.getByText('Who should still get in over SSH?')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('radio', { name: /^An address/ }));
+      // Nightjar's own address is a quick fill on a server.
+      expect(screen.getByRole('button', { name: /Nightjar 198\.51\.100\.10/ })).toBeInTheDocument();
+      fireEvent.change(screen.getByLabelText('Address or network allowed to reach SSH'), { target: { value: '203.0.113.7' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Block SSH' }));
+      await waitFor(() => expect(added).toHaveLength(2));
+      // The ports are sshd's own, not the firewall's guess.
+      expect(added[0]).toMatchObject({ action: 'allow', source: '203.0.113.7', port: '2222', proto: 'tcp' });
+      expect(added[1]).toMatchObject({ action: 'block', port: '2222', proto: 'tcp' });
+      expect(added[1].source).toBeFalsy();
+      expect(await screen.findByText('Only 203.0.113.7 can reach SSH on nas')).toBeInTheDocument();
+    });
+
+    it('shows a refused block as the firewall said it, and keeps the allow', async () => {
+      const { t, added } = target();
+      t.add = async (rule) => {
+        added.push(rule);
+        if (rule.action === 'block') throw new ApiError('that would cut off the SSH login open now from 192.168.1.20');
+        return t.load();
+      };
+      render(
+        <ToastProvider>
+          <FirewallManager target={t} />
+        </ToastProvider>,
+      );
+      fireEvent.click(await screen.findByRole('button', { name: 'Block SSH…' }));
+      fireEvent.click(screen.getByRole('radio', { name: /^An address/ }));
+      fireEvent.change(screen.getByLabelText('Address or network allowed to reach SSH'), { target: { value: '203.0.113.7' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Block SSH' }));
+      expect(await screen.findByText('that would cut off the SSH login open now from 192.168.1.20')).toBeInTheDocument();
+      // Without sshd's own ports, the firewall's SSH port is used.
+      expect(added.map((r) => `${r.action} ${r.port}`)).toEqual(['allow 22', 'block 22']);
+      expect(screen.getByText(/The allow for 203\.0\.113\.7 went in/)).toBeInTheDocument();
+    });
+
+    it('adds a key to root, asks "Only allow keys?", and on Yes turns passwords off with Keep to press', async () => {
+      vi.spyOn(api, 'sshKeys').mockResolvedValue({ keys: [nightjarKey] });
+      const { t } = target();
+      const { ssh, calls } = sshTarget();
+      t.ssh = ssh;
+      render(
+        <ToastProvider>
+          <FirewallManager target={t} />
+        </ToastProvider>,
+      );
+      fireEvent.click(await screen.findByRole('button', { name: 'Block SSH…' }));
+      fireEvent.click(screen.getByRole('radio', { name: /^A key/ }));
+      expect(await screen.findByRole('radio', { name: /nightjar SHA256:abc/ })).toBeChecked();
+      // root is picked, with how many keys each account has.
+      expect(screen.getByLabelText('Account')).toHaveValue('root');
+      expect(screen.getByRole('option', { name: 'alex · 0 keys' })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Add key' }));
+      expect(await screen.findByText(/Only allow keys\?/)).toBeInTheDocument();
+      expect(calls).toEqual([`key root ${nightjarKey.public}`]);
+      fireEvent.click(screen.getByRole('button', { name: 'Yes, only keys' }));
+      const keep = await screen.findByRole('button', { name: 'Keep keys only' });
+      expect(calls[1]).toBe('keys-only true root');
+      expect(screen.getByText(/Passwords come back by themselves in/)).toBeInTheDocument();
+      expect(screen.getByText('keys only')).toBeInTheDocument();
+      fireEvent.click(keep);
+      await waitFor(() => expect(calls[2]).toBe('keep true'));
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Keep keys only' })).not.toBeInTheDocument());
+      // Kept: passwords can be let back in, after a yes.
+      fireEvent.click(screen.getByRole('button', { name: 'Allow passwords again' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
+      await waitFor(() => expect(calls[3]).toBe('keys-only false '));
+    });
+
+    it('refuses a pasted private key before sending it', async () => {
+      vi.spyOn(api, 'sshKeys').mockResolvedValue({ keys: [] });
+      const { t } = target();
+      const { ssh, calls } = sshTarget();
+      t.ssh = ssh;
+      render(
+        <ToastProvider>
+          <FirewallManager target={t} />
+        </ToastProvider>,
+      );
+      fireEvent.click(await screen.findByRole('button', { name: 'Block SSH…' }));
+      fireEvent.click(screen.getByRole('radio', { name: /^A key/ }));
+      // With no keys of Nightjar's, pasting is picked.
+      const box = await screen.findByLabelText('Public key');
+      fireEvent.change(box, { target: { value: '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----' } });
+      expect(screen.getByRole('alert')).toHaveTextContent(/private key, which should never leave your computer/);
+      const add = screen.getByRole('button', { name: 'Add key' });
+      expect(add).toBeDisabled();
+      fireEvent.submit(add.closest('form')!);
+      await act(async () => {});
+      expect(calls).toEqual([]);
+    });
+
+    it('hides the SSH state when the agent cannot say, and says so only on the key path', async () => {
+      const { t } = target();
+      t.ssh = { ...sshTarget().ssh, load: async () => Promise.reject(new ApiError('nas’s agent is too old to manage SSH logins: update the agent')) };
+      render(
+        <ToastProvider>
+          <FirewallManager target={t} />
+        </ToastProvider>,
+      );
+      fireEvent.click(await screen.findByRole('button', { name: 'Block SSH…' }));
+      expect(screen.queryByText(/^SSH:/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/too old/)).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('radio', { name: /^A key/ }));
+      expect(screen.getByText('nas’s agent is too old to manage SSH logins: update the agent')).toBeInTheDocument();
+    });
   });
 });
 

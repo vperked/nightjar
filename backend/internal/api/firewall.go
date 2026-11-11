@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"nightjar/internal/agent"
 	"nightjar/internal/firewall"
 	"nightjar/internal/remote"
 )
@@ -91,7 +90,7 @@ func (s *Server) unblockHost(w http.ResponseWriter, r *http.Request) {
 
 // answerAgent passes on what the agent said, or why it could not be asked. Refusals go out as 422,
 // since a proxy such as Cloudflare hides the body of a 5xx.
-func answerAgent(w http.ResponseWriter, v agent.FirewallView, err error) {
+func answerAgent[T any](w http.ResponseWriter, v T, err error) {
 	var ae *remote.AgentError
 	switch {
 	case errors.Is(err, remote.ErrNotFound):

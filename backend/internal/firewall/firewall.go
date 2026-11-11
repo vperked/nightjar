@@ -74,6 +74,10 @@ type Port struct {
 	// Allowed is a port anyone may reach whatever the default: a rule allows everyone to it, or it is
 	// kept open.
 	Allowed bool `json:"allowed,omitempty"`
+	// Blocked is a port a rule shuts for everyone, before anything keeps it open; Only are the
+	// addresses rules ahead of that block still let in ("only the dashboard on 9101").
+	Blocked bool     `json:"blocked,omitempty"`
+	Only    []string `json:"only,omitempty"`
 }
 
 // Open is a port kept open to everyone however the rest is decided: SSH, the dashboard's.
@@ -414,7 +418,7 @@ func (m *Manager) Status(ctx context.Context) Status {
 		st.Listening = []Port{}
 	}
 	for i, p := range st.Listening {
-		st.Listening[i].Allowed = Allowed(p, st.Rules, st.Open)
+		st.Listening[i].Allowed, st.Listening[i].Blocked, st.Listening[i].Only = Reachable(p, st.Rules, st.Open)
 	}
 	return st
 }
@@ -438,31 +442,44 @@ func (m *Manager) openLocked() []Open {
 	return out
 }
 
-// Allowed says whether anyone may reach a port whatever the default: it is kept open, or the first
-// rule for everyone that covers it allows it.
+// Allowed says whether anyone may reach a port whatever the default (see Reachable).
 func Allowed(p Port, rules []Rule, open []Open) bool {
-	if p.Proto == "tcp" && slices.ContainsFunc(open, func(o Open) bool { return o.Port == p.Port }) {
-		return true
-	}
+	allowed, _, _ := Reachable(p, rules, open)
+	return allowed
+}
+
+// Reachable is how everyone reaches a port, read as iptables reads it: the rules come first, in order,
+// and the first for everyone that covers the port decides; only when none does is a port kept open
+// (SSH's, the dashboard's) let in. So a block for everyone shuts a kept-open port too, and the
+// addresses allowed ahead of it are the only ones still let in (only).
+func Reachable(p Port, rules []Rule, open []Open) (allowed, blocked bool, only []string) {
 	for _, r := range rules {
-		if r.Paused || r.Out() || r.Source != "" || (r.Proto != "" && r.Proto != p.Proto) || !covers(r, p.Port) {
+		if r.Paused || r.Out() || (r.Proto != "" && r.Proto != p.Proto) || !covers(r, p.Port) {
+			continue
+		}
+		if r.Source != "" {
+			if r.Action == "allow" && !slices.Contains(only, r.Source) {
+				only = append(only, r.Source)
+			}
 			continue
 		}
 		switch r.Action {
 		case "allow":
-			return true
+			return true, false, nil
 		case "block":
-			return false
+			return false, true, only
 		}
 	}
-	return false
+	kept := p.Proto == "tcp" && slices.ContainsFunc(open, func(o Open) bool { return o.Port == p.Port })
+	return kept, false, nil
 }
 
 // Add checks a rule, puts it in place and keeps it. keep are those who must keep reaching the machine
-// besides whoever is logged in over SSH, which it finds itself. A new allow goes last; a new block or
-// limit goes before the allows, so it is not lifted by one, except those that only let in part of
-// what it stops: they are exceptions to it ("allow the dashboard on 9101" before "block everyone on
-// 9101"), so it goes after them.
+// besides whoever is logged in over SSH, which it finds itself. A new allow goes last, unless it only
+// lets in part of what a block (or limit) stops: then it is an exception to that block ("allow my
+// other server on 5432" with "block everyone on the database ports") and goes just before it, where
+// it takes effect. A new block or limit goes before the allows, so it is not lifted by one, except
+// those that are exceptions to it, which stay ahead of it.
 func (m *Manager) Add(ctx context.Context, r Rule, keep []Reach) (Rule, error) {
 	r, err := m.check(r, keep)
 	if err != nil {
@@ -481,7 +498,7 @@ func (m *Manager) Add(ctx context.Context, r Rule, keep []Reach) (Rule, error) {
 	}
 	r.ID = strconv.FormatInt(m.now().UnixNano(), 36)
 	r.Added = float64(m.now().Unix())
-	at := len(m.rules)
+	at := allowAt(m.rules, r)
 	if r.Action != "allow" {
 		at = blockAt(m.rules, r)
 	}
@@ -1018,6 +1035,15 @@ func guard(rules []Rule, keep []Reach) error {
 		}
 	}
 	return nil
+}
+
+// allowAt is where a new allow r goes: before the first block or limit it is an exception to (one it
+// lies within), so it takes effect; else last.
+func allowAt(rules []Rule, r Rule) int {
+	if i := slices.IndexFunc(rules, func(o Rule) bool { return o.Action != "allow" && within(r, o) }); i >= 0 {
+		return i
+	}
+	return len(rules)
 }
 
 // blockAt is where a new block or limit r goes: before the first allow that would lift it for some of

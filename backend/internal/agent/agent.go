@@ -22,6 +22,7 @@ import (
 	"nightjar/internal/ddos"
 	"nightjar/internal/firewall"
 	"nightjar/internal/smart"
+	"nightjar/internal/sshd"
 )
 
 // Version is the wire format. The dashboard refuses readings from a newer one it cannot read.
@@ -92,6 +93,8 @@ type Sampler struct {
 	// agent listens on, which a rule must not close to the dashboard.
 	firewall *firewall.Manager
 	port     uint16
+	// sshd manages who may log in over SSH; nil when not running.
+	sshd *sshd.Manager
 
 	// dashboards are the addresses that asked for readings with the token, and when they last did:
 	// never blocked while defending.
@@ -257,6 +260,7 @@ func Handler(s *Sampler, token string, self *Self, secure bool) http.Handler {
 	}
 	mux.HandleFunc("POST "+UpdatePath, updateHandler(self, authorized, secure))
 	firewallRoutes(mux, s, authorized, secure)
+	sshdRoutes(mux, s, authorized, secure)
 	mux.HandleFunc("GET "+Path, func(w http.ResponseWriter, r *http.Request) {
 		if !authorized(r) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
@@ -317,6 +321,13 @@ func Serve(ctx context.Context, listen, token, build string, plain bool) error {
 	s.port = listenPort(listen)
 	s.firewall = newFirewall(s.port)
 	go s.firewall.Start(ctx)
+	// Keys-only SSH left waiting to be kept when the agent stopped goes back now.
+	s.sshd = &sshd.Manager{}
+	sshdDone := make(chan struct{})
+	go func() {
+		defer close(sshdDone)
+		s.sshd.Run(ctx)
+	}()
 	go s.Run(ctx)
 	self, err := FindSelf()
 	if err != nil {
@@ -340,9 +351,14 @@ func Serve(ctx context.Context, listen, token, build string, plain bool) error {
 		return err
 	}
 	// The defence takes its chains and blocks out as its watch stops: nothing would lift them later.
-	select {
-	case <-attacksDone:
-	case <-time.After(30 * time.Second):
+	// Keys-only SSH still waiting to be kept goes back as the agent stops, too.
+	wait, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, done := range []chan struct{}{attacksDone, sshdDone} {
+		select {
+		case <-done:
+		case <-wait.Done():
+		}
 	}
 	return nil
 }

@@ -20,7 +20,7 @@ import { useNow } from '../hooks/useNow';
 import { usePoll } from '../hooks/usePoll';
 import { Readout } from './Overview';
 import { DriveRow } from './overview/Drives';
-import { BulkBar, BulkResults, useBulk } from './servers/Bulk';
+import { BulkBar, BulkFirewall, BulkResults, useBulk } from './servers/Bulk';
 
 // Other servers, watched through the small agent installed on each, for its readings. Whether
 // something merely answers (a router's page, a port, a ping) is an uptime check, under Services; a
@@ -212,6 +212,8 @@ export function ServersPage() {
   // selected is the servers ticked while choosing; null when not choosing.
   const [selected, setSelected] = useState<Set<string> | null>(null);
   const bulk = useBulk(refresh);
+  // firewalling is whether the panel picking rules for every selected server's firewall is open.
+  const [firewalling, setFirewalling] = useState(false);
   const now = useNow(10000);
   useEffect(() => {
     if (!selected) return;
@@ -268,6 +270,17 @@ export function ServersPage() {
           </div>
         )}
       </div>
+      {firewalling && picked.length > 0 && (
+        <BulkFirewall
+          picked={picked}
+          busy={bulk.busy}
+          onClose={() => setFirewalling(false)}
+          onRun={(batch) => {
+            setFirewalling(false);
+            void bulk.start('firewall', picked, 0, batch);
+          }}
+        />
+      )}
       {bulk.run && <BulkResults run={bulk.run} onDismiss={bulk.dismiss} />}
       {data.hosts.length === 0 ? (
         <section className="section servers-empty">
@@ -299,6 +312,7 @@ export function ServersPage() {
               if (action === 'remove') setSelected(new Set());
             })
           }
+          onFirewall={() => setFirewalling(true)}
           onClear={() => setSelected(new Set())}
         />
       )}

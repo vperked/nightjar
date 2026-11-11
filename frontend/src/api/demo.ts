@@ -1915,6 +1915,16 @@ To                         Action      From
   };
 }
 
+// demoWithin says whether an IPv4 address is a network's, or the address itself.
+function demoWithin(addr: string, net: string): boolean {
+  if (addr === net) return true;
+  const n = (x: string) => x.split('.').reduce((a, b) => a * 256 + Number(b), 0);
+  const [base, bits] = net.split('/');
+  if (bits === undefined || !/^[\d.]+$/.test(base)) return false;
+  const size = 2 ** (32 - Number(bits));
+  return Math.floor(n(addr) / size) === Math.floor(n(base) / size);
+}
+
 // demoAllowed marks the ports anyone may reach whatever the default, as the firewall does.
 function demoAllowed(fw: FirewallStatus) {
   const covers = (r: FirewallRule, port: number) =>
@@ -1923,11 +1933,16 @@ function demoAllowed(fw: FirewallStatus) {
       const [a, b = a] = p.split(':').map(Number);
       return port >= a && port <= b;
     });
+  // The rules come first, in order: the first for everyone decides, and the addresses allowed ahead
+  // of a block are the only ones it lets in; only then is a kept-open port let in.
   for (const p of fw.listening) {
-    p.allowed = (p.proto === 'tcp' && !!fw.open?.some((o) => o.port === p.port)) || undefined;
-    if (p.allowed) continue;
-    const first = fw.rules.find((r) => !r.paused && r.direction !== 'out' && !r.source && (!r.proto || r.proto === p.proto) && covers(r, p.port) && r.action !== 'limit');
-    p.allowed = first?.action === 'allow' || undefined;
+    const meets = fw.rules.filter((r) => !r.paused && r.direction !== 'out' && (!r.proto || r.proto === p.proto) && covers(r, p.port) && r.action !== 'limit');
+    const i = meets.findIndex((r) => !r.source);
+    const first = meets[i];
+    const only = [...new Set(meets.slice(0, i < 0 ? meets.length : i).flatMap((r) => (r.action === 'allow' && r.source ? [r.source] : [])))];
+    p.allowed = first ? first.action === 'allow' || undefined : (p.proto === 'tcp' && !!fw.open?.some((o) => o.port === p.port)) || undefined;
+    p.blocked = first?.action === 'block' || undefined;
+    p.only = p.blocked && only.length ? only : undefined;
   }
 }
 
@@ -2038,6 +2053,48 @@ const demoKeys: SSHKey[] = [
     own: false,
   },
 ];
+// demoSSHDs are each machine's SSH logins, made on first look: root with a key, and one everyday
+// account. Keys only waits two minutes to be kept, then passwords come back, as the agent does.
+interface DemoSSHD {
+  keysOnly: boolean;
+  passwords: boolean;
+  until?: number;
+  users: { name: string; keys: string[] }[];
+}
+const demoSSHDs: Record<string, DemoSSHD> = {};
+const DEMO_LAPTOP_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPq4Rk7dWm2Zs9Lb1yVc8xNe3hTf0aGuJo5iKt6BzQrX alex@laptop';
+function demoSSHD(id: string): DemoSSHD {
+  // nas already has Nightjar's own key on root, from setting up its login; this machine root's own.
+  const root = id === 'local' ? [demoKeys[demoKeys.length - 1].public] : id === 'a1b2c3d4e5f6' ? [demoKeys[demoKeys.length - 2].public] : [];
+  return {
+    keysOnly: false,
+    passwords: true,
+    users: [
+      { name: 'root', keys: root },
+      { name: 'alex', keys: id === 'local' ? [DEMO_LAPTOP_KEY] : [] },
+    ],
+  };
+}
+
+// demoFingerprint makes up a key's SHA256 fingerprint, the same every time for the same key: the one
+// listed for a key Nightjar has, else 43 characters drawn from a hash of the key.
+function demoFingerprint(key: string): string {
+  const blob = key.trim().split(/\s+/)[1] ?? key;
+  const known = demoKeys.find((k) => k.public.split(' ')[1] === blob);
+  if (known) return known.fingerprint;
+  let h = 2166136261;
+  for (const c of blob) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0;
+  const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let out = '';
+  for (let i = 0; i < 43; i++) {
+    h ^= h << 13;
+    h ^= h >>> 17;
+    h ^= h << 5;
+    out += abc[(h >>> 0) % 64];
+  }
+  return `SHA256:${out}`;
+}
+
 const demoSSH: Record<string, HostSSH> = { a1b2c3d4e5f6: { port: 22, user: 'root', key: '/root/serverMonitor/ssh/nightjar' } };
 
 // demoChecks are how each saved login last went.
@@ -2243,6 +2300,69 @@ function route(method: string, url: URL, body: unknown): Response {
     demoKeys.unshift(key);
     return json({ key });
   }
+  // SSH logins: this machine's, and each agent server's through its agent. pi-dns's agent is one from
+  // before it could, to show how that looks.
+  const sshdMatch = path.match(/^\/api\/(?:hosts\/([0-9a-f]+)\/)?sshd(\/.*)?$/);
+  if (sshdMatch) {
+    const [, hostId, rest = ''] = sshdMatch;
+    const id = hostId ?? 'local';
+    const host = demoHosts.find((h) => h.id === id);
+    if (hostId && !host) return error(404, 'no such server');
+    if (host?.offlineSince) return error(422, `no answer from ${host.name}: timed out`);
+    if (host?.name === 'pi-dns') return error(409, `${host.name}'s agent is too old to manage SSH logins: update the agent`);
+    const d = (demoSSHDs[id] ??= demoSSHD(id));
+    // Keys only not kept in time goes back by itself.
+    if (d.until && d.until < now()) {
+      d.keysOnly = false;
+      d.passwords = true;
+      d.until = undefined;
+    }
+    const answer = () =>
+      json({
+        ports: [22],
+        password_login: d.passwords,
+        keys_only: d.keysOnly,
+        pending: d.until ? { until: d.until } : undefined,
+        users: d.users.map((u) => ({ name: u.name, keys: u.keys.length, fingerprints: u.keys.map(demoFingerprint) })),
+      });
+    const b = (body ?? {}) as { user?: string; key?: string; on?: boolean; keep?: boolean };
+    const user = d.users.find((u) => u.name === b.user);
+    if (method === 'GET' && rest === '') return answer();
+    if (method === 'POST' && rest === '/keys') {
+      if (!user) return error(422, `there is no account called "${b.user ?? ''}" that can log in over SSH`);
+      const key = (b.key ?? '').trim();
+      if (/PRIVATE KEY/.test(key)) return error(422, 'that is a private key: paste the public one (the .pub file) instead');
+      if (!/^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp\d+|sk-\S+)\s+[A-Za-z0-9+/=]{20,}(\s.*)?$/.test(key) || key.includes('\n'))
+        return error(422, 'that is not a public key: it is one line starting ssh-ed25519, ssh-rsa or ecdsa-sha2-…');
+      // The same key twice is still one key.
+      if (!user.keys.some((k) => demoFingerprint(k) === demoFingerprint(key))) user.keys.push(key);
+      return answer();
+    }
+    if (method === 'PUT' && rest === '/keys-only') {
+      if (!b.on) {
+        d.keysOnly = false;
+        d.passwords = true;
+        d.until = undefined;
+        return answer();
+      }
+      if (!user) return error(422, 'say which account you log in with, so Nightjar can check it has a key');
+      if (!user.keys.length) return error(422, `${user.name} has no key yet: with keys only, it could not log in at all`);
+      d.keysOnly = true;
+      d.passwords = false;
+      d.until = now() + 120;
+      return answer();
+    }
+    if (method === 'POST' && rest === '/keys-only/keep') {
+      if (!d.until) return error(422, 'nothing is waiting to be kept; passwords may have come back already');
+      if (!b.keep) {
+        d.keysOnly = false;
+        d.passwords = true;
+      }
+      d.until = undefined;
+      return answer();
+    }
+    return error(404, 'not found');
+  }
   // Firewalls: this machine's, and each agent server's through its agent.
   const fwMatch =
     path === '/api/firewall' || path.startsWith('/api/firewall/') ? ['', 'local', path.slice('/api'.length)] : path.match(/^\/api\/hosts\/([0-9a-f]+)(\/(?:firewall.*|defense|blocked\/.+))$/);
@@ -2296,13 +2416,33 @@ function route(method: string, url: URL, body: unknown): Response {
     if (method === 'POST' && rest === '/firewall/rules') {
       const r = check(body as Partial<FirewallRule>);
       if (r instanceof Response) return r;
+      // Like the firewall's guard, refuse a block for everyone on SSH here while an SSH login from
+      // 192.168.1.20 is open and no allow lets that address in first.
+      const sshLogin = '192.168.1.20';
+      const coversSSH = (x: FirewallRule) => !x.port || x.port.split(',').some((p) => p === '22' || (/^(\d+):(\d+)$/.test(p) && Number(p.split(':')[0]) <= 22 && Number(p.split(':')[1]) >= 22));
+      if (
+        local &&
+        r.action === 'block' &&
+        !r.source &&
+        !r.direction &&
+        coversSSH(r) &&
+        !fw.rules.some((o) => o.action === 'allow' && !o.paused && !o.direction && !!o.source && demoWithin(sshLogin, o.source) && coversSSH(o))
+      )
+        return error(422, `that would cut off the SSH login open now from ${sshLogin}; allow that address first, or block from somewhere else`);
       r.id = `r${fw.rules.length}${Math.round(now())}`;
       // A block or limit goes before the allows that would lift it, but after an allow that is an
-      // exception to it (from one address, to the same ports), as the firewall does; an allow last.
+      // exception to it (from one address, to some of its ports); an allow goes last, unless it is an
+      // exception to a block, when it goes just before that block. As the firewall does, simplified.
       const portsOf = (x: FirewallRule) => (x.port ? x.port.split(',') : []);
+      const sameWay = (o: FirewallRule) => (o.direction === 'out') === (r.direction === 'out');
       const meets = (o: FirewallRule) => !o.port || !r.port || portsOf(o).some((p) => portsOf(r).includes(p));
-      const exception = (o: FirewallRule) => !!o.source && !r.source && !!o.port && o.port === r.port && (!r.proto || o.proto === r.proto);
-      const at = r.action === 'allow' ? -1 : fw.rules.findIndex((o) => o.action === 'allow' && (o.direction === 'out') === (r.direction === 'out') && meets(o) && !exception(o));
+      // within: everything allow a matches, block b matches too.
+      const within = (a: FirewallRule, b: FirewallRule) =>
+        (!b.source || a.source === b.source) && !!a.source && (!b.port || (!!a.port && portsOf(a).every((p) => portsOf(b).includes(p)))) && (!b.proto || a.proto === b.proto);
+      const at =
+        r.action === 'allow'
+          ? fw.rules.findIndex((o) => o.action !== 'allow' && sameWay(o) && within(r, o))
+          : fw.rules.findIndex((o) => o.action === 'allow' && sameWay(o) && meets(o) && !within(o, r));
       if (at < 0) fw.rules.push(r);
       else fw.rules.splice(at, 0, r);
       return answer();

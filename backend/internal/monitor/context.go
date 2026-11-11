@@ -34,6 +34,7 @@ import (
 	"nightjar/internal/repair"
 	"nightjar/internal/services"
 	"nightjar/internal/smart"
+	"nightjar/internal/sshd"
 	"nightjar/internal/storage"
 	"nightjar/internal/units"
 	"nightjar/internal/updates"
@@ -73,6 +74,7 @@ type Context struct {
 	Remote   *remote.Monitor   // other servers, watched through their agents
 	Attacks  *ddos.Watcher     // denial-of-service attacks on this machine
 	Firewall *firewall.Manager // firewall rules set from the dashboard
+	SSHD     *sshd.Manager     // who may log in over SSH: keys, and passwords on or off
 	// Analytics records every server's minutes for the analytics page; nil records nothing.
 	Analytics *analytics.Recorder
 	Freeze    *FreezeMonitor

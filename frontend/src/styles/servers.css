@@ -788,3 +788,58 @@ main.choosing-servers {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Firewall… for the selected servers: what to add, as the firewall's own choice cards, then a rule's
+   fields in one row (wrapping on a phone). */
+.bulk-firewall {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.bulk-fw-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 10px;
+}
+.bulk-fw-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.bulk-fw-rule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.bulk-fw-rule > .field {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+/* The two menus take the width of their words; the address and port share the rest. */
+.bulk-fw-rule > select.field {
+  flex: 0 0 auto;
+  width: auto;
+}
+.bulk-fw-rate {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.bulk-fw-rate .field {
+  width: 64px;
+}
+.bulk-fw-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.bulk-fw-foot p {
+  margin: 0;
+  flex: 1 1 240px;
+}

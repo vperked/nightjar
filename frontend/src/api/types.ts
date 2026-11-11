@@ -1411,6 +1411,10 @@ export interface FirewallPort {
   program?: string;
   local?: boolean;
   allowed?: boolean;
+  // blocked: a rule shuts the port for everyone, ahead of anything keeping it open; only are the
+  // addresses rules before that block still let in.
+  blocked?: boolean;
+  only?: string[];
 }
 
 // FirewallDrop is one packet the firewall dropped, from the kernel log: rule is the rule's id, or
@@ -1457,6 +1461,29 @@ export interface AgentFirewall {
   firewall: FirewallStatus;
   defense?: AttackDefense;
   dashboard?: string;
+}
+
+// SSHAccess is how a machine's SSH server lets people log in (GET /api/sshd, or a server's through its
+// agent), and the accounts that can. Every change answers with it again.
+export interface SSHAccess {
+  ports: number[];
+  // password_login is whether sshd takes passwords now, however that came to be.
+  password_login: boolean;
+  // keys_only is Nightjar's own setting turning passwords off being in place.
+  keys_only: boolean;
+  // pending is there while keys only waits to be kept: passwords come back by themselves at until
+  // (unix seconds) otherwise.
+  pending?: { until: number };
+  users: SSHUser[];
+  // problem says why this machine's SSH logins can't be managed from here.
+  problem?: string;
+}
+
+// SSHUser is an account that can log in over SSH, and the keys it takes.
+export interface SSHUser {
+  name: string;
+  keys: number;
+  fingerprints?: string[];
 }
 
 // ---------- status page address ----------

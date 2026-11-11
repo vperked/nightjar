@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
-import type { AgentFirewall, FirewallDrop, FirewallPort, FirewallRule, FirewallStatus } from '../api/types';
+import type { AgentFirewall, FirewallDrop, FirewallPort, FirewallRule, FirewallStatus, SSHAccess } from '../api/types';
+import { BlockSSH, SSHPending, SSHState, useSSHAccess } from './BlockSSH';
 import { formatAgo, formatBytes, plural } from '../format';
 import { useNow } from '../hooks/useNow';
 import { Pager, usePaged } from './Pager';
@@ -86,6 +87,18 @@ export interface FirewallTarget {
   order: (ids: string[]) => Promise<FirewallStatus | undefined>;
   setDefault: (def: '' | 'drop') => Promise<FirewallStatus | undefined>;
   keep: (keep: boolean) => Promise<FirewallStatus | undefined>;
+  // ssh is how the same machine lets people log in over SSH, for Block SSH's key path. A target
+  // without it (as in tests) offers only the address path.
+  ssh?: SSHTarget;
+}
+
+// SSHTarget is a machine's SSH logins: add a key to an account, turn passwords off (they come back by
+// themselves unless kept) or on again. Each call answers with the logins after it.
+export interface SSHTarget {
+  load: () => Promise<SSHAccess>;
+  addKey: (user: string, key: string) => Promise<SSHAccess>;
+  keysOnly: (on: boolean, user?: string) => Promise<SSHAccess>;
+  keep: (keep: boolean) => Promise<SSHAccess>;
 }
 
 export const localFirewall: FirewallTarget = {
@@ -98,6 +111,7 @@ export const localFirewall: FirewallTarget = {
   order: (ids) => api.orderFirewall(ids).then((r) => r.firewall),
   setDefault: (def) => api.setFirewallDefault(def).then((r) => r.firewall),
   keep: (keep) => api.keepFirewallDefault(keep).then((r) => r.firewall),
+  ssh: { load: api.sshd, addKey: api.addSSHDKey, keysOnly: api.setKeysOnly, keep: api.keepKeysOnly },
 };
 
 // withDashboard puts the address the agent saw Nightjar ask from onto its firewall, for the form's
@@ -114,6 +128,12 @@ export const hostFirewall = (h: { id: string; name: string }): FirewallTarget =>
   order: (ids) => api.orderHostRules(h.id, ids).then(withDashboard),
   setDefault: (def) => api.setHostDefault(h.id, def).then(withDashboard),
   keep: (keep) => api.keepHostDefault(h.id, keep).then(withDashboard),
+  ssh: {
+    load: () => api.hostSSHD(h.id),
+    addKey: (user, key) => api.addHostSSHDKey(h.id, user, key),
+    keysOnly: (on, user) => api.setHostKeysOnly(h.id, on, user),
+    keep: (keep) => api.keepHostKeysOnly(h.id, keep),
+  },
 });
 
 interface Draft {
@@ -239,6 +259,11 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
   // adding is whether the rule form is open: it opens from Add a rule, a port, a dropped address or Edit.
   const [adding, setAdding] = useState(false);
   const [asking, setAsking] = useState(false);
+  // blocking is whether the Block SSH panel is open; it and the rule form take turns.
+  const [blocking, setBlocking] = useState(false);
+  // securing is which Secure preset's box is open (email, web); like Block SSH, it takes the form's place.
+  const [securing, setSecuring] = useState<SecureKind>();
+  const ssh = useSSHAccess(target.ssh, target.name);
   // removing is the rule whose Remove is waiting on a yes: one click should not drop a rule.
   const [removing, setRemoving] = useState('');
   const busyRef = useRef('');
@@ -270,6 +295,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
     setEditing(undefined);
     setAdding(false);
     setAsking(false);
+    setBlocking(false);
     setRemoving('');
     refresh();
     const t = window.setInterval(() => {
@@ -304,6 +330,8 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
   // ruleFor opens the form on a new rule: empty from Add a rule, a port's from the open ports, or a
   // block of an address that kept being dropped.
   const ruleFor = (d: Partial<Draft>, direction: 'in' | 'out' = 'in') => {
+    setBlocking(false);
+    setSecuring(undefined);
     setEditing(undefined);
     setFormError('');
     setDir(direction);
@@ -312,6 +340,8 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
     setTimeout(toForm);
   };
   const edit = (r: FirewallRule) => {
+    setBlocking(false);
+    setSecuring(undefined);
     setEditing(r);
     setFormError('');
     setDraft(draftOf(r));
@@ -367,6 +397,35 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
       epoch.current++;
       setBusy('');
     }
+  };
+
+  // addForSSH adds one of Block SSH's rules the way run makes a change, but leaves a refusal to the
+  // panel to show as it is.
+  const addForSSH = async (rule: Partial<FirewallRule>) => {
+    setBusy('ssh');
+    epoch.current++;
+    try {
+      const s = await target.add(rule);
+      if (s) {
+        setSt(withLists(s));
+        setError('');
+      }
+    } finally {
+      epoch.current++;
+      setBusy('');
+    }
+  };
+  const openBlock = () => {
+    cancelEdit();
+    setDir('in');
+    setSecuring(undefined);
+    setBlocking(true);
+  };
+  const openSecure = (kind: SecureKind) => {
+    cancelEdit();
+    setDir('in');
+    setBlocking(false);
+    setSecuring(kind);
   };
 
   const rules = st?.rules ?? [];
@@ -458,13 +517,27 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
                 />
               )}
               {full && st.since ? <span className="small ink-3">counted since {formatAgo(st.since)}</span> : null}
-              {canChange && !adding && (
-                <button type="button" className="btn fw-new" onClick={() => ruleFor({}, dir)}>
-                  + Add a rule
-                </button>
-              )}
+              {(dir === 'in' && ssh.access) || (canChange && !adding && !blocking) ? (
+                <span className="fw-new">
+                  {dir === 'in' && ssh.access && <SSHState ssh={ssh} name={target.name} />}
+                  {canChange && !adding && !blocking && dir === 'in' && (
+                    <button type="button" className="btn-ghost" onClick={openBlock}>
+                      Block SSH…
+                    </button>
+                  )}
+                  {canChange && !adding && !blocking && (
+                    <button type="button" className="btn" onClick={() => ruleFor({}, dir)}>
+                      + Add a rule
+                    </button>
+                  )}
+                </span>
+              ) : null}
             </div>
           )}
+
+          {ssh.access?.pending && <SSHPending ssh={ssh} name={target.name} />}
+          {canChange && blocking && <BlockSSH target={target} st={st} ssh={ssh} addRule={addForSSH} busy={busy === 'ssh'} onClose={() => setBlocking(false)} />}
+          {canChange && securing && <SecureRules key={securing} kind={securing} name={target.name} add={addForSSH} busy={busy === 'ssh'} onClose={() => setSecuring(undefined)} />}
 
           {canChange && adding && (
             <RuleForm
@@ -481,6 +554,8 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
               error={formError}
               onSubmit={submit}
               onCancel={cancelEdit}
+              onSecureSSH={openBlock}
+              onSecure={openSecure}
             />
           )}
           {shown.length === 0 ? (
@@ -603,6 +678,116 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
   );
 }
 
+// Secure presets are a few rules that set a machine up for one job safely, each said in words before
+// it goes in.
+export interface SecurePreset {
+  title: string;
+  // done is the toast's title once its rules are in: "Email secured".
+  done: string;
+  intro: string;
+  rules: { rule: Partial<FirewallRule>; why: string }[];
+  note: string;
+}
+export type SecureKind = 'email' | 'web';
+
+export const SECURE: Record<SecureKind, SecurePreset> = {
+  // Email: what a mail server with IMAP needs open, and nothing it shouldn't. Mail from other servers
+  // arrives on 25, left open to everyone, unlimited: senders retry, and a cap would lose mail. Sending
+  // (465, 587) and reading (993) go over TLS, limited per address, which cuts password guessing short
+  // without bothering a mail app's few connections. Plain-text POP3 and IMAP (110, 143) are blocked,
+  // so passwords never cross the network unencrypted.
+  email: {
+    title: 'Secure email',
+    done: 'Email secured',
+    intro: 'adds the rules a mail server with IMAP needs:',
+    rules: [
+      { rule: { action: 'allow', port: '25', proto: 'tcp', note: 'email: mail from other servers' }, why: 'Allow port 25 for everyone: mail arriving from other servers.' },
+      {
+        rule: { action: 'limit', port: '465,587,993', proto: 'tcp', rate: '30/min', note: 'email: sending and reading over TLS' },
+        why: 'Limit ports 465, 587 and 993 to 30 new connections a minute from each address: sending and reading mail over TLS, with password guessing cut short.',
+      },
+      {
+        rule: { action: 'block', port: '110,143', proto: 'tcp', note: 'email: plain-text POP3 and IMAP' },
+        why: 'Block ports 110 and 143: plain-text POP3 and IMAP, which send passwords unencrypted.',
+      },
+    ],
+    note: 'Webmail, if you run it, is separate: Secure web opens it.',
+  },
+  // Web: the site open to everyone (80 for certificates and the redirect to HTTPS, 443 over TCP and,
+  // for HTTP/3, UDP), and the databases and caches behind a web app shut to the internet, where an
+  // open one is the classic way a site's data leaks. Not limited: a browser opens many connections,
+  // and visitors behind one address (a school, a mobile carrier) would be cut off; floods are the
+  // attack defense's.
+  web: {
+    title: 'Secure web',
+    done: 'Web secured',
+    intro: 'adds the rules a web server needs:',
+    rules: [
+      {
+        rule: { action: 'allow', port: '80,443', proto: 'tcp', note: 'web: HTTP and HTTPS' },
+        why: 'Allow ports 80 and 443 for everyone: the site over HTTPS, and plain HTTP for certificate renewals and the redirect to HTTPS.',
+      },
+      { rule: { action: 'allow', port: '443', proto: 'udp', note: 'web: HTTP/3' }, why: 'Allow UDP port 443 for everyone: HTTP/3, which faster browsers use.' },
+      {
+        rule: { action: 'block', port: '3306,5432,6379,9200,11211,27017', proto: 'tcp', note: 'web: databases and caches' },
+        why: 'Block MySQL (3306), PostgreSQL (5432), Redis (6379), Elasticsearch (9200), Memcached (11211) and MongoDB (27017): what a web app keeps behind it, which should never face the internet.',
+      },
+    ],
+    note: 'Another machine of yours that uses one of those databases needs an allow for its address: add it, and it goes above this block by itself.',
+  },
+};
+
+// SecureRules says what a preset adds and adds it, a rule at a time. One already there is fine; a
+// refusal stops it and says how far it got, leaving the rules added so far in place.
+function SecureRules({ kind, name, add, busy, onClose }: { kind: SecureKind; name: string; add: (rule: Partial<FirewallRule>) => Promise<void>; busy: boolean; onClose: () => void }) {
+  const preset = SECURE[kind];
+  const notify = useToast();
+  const [error, setError] = useState('');
+  const go = async () => {
+    setError('');
+    let added = 0;
+    for (const { rule } of preset.rules) {
+      try {
+        await add(rule);
+        added++;
+      } catch (err) {
+        const text = errText(err);
+        if (/already a rule like that/i.test(text)) continue;
+        setError(added ? `Added ${plural(added, 'rule')}, then stopped: ${text}` : text);
+        return;
+      }
+    }
+    notify({ tone: 'ok', title: `${preset.done} · ${name}`, body: added ? `${plural(added, 'rule')} added.` : 'Its rules were all in place already.' });
+    onClose();
+  };
+  return (
+    <div className="fw-ask fw-secure" role="group" aria-label={preset.title}>
+      <p>
+        <strong>{preset.title}</strong> {preset.intro}
+      </p>
+      <ul>
+        {preset.rules.map(({ why }) => (
+          <li key={why}>{why}</li>
+        ))}
+      </ul>
+      <p className="small ink-3">{preset.note}</p>
+      {error && (
+        <p className="alert" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="fw-ask-acts">
+        <button type="button" className="btn-quiet" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button type="button" className="btn" onClick={go} disabled={busy}>
+          {busy ? 'Adding…' : 'Add these rules'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // RuleForm adds or changes one rule, a question at a time: which way the traffic goes, what to do
 // with it, from whom, on which ports. It says the rule in words as it is filled in, and what is still
 // missing, so the button is never greyed out without a reason.
@@ -620,6 +805,8 @@ function RuleForm({
   error,
   onSubmit,
   onCancel,
+  onSecureSSH,
+  onSecure,
 }: {
   formRef: React.RefObject<HTMLFormElement>;
   st: FirewallStatus;
@@ -634,6 +821,10 @@ function RuleForm({
   error: string;
   onSubmit: (e: React.FormEvent) => void;
   onCancel: () => void;
+  // onSecureSSH opens Block SSH in the form's place, from the quick row's "Secure: SSH…".
+  onSecureSSH?: () => void;
+  // onSecure opens a Secure preset (email, web) in the form's place.
+  onSecure?: (kind: SecureKind) => void;
 }) {
   const set = (d: Partial<Draft>) => setDraft({ ...draft, ...d });
   const out = dir === 'out';
@@ -653,6 +844,9 @@ function RuleForm({
         { value: 'limit', title: 'Limit', body: 'Let each address make only so many new connections, and drop the rest. Stops password guessing.' },
       ];
   const quick = full && !out && !editing ? presets(st) : [];
+  // The agent's port on a server, which only Nightjar needs to reach: the kept-open port named for it.
+  const agentPort = nightjar ? st.open?.find((o) => /agent/i.test(o.what))?.port : undefined;
+  const secure = !out && !editing && (onSecureSSH || onSecure || agentPort);
 
   return (
     <form ref={formRef} className="fw-form" onSubmit={onSubmit} aria-label={editing ? 'Change the rule' : 'Add a rule'}>
@@ -669,6 +863,36 @@ function RuleForm({
               Open {p.label}
             </button>
           ))}
+        </div>
+      )}
+      {secure && (
+        <div className="fw-quick" role="group" aria-label="Secure">
+          <span className="small ink-3">Secure:</span>
+          {onSecureSSH && (
+            <button type="button" className="chip" onClick={onSecureSSH} title="Let in only an address, or only key logins">
+              SSH…
+            </button>
+          )}
+          {agentPort && nightjar && (
+            <button
+              type="button"
+              className="chip"
+              title={`Let only Nightjar (${nightjar}) reach the agent on port ${agentPort}`}
+              onClick={() => setDraft(startDraft({ action: 'allow', source: nightjar, port: String(agentPort), proto: 'tcp', note: 'Nightjar only', alone: true }))}
+            >
+              Agent
+            </button>
+          )}
+          {onSecure && (
+            <>
+              <button type="button" className="chip" onClick={() => onSecure('web')} title="The rules a web server needs: the site open, its databases shut">
+                Web…
+              </button>
+              <button type="button" className="chip" onClick={() => onSecure('email')} title="The rules a mail server with IMAP needs, done safely">
+                Email…
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -794,7 +1018,7 @@ function RuleForm({
         <label className="fw-step fw-alone">
           <span className="fw-step-label" aria-hidden="true" />
           <span className="fw-radio">
-            <input type="checkbox" checked={draft.alone} onChange={(e) => set({ alone: e.target.checked })} />
+            <input type="checkbox" className="select-box" checked={draft.alone} onChange={(e) => set({ alone: e.target.checked })} />
             Keep everyone else out: also block {portWords(ruleOf(draft, dir) as FirewallRule)} for everyone but {sourceWords(draft.source.trim(), nightjar)}
           </span>
         </label>
@@ -810,7 +1034,8 @@ function RuleForm({
           {gap || (
             <>
               <span className="ink-3">This rule will </span>
-              {describeRule(ruleOf(draft, dir) as FirewallRule).replace(/^\w/, (c) => c.toLowerCase())}.
+              {describeRule({ ...(ruleOf(draft, dir) as FirewallRule), source: fromNightjar ? 'Nightjar' : ruleOf(draft, dir).source }).replace(/^\w/, (c) => c.toLowerCase())}
+              {draft.alone && keepsOthersOut(draft, dir, !!editing) ? ', and block everyone else there' : ''}.
             </>
           )}
         </p>
@@ -972,6 +1197,7 @@ function DefaultChoice({
                 <label>
                   <input
                     type="checkbox"
+                    className="select-box"
                     checked={keepOpen.has(key(p))}
                     onChange={(e) => {
                       const next = new Set(keepOpen);
@@ -1036,10 +1262,18 @@ function OpenPorts({ st, canChange, ruleFor }: { st: FirewallStatus; canChange: 
       <span className="label">Open ports</span>
       <ul>
         {paged.items.map((p) => {
-          // How the network sees the port: only from here, let in by a rule, shut by the default, or
-          // left to the machine's own firewall.
-          const state = p.local ? 'local' : p.allowed ? 'open' : dropping ? 'closed' : 'tool';
-          const words = { local: 'this machine only', open: 'open to anyone', closed: 'closed by the default', tool: `up to ${TOOL[st.tool]}` }[state];
+          // How the network sees the port: only from here, let in by a rule, shut for everyone by a rule
+          // (but for the addresses allowed ahead of it), shut by the default, or left to the machine's
+          // own firewall. The rules decide before anything kept open, so a block wins over that.
+          const only = (p.only ?? []).map((a) => sourceWords(a, st.dashboard));
+          const state = p.local ? 'local' : p.allowed ? 'open' : p.blocked ? (only.length ? 'some' : 'closed') : dropping ? 'closed' : 'tool';
+          const words = {
+            local: 'this machine only',
+            open: 'open to anyone',
+            some: `only ${only.join(', ')}`,
+            closed: p.blocked ? 'closed by a rule' : 'closed by the default',
+            tool: `up to ${TOOL[st.tool]}`,
+          }[state];
           return (
             <li key={`${p.proto}${p.port}`} className={`fw-port ${state}`}>
               <span className="fw-port-num mono num">

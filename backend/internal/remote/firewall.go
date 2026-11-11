@@ -70,51 +70,8 @@ var ErrNoAgent = errors.New("this server has no agent; install it to manage its 
 
 func (m *Monitor) firewallCall(ctx context.Context, id, method, path string, body any) (agent.FirewallView, error) {
 	var v agent.FirewallView
-	m.mu.Lock()
-	e := m.find(id)
-	var h Host
-	if e != nil {
-		h = e.host
-	}
-	m.mu.Unlock()
-	if e == nil {
-		return v, ErrNotFound
-	}
-	if h.isSSHOnly() || h.isCheck() {
-		return v, ErrNoAgent
-	}
-	var payload io.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		payload = bytes.NewReader(b)
-	}
-	// Reading the firewall runs a few commands on the server; a change may wait on iptables' lock.
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, h.Address+path, payload)
-	if err != nil {
+	if err := m.agentCall(ctx, id, method, path, body, ErrNoAgent, "this agent is too old for that; it updates itself to this dashboard's version shortly", &v); err != nil {
 		return v, err
-	}
-	req.Header.Set("Authorization", "Bearer "+h.Token)
-	req.Header.Set("Content-Type", "application/json")
-	client := *m.client(h.Address, h.Token)
-	client.Timeout = 30 * time.Second
-	resp, err := client.Do(req)
-	if err != nil {
-		return v, fmt.Errorf("no answer from %s: %s", h.Name, plainError(err))
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode != http.StatusOK {
-		msg, status := strings.TrimSpace(string(raw)), resp.StatusCode
-		// An agent from before a call answers 404, or 405 where the path is there for another method.
-		if (status == http.StatusNotFound && strings.Contains(msg, "page not found")) || status == http.StatusMethodNotAllowed {
-			msg, status = "this agent is too old for that; it updates itself to this dashboard's version shortly", http.StatusNotFound
-		}
-		return v, &AgentError{Status: status, Msg: msg}
-	}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return v, fmt.Errorf("%s did not answer like an agent: %v", h.Name, err)
 	}
 	if v.Firewall.Rules == nil {
 		v.Firewall.Rules = []firewall.Rule{}
@@ -129,6 +86,60 @@ func (m *Monitor) firewallCall(ctx context.Context, id, method, path string, bod
 		v.Firewall.Listening = []firewall.Port{}
 	}
 	return v, nil
+}
+
+// agentCall asks a server's agent to manage something on it, and reads its answer into out.
+// noAgent is the error for a server without an agent to ask, and tooOld what an agent from before
+// the call is told to do.
+func (m *Monitor) agentCall(ctx context.Context, id, method, path string, body any, noAgent error, tooOld string, out any) error {
+	m.mu.Lock()
+	e := m.find(id)
+	var h Host
+	if e != nil {
+		h = e.host
+	}
+	m.mu.Unlock()
+	if e == nil {
+		return ErrNotFound
+	}
+	if h.isSSHOnly() || h.isCheck() {
+		return noAgent
+	}
+	var payload io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		payload = bytes.NewReader(b)
+	}
+	// Reading the firewall runs a few commands on the server; a change may wait on iptables' lock, or
+	// on sshd checking and reloading its config.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, h.Address+path, payload)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+h.Token)
+	req.Header.Set("Content-Type", "application/json")
+	client := *m.client(h.Address, h.Token)
+	client.Timeout = 30 * time.Second
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("no answer from %s: %s", h.Name, plainError(err))
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode != http.StatusOK {
+		msg, status := strings.TrimSpace(string(raw)), resp.StatusCode
+		// An agent from before a call answers 404, or 405 where the path is there for another method.
+		if (status == http.StatusNotFound && strings.Contains(msg, "page not found")) || status == http.StatusMethodNotAllowed {
+			msg, status = tooOld, http.StatusNotFound
+		}
+		return &AgentError{Status: status, Msg: msg}
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("%s did not answer like an agent: %v", h.Name, err)
+	}
+	return nil
 }
 
 // AgentError is an agent turning a request down, with its reason.
