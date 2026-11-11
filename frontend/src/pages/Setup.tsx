@@ -319,8 +319,10 @@ function UpdatesStep({ st, s }: { st: SetupStatus; s: Saver }) {
   return (
     <Step n={5} title="Updates" tone={u.enabled ? 'good' : 'warn'} status={u.enabled ? 'checking' : 'off'}>
       <p className="setup-why">
-        {u.targets} things to keep updated were found: OS packages, snaps, this monitor and apps like Sonarr and Plex. Turn on checks to see what's new; choose per item on the{' '}
-        <Link to="/updates">Updates page</Link> which install by themselves ({u.window}).
+        {u.targets
+          ? `${plural(u.targets, 'thing')} to keep updated ${u.targets === 1 ? 'was' : 'were'} found among OS packages, snaps, this monitor and apps like Sonarr and Plex.`
+          : 'Nightjar can keep OS packages, snaps, this monitor and apps like Sonarr and Plex up to date, though none were found here yet.'}{' '}
+        Turn on checks to see what's new; choose per item on the <Link to="/updates">Updates page</Link> which install by themselves ({u.window}).
       </p>
       {u.enabled ? (
         <div className="setup-actions">

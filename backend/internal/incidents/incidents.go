@@ -92,6 +92,11 @@ const (
 	Lead = 15 * 60.0
 	// burst is how soon after an incident starts a problem still counts as part of its start.
 	burst = 120.0
+	// Quiet is how long something may go without a word before it stops counting as down. Many
+	// alerts have no recovery to close them (a drive's warning, a service that kept restarting but
+	// never failed, a check deleted or renamed while down), while a check still down re-alerts at
+	// least every ALERT_MAX_COOLDOWN (an hour by default): one quiet this long is over or forgotten.
+	Quiet = 6 * 3600.0
 )
 
 func problem(n storage.Notification) bool {
@@ -132,14 +137,15 @@ func Label(subject string) (label, kind string) {
 var rank = map[string]int{"info": 0, "ok": 0, "warning": 1, "critical": 2}
 
 // Build finds the incidents in notifications (oldest first), reading the machine's minutes in
-// samples, newest incident first. Something not yet recovered at now leaves its incident open.
+// samples, newest incident first. Something not yet recovered at now leaves its incident open,
+// unless nothing has been heard of it for Quiet.
 // What the owner taught it about earlier incidents weighs the causes.
 func Build(notes []storage.Notification, samples []storage.Sample, now float64, learned Learned) []Incident {
 	var out []*Incident
 	var cur *Incident
 	// open is what is still down, and the incident it went down in. It outlives that incident: a
-	// check that stays down past Join keeps its incident open until it recovers, and a re-alert
-	// about it while it is down belongs to that incident.
+	// check that stays down past Join keeps its incident open until it recovers (or goes quiet), and
+	// a re-alert about it while it is down belongs to that incident.
 	open := map[string]*Incident{}
 	holds := func(inc *Incident) bool {
 		for _, o := range open {
@@ -151,6 +157,34 @@ func Build(notes []storage.Notification, samples []storage.Sample, now float64, 
 	}
 	last := 0.0
 	used := map[int64]bool{}
+	// seen is each open subject's latest problem, and lastOf each incident's latest problem or
+	// recovery, so a subject gone quiet can be let go and its incident closed where it went quiet.
+	seen := map[string]float64{}
+	lastOf := map[*Incident]float64{}
+	expire := func(at float64) {
+		for subject, inc := range open {
+			if at-seen[subject] <= Quiet {
+				continue
+			}
+			delete(open, subject)
+			delete(seen, subject)
+			if holds(inc) {
+				continue
+			}
+			end := lastOf[inc]
+			inc.Ended = &end
+			// Notes it took in only because it looked still down belong to no incident.
+			kept := inc.Events[:0]
+			for _, e := range inc.Events {
+				if e.TS > end+Join {
+					delete(used, e.ID)
+					continue
+				}
+				kept = append(kept, e)
+			}
+			inc.Events = kept
+		}
+	}
 	finish := func() {
 		if cur == nil {
 			return
@@ -166,6 +200,7 @@ func Build(notes []storage.Notification, samples []storage.Sample, now float64, 
 		cur = nil
 	}
 	for _, n := range notes {
+		expire(n.TS)
 		switch {
 		case problem(n):
 			inc := open[n.Subject]
@@ -183,8 +218,9 @@ func Build(notes []storage.Notification, samples []storage.Sample, now float64, 
 				inc.Severity = n.Severity
 			}
 			if n.Subject != "" {
-				open[n.Subject] = inc
+				open[n.Subject], seen[n.Subject] = inc, n.TS
 			}
+			lastOf[inc] = n.TS
 			inc.Ended = nil
 			if inc == cur {
 				last = n.TS
@@ -194,6 +230,8 @@ func Build(notes []storage.Notification, samples []storage.Sample, now float64, 
 			inc := open[n.Subject]
 			inc.Events = append(inc.Events, event(n, "recovery"))
 			delete(open, n.Subject)
+			delete(seen, n.Subject)
+			lastOf[inc] = n.TS
 			if inc == cur {
 				last = n.TS
 			}
@@ -207,6 +245,7 @@ func Build(notes []storage.Notification, samples []storage.Sample, now float64, 
 			used[n.ID] = true
 		}
 	}
+	expire(now)
 	finish()
 
 	result := make([]Incident, 0, len(out))

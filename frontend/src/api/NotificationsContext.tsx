@@ -3,6 +3,7 @@ import { useToast } from '../components/Toasts';
 import { muteSpan } from '../components/notifications';
 import { usePoll } from '../hooks/usePoll';
 import { api } from './client';
+import { useCanEdit } from './ConfigContext';
 import type { Mute, NotificationSummary } from './types';
 
 interface Notifications {
@@ -21,6 +22,7 @@ const Ctx = createContext<Notifications>({ summary: undefined, refresh: () => un
 export function NotificationsProvider({ children, enabled }: { children: ReactNode; enabled: boolean }) {
   const poll = usePoll(api.notificationSummary, 20000, enabled);
   const notify = useToast();
+  const canEdit = useCanEdit();
   const { data, refresh } = poll;
 
   const mutedUntil = useCallback(
@@ -33,6 +35,8 @@ export function NotificationsProvider({ children, enabled }: { children: ReactNo
 
   const mute = useCallback(
     async (subject: string, label: string, minutes: number) => {
+      // Mutes are the admin's: a viewer's would only be refused.
+      if (!canEdit) return;
       try {
         await api.mute(subject, label, minutes);
         notify(
@@ -43,7 +47,7 @@ export function NotificationsProvider({ children, enabled }: { children: ReactNo
         notify({ tone: 'error', title: 'Could not change the mute', body: (e as Error).message });
       }
     },
-    [notify, refresh],
+    [notify, refresh, canEdit],
   );
 
   const value = useMemo(() => ({ summary: data, refresh, mutedUntil, mute }), [data, refresh, mutedUntil, mute]);

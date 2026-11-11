@@ -43,10 +43,11 @@ kbd + kbd {
     padding: 0 9px;
   }
 }
+/* Above the sheets (70), which Ctrl+K can be pressed over. */
 .finder-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  z-index: 80;
   display: flex;
   justify-content: center;
   align-items: flex-start;

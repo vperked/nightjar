@@ -48,6 +48,9 @@ func (s *Store) AddSamples(rows []Sample) {
 // SampleBuckets summarises a host's minutes since `since` into buckets of `width` seconds, oldest
 // first: means, peaks, the share answered, and how many minutes each holds. Empty buckets are left out;
 // with nothing to show, or no database, it is empty rather than nil.
+//
+// Buckets of an hour or more read the hourly rollups (see RollupSamples) for the hours rolled up and
+// the minutes after them, so a range can reach back past the minutes' own retention.
 func (s *Store) SampleBuckets(host string, since, width float64) []Sample {
 	out := []Sample{}
 	if width <= 0 {
@@ -58,11 +61,31 @@ func (s *Store) SampleBuckets(host string, since, width float64) []Sample {
 	if db == nil {
 		return out
 	}
-	// A minute stored before its peaks were kept stands in with its average.
-	rows, err := db.Query(`SELECT ? + CAST((ts - ?) / ? AS INTEGER) * ?, AVG(up), AVG(cpu), MAX(cpu_max), AVG(mem), MAX(COALESCE(mem_max, mem)),
+	var rows *sql.Rows
+	var err error
+	if width >= 3600 {
+		w := func(col string) string {
+			return "SUM(" + col + " * n) / SUM(CASE WHEN " + col + " IS NOT NULL THEN n END)"
+		}
+		rows, err = db.Query(`WITH cut AS (SELECT COALESCE(MAX(ts) + 3600, 0) AS c FROM samples_hourly WHERE host = ?),
+		src AS (
+			SELECT ts, up, cpu, cpu_max, mem, mem_max, temp, temp_max, disk, rx, tx, latency, latency_max, minutes AS n
+			FROM samples_hourly WHERE host = ? AND ts >= ?
+			UNION ALL
+			SELECT ts, up, cpu, cpu_max, mem, COALESCE(mem_max, mem), temp, temp_max, disk, rx, tx, latency, COALESCE(latency_max, latency), 1
+			FROM samples WHERE host = ? AND ts >= ? AND ts >= (SELECT c FROM cut)
+		)
+		SELECT ? + CAST((ts - ?) / ? AS INTEGER) * ?, SUM(up * n) / SUM(n), `+w("cpu")+`, MAX(cpu_max), `+w("mem")+`, MAX(mem_max),
+			`+w("temp")+`, MAX(temp_max), `+w("disk")+`, `+w("rx")+`, `+w("tx")+`, `+w("latency")+`, MAX(latency_max), SUM(n)
+		FROM src GROUP BY CAST((ts - ?) / ? AS INTEGER) ORDER BY 1`,
+			host, host, since, host, since, since, since, width, width, since, width)
+	} else {
+		// A minute stored before its peaks were kept stands in with its average.
+		rows, err = db.Query(`SELECT ? + CAST((ts - ?) / ? AS INTEGER) * ?, AVG(up), AVG(cpu), MAX(cpu_max), AVG(mem), MAX(COALESCE(mem_max, mem)),
 		AVG(temp), MAX(temp_max), AVG(disk), AVG(rx), AVG(tx), AVG(latency), MAX(COALESCE(latency_max, latency)), COUNT(*)
 		FROM samples WHERE host = ? AND ts >= ? GROUP BY CAST((ts - ?) / ? AS INTEGER) ORDER BY 1`,
-		since, since, width, width, host, since, since, width)
+			since, since, width, width, host, since, since, width)
+	}
 	if err != nil {
 		log.Warn("Samples query failed", "err", err)
 		return out
@@ -82,14 +105,67 @@ func (s *Store) SampleBuckets(host string, since, width float64) []Sample {
 	return out
 }
 
-// DownMinutes are a host's minutes since `since` in which it missed most of its checks, oldest first.
+// RollupSamples folds every finished hour's minutes into samples_hourly (and its down minutes into
+// samples_down), for every host, and returns
+// how many hours it wrote. The first run rolls up all the minutes there are. Later runs redo the last
+// hour already rolled up too, so a minute stored late (after a stall) still counts.
+func (s *Store) RollupSamples(now float64) int {
+	db, unlock := s.lock()
+	defer unlock()
+	if db == nil {
+		return 0
+	}
+	var last sql.NullFloat64
+	if err := db.QueryRow("SELECT MAX(ts) FROM samples_hourly").Scan(&last); err != nil {
+		log.Warn("Samples rollup failed", "err", err)
+		return 0
+	}
+	from := 0.0
+	if last.Valid {
+		from = last.Float64
+	}
+	until := float64(int64(now)/3600) * 3600
+	if until <= from {
+		return 0
+	}
+	res, err := db.Exec(`INSERT OR REPLACE INTO samples_hourly (host, ts, up, cpu, cpu_max, mem, mem_max, temp, temp_max, disk, rx, tx, latency, latency_max, minutes)
+		SELECT host, CAST(ts / 3600 AS INTEGER) * 3600, AVG(up), AVG(cpu), MAX(COALESCE(cpu_max, cpu)), AVG(mem), MAX(COALESCE(mem_max, mem)),
+			AVG(temp), MAX(COALESCE(temp_max, temp)), AVG(disk), AVG(rx), AVG(tx), AVG(latency), MAX(COALESCE(latency_max, latency)), COUNT(*)
+		FROM samples WHERE ts >= ? AND ts < ? GROUP BY host, CAST(ts / 3600 AS INTEGER)`, from, until)
+	if err != nil {
+		log.Warn("Samples rollup failed", "err", err)
+		return 0
+	}
+	n, _ := res.RowsAffected()
+	// The down minutes of the same hours, for listing outages after the minutes are gone.
+	if _, err := db.Exec(`INSERT OR IGNORE INTO samples_down (host, ts) SELECT host, ts FROM samples WHERE ts >= ? AND ts < ? AND up < 0.5`, from, until); err != nil {
+		log.Warn("Samples rollup failed", "err", err)
+	}
+	return int(n)
+}
+
+// PruneHourlySamples deletes rolled-up hours older than the cutoff.
+func (s *Store) PruneHourlySamples(olderThan float64) {
+	db, unlock := s.lock()
+	defer unlock()
+	if db != nil {
+		if _, err := db.Exec("DELETE FROM samples_hourly WHERE ts < ?", olderThan); err != nil {
+			log.Warn("Hourly samples prune failed", "err", err)
+		}
+		db.Exec("DELETE FROM samples_down WHERE ts < ?", olderThan)
+	}
+}
+
+// DownMinutes are a host's minutes since `since` in which it missed most of its checks, oldest first:
+// from the minutes still kept, and from samples_down for older ones.
 func (s *Store) DownMinutes(host string, since float64) []float64 {
 	db, unlock := s.lock()
 	defer unlock()
 	if db == nil {
 		return nil
 	}
-	rows, err := db.Query(`SELECT ts FROM samples WHERE host = ? AND ts >= ? AND up < 0.5 ORDER BY ts`, host, since)
+	rows, err := db.Query(`SELECT ts FROM samples WHERE host = ? AND ts >= ? AND up < 0.5
+		UNION SELECT ts FROM samples_down WHERE host = ? AND ts >= ? ORDER BY 1`, host, since, host, since)
 	if err != nil {
 		log.Warn("Samples query failed", "err", err)
 		return nil
@@ -111,6 +187,8 @@ func (s *Store) DeleteSamples(host string) {
 	defer unlock()
 	if db != nil {
 		db.Exec("DELETE FROM samples WHERE host = ?", host)
+		db.Exec("DELETE FROM samples_hourly WHERE host = ?", host)
+		db.Exec("DELETE FROM samples_down WHERE host = ?", host)
 	}
 }
 

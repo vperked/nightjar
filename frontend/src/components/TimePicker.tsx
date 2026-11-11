@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type FocusEvent, type KeyboardEvent } from 'react';
+import { browserZone, useServerZone } from '../api/ConfigContext';
 
 // TimePicker is the dashboard's time field: a button showing the time and a small panel of hour and
 // minute columns, in place of the browser's own picker. The value is "HH:MM" on a 24-hour clock;
@@ -172,5 +173,42 @@ export function TimePicker({ value, onChange, label, disabled }: { value: string
         </div>
       )}
     </div>
+  );
+}
+
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// inYourTime is a server-clock from–to in the browser's time, moved by shift minutes: "22:00–23:00",
+// with the days it falls on there when the move crosses midnight ("Sat, Sun 22:00–23:00").
+export function inYourTime(from: string, to: string, shift: number, days?: number[]): string {
+  const [fh, fm] = parse(from);
+  const start = fh * 60 + fm + shift;
+  const dayShift = Math.floor(start / 1440);
+  const at = (v: string) => {
+    const [h, m] = parse(v);
+    const t = (((h * 60 + m + shift) % 1440) + 1440) % 1440;
+    return formatTime(`${pad(Math.floor(t / 60))}:${pad(t % 60)}`);
+  };
+  const span = `${at(from)}–${at(to)}`;
+  if (!dayShift || !days?.length || days.length === 7) return span;
+  const moved = days.map((d) => (((d + dayShift) % 7) + 7) % 7).sort((a, b) => a - b);
+  return `${moved.map((d) => DAY_NAMES[d]).join(', ')} ${span}`;
+}
+
+// ServerTime labels times that run on the server's clock (weekly maintenance and quiet hours) and,
+// where the browser's clock differs, says what they come to in the browser's time.
+export function ServerTime({ from, to, days }: { from?: string; to?: string; days?: number[] }) {
+  const zone = useServerZone();
+  if (!zone) return null;
+  return (
+    <span className="form-help server-time">
+      Server time ({zone.name})
+      {zone.shift !== 0 && from && to && (
+        <>
+          {' '}
+          · {inYourTime(from, to, zone.shift, days)} your time ({browserZone()})
+        </>
+      )}
+    </span>
   );
 }

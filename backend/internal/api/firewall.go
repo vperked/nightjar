@@ -224,7 +224,7 @@ func (s *Server) orderLocalRules(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.localChange(w, r, func() error { return s.ctx.Firewall.Order(r.Context(), ids) })
+	s.localChange(w, r, func() error { return s.ctx.Firewall.Order(r.Context(), ids, s.localKeep(r)...) })
 }
 
 // setLocalDefault changes what happens to incoming traffic no rule decides. It goes back by itself
@@ -249,5 +249,5 @@ func (s *Server) keepLocalDefault(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) removeLocalRule(w http.ResponseWriter, r *http.Request) {
-	s.localChange(w, r, func() error { return s.ctx.Firewall.Remove(r.Context(), r.PathValue("rule")) })
+	s.localChange(w, r, func() error { return s.ctx.Firewall.Remove(r.Context(), r.PathValue("rule"), s.localKeep(r)...) })
 }

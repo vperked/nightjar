@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { ApiError, api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import type { UpdateTarget, UpdatesResponse } from '../api/types';
 import { useUpdates } from '../api/UpdatesContext';
+import { Editable } from '../components/Editable';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { AppsTabs, Seg } from '../components/ui';
 import { formatAgo, plural } from '../format';
+import { useDialog } from '../hooks/useDialog';
 import { useNow } from '../hooks/useNow';
 import { KIND_LABEL, UpdateForm, specOf } from './UpdateForm';
 
@@ -54,9 +57,9 @@ function source(t: UpdateTarget): string {
   return KIND_LABEL[t.kind];
 }
 
-function Switch({ on, label, disabled, onChange }: { on: boolean; label: string; disabled?: boolean; onChange: (on: boolean) => void }) {
+function Switch({ on, label, title = label, disabled, onChange }: { on: boolean; label: string; title?: string; disabled?: boolean; onChange: (on: boolean) => void }) {
   return (
-    <label className={`switch ${disabled ? 'disabled' : ''}`} title={label}>
+    <label className={`switch ${disabled ? 'disabled' : ''}`} title={title}>
       <input type="checkbox" role="switch" aria-label={label} checked={on} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       <span className="switch-track" aria-hidden="true" />
       <span className="switch-text">Auto</span>
@@ -139,29 +142,31 @@ function Details({ t, data, onEdit, now }: { t: UpdateTarget; data: UpdatesRespo
           </ul>
         </div>
       )}
-      <div className="upd-actions">
-        <button className="btn-quiet" disabled={!!t.busy} onClick={() => act(() => api.checkUpdates(t.id), 'Could not check')}>
-          Check now
-        </button>
-        <button className="btn-quiet" onClick={onEdit}>
-          Edit
-        </button>
-        {confirmDelete ? (
-          <span className="confirm">
-            stop tracking {t.name}?{' '}
-            <button className="btn-quiet danger" onClick={() => act(() => api.deleteUpdate(t.id), 'Could not remove it')}>
-              Remove
-            </button>{' '}
-            <button className="btn-quiet" onClick={() => setConfirmDelete(false)}>
-              Keep
-            </button>
-          </span>
-        ) : (
-          <button className="btn-quiet" onClick={() => setConfirmDelete(true)}>
-            Remove
+      <Editable>
+        <div className="upd-actions">
+          <button className="btn-quiet" disabled={!!t.busy} onClick={() => act(() => api.checkUpdates(t.id), 'Could not check')}>
+            Check now
           </button>
-        )}
-      </div>
+          <button className="btn-quiet" onClick={onEdit}>
+            Edit
+          </button>
+          {confirmDelete ? (
+            <span className="confirm">
+              stop tracking {t.name}?{' '}
+              <button className="btn-quiet danger" onClick={() => act(() => api.deleteUpdate(t.id), 'Could not remove it')}>
+                Remove
+              </button>{' '}
+              <button className="btn-quiet" onClick={() => setConfirmDelete(false)}>
+                Keep
+              </button>
+            </span>
+          ) : (
+            <button className="btn-quiet" onClick={() => setConfirmDelete(true)}>
+              Remove
+            </button>
+          )}
+        </div>
+      </Editable>
     </div>
   );
 }
@@ -239,6 +244,9 @@ function UpdateAllSheet({ ready, onClose, onStart }: { ready: UpdateTarget[]; on
   const [picked, setPicked] = useState(() => new Set(ready.map((t) => t.id)));
   const chosen = ready.filter((t) => picked.has(t.id));
   const majors = chosen.filter(isMajor).length;
+  // Focus moves into the sheet and stays there until it closes, then goes back to Update all.
+  const sheet = useRef<HTMLDivElement>(null);
+  useDialog(sheet, true);
   useEffect(() => {
     const esc = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', esc);
@@ -246,7 +254,7 @@ function UpdateAllSheet({ ready, onClose, onStart }: { ready: UpdateTarget[]; on
   }, [onClose]);
   return (
     <div className="sheet-backdrop" onMouseDown={onClose}>
-      <div className="sheet upd-all-sheet" role="dialog" aria-modal="true" aria-label="Update all" onMouseDown={(e) => e.stopPropagation()}>
+      <div ref={sheet} className="sheet upd-all-sheet" role="dialog" aria-modal="true" aria-label="Update all" onMouseDown={(e) => e.stopPropagation()}>
         <div className="sheet-head">
           <div className="min0">
             <h2>Update all</h2>
@@ -306,6 +314,9 @@ function UpdateAllRun({ batch, targets, onDismiss }: { batch: Batch; targets: Up
   });
   const finished = items.filter((i) => i.state === 'updated' || i.state === 'failed' || i.state === 'skipped').length;
   const done = finished === items.length;
+  // An item can sit waiting with nothing running (its update was refused, or the server forgot
+  // it), so the batch can be put away whenever nothing in it is actually under way.
+  const idle = !items.some((i) => i.state === 'running');
   const updated = items.filter((i) => i.state === 'updated').length;
   const failed = items.filter((i) => i.state === 'failed').length;
   const title = done ? `Update all finished · ${updated} updated${failed ? ` · ${failed} failed` : ''}` : `Updating all · ${finished} of ${items.length} done`;
@@ -313,7 +324,7 @@ function UpdateAllRun({ batch, targets, onDismiss }: { batch: Batch; targets: Up
     <section className={`section upd-batch ${done ? (failed ? 'bad' : 'good') : ''}`} aria-label="Update all">
       <div className="section-head">
         <span className="label">{title}</span>
-        {done && (
+        {idle && (
           <button type="button" className="btn-quiet" onClick={onDismiss}>
             Dismiss
           </button>
@@ -368,6 +379,7 @@ function LiveUpdate({ t }: { t: UpdateTarget }) {
 function TargetRow({ t, data, now, onEdit, followed }: { t: UpdateTarget; data: UpdatesResponse; now: number; onEdit: () => void; followed?: boolean }) {
   const { refresh } = useUpdates();
   const notify = useToast();
+  const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
   const [tone, word] = verdict(t);
 
@@ -405,8 +417,9 @@ function TargetRow({ t, data, now, onEdit, followed }: { t: UpdateTarget; data: 
           </svg>
         </button>
         <div className="upd-controls">
-          <Switch on={t.auto} label={`Update ${t.name} automatically`} disabled={!t.can_update} onChange={toggleAuto} />
-          {t.available && t.can_update ? (
+          {/* A viewer still sees whether it updates on its own. */}
+          <Switch on={t.auto} label={`Update ${t.name} automatically`} title={canEdit ? undefined : "Viewers can't change this"} disabled={!t.can_update || !canEdit} onChange={toggleAuto} />
+          {t.available && t.can_update && canEdit ? (
             <button className="btn small-btn" disabled={!!t.busy} onClick={update}>
               {t.busy === 'updating' ? 'Updating…' : 'Update'}
             </button>
@@ -442,15 +455,31 @@ export function UpdatesPage() {
     const b = { started: Date.now() / 1000, ids, before };
     setBatch(b);
     saveBatch(b);
-    let failed = 0;
+    const failed: { id: string; why: string }[] = [];
     for (const id of ids) {
       try {
         await api.applyUpdate(id);
-      } catch {
-        failed++;
+      } catch (err) {
+        failed.push({ id, why: err instanceof ApiError ? err.message : String(err) });
       }
     }
-    if (failed) notify({ tone: 'error', title: `${failed} update(s) could not start` });
+    if (failed.length) {
+      // One that never started would wait in the batch for ever, so it leaves it, and is named.
+      const left = ids.filter((id) => !failed.some((f) => f.id === id));
+      const next = left.length ? { ...b, ids: left } : null;
+      // Unless it was dismissed or replaced meanwhile (saving twice is harmless).
+      setBatch((cur) => {
+        if (cur !== b) return cur;
+        saveBatch(next);
+        return next;
+      });
+      const names = failed.map((f) => list.find((t) => t.id === f.id)?.name ?? f.id);
+      notify({
+        tone: 'error',
+        title: failed.length === 1 ? `Could not start updating ${names[0]}` : `${failed.length} updates could not start`,
+        body: failed.length === 1 ? failed[0].why : failed.map((f, i) => `${names[i]}: ${f.why}`).join('; '),
+      });
+    }
     refresh();
   };
   const dismissBatch = () => {
@@ -500,20 +529,22 @@ export function UpdatesPage() {
               ),
             }))}
           />
-          <button className="btn-quiet" onClick={detect}>
-            Detect apps
-          </button>
-          <button className="btn-quiet" onClick={() => setEditing('new')}>
-            Add
-          </button>
-          {ready.length > 1 && (
-            <button className="btn-quiet" onClick={() => setChoosing(true)}>
-              Update all ({ready.length})
+          <Editable>
+            <button className="btn-quiet" onClick={detect}>
+              Detect apps
             </button>
-          )}
-          <button className="btn" onClick={checkAll} disabled={!data || data.checking}>
-            {data?.checking ? 'Checking…' : 'Check now'}
-          </button>
+            <button className="btn-quiet" onClick={() => setEditing('new')}>
+              Add
+            </button>
+            {ready.length > 1 && (
+              <button className="btn-quiet" onClick={() => setChoosing(true)}>
+                Update all ({ready.length})
+              </button>
+            )}
+            <button className="btn" onClick={checkAll} disabled={!data || data.checking}>
+              {data?.checking ? 'Checking…' : 'Check now'}
+            </button>
+          </Editable>
         </div>
       </div>
       {choosing && <UpdateAllSheet ready={ready} onClose={() => setChoosing(false)} onStart={updateAll} />}
@@ -543,11 +574,13 @@ export function UpdatesPage() {
         <div className="empty">
           <strong>Nothing to keep updated yet</strong>
           Detect finds OS packages, snaps, this monitor and apps such as Sonarr, Radarr, Plex and AdGuard Home.
-          <div>
-            <button className="btn" onClick={detect}>
-              Detect apps
-            </button>
-          </div>
+          <Editable>
+            <div>
+              <button className="btn" onClick={detect}>
+                Detect apps
+              </button>
+            </div>
+          </Editable>
         </div>
       ) : shown.length === 0 ? (
         <p className="note">{filter === 'available' ? 'Everything is up to date.' : 'Nothing updates automatically yet. Turn on auto for a row.'}</p>

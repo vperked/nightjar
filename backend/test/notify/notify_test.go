@@ -119,6 +119,49 @@ func TestFailuresAreReported(t *testing.T) {
 	}
 }
 
+// A redirect that would turn the POST into a GET (as http:// to https:// often does) is a failure
+// naming where it points, not a "sent" alert that never arrived; 307 and 308 keep the body.
+func TestRedirectsThatDropTheAlertFail(t *testing.T) {
+	var posts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/moved/SECRET":
+			w.Header().Set("Location", "https://ntfy.example.com/moved/SECRET")
+			w.WriteHeader(http.StatusMovedPermanently)
+		case "/found":
+			http.Redirect(w, r, "/target", http.StatusFound)
+		case "/kept":
+			http.Redirect(w, r, "/target", http.StatusPermanentRedirect)
+		case "/target":
+			if r.Method == http.MethodPost {
+				posts.Add(1)
+			}
+		}
+	}))
+	defer srv.Close()
+	for _, path := range []string{"/moved/SECRET", "/found"} {
+		ch, _ := notify.NewWebhook(srv.URL+path, origin)
+		r := notify.Test([]notify.Channel{ch})[0]
+		if r.OK || !strings.Contains(r.Error, "redirects to") {
+			t.Fatalf("%s: a redirect is a failure, got %+v", path, r)
+		}
+		if strings.Contains(r.Error, "SECRET") {
+			t.Fatalf("%s: only the host is named: %s", path, r.Error)
+		}
+	}
+	ch, _ := notify.NewWebhook(srv.URL+"/moved/SECRET", origin)
+	if r := notify.Test([]notify.Channel{ch})[0]; !strings.Contains(r.Error, "https://ntfy.example.com") {
+		t.Fatalf("the error says where to: %s", r.Error)
+	}
+	if posts.Load() != 0 {
+		t.Fatal("no body-less GET may count as delivered")
+	}
+	ch, _ = notify.NewWebhook(srv.URL+"/kept", origin)
+	if r := notify.Test([]notify.Channel{ch})[0]; !r.OK || posts.Load() != 1 {
+		t.Fatalf("a 308 keeps the POST, got %+v and %d posts", r, posts.Load())
+	}
+}
+
 // fakeSMTP accepts one message and returns its DATA.
 func fakeSMTP(t *testing.T) (port int, data <-chan string) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

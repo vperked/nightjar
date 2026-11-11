@@ -13,6 +13,8 @@ import { useArrivals } from '../hooks/useArrivals';
 // The monitor's own log, live: what it checked, what it changed, and what went wrong.
 
 type Show = 'all' | 'info' | 'warn' | 'error';
+// MAX is how many lines the monitor keeps (logx.RecentSize), and so how many are asked for:
+// without a limit it sends only its newest 500, and above what it keeps it falls back to 500.
 const MAX = 3000;
 
 const LEVEL_WORD: Record<LogLevel, string> = { debug: 'debug', info: 'info', warn: 'warn', error: 'error' };
@@ -127,6 +129,9 @@ export function LogsPage() {
   const filters = useMemo(() => ({ level: show === 'all' ? '' : show, component, q: search }), [show, component, search]);
 
   // A filter change loads the matching tail afresh; after that, only newer entries are asked for.
+  // Polling lives in its own effect below, so turning Follow off or on keeps the lines, the
+  // scroll position and the picked line rather than loading the tail again.
+  const poll = useRef<() => void>();
   useEffect(() => {
     let live = true;
     let busy = false;
@@ -137,7 +142,7 @@ export function LogsPage() {
       busy = true;
       const first = latest.current === 0;
       try {
-        const r = await api.logs({ ...filters, after: latest.current || undefined });
+        const r = await api.logs({ ...filters, after: latest.current || undefined, limit: MAX });
         if (!live) return;
         const { entries: fresh, ...rest } = r;
         setMeta(rest);
@@ -145,7 +150,9 @@ export function LogsPage() {
         setEntries((old) => {
           if (first || !old) return fresh;
           const last = old.at(-1)?.seq ?? 0;
-          return [...old, ...fresh.filter((e) => e.seq > last)].slice(-MAX);
+          const added = fresh.filter((e) => e.seq > last);
+          // A poll with nothing new keeps the same list, so nothing that watches it runs again.
+          return added.length ? [...old, ...added].slice(-MAX) : old;
         });
         latest.current = Math.max(latest.current, r.latest);
       } catch (e) {
@@ -155,33 +162,55 @@ export function LogsPage() {
       }
     };
     load();
-    const id = follow ? setInterval(() => document.visibilityState !== 'hidden' && load(), 2000) : 0;
+    poll.current = load;
     return () => {
       live = false;
-      clearInterval(id);
     };
-  }, [filters, follow]);
+  }, [filters]);
+  useEffect(() => {
+    if (!follow) return;
+    // Turning Follow back on catches up at once (a load already under way is not repeated).
+    poll.current?.();
+    const id = setInterval(() => document.visibilityState !== 'hidden' && poll.current?.(), 2000);
+    return () => clearInterval(id);
+  }, [follow]);
 
   // While following, the view stays pinned to the newest line, unless you scrolled up to read.
   useLayoutEffect(() => {
     const el = box.current;
     if (el && follow && atBottom.current && focus === undefined) el.scrollTop = el.scrollHeight;
   }, [entries, follow, focus]);
-  // A line asked for in context is brought to the middle of the view once it has loaded.
+  // A line asked for in context is brought to the middle of the view once, when the unfiltered
+  // log has loaded; lines that arrive afterwards must not pull the view back to it.
+  const centered = useRef<number>();
+  const focusTimer = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(focusTimer.current), []);
   useLayoutEffect(() => {
-    if (focus === undefined || !entries) return;
+    if (focus === undefined) {
+      centered.current = undefined;
+      return;
+    }
+    if (!entries || centered.current === focus) return;
     const el = box.current;
-    const line = el?.querySelector<HTMLElement>(`[data-seq="${focus}"]`);
-    if (!el || !line) return;
+    if (!el) return;
+    const line = el.querySelector<HTMLElement>(`[data-seq="${focus}"]`);
+    if (!line) {
+      // It has aged out of what the monitor keeps: say so, and go on following as before.
+      setFocus(undefined);
+      notify({ tone: 'info', title: 'That line is no longer in the log', body: `The monitor keeps only its last ${MAX.toLocaleString()} entries.` });
+      return;
+    }
+    centered.current = focus;
     atBottom.current = false;
     setScrolledUp(true);
     setReadTo(entries.at(-1)?.seq ?? 0);
     // Only the log scrolls; the page stays where it is.
     const at = line.getBoundingClientRect().top - el.getBoundingClientRect().top;
     el.scrollTop += at - el.clientHeight / 2 + line.offsetHeight / 2;
-    const id = setTimeout(() => setFocus(undefined), 2400);
-    return () => clearTimeout(id);
-  }, [focus, entries]);
+    // The highlight fades on its own; kept in a ref so a later render can't cancel it.
+    clearTimeout(focusTimer.current);
+    focusTimer.current = setTimeout(() => setFocus(undefined), 2400);
+  }, [focus, entries, notify]);
   const onScroll = () => {
     const el = box.current;
     if (!el) return;
@@ -212,6 +241,8 @@ export function LogsPage() {
     setSearch('');
     setShow('all');
     setComponent('');
+    // The filtered lines go at once, so the line is looked for only among the unfiltered ones.
+    setEntries(undefined);
     setPicked(e.seq);
     setFocus(e.seq);
   };

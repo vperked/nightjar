@@ -20,19 +20,22 @@ import (
 )
 
 // fakeGitHub answers "latest release" for every repo with assets for both architectures.
+// digest is the checksum the fake GitHub lists for every download.
+const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func fakeGitHub(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v1.2.3", "assets": []map[string]string{
-			{"name": "x86_64-qbittorrent-nox", "browser_download_url": "https://example.com/qb"},
-			{"name": "Jackett.Binaries.LinuxAMDx64.tar.gz", "browser_download_url": "https://example.com/jackett.tar.gz"},
-			{"name": "thing_1.2.3_linux_x86_64.tar.gz", "browser_download_url": "https://example.com/x86_64.tar.gz"},
-			{"name": "thing_1.2.3_linux_amd64.tar.gz", "browser_download_url": "https://example.com/amd64.tar.gz"},
+			{"name": "x86_64-qbittorrent-nox", "browser_download_url": "https://example.com/qb", "digest": digest},
+			{"name": "Jackett.Binaries.LinuxAMDx64.tar.gz", "browser_download_url": "https://example.com/jackett.tar.gz", "digest": digest},
+			{"name": "thing_1.2.3_linux_x86_64.tar.gz", "browser_download_url": "https://example.com/x86_64.tar.gz", "digest": digest},
+			{"name": "thing_1.2.3_linux_amd64.tar.gz", "browser_download_url": "https://example.com/amd64.tar.gz", "digest": digest},
 			// The home-server apps' own names for their builds.
-			{"name": "linux-x64.tar.gz", "browser_download_url": "https://example.com/ombi.tar.gz"},
-			{"name": "syncthing-linux-amd64-v1.2.3.tar.gz", "browser_download_url": "https://example.com/syncthing.tar.gz"},
-			{"name": "linux-amd64-filebrowser.tar.gz", "browser_download_url": "https://example.com/filebrowser.tar.gz"},
-			{"name": "AdGuardHome_linux_amd64.tar.gz", "browser_download_url": "https://example.com/adguardhome.tar.gz"},
-			{"name": "gitea-1.2.3-linux-amd64", "browser_download_url": "https://example.com/gitea"},
+			{"name": "linux-x64.tar.gz", "browser_download_url": "https://example.com/ombi.tar.gz", "digest": digest},
+			{"name": "syncthing-linux-amd64-v1.2.3.tar.gz", "browser_download_url": "https://example.com/syncthing.tar.gz", "digest": digest},
+			{"name": "linux-amd64-filebrowser.tar.gz", "browser_download_url": "https://example.com/filebrowser.tar.gz", "digest": digest},
+			{"name": "AdGuardHome_linux_amd64.tar.gz", "browser_download_url": "https://example.com/adguardhome.tar.gz", "digest": digest},
+			{"name": "gitea-1.2.3-linux-amd64", "browser_download_url": "https://example.com/gitea", "digest": digest},
 		}})
 	}))
 	t.Cleanup(srv.Close)
@@ -371,5 +374,106 @@ func TestInstallKeepsWhatIsNotTheStoresAndSetsUpAsTheAppsUser(t *testing.T) {
 		if got := strings.Contains(rec.scripts["sonarr"], "rm -f /etc/nightjar/apps/sonarr.owned"); got != purge {
 			t.Errorf("purge %v: the mark is removed: %v", purge, got)
 		}
+	}
+}
+
+// A GitHub download is checked against the SHA-256 its release lists before anything is stopped
+// or replaced; a release that lists none is not installed.
+func TestDownloadsAreCheckedAgainstTheirChecksum(t *testing.T) {
+	m, rec, _, _ := newManager(t, "", "")
+	if _, err := m.Install("autobrr", 17474, "perked", nil); err != nil {
+		t.Fatal(err)
+	}
+	m.Wait(30 * time.Second)
+	script := rec.scripts["autobrr"]
+	check := strings.Index(script, `[ "$got" = 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ]`)
+	if check < 0 || check > strings.Index(script, "systemctl stop autobrr.service") || check < strings.Index(script, "curl ") {
+		t.Fatalf("the download is not checked before the app is stopped:\n%s", script)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v1.2.3", "assets": []map[string]string{
+			{"name": "ntfy_1.2.3_linux_amd64.tar.gz", "browser_download_url": "https://example.com/ntfy.tar.gz"},
+		}})
+	}))
+	defer srv.Close()
+	ran := false
+	m = apps.New(apps.Options{Arch: "amd64", GitHubAPI: srv.URL, ManifestDir: t.TempDir(), LockDir: t.TempDir(),
+		Systemctl: func(...string) string { return "" }, Processes: func() []string { return nil },
+		Run: func(context.Context, string, string, func(string)) error { ran = true; return nil }})
+	if _, err := m.Install("ntfy", 0, "perked", nil); err != nil {
+		t.Fatal(err)
+	}
+	m.Wait(30 * time.Second)
+	if j := m.Job(0); j.OK || ran || !strings.Contains(j.Error, "SHA-256") {
+		t.Fatalf("job: %+v (script ran: %v)", j, ran)
+	}
+}
+
+// A script's output reaches the job through a log file, line by line, the last line too.
+func TestScriptOutputIsTailedFromItsLog(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("no bash")
+	}
+	t.Setenv("NIGHTJAR_APPS_NO_SYSTEMD", "1")
+	var mu sync.Mutex
+	var lines []string
+	line := func(s string) { mu.Lock(); lines = append(lines, s); mu.Unlock() }
+	err := apps.RunScript(context.Background(), t.TempDir(), "test", "echo one; sleep 0.3; echo two >&2; printf three", line)
+	if err != nil || strings.Join(lines, "|") != "one|two|three" {
+		t.Fatalf("err %v, lines %q", err, lines)
+	}
+	lines = nil
+	if err := apps.RunScript(context.Background(), t.TempDir(), "test", "echo failing; exit 3", line); err == nil || strings.Join(lines, "|") != "failing" {
+		t.Fatalf("err %v, lines %q", err, lines)
+	}
+	// Out of time, it stops with what it started.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := apps.RunScript(ctx, t.TempDir(), "test", "echo begun; sleep 600", func(string) {}); err == nil || time.Since(start) > 15*time.Second {
+		t.Fatalf("err %v after %s", err, time.Since(start))
+	}
+}
+
+// Under systemd the script runs as its own unit, which writes to the log rather than to Nightjar,
+// and running out of time stops that unit, not only the systemd-run waiting for it.
+func TestScriptUnitIsStoppedWhenOutOfTime(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root for systemd-run")
+	}
+	if _, err := os.Stat("/run/systemd/system"); err != nil {
+		t.Skip("no systemd")
+	}
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		t.Skip("no systemd-run")
+	}
+	var mu sync.Mutex
+	var lines []string
+	line := func(s string) { mu.Lock(); lines = append(lines, s); mu.Unlock() }
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := apps.RunScript(ctx, t.TempDir(), "test", "echo unit=$(cut -d/ -f2- /proc/self/cgroup | tr '/' '\\n' | grep '^nightjar-app-'); ls -l /proc/self/fd/1; sleep 600", line)
+	if err == nil || time.Since(start) > 30*time.Second {
+		t.Fatalf("err %v after %s", err, time.Since(start))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var unit string
+	for _, l := range lines {
+		if u, ok := strings.CutPrefix(l, "unit="); ok {
+			unit = u
+		}
+		if strings.Contains(l, "/proc/self/fd/1") && (strings.Contains(l, "pipe:") || strings.Contains(l, "socket:")) {
+			t.Errorf("the script writes to Nightjar: %s", l)
+		}
+	}
+	if unit == "" {
+		t.Fatalf("no unit in %q", lines)
+	}
+	out, _ := exec.Command("systemctl", "is-active", unit).Output()
+	if state := strings.TrimSpace(string(out)); state == "active" || state == "activating" || state == "deactivating" {
+		t.Fatalf("%s is still %s", unit, state)
 	}
 }

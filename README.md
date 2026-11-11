@@ -64,6 +64,9 @@ signed in for 30 days of use. Change the password under **Settings → Account**
 other browser. Forgot it? `./bin/nightjar -reset-admin` deletes the account; restart the monitor and
 create it again with the new setup code.
 
+To let someone look without changing anything, add a read-only **viewer** under **Settings → Viewers**.
+Viewers see the dashboard but cannot make changes, and never see settings, backups or keys.
+
 The React app is embedded in the binary, so `bin/nightjar` is all you deploy. Without make,
 `./build.sh` does the same. Other targets (`make help` lists them all):
 
@@ -94,7 +97,7 @@ docker run -d --name nightjar --pid=host --network=host \
 ## Service monitoring
 
 Add, edit, pause and delete checks on the dashboard's **services** page; changes apply immediately.
-Each check has a type (HTTP, TCP, ping or TLS expiry), a target, an interval, a timeout and a number of
+Each check has a type (HTTP, TCP, ping, TLS expiry, DNS, PostgreSQL, MySQL, Redis, Docker, plugin or heartbeat), a target, an interval, a timeout and a number of
 retries; HTTP checks can also require status codes and a keyword, TLS checks warn ahead of expiry, and
 ping checks set how many pings to send and how far apart (default 3, 0.2s apart; up when any is answered).
 Checks and their results are stored in `HISTORY_DB` (SQLite); results are kept for `HISTORY_RETENTION_DAYS`.

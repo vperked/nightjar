@@ -325,9 +325,10 @@ func ParseWhen(s string) (When, error) {
 
 // Last is the latest time at or before now that the report is due.
 func (w When) Last(now time.Time) time.Time {
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	back := (int(now.Weekday()) - int(w.Day) + 7) % 7
-	t := midnight.AddDate(0, 0, -back).Add(time.Duration(w.Minute) * time.Minute)
+	// Built from the clock time, not midnight plus a duration: a day with a DST change is 23 or 25
+	// hours long, and the report would come an hour off.
+	t := time.Date(now.Year(), now.Month(), now.Day()-back, w.Minute/60, w.Minute%60, 0, 0, now.Location())
 	if t.After(now) {
 		t = t.AddDate(0, 0, -7)
 	}

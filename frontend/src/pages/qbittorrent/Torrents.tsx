@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { ApiError, api } from '../../api/client';
+import { useCopy } from '../../clipboard';
+import { useCanEdit } from '../../api/ConfigContext';
 import type { QBAction, QBTorrent } from '../../api/types';
 import { useToast } from '../../components/Toasts';
 import { formatAgo, formatBytes, formatDuration, formatRate, plural } from '../../format';
@@ -103,25 +105,18 @@ export function Actions({ torrents, run, busy, onDone, panel = false }: { torren
 }
 
 // CopyValue is a long value (a path, a hash) with a button that copies it.
+// On plain http, with no clipboard, the value is selected and the button says to press Ctrl+C.
 function CopyValue({ label, value }: { label: string; value: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard unavailable */
-    }
-  };
+  const shown = useRef<HTMLSpanElement>(null);
+  const copy = useCopy(value, shown);
   return (
     <div className="qb-line">
       <span className="qb-line-label">{label}</span>
-      <span className="qb-line-value mono truncate" title={value}>
+      <span ref={shown} className="qb-line-value mono truncate" title={value}>
         {value}
       </span>
-      <button type="button" className="qb-copy" onClick={copy} aria-label={`Copy ${label.toLowerCase()}`}>
-        {copied ? 'Copied' : 'Copy'}
+      <button type="button" className="qb-copy" onClick={copy.copy} aria-label={copy.state ? copy.label() : `Copy ${label.toLowerCase()}`}>
+        {copy.label()}
       </button>
     </div>
   );
@@ -145,6 +140,7 @@ export function TorrentRow({
   arrived?: boolean;
 }) {
   const now = useNow(30000);
+  const canEdit = useCanEdit();
   const g = group(t.state);
   const pct = Math.round(t.progress * 1000) / 10;
   const done = t.progress >= 1;
@@ -152,9 +148,11 @@ export function TorrentRow({
   return (
     <>
       <tr className={`qb-row ${selected ? 'selected' : ''} ${open ? 'open' : ''}${arrived ? ' arrive' : ''}`}>
-        <td className="shrink qb-check">
-          <input type="checkbox" className="select-box" aria-label={`Select ${t.name}`} checked={selected} onChange={(e) => onSelect(e.target.checked)} />
-        </td>
+        {canEdit && (
+          <td className="shrink qb-check">
+            <input type="checkbox" className="select-box" aria-label={`Select ${t.name}`} checked={selected} onChange={(e) => onSelect(e.target.checked)} />
+          </td>
+        )}
         <td className="fill">
           <button className="qb-name" aria-expanded={open} onClick={onToggle}>
             <span className="truncate" title={t.name}>
@@ -174,7 +172,9 @@ export function TorrentRow({
           {/* Phones: state and speed sit under the name, so the name gets the row's width. */}
           <div className="show-sm qb-phone-line">
             <span className={`state ${TONE[g]}`}>{WORD[t.state] ?? t.state}</span>
-            <span className="num ink-2">{[t.dlspeed ? `↓ ${formatRate(t.dlspeed)}` : '', t.upspeed ? `↑ ${formatRate(t.upspeed)}` : '', done ? '' : `${pct}%`].filter(Boolean).join(' · ')}</span>
+            <span className="num ink-2">
+              {[t.dlspeed ? `↓ ${formatRate(t.dlspeed)}` : '', t.upspeed ? `↑ ${formatRate(t.upspeed)}` : '', done ? '' : `${pct}%`, `ratio ${t.ratio.toFixed(2)}`].filter(Boolean).join(' · ')}
+            </span>
           </div>
         </td>
         <td className="shrink hide-sm">
@@ -199,7 +199,7 @@ export function TorrentRow({
       </tr>
       {open && (
         <tr className="qb-detail">
-          <td colSpan={6}>
+          <td colSpan={canEdit ? 6 : 5}>
             <div className="qb-panel">
               {t.stalled_for ? (
                 <div className="qb-panel-stall">
@@ -229,7 +229,7 @@ export function TorrentRow({
                 <CopyValue label="Saved in" value={t.save_path} />
                 <CopyValue label="Hash" value={t.hash} />
               </div>
-              <Actions torrents={[t]} run={actions.run} busy={actions.busy} panel />
+              {canEdit && <Actions torrents={[t]} run={actions.run} busy={actions.busy} panel />}
             </div>
           </td>
         </tr>

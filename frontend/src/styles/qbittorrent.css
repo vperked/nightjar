@@ -518,3 +518,15 @@
 .readout-head .readout-sub {
   margin: 0;
 }
+
+/* The sort menu is for phones, where the column headers that sort the list are hidden. The select's
+   own display rule would otherwise show it on wide screens too. */
+.select.qb-sort {
+  display: none;
+}
+@media (max-width: 760px) {
+  .select.qb-sort {
+    display: inline-block;
+    margin-top: 0;
+  }
+}

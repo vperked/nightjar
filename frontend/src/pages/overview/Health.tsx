@@ -1,4 +1,5 @@
 import { Link } from 'react-router';
+import { useCanEdit } from '../../api/ConfigContext';
 import { useServices } from '../../api/ServicesContext';
 import type { DrivesResponse, Unit, UnitsResponse } from '../../api/types';
 import { useUpdates } from '../../api/UpdatesContext';
@@ -52,7 +53,7 @@ export function HealthSummary({ units, drives }: { units: UnitsResponse | undefi
       )}
       {driveList.length > 0 && (
         <a className={`health-chip ${failing ? 'crit' : warning ? 'warn' : ''}`} href="#drive-health">
-          {failing ? `${failing} drive failing` : warning ? plural(warning, 'drive warning') : 'drives healthy'}
+          {failing ? `${plural(failing, 'drive')} failing` : warning ? plural(warning, 'drive warning') : 'drives healthy'}
         </a>
       )}
       {available > 0 && (
@@ -66,14 +67,18 @@ export function HealthSummary({ units, drives }: { units: UnitsResponse | undefi
 
 // ServiceProblems lists systemd services that are down or restarting, when there are any.
 export function ServiceProblems({ data }: { data: UnitsResponse | undefined }) {
+  const canEdit = useCanEdit();
   const now = Date.now() / 1000;
   const down = (data?.units ?? []).filter(isProblem);
   if (!down.length) return null;
   const detail = (u: Unit) => {
-    if (u.flapping) return `${u.flapping} restarts in 10 min`;
-    if (u.sub === 'auto-restart') return u.restarts ? `${u.restarts} restarts` : 'restarting';
+    if (u.flapping) return `${plural(u.flapping, 'restart')} in 10 min`;
+    if (u.sub === 'auto-restart') return u.restarts ? plural(u.restarts, 'restart') : 'restarting';
     return u.since ? `for ${formatAgo(u.since, now).replace(' ago', '')}` : '';
   };
+  // The section is an alert, so what is said in it is read out whenever it changes. "for 12m"
+  // moves on by itself, so screen readers get the time it went down instead, which stays put.
+  const since = (u: Unit) => (!u.flapping && u.sub !== 'auto-restart' && u.since ? `since ${new Date(u.since * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}` : '');
   return (
     <section className="attention" role="alert" aria-label="Services that need attention">
       <div className="attention-head">
@@ -84,7 +89,7 @@ export function ServiceProblems({ data }: { data: UnitsResponse | undefined }) {
         </span>
         <div className="min0">
           <strong>{down.length === 1 ? 'A system service needs attention' : `${down.length} system services need attention`}</strong>
-          <div className="attention-sub">Alerts went out when they stopped. Open one for its log and a restart button.</div>
+          <div className="attention-sub">Alerts went out when they stopped. Open one for its log{canEdit ? ' and a restart button' : ''}.</div>
         </div>
         <Link className="btn-quiet attention-all" to="/system">
           System services →
@@ -97,7 +102,16 @@ export function ServiceProblems({ data }: { data: UnitsResponse | undefined }) {
             <Link key={u.name} className="attention-chip" to={`/system?open=${encodeURIComponent(u.name)}`}>
               <span className={`state ${tone}`}>{word}</span>
               <span className="attention-name">{u.name.replace(/\.service$/, '')}</span>
-              <span className="attention-meta num">{detail(u)}</span>
+              {since(u) ? (
+                <>
+                  <span className="attention-meta num" aria-hidden="true">
+                    {detail(u)}
+                  </span>
+                  <span className="sr-only">{since(u)}</span>
+                </>
+              ) : (
+                <span className="attention-meta num">{detail(u)}</span>
+              )}
             </Link>
           );
         })}

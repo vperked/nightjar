@@ -142,7 +142,7 @@ type Quiet struct {
 	Enabled bool   `json:"enabled"`
 	Start   string `json:"start"` // "23:00", local time
 	End     string `json:"end"`
-	// Critical alerts are sent straight away when this is set.
+	// Critical alerts are sent straight away when this is set, and so are their recoveries.
 	Critical bool `json:"critical"`
 }
 
@@ -170,8 +170,11 @@ func (q Quiet) Active(now time.Time) bool {
 	return m >= start || m < end
 }
 
-func (q Quiet) holds(now time.Time, sev discord.Severity) bool {
-	return q.Active(now) && !(q.Critical && sev == discord.Critical)
+// holds reports whether quiet hours hold an alert of sev back. raised says a critical alert about
+// the same thing was delivered: its recovery goes out too, or the last word until morning would be
+// that it is down.
+func (q Quiet) holds(now time.Time, sev discord.Severity, raised bool) bool {
+	return q.Active(now) && !(q.Critical && (sev == discord.Critical || (sev == discord.OK && raised)))
 }
 
 // Mute silences one subject ("check:Plex", "unit:sonarr.service", "drive:S4EV…", "host:<id>", "area:torrents")
@@ -215,8 +218,15 @@ type Hub struct {
 	prefs  Prefs
 	failed map[string]failure // an alert whose delivery failed everywhere → its record, so a retry updates it
 	pruned time.Time
-	// summaryTries counts quiet hours summaries that did not get through, which are retried a few times.
-	summaryTries int
+	// summaryTries counts quiet hours summaries in a row that did not get through, summaryFailing is
+	// when the first of them was tried, and nextSummary when to try again: a summary is retried with
+	// a growing wait until summaryGiveUp has passed.
+	summaryTries   int
+	summaryFailing time.Time
+	nextSummary    time.Time
+	// raised are the subjects (or areas, for alerts about none) whose latest alert delivered was
+	// critical and not yet followed by a recovery, so quiet hours let that recovery through.
+	raised map[string]bool
 
 	subjects map[string]*subjectLog
 	recent   []time.Time // deliveries in the last hour, for the rate limit
@@ -229,7 +239,7 @@ type Hub struct {
 // NewHub routes to dests and keeps history in store (which may be unavailable: alerts are then
 // delivered without being kept, and quiet hours send them straight away).
 func NewHub(store *storage.Store, dests []Destination) *Hub {
-	h := &Hub{store: store, dests: dests, Now: time.Now, Limits: DefaultLimits, failed: map[string]failure{}, subjects: map[string]*subjectLog{}}
+	h := &Hub{store: store, dests: dests, Now: time.Now, Limits: DefaultLimits, failed: map[string]failure{}, subjects: map[string]*subjectLog{}, raised: map[string]bool{}}
 	h.prefs = Prefs{Quiet: Quiet{Start: "23:00", End: "07:00", Critical: true}}
 	if raw := store.Meta(prefsKey); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &h.prefs); err != nil {
@@ -288,10 +298,26 @@ func (h *Hub) send(a Alert, area, subject string, throttle bool) bool {
 		Title: a.Title, Body: a.Description, Fields: fields, Subject: subject,
 	}
 	now := h.Now()
+	raisedKey := cmp.Or(subject, "area:"+area)
 	h.mu.Lock()
 	p := h.prefs
 	muted := mutedBy(p.Mutes, now, subject, "area:"+area) != ""
+	raised := h.raised[raisedKey]
+	if a.Severity == discord.OK {
+		// Whatever happens to it, this recovery answers the critical alert before it.
+		delete(h.raised, raisedKey)
+	}
 	h.mu.Unlock()
+	// deliver sends it now, noting a critical alert that got through for its recovery's sake.
+	deliver := func(targets []target) bool {
+		ok := h.deliver(rec, targets, a)
+		if ok && a.Severity == discord.Critical {
+			h.mu.Lock()
+			h.raised[raisedKey] = true
+			h.mu.Unlock()
+		}
+		return ok
+	}
 
 	switch targets := h.targets(p, area, a.Severity); {
 	case h.Maintenance != nil && h.Maintenance(subject, now):
@@ -300,20 +326,20 @@ func (h *Hub) send(a Alert, area, subject string, throttle bool) bool {
 		rec.Status = "muted"
 	case len(targets) == 0:
 		rec.Status = "kept"
-	case p.Quiet.holds(now, a.Severity) && h.store.Available():
+	case p.Quiet.holds(now, a.Severity, raised) && h.store.Available():
 		rec.Status = "held"
 		for _, t := range targets {
 			rec.Channels = append(rec.Channels, t.name)
 		}
 	case !throttle:
-		return h.deliver(rec, targets, a)
+		return deliver(targets)
 	default:
 		h.mu.Lock()
 		verdict := h.admit(a, area, subject, now)
 		h.mu.Unlock()
 		switch verdict {
 		case admit:
-			return h.deliver(rec, targets, a)
+			return deliver(targets)
 		case overRate:
 			if h.store.Available() {
 				rec.Status = "held"
@@ -492,6 +518,9 @@ func (h *Hub) Tick() {
 func (h *Hub) summaryDue(now time.Time) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if now.Before(h.nextSummary) {
+		return false
+	}
 	if !h.rateHeld {
 		return true
 	}
@@ -530,27 +559,47 @@ func (h *Hub) sendSummary(q Quiet) {
 	}
 	h.mu.Lock()
 	rate := h.rateHeld
-	h.lastSummary = h.Now()
+	now := h.Now()
+	h.lastSummary = now
 	h.mu.Unlock()
-	delivered := map[int64][]string{}
-	for _, b := range batches {
+	// Every channel at once, waited on like any alert: the loop sends this itself, and a few slow
+	// channels in a row must not look to the watchdog like a monitor that stopped.
+	ok := make([]bool, len(batches))
+	var wg sync.WaitGroup
+	for i, b := range batches {
 		title, desc, sev := summary(b.alerts, q)
 		if rate {
 			title, desc, sev = h.rateSummary(b.alerts)
 		}
-		if b.channel.SendEmbed(title, desc, sev, nil, "Notifications") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok[i] = b.channel.SendEmbed(title, desc, sev, nil, "Notifications")
+		}()
+	}
+	h.wait(&wg)
+	delivered := map[int64][]string{}
+	for i, b := range batches {
+		if ok[i] {
 			for _, n := range b.alerts {
 				delivered[n.ID] = append(delivered[n.ID], b.channel.Name())
 			}
 		}
 	}
-	// A channel that is down for a moment keeps its alerts held for the next tick, a few times over.
+	// A channel that is down for a while keeps its alerts held, tried again after a growing wait,
+	// until summaryGiveUp has passed since the first try.
 	h.mu.Lock()
-	retry := len(delivered) < len(held) && h.summaryTries < summaryRetries
+	failing := len(delivered) < len(held)
+	if failing && h.summaryFailing.IsZero() {
+		h.summaryFailing = now
+	}
+	retry := failing && now.Sub(h.summaryFailing) < summaryGiveUp
 	if retry {
+		h.nextSummary = now.Add(min(summaryFirstRetry<<h.summaryTries, summaryMaxRetry))
 		h.summaryTries++
 	} else {
 		h.summaryTries, h.rateHeld = 0, false
+		h.summaryFailing, h.nextSummary = time.Time{}, time.Time{}
 	}
 	h.mu.Unlock()
 	for _, n := range held {
@@ -562,8 +611,13 @@ func (h *Hub) sendSummary(q Quiet) {
 	}
 }
 
-// summaryRetries is how many more ticks try a quiet hours summary that was not delivered.
-const summaryRetries = 5
+// A summary that did not get through is tried again after summaryFirstRetry, the wait doubling
+// up to summaryMaxRetry, until summaryGiveUp after the first try.
+const (
+	summaryFirstRetry = 30 * time.Second
+	summaryMaxRetry   = 10 * time.Minute
+	summaryGiveUp     = time.Hour
+)
 
 // summary writes the quiet hours summary for alerts, oldest first.
 func summary(alerts []storage.Notification, q Quiet) (string, string, discord.Severity) {
@@ -572,7 +626,7 @@ func summary(alerts []storage.Notification, q Quiet) (string, string, discord.Se
 	var b strings.Builder
 	fmt.Fprintf(&b, "Held from %s to %s.", q.Start, q.End)
 	if q.Critical {
-		b.WriteString(" Critical alerts were sent straight away.")
+		b.WriteString(" Critical alerts, and their recoveries, were sent straight away.")
 	}
 	b.WriteString("\n")
 	for i, n := range alerts {

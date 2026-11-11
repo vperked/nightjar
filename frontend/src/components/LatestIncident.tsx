@@ -13,6 +13,9 @@ export function LatestIncident() {
   const inc = data?.incidents[0];
   if (!inc) return null;
   const ongoing = inc.ended === null;
+  // Whole minutes, as the line moves on only every half minute: seconds would jump by 30 at a time.
+  const lasted = now - inc.started;
+  const sofar = lasted < 60 ? 'under a minute so far' : `${formatDuration(Math.floor(lasted / 60) * 60)} so far`;
   return (
     <Link to="/incidents" className={`latest-incident ${ongoing ? 'ongoing' : ''}`}>
       <span className={`inc-state ${ongoing ? 'open' : 'closed'}`}>{ongoing ? 'Ongoing' : 'Last incident'}</span>
@@ -20,7 +23,7 @@ export function LatestIncident() {
         <strong>{inc.title}</strong>
         <span className="latest-why">{inc.cause ? `${inc.cause.confidence === 'likely' ? 'Likely' : 'Possibly'}: ${inc.cause.text}` : 'No other cause found on the machine'}</span>
       </span>
-      <span className="latest-when num">{ongoing ? `${formatDuration(now - inc.started)} so far` : formatAgo(inc.ended, now)} →</span>
+      <span className="latest-when num">{ongoing ? sofar : formatAgo(inc.ended, now)} →</span>
     </Link>
   );
 }

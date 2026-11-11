@@ -559,3 +559,30 @@ func TestFinishedStreamKeepsItsDetails(t *testing.T) {
 		t.Fatalf("finished stream %+v", last)
 	}
 }
+
+// When a player restarts playback Plex opens a new session but keeps listing the old one for minutes;
+// the player must show once, as its newest session, while other players are left alone.
+func TestStalePlayerSessionIsDropped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"MediaContainer":{"size":3,"Metadata":[
+ {"sessionKey":"71","type":"episode","title":"The G-Word","grandparentTitle":"Show","User":{"title":"jo"},
+  "Player":{"title":"Chrome","machineIdentifier":"web1","state":"playing"},"Session":{"id":"new"}},
+ {"sessionKey":"64","type":"episode","title":"The G-Word","grandparentTitle":"Show","User":{"title":"jo"},
+  "Player":{"title":"Chrome","machineIdentifier":"web1","state":"playing"},"Session":{"id":"old"}},
+ {"sessionKey":"65","type":"movie","title":"Heat","User":{"title":"sam"},
+  "Player":{"title":"TV","machineIdentifier":"tv1","state":"playing"},"Session":{"id":"tv"}}
+]}}`))
+	}))
+	defer srv.Close()
+	c, err := plex.New(srv.URL, "secret", true, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streams, err := c.Sessions()
+	if err != nil || len(streams) != 2 {
+		t.Fatalf("want 2 streams, got %+v %v", streams, err)
+	}
+	if streams[0].ID != "71" || streams[0].SessionID != "new" || streams[1].ID != "65" {
+		t.Errorf("want the newest Chrome session and the TV, got %+v", streams)
+	}
+}

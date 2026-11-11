@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import type { Incident, IncidentCause, IncidentEvent } from '../api/types';
 import { Skeleton } from '../components/Skeleton';
 import { Legend, TrendChart } from '../components/TrendChart';
@@ -21,6 +22,8 @@ const RANGES = [
   { value: 30, label: '30d' },
   { value: 90, label: '90d' },
 ];
+// LAST is each range in words, for sentences: "in the last 7 days".
+const LAST: Record<number, string> = { 1: '24 hours', 7: '7 days', 30: '30 days', 90: '90 days' };
 
 // KIND names a cause in a few words, for the summary and the tag beside it.
 export const KIND: Record<IncidentCause['kind'], string> = {
@@ -41,11 +44,14 @@ const ROLE: Record<IncidentEvent['role'], string> = { before: 'before', problem:
 const clock = (ts: number) => new Date(ts * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 const day = (ts: number) => new Date(ts * 1000).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 
-// offset is an event's time from the incident's start: "−4m", "+0:40", "+1h 12m".
+// offset is an event's time from the incident's start: "−5m", "+40s", "+17m", "+1h 05m". Units are
+// spelled out, as "+17:00" reads as an hour of the day rather than minutes in.
 function offset(seconds: number): string {
   const s = Math.round(Math.abs(seconds));
   const sign = seconds < 0 ? '−' : '+';
-  if (s < 3600) return `${sign}${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  if (s < 60) return `${sign}${s}s`;
+  if (s < 3600) return `${sign}${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${sign}${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
   return `${sign}${formatDuration(s)}`;
 }
 
@@ -145,6 +151,7 @@ function Feedback({ inc, onSaved }: { inc: Incident; onSaved: () => void }) {
   const [note, setNote] = useState(inc.feedback?.note ?? '');
   const [saving, setSaving] = useState(false);
   const notify = useToast();
+  const canEdit = useCanEdit();
   const fb = inc.feedback;
   const save = async (v: 'right' | 'wrong', a: IncidentCause['kind'] | '' = '', n = note) => {
     setSaving(true);
@@ -164,14 +171,19 @@ function Feedback({ inc, onSaved }: { inc: Incident; onSaved: () => void }) {
     return (
       <div className="inc-feedback done">
         <span className="inc-feedback-q">
-          You said: {fb.verdict === 'right' ? 'that was the cause' : fb.actual ? `it was really ${KIND[fb.actual as IncidentCause['kind']].toLowerCase()}` : 'that was not the cause'}
+          {canEdit ? 'You said' : 'The admin said'}:{' '}
+          {fb.verdict === 'right' ? 'that was the cause' : fb.actual ? `it was really ${KIND[fb.actual as IncidentCause['kind']].toLowerCase()}` : 'that was not the cause'}
         </span>
         {fb.note && <span className="inc-feedback-note">“{fb.note}”</span>}
-        <button type="button" className="btn-ghost" onClick={() => setVerdict(fb.verdict)}>
-          Change
-        </button>
+        {canEdit && (
+          <button type="button" className="btn-ghost" onClick={() => setVerdict(fb.verdict)}>
+            Change
+          </button>
+        )}
       </div>
     );
+  // A viewer sees the owner's answer, but is not asked.
+  if (!canEdit) return null;
   return (
     <div className="inc-feedback">
       <span className="inc-feedback-q">Was that the cause?</span>
@@ -208,8 +220,10 @@ function NoticeEditor({ inc, onSaved }: { inc: Incident; onSaved: () => void }) 
   const [title, setTitle] = useState(start?.title ?? '');
   const [text, setText] = useState(start?.text ?? '');
   const notify = useToast();
-  if (!start) return null;
+  const canEdit = useCanEdit();
   const published = inc.notice?.published ?? false;
+  // A viewer only sees that a notice is up.
+  if (!start || (!canEdit && !published)) return null;
   const save = async (publish: boolean | null) => {
     try {
       await api.notice(inc.id, publish === null ? null : { title, text, published: publish });
@@ -229,9 +243,11 @@ function NoticeEditor({ inc, onSaved }: { inc: Incident; onSaved: () => void }) 
       {!open ? (
         <>
           {published && <span className="inc-state closed">On the status page</span>}
-          <button type="button" className="btn-ghost" onClick={() => setOpen(true)}>
-            {published ? 'Edit the notice' : inc.notice ? 'Finish the notice' : 'Tell visitors on the status page'}
-          </button>
+          {canEdit && (
+            <button type="button" className="btn-ghost" onClick={() => setOpen(true)}>
+              {published ? 'Edit the notice' : inc.notice ? 'Finish the notice' : 'Tell visitors on the status page'}
+            </button>
+          )}
         </>
       ) : (
         <div className="inc-notice-form">
@@ -351,7 +367,7 @@ export function IncidentsPage() {
             <div>
               <span className="label">Time in trouble</span>
               <div className="readout-value">{list.length ? formatDuration(down) : '—'}</div>
-              <div className="readout-sub">across the {RANGES.find((r) => r.value === days)?.label}</div>
+              <div className="readout-sub">in the last {LAST[days] ?? plural(days, 'day')}</div>
             </div>
             <div>
               <span className="label">Usual cause</span>

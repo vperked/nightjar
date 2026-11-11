@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import type { PlexPlay, PlexResponse, PlexStream } from '../api/types';
 import { formatAgo, formatClock, formatDuration, formatKbps } from '../format';
+import { useDialog } from '../hooks/useDialog';
 import { useNow } from '../hooks/useNow';
 import { useToast } from './Toasts';
 
@@ -127,6 +129,7 @@ function Fact({ label, value, detail, address }: { label: string; value: string;
 export function PlexStreamSheet({ stream, play, onClose, onStopped }: { stream?: PlexStream; play?: PlexPlay; onClose: () => void; onStopped?: (r: PlexResponse) => void }) {
   const now = useNow(5000);
   const notify = useToast();
+  const canEdit = useCanEdit();
   const [choice, setChoice] = useState(0);
   const [custom, setCustom] = useState('');
   const [confirming, setConfirming] = useState(false);
@@ -137,9 +140,13 @@ export function PlexStreamSheet({ stream, play, onClose, onStopped }: { stream?:
   useEffect(() => {
     if (stream) setLast(stream);
   }, [stream]);
+  // Focus moves into the sheet and stays there until it closes, then goes back to what opened it.
+  const sheet = useRef<HTMLDivElement>(null);
+  useDialog(sheet, !!(play || stream || last));
 
   useEffect(() => {
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onClose();
+    // An Escape something on top already used (the finder) is not for the sheet.
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && !e.defaultPrevented && !busy && onClose();
     document.addEventListener('keydown', esc);
     return () => document.removeEventListener('keydown', esc);
   }, [busy, onClose]);
@@ -171,7 +178,7 @@ export function PlexStreamSheet({ stream, play, onClose, onStopped }: { stream?:
 
   return (
     <div className="sheet-backdrop" onMouseDown={() => !busy && onClose()}>
-      <div className="sheet stream-sheet" role="dialog" aria-modal="true" aria-label={`${s.title}, watched by ${s.user}`} onMouseDown={(e) => e.stopPropagation()}>
+      <div ref={sheet} className="sheet stream-sheet" role="dialog" aria-modal="true" aria-label={`${s.title}, watched by ${s.user}`} onMouseDown={(e) => e.stopPropagation()}>
         <div className="stream-body">
           <div className="stream-head">
             <div className="min0">
@@ -236,7 +243,7 @@ export function PlexStreamSheet({ stream, play, onClose, onStopped }: { stream?:
             )}
           </dl>
 
-          {!ended && (
+          {!ended && canEdit && (
             <fieldset className="stream-messages" disabled={busy}>
               <legend>Message for {s.user}</legend>
               <p className="stream-hint">Shown on {player} when the stream stops.</p>
@@ -264,7 +271,8 @@ export function PlexStreamSheet({ stream, play, onClose, onStopped }: { stream?:
           )}
         </div>
 
-        {!play?.last && (
+        {/* A viewer can't stop a stream, so a live one has no foot for them. */}
+        {!play?.last && (play || ended || canEdit) && (
           <div className="stream-foot">
             {play ? (
               <p className="stream-ended">Finished before Nightjar kept how streams are delivered.</p>

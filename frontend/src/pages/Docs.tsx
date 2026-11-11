@@ -131,11 +131,12 @@ function Nav({ current, onPick }: { current: string; onPick?: () => void }) {
   );
 }
 
-function Results({ q, onPick }: { q: string; onPick: () => void }) {
+// Under the docs home's own heading, the results leave out theirs.
+function Results({ q, onPick, titled = true }: { q: string; onPick: () => void; titled?: boolean }) {
   const hits = useMemo(() => searchDocs(q), [q]);
   return (
     <section className="docs-results" aria-label="Search results">
-      <h1>Search</h1>
+      {titled && <h1>Search</h1>}
       <p className="page-sub">{hits.length ? `${hits.length === 20 ? 'The best 20' : hits.length} ${hits.length === 1 ? 'match' : 'matches'} for “${q}”` : `Nothing matches “${q}”.`}</p>
       <ul>
         {hits.map((h) => (
@@ -293,7 +294,10 @@ const START = [
   { to: '/docs/alerts', title: 'Get alerts on your phone', text: 'Discord, ntfy, Telegram, Slack or email, and when each one hears.' },
 ];
 
+// The hero's search box stays put while a search shows its results below it, so typing in it
+// carries on; swapping the whole home for the results would take the box, and its focus, away.
 function DocsHome({ query, setQuery, onPick }: { query: string; setQuery: (q: string) => void; onPick: () => void }) {
+  const q = query.trim();
   return (
     <div className="docs-home">
       <header className="docs-hero">
@@ -302,6 +306,14 @@ function DocsHome({ query, setQuery, onPick }: { query: string; setQuery: (q: st
         <p className="doc-lead">Guides for watching this server and your others, getting the alerts you want, and running it all safely.</p>
         <SearchBox query={query} setQuery={setQuery} onPick={onPick} big />
       </header>
+      {q ? <Results q={q} onPick={onPick} titled={false} /> : <HomeCards />}
+    </div>
+  );
+}
+
+function HomeCards() {
+  return (
+    <>
       <div className="docs-start">
         {START.map((c, i) => (
           <Link key={c.to} to={c.to} className="docs-start-card">
@@ -327,7 +339,7 @@ function DocsHome({ query, setQuery, onPick }: { query: string; setQuery: (q: st
           </div>
         </section>
       ))}
-    </div>
+    </>
   );
 }
 
@@ -362,10 +374,11 @@ export function DocsPage() {
     else (document.scrollingElement ?? document.documentElement).scrollTo?.({ top: 0 });
   }, [location.pathname, location.hash, searching]);
 
-  // Results start at their top, wherever the page was scrolled to when the search began.
+  // Results start at their top, wherever the page was scrolled to when the search began. On the
+  // home page they sit right under the box being typed in, so the page stays where it is.
   useEffect(() => {
-    if (searching) (document.scrollingElement ?? document.documentElement).scrollTo?.({ top: 0 });
-  }, [searching]);
+    if (searching && !home) (document.scrollingElement ?? document.documentElement).scrollTo?.({ top: 0 });
+  }, [searching, home]);
   useReadingProgress(article, progress, `${slug}:${searching}`);
 
   const pick = () => {
@@ -375,7 +388,7 @@ export function DocsPage() {
   const current = inView || hashId(location.hash);
 
   return (
-    <main className={`docs ${home && !searching ? 'is-home' : ''}`}>
+    <main className={`docs ${home ? 'is-home' : ''}`}>
       <aside className={`docs-side ${menu ? 'open' : ''}`}>
         <SearchBox query={query} setQuery={setQuery} onPick={pick} />
         <button type="button" className="btn-quiet docs-menu-toggle" aria-expanded={menu} onClick={() => setMenu((m) => !m)}>
@@ -385,10 +398,10 @@ export function DocsPage() {
       </aside>
 
       <article className="docs-main" ref={article}>
-        {searching ? (
-          <Results q={query.trim()} onPick={pick} />
-        ) : home ? (
+        {home ? (
           <DocsHome query={query} setQuery={setQuery} onPick={pick} />
+        ) : searching ? (
+          <Results q={query.trim()} onPick={pick} />
         ) : !doc || !body ? (
           <div className="docs-missing">
             <h1>No such page</h1>

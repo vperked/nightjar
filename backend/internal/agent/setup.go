@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -30,11 +31,15 @@ var run = func(name string, args ...string) (string, error) {
 
 var lookPath = exec.LookPath
 
-// SetCommands replaces how setup runs and finds commands, for tests; restore puts them back.
-func SetCommands(runner func(name string, args ...string) (string, error), finder func(string) (string, error)) (restore func()) {
-	oldRun, oldLook := run, lookPath
-	run, lookPath = runner, finder
-	return func() { run, lookPath = oldRun, oldLook }
+// etc is where the saved firewall rules are: /etc, replaced in tests.
+var etc = "/etc"
+
+// SetCommands replaces how setup runs and finds commands, and the folder it reads and writes saved
+// firewall rules in instead of /etc, for tests; restore puts them back.
+func SetCommands(runner func(name string, args ...string) (string, error), finder func(string) (string, error), etcDir string) (restore func()) {
+	oldRun, oldLook, oldEtc := run, lookPath, etc
+	run, lookPath, etc = runner, finder, etcDir
+	return func() { run, lookPath, etc = oldRun, oldLook, oldEtc }
 }
 
 // activeFirewall is the firewall in charge on this machine, if install knows it: "" for none.
@@ -119,25 +124,85 @@ func closeIPTables(port string) {
 }
 
 // saveIPTables keeps the rules over a reboot the way this system does: netfilter-persistent (added
-// on Debian and Ubuntu when missing), or the rules file a RHEL-like system reads at boot.
+// on Debian and Ubuntu when missing), or the rules file a RHEL-like system reads at boot. What it keeps
+// leaves out Nightjar's own chains and the jumps to them: the agent puts those back as it starts, and
+// kept they would come back at boot without it, live attack blocks and a default drop included.
 func saveIPTables(out io.Writer) {
 	if _, err := lookPath("netfilter-persistent"); err != nil {
-		if _, err := lookPath("apt-get"); err == nil {
+		if _, err := lookPath("apt-get"); err == nil && !otherFirewallTool() {
 			os.Setenv("DEBIAN_FRONTEND", "noninteractive")
-			run("apt-get", "install", "-y", "-q", "iptables-persistent")
+			// --no-remove: should it conflict with something installed, nothing is taken away for it.
+			run("apt-get", "install", "-y", "-q", "--no-remove", "iptables-persistent")
 		}
 	}
 	if _, err := lookPath("netfilter-persistent"); err == nil {
 		if _, err := run("netfilter-persistent", "save"); err == nil {
+			for _, name := range []string{"rules.v4", "rules.v6"} {
+				stripNightjar(filepath.Join(etc, "iptables", name))
+			}
 			return
 		}
 	}
-	if _, err := os.Stat("/etc/sysconfig"); err == nil {
-		if rules, err := run("iptables-save"); err == nil && rules != "" && os.WriteFile("/etc/sysconfig/iptables", []byte(rules+"\n"), 0o600) == nil {
+	if _, err := os.Stat(filepath.Join(etc, "sysconfig")); err == nil {
+		if rules, err := run("iptables-save"); err == nil && rules != "" && os.WriteFile(filepath.Join(etc, "sysconfig", "iptables"), []byte(WithoutNightjar(rules)+"\n"), 0o600) == nil {
 			return
 		}
 	}
 	fmt.Fprintln(out, "The firewall rule lasts until the next reboot; to keep it, install iptables-persistent and run: netfilter-persistent save")
+}
+
+// otherFirewallTool says whether ufw or firewalld is installed, even switched off: Debian's
+// iptables-persistent conflicts with them, and installing it would take them away.
+func otherFirewallTool() bool {
+	for _, tool := range []string{"ufw", "firewall-cmd"} {
+		if _, err := lookPath(tool); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// stripNightjar takes Nightjar's chains out of a saved rules file, keeping its mode.
+func stripNightjar(path string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if kept := WithoutNightjar(string(b)); kept != string(b) {
+		mode := os.FileMode(0o640)
+		if st, err := os.Stat(path); err == nil {
+			mode = st.Mode().Perm()
+		}
+		tmp := path + ".nightjar"
+		if os.WriteFile(tmp, []byte(kept), mode) == nil {
+			os.Rename(tmp, path)
+		}
+	}
+}
+
+// WithoutNightjar is iptables-save output without Nightjar's chains (NIGHTJAR, NIGHTJAR-UDP,
+// NIGHTJAR-RULES, NIGHTJAR-OUT), their rules and the rules that jump to them. Nothing else changes:
+// Nightjar never changes a chain's policy, so the machine's own rules are left as they were.
+func WithoutNightjar(rules string) string {
+	var b strings.Builder
+	for line := range strings.Lines(rules) {
+		f := strings.Fields(line)
+		// iptables-save -c puts the counters first: "[12:3456] -A INPUT …".
+		if len(f) > 0 && strings.HasPrefix(f[0], "[") {
+			f = f[1:]
+		}
+		if len(f) > 0 && strings.HasPrefix(f[0], ":NIGHTJAR") {
+			continue
+		}
+		if len(f) > 1 && f[0] == "-A" && strings.HasPrefix(f[1], "NIGHTJAR") {
+			continue
+		}
+		if i := slices.IndexFunc(f, func(s string) bool { return s == "-j" || s == "-g" || s == "--jump" || s == "--goto" }); i >= 0 && i+1 < len(f) && strings.HasPrefix(f[i+1], "NIGHTJAR") {
+			continue
+		}
+		b.WriteString(line)
+	}
+	return b.String()
 }
 
 // OpenPort lets the agent's port through the active firewall, saying what it did. It returns which

@@ -1,8 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { ApiError, api, isDemo } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import type { AgentBuild, AgentUpdate, AnalyticsPoint, AnalyticsRangeName, HostPoint, RemoteHost, RemoteReadings, Service, SSHAction, SSHKey } from '../api/types';
 import { useServices } from '../api/ServicesContext';
+import { Editable } from '../components/Editable';
 import { State } from '../components/ui';
 import { Select } from '../components/Select';
 import { AttackWatch } from '../components/Attacks';
@@ -76,6 +78,8 @@ const CHART_RANGES: { value: AnalyticsRangeName; label: string }[] = [
   { value: '24h', label: '24 hours' },
   { value: '7d', label: '7 days' },
   { value: '30d', label: '30 days' },
+  { value: '90d', label: '90 days' },
+  { value: '1y', label: '1 year' },
 ];
 
 interface Kept {
@@ -86,8 +90,9 @@ interface Kept {
 // useStored reads a server's stored minutes for ranges past the live hour; undefined while loading.
 function useStored(id: string, range: AnalyticsRangeName): Kept | undefined {
   const fetchRange = useCallback(() => (range === '1h' ? Promise.resolve(null) : api.hostAnalytics(id, range)), [id, range]);
-  const { data } = usePoll(fetchRange, 60000);
-  return range === '1h' || !data ? undefined : { points: data.host.points ?? [], step: data.step };
+  const { data, stale } = usePoll(fetchRange, 60000);
+  // Points from the last range are not this one's: loading until the new range answers.
+  return range === '1h' || !data || stale ? undefined : { points: data.host.points ?? [], step: data.step };
 }
 
 // stored is one metric of the kept points, with a gap wherever buckets are missing.
@@ -201,6 +206,8 @@ function HostCard({ h, now, select }: { h: RemoteHost; now: number; select?: { o
 
 export function ServersPage() {
   const { data, error, refresh } = usePoll(api.hosts, 10000);
+  // A viewer gets neither adding nor choosing: every bulk action is a change.
+  const canEdit = useCanEdit();
   const [adding, setAdding] = useState(false);
   // selected is the servers ticked while choosing; null when not choosing.
   const [selected, setSelected] = useState<Set<string> | null>(null);
@@ -235,7 +242,7 @@ export function ServersPage() {
           </div>
           <ServersTabs current="/servers" />
         </div>
-        {data.hosts.length > 0 && (
+        {data.hosts.length > 0 && canEdit && (
           <div className="page-actions">
             {selected ? (
               <>
@@ -269,9 +276,11 @@ export function ServersPage() {
             Install the small agent on a server for its temperatures, CPU, memory, disks and drives. This dashboard does the asking; the server never needs to reach it. Something you only want to know
             is answering, like a router or a website, is an <Link to="/services">uptime check</Link> instead.
           </p>
-          <button className="btn" onClick={() => setAdding(true)}>
-            Add a server
-          </button>
+          <Editable>
+            <button className="btn" onClick={() => setAdding(true)}>
+              Add a server
+            </button>
+          </Editable>
         </section>
       ) : (
         <div className="host-grid">
@@ -1005,6 +1014,8 @@ function LoginStatus({ h, busy }: { h: RemoteHost; busy: boolean }) {
 // A server watched through its SSH login alone always has one.
 function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
   const notify = useToast();
+  // A viewer sees how the login stands, without testing, changing or using it.
+  const canEdit = useCanEdit();
   const sshOnly = h.kind === 'ssh';
   const [editing, setEditing] = useState(false);
   const [login, setLogin] = useState<Login>(loginOf(h));
@@ -1121,11 +1132,13 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
     return (
       <Section label="SSH" aside={<span className="small ink-3">not set up</span>}>
         <p className="note">Give Nightjar an SSH login for {h.name} to restart its agent or reboot it from here when the agent stops answering.</p>
-        <div className="host-edit-actions ssh-setup">
-          <button type="button" className="btn" onClick={open}>
-            Set up SSH…
-          </button>
-        </div>
+        {canEdit && (
+          <div className="host-edit-actions ssh-setup">
+            <button type="button" className="btn" onClick={open}>
+              Set up SSH…
+            </button>
+          </div>
+        )}
       </Section>
     );
 
@@ -1134,42 +1147,44 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
     <Section label="SSH" aside={<span className="small ink-3 mono">{keyName}</span>}>
       <div className="host-edit">
         <LoginStatus h={h} busy={busy === 'test'} />
-        <div className="ssh-actions">
-          <button type="button" className={h.ssh_check?.ok ? 'btn-quiet' : 'btn'} onClick={() => run('test')} disabled={!!busy}>
-            {busy === 'test' ? 'Logging in…' : h.ssh_check ? 'Test again' : 'Test login'}
-          </button>
-          {h.kind === 'agent' && (
-            <>
-              <button type="button" className="btn-quiet" onClick={() => run('restart-agent')} disabled={!!busy}>
-                {busy === 'restart-agent' ? 'Restarting…' : 'Restart agent'}
-              </button>
-              <button
-                type="button"
-                className="btn-quiet"
-                onClick={() => run('reinstall-agent')}
-                disabled={!!busy}
-                title="Install this dashboard's build of the agent, with the token and settings already on the server"
-              >
-                {busy === 'reinstall-agent' ? 'Reinstalling…' : 'Reinstall agent'}
-              </button>
-            </>
-          )}
-          {confirmReboot ? (
-            <span className="confirm">
-              <span className="small ink-3">Reboot {h.name}?</span>
-              <button type="button" className="btn-quiet danger" onClick={() => run('reboot')} disabled={!!busy}>
-                Reboot
-              </button>
-              <button type="button" className="btn-quiet" onClick={() => setConfirmReboot(false)}>
-                Keep running
-              </button>
-            </span>
-          ) : (
-            <button type="button" className="btn-quiet danger" onClick={() => setConfirmReboot(true)} disabled={!!busy}>
-              {busy === 'reboot' ? 'Rebooting…' : 'Reboot…'}
+        {canEdit && (
+          <div className="ssh-actions">
+            <button type="button" className={h.ssh_check?.ok ? 'btn-quiet' : 'btn'} onClick={() => run('test')} disabled={!!busy}>
+              {busy === 'test' ? 'Logging in…' : h.ssh_check ? 'Test again' : 'Test login'}
             </button>
-          )}
-        </div>
+            {h.kind === 'agent' && (
+              <>
+                <button type="button" className="btn-quiet" onClick={() => run('restart-agent')} disabled={!!busy}>
+                  {busy === 'restart-agent' ? 'Restarting…' : 'Restart agent'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-quiet"
+                  onClick={() => run('reinstall-agent')}
+                  disabled={!!busy}
+                  title="Install this dashboard's build of the agent, with the token and settings already on the server"
+                >
+                  {busy === 'reinstall-agent' ? 'Reinstalling…' : 'Reinstall agent'}
+                </button>
+              </>
+            )}
+            {confirmReboot ? (
+              <span className="confirm">
+                <span className="small ink-3">Reboot {h.name}?</span>
+                <button type="button" className="btn-quiet danger" onClick={() => run('reboot')} disabled={!!busy}>
+                  Reboot
+                </button>
+                <button type="button" className="btn-quiet" onClick={() => setConfirmReboot(false)}>
+                  Keep running
+                </button>
+              </span>
+            ) : (
+              <button type="button" className="btn-quiet danger" onClick={() => setConfirmReboot(true)} disabled={!!busy}>
+                {busy === 'reboot' ? 'Rebooting…' : 'Reboot…'}
+              </button>
+            )}
+          </div>
+        )}
         {result && (
           <div className={`ssh-result ${result.ok ? 'ok' : 'bad'}`} role="status">
             <span className="ssh-result-head">{result.ok ? SSH_DONE[result.action] : 'Did not work'}</span>
@@ -1182,27 +1197,29 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
             <Command text={h.ssh_command} />
           </details>
         )}
-        <div className="host-edit-actions">
-          <button type="button" className="btn-quiet" onClick={open} disabled={!!busy}>
-            Change login…
-          </button>
-          {!sshOnly &&
-            (confirmForget ? (
-              <span className="confirm">
-                <span className="small ink-3">Forget this login?</span>
-                <button type="button" className="btn-quiet danger" onClick={forget} disabled={!!busy}>
-                  Forget
+        {canEdit && (
+          <div className="host-edit-actions">
+            <button type="button" className="btn-quiet" onClick={open} disabled={!!busy}>
+              Change login…
+            </button>
+            {!sshOnly &&
+              (confirmForget ? (
+                <span className="confirm">
+                  <span className="small ink-3">Forget this login?</span>
+                  <button type="button" className="btn-quiet danger" onClick={forget} disabled={!!busy}>
+                    Forget
+                  </button>
+                  <button type="button" className="btn-quiet" onClick={() => setConfirmForget(false)}>
+                    Keep
+                  </button>
+                </span>
+              ) : (
+                <button type="button" className="btn-quiet danger" onClick={() => setConfirmForget(true)} disabled={!!busy}>
+                  Forget…
                 </button>
-                <button type="button" className="btn-quiet" onClick={() => setConfirmForget(false)}>
-                  Keep
-                </button>
-              </span>
-            ) : (
-              <button type="button" className="btn-quiet danger" onClick={() => setConfirmForget(true)} disabled={!!busy}>
-                Forget…
-              </button>
-            ))}
-        </div>
+              ))}
+          </div>
+        )}
       </div>
     </Section>
   );
@@ -1214,7 +1231,14 @@ function ServicesOn({ h }: { h: RemoteHost }) {
   const now = useNow(10000);
   const mine = (data?.services ?? []).filter((s: Service) => s.server === h.id);
   return (
-    <Section label="Services on it" aside={<Link to={`/services?server=${encodeURIComponent(h.id)}#add`}>add a check →</Link>}>
+    <Section
+      label="Services on it"
+      aside={
+        <Editable>
+          <Link to={`/services?server=${encodeURIComponent(h.id)}#add`}>add a check →</Link>
+        </Editable>
+      }
+    >
       {mine.length === 0 ? (
         <p className="note">
           No checks belong to {h.name} yet. Add an uptime check for something it runs, like Plex, a share or SSH, and pick {h.name} as its server.
@@ -1276,7 +1300,9 @@ function SSHServerDetail({ h, refresh }: { h: RemoteHost; refresh: () => void })
         </div>
         <div className="col">
           <SSHAccess h={h} refresh={refresh} />
-          <EditServer h={h} onSaved={refresh} onRemoved={() => navigate('/servers')} />
+          <Editable>
+            <EditServer h={h} onSaved={refresh} onRemoved={() => navigate('/servers')} />
+          </Editable>
         </div>
       </div>
     </main>
@@ -1519,7 +1545,11 @@ function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
                       {AGENT_UPDATE[h.update.state]}
                     </span>
                   )}
-                  {(h.update?.state === 'manual' || h.update?.state === 'failed') && <ReinstallNow h={h} refresh={refresh} />}
+                  {(h.update?.state === 'manual' || h.update?.state === 'failed') && (
+                    <Editable>
+                      <ReinstallNow h={h} refresh={refresh} />
+                    </Editable>
+                  )}
                 </dd>
               </dl>
             </Section>
@@ -1534,7 +1564,9 @@ function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
       <section className="server-manage" id="manage" aria-label="Manage">
         <h2 className="server-manage-head">Manage</h2>
         <div className="server-manage-cols">
-          <EditServer h={h} onSaved={refresh} onRemoved={() => navigate('/servers')} />
+          <Editable>
+            <EditServer h={h} onSaved={refresh} onRemoved={() => navigate('/servers')} />
+          </Editable>
           <SSHAccess h={h} refresh={refresh} />
         </div>
       </section>

@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -49,7 +48,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_ts ON notifications (ts);
 CREATE INDEX IF NOT EXISTS idx_notifications_status ON notifications (status);
-CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, created REAL NOT NULL, seen REAL NOT NULL, agent TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, created REAL NOT NULL, seen REAL NOT NULL, agent TEXT NOT NULL DEFAULT '', user TEXT NOT NULL DEFAULT '');
 -- One row per server per minute, for analytics: averages, peaks and the share of checks it answered.
 CREATE TABLE IF NOT EXISTS samples (
     host TEXT NOT NULL,
@@ -59,6 +58,20 @@ CREATE TABLE IF NOT EXISTS samples (
     mem_max REAL, latency_max REAL
 );
 CREATE INDEX IF NOT EXISTS idx_samples_host_ts ON samples (host, ts);
+-- The same minutes rolled up into hours, kept far longer than the minutes, for trends over months.
+-- minutes is how many stored minutes each hour holds; averages are over those minutes.
+CREATE TABLE IF NOT EXISTS samples_hourly (
+    host TEXT NOT NULL,
+    ts REAL NOT NULL,
+    up REAL NOT NULL,
+    cpu REAL, cpu_max REAL, mem REAL, mem_max REAL, temp REAL, temp_max REAL, disk REAL, rx REAL, tx REAL,
+    latency REAL, latency_max REAL,
+    minutes INTEGER NOT NULL,
+    PRIMARY KEY (host, ts)
+);
+-- The minutes a server missed most of its checks in, kept as long as the hourly rows, so outages
+-- can be listed over months.
+CREATE TABLE IF NOT EXISTS samples_down (host TEXT NOT NULL, ts REAL NOT NULL, PRIMARY KEY (host, ts));
 -- What Nightjar did to repair a check that went down, and whether the check came back after it.
 CREATE TABLE IF NOT EXISTS repairs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,6 +134,7 @@ type Store struct {
 var added = []struct{ table, column, kind string }{
 	{"samples", "mem_max", "REAL"},
 	{"samples", "latency_max", "REAL"},
+	{"sessions", "user", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // migrate adds the columns an older database lacks.
@@ -362,18 +376,29 @@ type Day struct {
 	Ups    int
 }
 
-// Days summarises a service's last `days` days, midnight to midnight in the zone `offset` seconds
-// east of UTC, oldest first. Days without checks are left out.
-func (s *Store) Days(service string, days int, offset int) []Day {
+// Days summarises a service's checks in each day, from its start to the next one's (the last day's
+// to end), oldest first. Days without checks are left out. The caller gives every day's start, its
+// own local midnight: today's UTC offset, used for every day, puts each day before a clock change
+// an hour out.
+func (s *Store) Days(service string, starts []float64, end float64) []Day {
 	db, unlock := s.lock()
 	defer unlock()
-	if db == nil || days < 1 {
+	if db == nil || len(starts) == 0 {
 		return nil
 	}
-	today := (time.Now().Unix() + int64(offset)) / 86400
-	since := (today-int64(days)+1)*86400 - int64(offset)
-	rows, err := db.Query(`SELECT CAST((ts + ?1) / 86400 AS INTEGER), COUNT(*), SUM(up) FROM checks
-		WHERE service = ?2 AND ts >= ?3 GROUP BY 1 ORDER BY 1`, offset, service, since)
+	var args []any
+	values := make([]string, len(starts))
+	for i, start := range starts {
+		next := end
+		if i+1 < len(starts) {
+			next = starts[i+1]
+		}
+		values[i] = "(?, ?)"
+		args = append(args, start, next)
+	}
+	rows, err := db.Query(`WITH days(start, stop) AS (VALUES `+strings.Join(values, ", ")+`)
+		SELECT days.start, COUNT(*), SUM(checks.up) FROM days JOIN checks ON checks.service = ? AND checks.ts >= days.start AND checks.ts < days.stop
+		GROUP BY days.start ORDER BY days.start`, append(args, service)...)
 	if err != nil {
 		log.Warn("History query failed", "err", err)
 		return nil
@@ -381,10 +406,8 @@ func (s *Store) Days(service string, days int, offset int) []Day {
 	defer rows.Close()
 	var out []Day
 	for rows.Next() {
-		var day int64
 		var d Day
-		if rows.Scan(&day, &d.Checks, &d.Ups) == nil {
-			d.Start = float64(day*86400 - int64(offset))
+		if rows.Scan(&d.Start, &d.Checks, &d.Ups) == nil {
 			out = append(out, d)
 		}
 	}

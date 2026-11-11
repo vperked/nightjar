@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -70,8 +71,9 @@ type Server struct {
 	http *http.Server
 
 	failMu   sync.Mutex
-	failures map[string][]time.Time
-	hashing  chan struct{} // a slot for each password check running
+	failures map[string][]time.Time // by client address (an IPv6 one's /64), within authFailWindow
+	held     map[string]*heldBack   // by account, or by a browser known to it (see limitKey)
+	hashing  chan struct{}          // a slot for each password check running
 
 	// noRealIP and noForwarded are set once a request through a proxy on this machine came without
 	// that header: the proxy does not set it, so whatever it holds is the client's own (see learnProxy).
@@ -110,7 +112,7 @@ func tooSoon(w http.ResponseWriter, wait time.Duration) {
 }
 
 func New(cfg Config, ctx *monitor.Context) *Server {
-	s := &Server{cfg: cfg, ctx: ctx, failures: map[string][]time.Time{}, hashing: make(chan struct{}, maxHashing), statsTTL: 2 * time.Second}
+	s := &Server{cfg: cfg, ctx: ctx, failures: map[string][]time.Time{}, held: map[string]*heldBack{}, hashing: make(chan struct{}, maxHashing), statsTTL: 2 * time.Second}
 	s.recallProxy()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
@@ -118,14 +120,19 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.HandleFunc("POST /api/auth/setup", s.fromDashboard(s.createAdmin))
 	mux.HandleFunc("POST /api/auth/login", s.fromDashboard(s.login))
 	mux.HandleFunc("POST /api/auth/logout", s.fromDashboard(s.logout))
-	mux.Handle("POST /api/auth/password", s.writable(s.changePassword))
+	// Any signed-in account changes its own password, a viewer included.
+	mux.Handle("POST /api/auth/password", s.auth(s.fromDashboard(s.logged(s.changePassword))))
 	mux.Handle("POST /api/auth/2fa/begin", s.writable(s.beginTwoFactor))
 	mux.Handle("POST /api/auth/2fa/enable", s.writable(s.enableTwoFactor))
 	mux.Handle("POST /api/auth/2fa/disable", s.writable(s.disableTwoFactor))
+	mux.Handle("GET /api/auth/viewers", s.admin(s.listViewers))
+	mux.Handle("POST /api/auth/viewers", s.writable(s.addViewer))
+	mux.Handle("PUT /api/auth/viewers/{name}", s.writable(s.setViewerPassword))
+	mux.Handle("DELETE /api/auth/viewers/{name}", s.writable(s.removeViewer))
 	mux.Handle("GET /api/activity", s.auth(s.activity))
-	mux.Handle("GET /api/backup", s.auth(s.makeBackup))
+	mux.Handle("GET /api/backup", s.admin(s.makeBackup))
 	// A backup can be larger than other changes, so it skips their size limit for its own.
-	mux.Handle("POST /api/backup/restore", s.auth(s.logged(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/backup/restore", s.admin(s.logged(func(w http.ResponseWriter, r *http.Request) {
 		if !s.sameOrigin(w, r) {
 			return
 		}
@@ -157,7 +164,7 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("PUT /api/appearance", s.writable(s.saveAppearance))
 	mux.Handle("GET /api/statuspage", s.auth(s.statusPageDesign))
 	mux.Handle("PUT /api/statuspage", s.writableUpTo(maxDesignBody, s.saveStatusPageDesign))
-	mux.Handle("GET /api/statuspage/proxy", s.auth(s.statusProxy))
+	mux.Handle("GET /api/statuspage/proxy", s.admin(s.statusProxy))
 	// Testing nginx, reloading it and certbot's challenge take a while.
 	mux.Handle("POST /api/statuspage/proxy", s.writable(slow(5*time.Minute, s.setUpStatusProxy)))
 	mux.Handle("DELETE /api/statuspage/proxy", s.writable(slow(time.Minute, s.removeStatusProxy)))
@@ -167,7 +174,7 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("GET /api/apps/job", s.auth(s.needApps(s.appJob)))
 	mux.Handle("POST /api/apps/{id}/install", s.writable(s.needApps(s.installApp)))
 	mux.Handle("POST /api/apps/{id}/remove", s.writable(s.needApps(s.removeApp)))
-	mux.Handle("GET /api/plugins", s.auth(s.needPlugins(s.listPlugins)))
+	mux.Handle("GET /api/plugins", s.admin(s.needPlugins(s.listPlugins)))
 	mux.Handle("GET /api/plugins/cards", s.auth(s.needPlugins(s.pluginCards)))
 	mux.Handle("POST /api/plugins/rescan", s.writable(s.needPlugins(s.rescanPlugins)))
 	mux.Handle("PUT /api/plugins/{id}", s.writable(s.needPlugins(s.configurePlugin)))
@@ -181,7 +188,7 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("GET /api/hosts", s.auth(s.needRemote(s.listHosts)))
 	mux.Handle("GET /api/hosts/{id}", s.auth(s.needRemote(s.getHost)))
 	mux.Handle("POST /api/hosts/token", s.writable(s.needRemote(s.newHostToken)))
-	mux.Handle("GET /api/agent/download", s.auth(s.downloadAgent))
+	mux.Handle("GET /api/agent/download", s.admin(s.downloadAgent))
 	mux.Handle("GET /api/analytics", s.auth(s.analyticsAll))
 	mux.Handle("GET /api/analytics/{id}", s.auth(s.analyticsHost))
 	mux.Handle("POST /api/hosts", s.writable(slow(sshBudget, s.needRemote(s.saveHost))))
@@ -199,7 +206,7 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("POST /api/hosts/{id}/firewall/default/keep", s.writable(slow(hostFirewallBudget, s.needRemote(s.keepHostDefault))))
 	mux.Handle("PUT /api/hosts/{id}/defense", s.writable(slow(hostFirewallBudget, s.needRemote(s.setHostDefense))))
 	mux.Handle("DELETE /api/hosts/{id}/blocked/{address}", s.writable(slow(hostFirewallBudget, s.needRemote(s.unblockHost))))
-	mux.Handle("GET /api/ssh/keys", s.auth(s.needRemote(s.sshKeys)))
+	mux.Handle("GET /api/ssh/keys", s.admin(s.needRemote(s.sshKeys)))
 	mux.Handle("POST /api/ssh/keys", s.writable(s.needRemote(s.newSSHKey)))
 	mux.Handle("POST /api/ssh/authorize", s.writable(slow(sshAuthorizeBudget, s.needRemote(s.authorizeSSHKey))))
 	mux.Handle("POST /api/ssh/trust", s.writable(slow(time.Minute, s.needRemote(s.trustSSHHostKey))))
@@ -229,13 +236,14 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	// A heartbeat's token is its credential; jobs ping without signing in.
 	mux.HandleFunc("/ping/{token}", s.ping)
 	mux.HandleFunc("/ping/{token}/{kind}", s.ping)
-	mux.Handle("GET /api/settings", s.auth(s.settings))
+	mux.Handle("GET /api/settings", s.admin(s.settings))
 	mux.Handle("PUT /api/settings", s.writable(s.saveSettings))
 	mux.Handle("POST /api/settings/test", s.writable(s.testSettings))
-	mux.Handle("GET /api/setup", s.auth(s.setupStatus))
+	mux.Handle("GET /api/setup", s.admin(s.setupStatus))
 	mux.Handle("POST /api/alerts/test", s.writable(s.testAlerts))
 	mux.Handle("GET /api/units", s.auth(s.listUnits))
-	mux.Handle("GET /api/units/{name}/logs", s.auth(s.unitLogs))
+	// A service's journal can hold secrets (qBittorrent prints its first WebUI password there).
+	mux.Handle("GET /api/units/{name}/logs", s.admin(s.unitLogs))
 	mux.Handle("POST /api/units/{name}/{action}", s.writable(slow(90*time.Second, s.controlUnit)))
 	mux.Handle("GET /api/drives", s.auth(s.drives))
 	mux.Handle("GET /api/network", s.auth(s.network))
@@ -342,6 +350,12 @@ func (s *Server) headers(next http.Handler) http.Handler {
 	custom := "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; " +
 		"font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Before anything else, so a rebound page cannot even teach learnProxy anything.
+		if !s.knownHost(r) {
+			log.Debug("Refused a request for an unknown host name", "host", r.Host)
+			http.Error(w, "Nightjar does not know this address. Open it by IP address or localhost, or set DASHBOARD_URL to the address you use.", http.StatusForbidden)
+			return
+		}
 		s.learnProxy(r)
 		h := w.Header()
 		if r.URL.Path == "/status-page" || s.isStatusPage(r) {
@@ -370,6 +384,44 @@ func (s *Server) headers(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// knownHost guards against DNS rebinding: a page on evil.example whose name is then pointed at
+// 127.0.0.1 is, to the browser, its own origin, so it could talk to a dashboard that listens only on
+// this machine (or at the end of an SSH tunnel) as if it were its own site, passing every same-origin
+// check, since its Origin matches the Host it sends. Such a request comes straight from the browser,
+// so its Host is the attacker's name with the dashboard's own port.
+//
+// So, as Syncthing does: on a dashboard listening only on loopback, a Host naming the dashboard's port
+// must be an IP address, localhost (or a name under .localhost, which browsers keep to this machine
+// themselves), or a name in the settings (DASHBOARD_URL's, STATUS_PAGE_DOMAIN). Anything else is
+// refused. A Host for another port (or none, port 80) is let through: that came through a reverse
+// proxy on this machine, which serves its own port and passes on the name it was asked for (nginx's
+// proxy_set_header Host $host). A dashboard listening on other addresses is reached by name from the
+// network anyway, and is left alone.
+func (s *Server) knownHost(r *http.Request) bool {
+	if !isLoopback(s.cfg.Host) || r.Host == "" {
+		return true
+	}
+	host, port, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host, port = r.Host, ""
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	if net.ParseIP(host) != nil || host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	if port == "" {
+		port = "80"
+	}
+	if port != s.cfg.Port {
+		return true
+	}
+	cfg := s.ctx.Config()
+	if d, err := url.Parse(cfg.DashboardURL); err == nil && d.Hostname() != "" && strings.EqualFold(strings.TrimSuffix(d.Hostname(), "."), host) {
+		return true
+	}
+	return cfg.StatusPageDomain != "" && strings.EqualFold(cfg.StatusPageDomain, host)
 }
 
 // clientIPs is who is asking, as the sign-in limits see it. Behind a reverse proxy on this machine
@@ -490,34 +542,52 @@ const (
 // same proxy or edge) cannot lock the admin out of a dashboard already open. A token can be guessed,
 // so it is only looked at while the client is not locked out, and every wrong one counts, wherever
 // it is sent: the public endpoints that say whether the caller is signed in included.
-func (s *Server) access(r *http.Request) access {
-	if s.cfg.Accounts != nil && s.cfg.Accounts.Valid(sessionCookie(r)) {
-		return allowed
+//
+// It also says who the request is from: the session's account, or the admin for the token (and for
+// a server with no sign-in at all, which only tests run).
+func (s *Server) access(r *http.Request) (access, accounts.Who) {
+	if s.cfg.Accounts != nil {
+		if who, ok := s.cfg.Accounts.SessionWho(sessionCookie(r)); ok {
+			return allowed, who
+		}
 	}
+	admin := accounts.Who{Role: accounts.RoleAdmin}
 	if s.cfg.AuthToken == "" {
 		if s.cfg.Accounts == nil {
-			return allowed
+			return allowed, admin
 		}
-		return denied
+		return denied, accounts.Who{}
 	}
 	token := presentedToken(r)
 	if token == "" {
-		return denied
+		return denied, accounts.Who{}
 	}
 	if s.throttled(r) {
-		return lockedOut
+		return lockedOut, accounts.Who{}
 	}
 	if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AuthToken)) == 1 {
-		return allowed
+		admin.Username = "API token"
+		return allowed, admin
 	}
 	s.recordFailure(r)
 	log.Warn("Unauthorized request", "path", r.URL.Path, "ip", s.clientNames(r))
-	return denied
+	return denied, accounts.Who{}
 }
 
 // authorized reports whether the request is signed in, for the public endpoints that only say more
 // when it is.
-func (s *Server) authorized(r *http.Request) bool { return s.access(r) == allowed }
+func (s *Server) authorized(r *http.Request) bool {
+	a, _ := s.access(r)
+	return a == allowed
+}
+
+type whoKey struct{}
+
+// whoFrom is who a request that went through auth is from.
+func whoFrom(r *http.Request) accounts.Who {
+	who, _ := r.Context().Value(whoKey{}).(accounts.Who)
+	return who
+}
 
 func presentedToken(r *http.Request) string {
 	if t := r.Header.Get("X-Auth-Token"); t != "" {
@@ -535,11 +605,33 @@ func (s *Server) signInRequired() bool { return s.cfg.Accounts != nil || s.cfg.A
 // maxFailClients is how many clients' failures are kept at most.
 const maxFailClients = 1024
 
+// failKeys is what the client's failures count against: each of its addresses, an IPv6 one as its
+// /64. One machine is handed a whole /64, and could otherwise take a fresh address every few guesses.
+func (s *Server) failKeys(r *http.Request) []string {
+	var keys []string
+	for _, ip := range s.clientIPs(r) {
+		if k := netKey(ip); !slices.Contains(keys, k) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// netKey is an IPv4 address as it is, and an IPv6 one as its /64 ("2001:db8::/64").
+func netKey(addr string) string {
+	ip := net.ParseIP(addr)
+	if ip == nil || ip.To4() != nil {
+		return addr
+	}
+	mask := net.CIDRMask(64, 128)
+	return (&net.IPNet{IP: ip.Mask(mask), Mask: mask}).String()
+}
+
 // throttled reports whether the client has failed too often of late, under any of its addresses.
 func (s *Server) throttled(r *http.Request) bool {
 	s.failMu.Lock()
 	defer s.failMu.Unlock()
-	return s.throttledLocked(s.clientIPs(r))
+	return s.throttledLocked(s.failKeys(r))
 }
 
 func (s *Server) throttledLocked(ips []string) bool {
@@ -572,7 +664,7 @@ func (s *Server) recordFailure(r *http.Request) {
 	s.failMu.Lock()
 	defer s.failMu.Unlock()
 	now := time.Now()
-	for _, ip := range s.clientIPs(r) {
+	for _, ip := range s.failKeys(r) {
 		s.addFailureLocked(ip, now)
 	}
 }
@@ -604,6 +696,131 @@ func (s *Server) evictLocked() {
 	}
 }
 
+// The limits above are per client address, which a client on this machine (or a page rebound to
+// it) names itself in X-Real-IP or X-Forwarded-For, taking a new one for every few guesses. So wrong
+// passwords, codes and setup codes also count against the account they were for, whatever address
+// they came from: past accountFreeTries the account's sign-ins are held back, for accountFirstHold
+// at first and twice as long after each further wrong try, up to accountMaxHold. That is at most
+// about a hundred guesses a day, and never a lockout that lasts: once the guessing stops, the
+// account opens again. A browser that has signed in to the account before (its device cookie says
+// so) counts against limits of its own instead, so whoever runs up the account's cannot keep its
+// owner out.
+const (
+	accountFreeTries = 20
+	accountFirstHold = 30 * time.Second
+	accountMaxHold   = 15 * time.Minute
+	// accountForget is how long after the last wrong try an account's count starts again.
+	accountForget = 24 * time.Hour
+	// maxHeldKeys is how many accounts' (and browsers') counts are kept, a made-up name each at most.
+	maxHeldKeys = 4096
+)
+
+// heldBack is the wrong tries counted against one account or browser.
+type heldBack struct {
+	n     int       // wrong tries, one after another
+	last  time.Time // the last of them
+	until time.Time // tries are held back until then
+}
+
+// setupAccount stands for the setup code in the per-account limits.
+const setupAccount = "\x00setup"
+
+// limitKey is what a try at account counts against in the per-account limits: the account, or the
+// browser itself when its device cookie shows it signed in to that account before. label names it in
+// the log.
+func (s *Server) limitKey(r *http.Request, account string) (key, label string) {
+	if account == setupAccount {
+		return "setup", "the setup code"
+	}
+	name := strings.ToLower(strings.TrimSpace(account))
+	// Longer is no account's name; this keeps a made-up one from taking much room.
+	if len(name) > 64 {
+		name = name[:64]
+	}
+	if s.cfg.Accounts != nil {
+		if c, err := r.Cookie(deviceCookieName); err == nil {
+			if id, ok := s.cfg.Accounts.Device(c.Value, name); ok {
+				return "device:" + id, name + " (from a browser that signed in before)"
+			}
+		}
+	}
+	return "account:" + name, name
+}
+
+// heldLocked is how much longer tries counting against key are held back (none when not positive).
+func (s *Server) heldLocked(key string, now time.Time) time.Duration {
+	f := s.held[key]
+	if f == nil {
+		return 0
+	}
+	if now.Sub(f.last) > accountForget {
+		delete(s.held, key)
+		return 0
+	}
+	return f.until.Sub(now)
+}
+
+// holdBackLocked counts a wrong try against key, holding its tries back once there are too many.
+func (s *Server) holdBackLocked(key, label string, now time.Time) {
+	f := s.held[key]
+	if f == nil || now.Sub(f.last) > accountForget {
+		if f == nil && len(s.held) >= maxHeldKeys {
+			s.evictHeldLocked(now)
+		}
+		f = &heldBack{}
+		s.held[key] = f
+	}
+	f.n++
+	f.last = now
+	if over := f.n - accountFreeTries; over >= 0 {
+		hold := min(accountMaxHold, accountFirstHold<<min(over, 16))
+		f.until = now.Add(hold)
+		log.Warn("Too many wrong sign-in tries for one account: its sign-ins are held back", "account", label, "tries", f.n, "for", hold.String())
+	}
+}
+
+// evictHeldLocked makes room for one more count: those long forgotten go first, then the one whose
+// last wrong try is oldest. One held back now is kept, so a flood of made-up names cannot set it free.
+func (s *Server) evictHeldLocked(now time.Time) {
+	var oldest string
+	var oldestAt time.Time
+	for k, f := range s.held {
+		if now.Sub(f.last) > accountForget {
+			delete(s.held, k)
+			continue
+		}
+		if f.until.After(now) {
+			continue
+		}
+		if oldest == "" || f.last.Before(oldestAt) {
+			oldest, oldestAt = k, f.last
+		}
+	}
+	if len(s.held) >= maxHeldKeys && oldest != "" {
+		delete(s.held, oldest)
+	}
+}
+
+// heldBackReply answers a try at an account whose sign-ins are held back.
+func heldBackReply(w http.ResponseWriter, wait time.Duration) {
+	secs := int(wait.Seconds()) + 1
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	in := fmt.Sprintf("%d seconds", secs)
+	if secs > 90 {
+		in = fmt.Sprintf("%d minutes", (secs+59)/60)
+	}
+	writeJSON(w, http.StatusTooManyRequests, errBody("Too many wrong tries for this account. Try again in "+in+"."))
+}
+
+// tryResult is how a try that passwordTry let in went.
+type tryResult int
+
+const (
+	notAGuess  tryResult = iota // nothing was guessed (the password was right, and a code is yet to come)
+	wrongGuess                  // a wrong password, code or setup code
+	rightGuess                  // the password, code or setup code was right
+)
+
 // How many password checks (600,000 rounds of PBKDF2 each) may run at once, and how long a sign-in
 // waits for its turn. Without a cap, a flood of sign-ins would keep every core busy hashing.
 const (
@@ -611,18 +828,26 @@ const (
 	hashWait   = 5 * time.Second
 )
 
-// passwordTry starts a try at the password, which may be a guess: it is counted against the client's
-// limit before the slow check, so tries sent all at once cannot all pass the limit before the first
-// failure is counted, and it waits for a hashing slot. It answers and is false when the client is
-// locked out or too many checks are running. Otherwise finish ends the try: failed keeps it
-// counted, and a try that worked, or was never a guess, is taken back.
-func (s *Server) passwordTry(w http.ResponseWriter, r *http.Request) (finish func(failed bool), ok bool) {
-	ips := s.clientIPs(r)
+// passwordTry starts a try at account's password (or a code for it, or the setup code: setupAccount),
+// which may be a guess: it is counted against the client's limit before the slow check, so tries
+// sent all at once cannot all pass the limit before the first failure is counted, and it waits for a
+// hashing slot. It answers and is false when the client or the account is held back, or too many
+// checks are running. Otherwise finish ends the try: a wrong guess stays counted against the client
+// and counts against the account; anything else is taken back, and a right guess clears the account's
+// count.
+func (s *Server) passwordTry(w http.ResponseWriter, r *http.Request, account string) (finish func(tryResult), ok bool) {
+	ips := s.failKeys(r)
+	key, label := s.limitKey(r, account)
 	at := time.Now()
 	s.failMu.Lock()
 	if s.throttledLocked(ips) {
 		s.failMu.Unlock()
 		writeJSON(w, http.StatusTooManyRequests, errBody("Too many tries. Wait a minute and try again."))
+		return nil, false
+	}
+	if wait := s.heldLocked(key, at); wait > 0 {
+		s.failMu.Unlock()
+		heldBackReply(w, wait)
 		return nil, false
 	}
 	for _, ip := range ips {
@@ -654,9 +879,31 @@ func (s *Server) passwordTry(w http.ResponseWriter, r *http.Request) (finish fun
 		writeJSON(w, http.StatusServiceUnavailable, errBody("The request was cancelled"))
 		return nil, false
 	}
-	return func(failed bool) {
+	// Tries sent together all passed the account's check above before any of them was found wrong.
+	// Looked at again holding a slot, only the few running already go on once it is held back.
+	s.failMu.Lock()
+	held := s.heldLocked(key, time.Now())
+	s.failMu.Unlock()
+	if held > 0 {
 		<-s.hashing
-		if !failed {
+		takeBack()
+		heldBackReply(w, held)
+		return nil, false
+	}
+	return func(res tryResult) {
+		// Counted before the slot is given up, so the next try waiting for it sees the count.
+		switch res {
+		case wrongGuess:
+			s.failMu.Lock()
+			s.holdBackLocked(key, label, time.Now())
+			s.failMu.Unlock()
+		case rightGuess:
+			s.failMu.Lock()
+			delete(s.held, key)
+			s.failMu.Unlock()
+		}
+		<-s.hashing
+		if res != wrongGuess {
 			takeBack()
 		}
 	}, true
@@ -664,9 +911,10 @@ func (s *Server) passwordTry(w http.ResponseWriter, r *http.Request) (finish fun
 
 func (s *Server) auth(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch s.access(r) {
+		a, who := s.access(r)
+		switch a {
 		case allowed:
-			next(w, r)
+			next(w, r.WithContext(context.WithValue(r.Context(), whoKey{}, who)))
 		case lockedOut:
 			// The token is not looked at, so a client that is guessing learns nothing while locked out.
 			writeJSON(w, http.StatusTooManyRequests, errBody("Too Many Requests"))
@@ -680,6 +928,22 @@ func (s *Server) auth(next http.HandlerFunc) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, errBody("Unauthorized"))
 		}
 	})
+}
+
+// admin is auth for what only the admin may do or see: every change, and what holds secrets
+// (settings, backups, SSH keys, the agent). A viewer is turned away with 403.
+func (s *Server) admin(next http.HandlerFunc) http.Handler {
+	return s.auth(adminOnly(next))
+}
+
+func adminOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !whoFrom(r).Admin() {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "You are signed in as a viewer: you can look, but not change anything", "read_only": true})
+			return
+		}
+		next(w, r)
+	}
 }
 
 // statusRefused answers a request Nightjar carried out but that something it talks to turned down or
@@ -701,11 +965,12 @@ func nowSeconds() float64 { return float64(time.Now().UnixNano()) / 1e9 }
 // config is what the page needs before it draws. Signed out, that is only enough to sign in: what
 // runs on the machine, its version and the admin's name are left out.
 func (s *Server) config(w http.ResponseWriter, r *http.Request) {
-	signedIn := s.authorized(r)
+	a, who := s.access(r)
+	signedIn := a == allowed
 	out := map[string]any{
 		"auth_required":       s.signInRequired(),
 		"authorized":          signedIn,
-		"account":             s.account(signedIn),
+		"account":             s.account(signedIn, who),
 		"status_page_enabled": s.ctx.Config().StatusPageEnabled,
 		"status_page_title":   s.ctx.Config().StatusPageTitle,
 		"status_page_domain":  s.ctx.Config().StatusPageDomain,
@@ -719,8 +984,38 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 		out["needs_setup"] = s.needsSetup()
 		out["version"] = s.cfg.Version
 		out["hidden"] = append([]string{}, s.ctx.Config().HiddenSections...)
+		// Weekly maintenance and quiet hours run on the server's clock, so the page names it.
+		name, offset := serverZone(time.Now())
+		out["time_zone"] = map[string]any{"name": name, "offset": offset}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// serverZone is the server's time zone as an IANA name where it can be found, else as its offset
+// from UTC, and that offset now in seconds east of UTC.
+func serverZone(now time.Time) (string, int) {
+	_, offset := now.Zone()
+	name := time.Local.String()
+	if name == "Local" {
+		// Go calls the zone it read from /etc/localtime "Local"; that file is usually a link
+		// into the zoneinfo tree, whose path names the zone.
+		if p, err := os.Readlink("/etc/localtime"); err == nil {
+			if _, zone, ok := strings.Cut(p, "zoneinfo/"); ok && zone != "" {
+				name = zone
+			}
+		}
+	}
+	if name == "Local" || name == "" {
+		name = "UTC"
+		if offset != 0 {
+			sign, o := '+', offset
+			if o < 0 {
+				sign, o = '-', -o
+			}
+			name = fmt.Sprintf("UTC%c%02d:%02d", sign, o/3600, o%3600/60)
+		}
+	}
+	return name, offset
 }
 
 type check struct {
@@ -919,6 +1214,11 @@ func (s *Server) serviceHistory(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("hours"); raw != "" {
 		v, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody("hours must be a number"))
+			return
+		}
+		// NaN and the infinities parse, but cannot be written back as JSON once the answer has begun.
+		if math.IsNaN(v) || math.IsInf(v, 0) {
 			writeJSON(w, http.StatusBadRequest, errBody("hours must be a number"))
 			return
 		}

@@ -1,13 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { BrowserRouter, Link, NavLink, Route, Routes, useLocation } from 'react-router';
+import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router';
 import { api, onUnauthorized } from './api/client';
 import { ConfigContext } from './api/ConfigContext';
 import { NotificationsProvider } from './api/NotificationsContext';
 import { ServicesProvider, useServices } from './api/ServicesContext';
 import type { AppConfig } from './api/types';
 import { UpdatesProvider, useUpdates } from './api/UpdatesContext';
-import { CreateAdmin, SignIn } from './components/Account';
+import { CreateAdmin, SignIn, ViewerAccountPage } from './components/Account';
 import { AccountMenu } from './components/AccountMenu';
 import { Bell } from './components/Bell';
 import { SectionOff, type SectionID } from './components/Sections';
@@ -17,8 +17,9 @@ import { Skeleton } from './components/Skeleton';
 import { bootDone, onStatusPage } from './boot';
 import { ToastProvider } from './components/Toasts';
 import { DemoBanner } from './components/ui';
-import { useNewBuild } from './freshness';
-import { formatAgo } from './format';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { safe, useNewBuild } from './freshness';
+import { formatAgo, plural } from './format';
 import { useNow } from './hooks/useNow';
 import { Overview } from './pages/Overview';
 import { revealTheme, useCountUp, useEdgeLight, useTitleDecode } from './motion';
@@ -52,30 +53,54 @@ const pages = {
   system: () => import('./pages/SystemServices'),
   updates: () => import('./pages/Updates'),
 };
-const PlexPage = lazy(() => pages.plex().then((m) => ({ default: m.PlexPage })));
-const NetworkPage = lazy(() => pages.network().then((m) => ({ default: m.NetworkPage })));
-const FirewallPage = lazy(() => pages.firewall().then((m) => ({ default: m.FirewallPage })));
-const AppsPage = lazy(() => pages.apps().then((m) => ({ default: m.AppsPage })));
-const LogsPage = lazy(() => pages.logs().then((m) => ({ default: m.LogsPage })));
-const NotificationsPage = lazy(() => pages.notifications().then((m) => ({ default: m.NotificationsPage })));
-const QBittorrentPage = lazy(() => pages.qbittorrent().then((m) => ({ default: m.QBittorrentPage })));
-const DocsPage = lazy(() => pages.docs().then((m) => ({ default: m.DocsPage })));
-const AnalyticsPage = lazy(() => pages.analytics().then((m) => ({ default: m.AnalyticsPage })));
-const ServersPage = lazy(() => pages.servers().then((m) => ({ default: m.ServersPage })));
-const ServerDetail = lazy(() => pages.servers().then((m) => ({ default: m.ServerDetail })));
-const ServiceDetail = lazy(() => pages.detail().then((m) => ({ default: m.ServiceDetail })));
-const ServicesPage = lazy(() => pages.services().then((m) => ({ default: m.ServicesPage })));
-const SettingsPage = lazy(() => pages.settings().then((m) => ({ default: m.SettingsPage })));
-const SetupPage = lazy(() => pages.setup().then((m) => ({ default: m.SetupPage })));
-const StatusDesignerPage = lazy(() => pages.statusDesign().then((m) => ({ default: m.StatusDesignerPage })));
-const StatusPage = lazy(() => pages.status().then((m) => ({ default: m.StatusPage })));
-const IncidentsPage = lazy(() => pages.incidents().then((m) => ({ default: m.IncidentsPage })));
-const MaintenancePage = lazy(() => pages.maintenance().then((m) => ({ default: m.MaintenancePage })));
-const CleanupPage = lazy(() => pages.cleanup().then((m) => ({ default: m.CleanupPage })));
-const WeeklyReportPage = lazy(() => pages.report().then((m) => ({ default: m.WeeklyReportPage })));
-const PluginsPage = lazy(() => pages.plugins().then((m) => ({ default: m.PluginsPage })));
-const SystemServicesPage = lazy(() => pages.system().then((m) => ({ default: m.SystemServicesPage })));
-const UpdatesPage = lazy(() => pages.updates().then((m) => ({ default: m.UpdatesPage })));
+
+// A tab left open across a UI update can ask for a page file that is no longer there. When a page
+// someone opened fails to download, load the new build instead, but only when that loses nothing:
+// online (offline, the reload would fail too), nothing edited or on its way, and once a minute at
+// most so a real outage can't loop. Otherwise the error boundary says the page did not load. The
+// idle prefetch below never reloads: nobody is waiting for it, and a brief drop would cost the tab.
+function opened<T>(load: Promise<T>): Promise<T> {
+  return load.catch((err) => {
+    if (navigator.onLine && safe()) {
+      try {
+        const last = Number(sessionStorage.getItem('nightjar.reloaded') || 0);
+        if (Date.now() - last >= 60_000) {
+          sessionStorage.setItem('nightjar.reloaded', String(Date.now()));
+          window.location.reload();
+          // Keep showing the page loading until the reload replaces it.
+          return new Promise<T>(() => {});
+        }
+      } catch {
+        /* storage unavailable: no guard against a loop, so no reload */
+      }
+    }
+    throw err;
+  });
+}
+const PlexPage = lazy(() => opened(pages.plex()).then((m) => ({ default: m.PlexPage })));
+const NetworkPage = lazy(() => opened(pages.network()).then((m) => ({ default: m.NetworkPage })));
+const FirewallPage = lazy(() => opened(pages.firewall()).then((m) => ({ default: m.FirewallPage })));
+const AppsPage = lazy(() => opened(pages.apps()).then((m) => ({ default: m.AppsPage })));
+const LogsPage = lazy(() => opened(pages.logs()).then((m) => ({ default: m.LogsPage })));
+const NotificationsPage = lazy(() => opened(pages.notifications()).then((m) => ({ default: m.NotificationsPage })));
+const QBittorrentPage = lazy(() => opened(pages.qbittorrent()).then((m) => ({ default: m.QBittorrentPage })));
+const DocsPage = lazy(() => opened(pages.docs()).then((m) => ({ default: m.DocsPage })));
+const AnalyticsPage = lazy(() => opened(pages.analytics()).then((m) => ({ default: m.AnalyticsPage })));
+const ServersPage = lazy(() => opened(pages.servers()).then((m) => ({ default: m.ServersPage })));
+const ServerDetail = lazy(() => opened(pages.servers()).then((m) => ({ default: m.ServerDetail })));
+const ServiceDetail = lazy(() => opened(pages.detail()).then((m) => ({ default: m.ServiceDetail })));
+const ServicesPage = lazy(() => opened(pages.services()).then((m) => ({ default: m.ServicesPage })));
+const SettingsPage = lazy(() => opened(pages.settings()).then((m) => ({ default: m.SettingsPage })));
+const SetupPage = lazy(() => opened(pages.setup()).then((m) => ({ default: m.SetupPage })));
+const StatusDesignerPage = lazy(() => opened(pages.statusDesign()).then((m) => ({ default: m.StatusDesignerPage })));
+const StatusPage = lazy(() => opened(pages.status()).then((m) => ({ default: m.StatusPage })));
+const IncidentsPage = lazy(() => opened(pages.incidents()).then((m) => ({ default: m.IncidentsPage })));
+const MaintenancePage = lazy(() => opened(pages.maintenance()).then((m) => ({ default: m.MaintenancePage })));
+const CleanupPage = lazy(() => opened(pages.cleanup()).then((m) => ({ default: m.CleanupPage })));
+const WeeklyReportPage = lazy(() => opened(pages.report()).then((m) => ({ default: m.WeeklyReportPage })));
+const PluginsPage = lazy(() => opened(pages.plugins()).then((m) => ({ default: m.PluginsPage })));
+const SystemServicesPage = lazy(() => opened(pages.system()).then((m) => ({ default: m.SystemServicesPage })));
+const UpdatesPage = lazy(() => opened(pages.updates()).then((m) => ({ default: m.UpdatesPage })));
 
 function usePrefetchPages(enabled: boolean) {
   useEffect(() => {
@@ -205,15 +230,39 @@ function Brand({ enabled }: { enabled: boolean }) {
   );
 }
 
-// UpdatesBadge counts updates waiting on the nav tab.
-function UpdatesBadge() {
+// useWaitingUpdates counts the updates waiting to be installed, for the Apps tab's badge.
+function useWaitingUpdates(): number {
   const { data } = useUpdates();
-  const n = data?.targets.filter((t) => t.available && !t.paused).length ?? 0;
-  return n > 0 ? (
-    <span className="nav-badge" aria-label={`${n} available`}>
-      {n}
-    </span>
-  ) : null;
+  return data?.targets.filter((t) => t.available && !t.paused).length ?? 0;
+}
+
+type Tab = (typeof TABS)[number];
+
+// tabActive says whether a path is a tab's page, or one of the pages it gathers (`also`).
+const tabActive = (t: Pick<Tab, 'to' | 'end' | 'also'>, path: string) => (t.end ? path === t.to : path === t.to || path.startsWith(`${t.to}/`)) || !!t.also?.some((p) => path.startsWith(p));
+
+// Settings and the pages it leads to (they have no tab of their own).
+const SETTINGS_PAGES = ['/settings', '/setup', '/status-page', '/plugins'];
+const onSettings = (path: string) => SETTINGS_PAGES.some((p) => path === p || path.startsWith(`${p}/`));
+
+// NavTab is one tab of the masthead. Its name says the waiting updates too, since the label
+// replaces the badge for a screen reader, and it is the current page wherever it shows as current
+// (a page it gathers included), not only on its own address.
+function NavTab({ t, path }: { t: Tab; path: string }) {
+  const waiting = useWaitingUpdates();
+  const active = tabActive(t, path);
+  const n = t.badge ? waiting : 0;
+  return (
+    <Link to={t.to} aria-label={n ? `${t.label}, ${plural(n, 'update')}` : t.label} title={t.label} className={active ? 'active' : ''} aria-current={active ? 'page' : undefined}>
+      <t.Icon />
+      <span>{t.label}</span>
+      {n > 0 && (
+        <span className="nav-badge" aria-hidden="true">
+          {n}
+        </span>
+      )}
+    </Link>
+  );
 }
 
 // SetupBanner points a new monitor at the setup guide until alerts and checks exist, or it is dismissed.
@@ -246,6 +295,44 @@ function SetupBanner() {
         ×
       </button>
     </div>
+  );
+}
+
+// NotFound stands in for an address the dashboard has no page at (an old link, a typo), rather
+// than quietly showing the overview there.
+function NotFound() {
+  const { pathname } = useLocation();
+  return (
+    <main>
+      <div className="page-title">
+        <div>
+          <h1>Page not found</h1>
+        </div>
+      </div>
+      <div className="empty">
+        <strong>Nothing is at {pathname}</strong>
+        The link may be out of date, or the address mistyped.
+        {/* The link is inline, so its .empty .btn margin would not apply: the space goes on its line. */}
+        <div style={{ marginTop: 16 }}>
+          <Link className="btn" to="/">
+            Back to the overview
+          </Link>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+// AdminOnly stands in for a page a viewer cannot open.
+function AdminOnly() {
+  return (
+    <section className="admin-only">
+      <h1>Only the admin can open this</h1>
+      <p className="ink-3">You are signed in as a viewer, so the setup guide, plugins and the status page designer are not shown.</p>
+      <Link className="btn" to="/">
+        Back to the overview
+      </Link>
+    </section>
   );
 }
 
@@ -359,9 +446,9 @@ function Shell() {
   // pages are right of every tab). Worked out once per path change; a second render of the same path
   // (strict mode) keeps it.
   const tabOf = (path: string) => {
-    const i = tabs.findIndex((t) => (t.end ? path === t.to : path === t.to || path.startsWith(`${t.to}/`) || !!t.also?.some((p) => path.startsWith(p))));
+    const i = tabs.findIndex((t) => tabActive(t, path));
     if (i >= 0) return i;
-    return ['/settings', '/setup', '/status-page', '/plugins'].some((p) => path.startsWith(p)) ? tabs.length : -1;
+    return onSettings(path) ? tabs.length : -1;
   };
   if (turn.current.path !== location.pathname) {
     const from = tabOf(turn.current.path);
@@ -372,6 +459,9 @@ function Shell() {
   // Which of the two only the config says, so until it comes the gate waits for it.
   const gate = !config ? <Loading /> : config.account && !config.account.configured ? <CreateAdmin onDone={signedIn} /> : <SignIn onDone={signedIn} />;
   const gated = (el: JSX.Element) => (signedOut ? gate : el);
+  // A viewer signs in read-only: the pages that hold settings and secrets are the admin's.
+  const viewer = config?.account?.role === 'viewer';
+  const adminOnly = (el: JSX.Element) => (signedOut ? gate : viewer ? <AdminOnly /> : el);
   // A page whose section is off says so, with a way to turn it back on.
   const section = (id: SectionID, el: JSX.Element) => gated(shown(id) ? el : <SectionOff id={id} />);
   return (
@@ -397,18 +487,7 @@ function Shell() {
                   <nav className="nav" aria-label="Pages" ref={navRef}>
                     <span className="nav-indicator" aria-hidden="true" />
                     {tabs.map((t) => (
-                      <NavLink
-                        key={t.to}
-                        to={t.to}
-                        end={t.end}
-                        aria-label={t.label}
-                        title={t.label}
-                        className={({ isActive }) => (isActive || t.also?.some((p) => location.pathname.startsWith(p)) ? 'active' : '')}
-                      >
-                        <t.Icon />
-                        <span>{t.label}</span>
-                        {t.badge && <UpdatesBadge />}
-                      </NavLink>
+                      <NavTab key={t.to} t={t} path={location.pathname} />
                     ))}
                   </nav>
                 )}
@@ -421,15 +500,16 @@ function Shell() {
                     </button>
                   )}
                   {!signedOut && shown('notifications') && <Bell />}
-                  {!signedOut && (
-                    <NavLink
+                  {!signedOut && !viewer && (
+                    <Link
                       to="/settings"
-                      className={({ isActive }) => `icon-btn${isActive || location.pathname === '/setup' || location.pathname === '/status-page' || location.pathname === '/plugins' ? ' active' : ''}`}
+                      className={`icon-btn${onSettings(location.pathname) ? ' active' : ''}`}
+                      aria-current={onSettings(location.pathname) ? 'page' : undefined}
                       aria-label="Settings"
                       title="Settings"
                     >
                       <GearIcon />
-                    </NavLink>
+                    </Link>
                   )}
                   <AccountMenu theme={theme} onToggleTheme={toggleTheme} onSignOut={signOut} />
                 </div>
@@ -447,41 +527,53 @@ function Shell() {
                 </button>
               </div>
             )}
-            {!signedOut && config?.needs_setup && location.pathname === '/' && <SetupBanner />}
+            {!signedOut && !viewer && config?.needs_setup && location.pathname === '/' && <SetupBanner />}
+            {!signedOut && viewer && (
+              <div className="setup-banner viewer-banner" role="note">
+                <span>
+                  <strong>Read-only.</strong> Signed in as {config?.account?.username}, a viewer: you can look around, but not change anything.
+                </span>
+              </div>
+            )}
             <div className="app" id="content" tabIndex={-1}>
               <Suspense fallback={<Loading />}>
-                {/* Keyed by page, so each page arrives with a short entrance. */}
-                <div className={`page${turn.current.dir}`} key={location.pathname}>
-                  <Routes>
-                    <Route path="/services" element={gated(<ServicesPage />)} />
-                    <Route path="/incidents" element={gated(<IncidentsPage />)} />
-                    <Route path="/incidents/maintenance" element={gated(<MaintenancePage />)} />
-                    <Route path="/incidents/report" element={gated(<WeeklyReportPage />)} />
-                    <Route path="/system" element={gated(<SystemServicesPage />)} />
-                    <Route path="/plex" element={section('media', <PlexPage />)} />
-                    <Route path="/plex/cleanup" element={section('media', <CleanupPage />)} />
-                    <Route path="/network" element={section('network', <NetworkPage />)} />
-                    <Route path="/network/firewall" element={section('network', <FirewallPage />)} />
-                    <Route path="/servers" element={section('servers', <ServersPage />)} />
-                    <Route path="/servers/analytics" element={section('servers', <AnalyticsPage />)} />
-                    <Route path="/servers/:id" element={section('servers', <ServerDetail />)} />
-                    <Route path="/qbittorrent" element={section('media', <QBittorrentPage />)} />
-                    <Route path="/updates" element={section('apps', <UpdatesPage />)} />
-                    <Route path="/apps" element={section('apps', <AppsPage />)} />
-                    <Route path="/logs" element={gated(<LogsPage />)} />
-                    {/* The docs hold nothing private, so they open before signing in too: they explain how to. */}
-                    <Route path="/docs" element={<DocsPage />} />
-                    <Route path="/docs/:slug" element={<DocsPage />} />
-                    <Route path="/notifications" element={gated(<NotificationsPage />)} />
-                    <Route path="/notifications/rules" element={gated(<NotificationsPage />)} />
-                    <Route path="/settings" element={gated(<SettingsPage />)} />
-                    <Route path="/setup" element={gated(<SetupPage />)} />
-                    <Route path="/status-page" element={gated(<StatusDesignerPage />)} />
-                    <Route path="/plugins" element={gated(<PluginsPage />)} />
-                    <Route path="/services/:name" element={gated(<ServiceDetail />)} />
-                    <Route path="*" element={gated(<Overview />)} />
-                  </Routes>
-                </div>
+                {/* A page that crashes, or fails to download, says so in place of itself; keyed by
+                    page, so leaving it clears the error. */}
+                <ErrorBoundary key={location.pathname}>
+                  {/* Keyed by page, so each page arrives with a short entrance. */}
+                  <div className={`page${turn.current.dir}`} key={location.pathname}>
+                    <Routes>
+                      <Route path="/" element={gated(<Overview />)} />
+                      <Route path="/services" element={gated(<ServicesPage />)} />
+                      <Route path="/incidents" element={gated(<IncidentsPage />)} />
+                      <Route path="/incidents/maintenance" element={gated(<MaintenancePage />)} />
+                      <Route path="/incidents/report" element={gated(<WeeklyReportPage />)} />
+                      <Route path="/system" element={gated(<SystemServicesPage />)} />
+                      <Route path="/plex" element={section('media', <PlexPage />)} />
+                      <Route path="/plex/cleanup" element={section('media', <CleanupPage />)} />
+                      <Route path="/network" element={section('network', <NetworkPage />)} />
+                      <Route path="/network/firewall" element={section('network', <FirewallPage />)} />
+                      <Route path="/servers" element={section('servers', <ServersPage />)} />
+                      <Route path="/servers/analytics" element={section('servers', <AnalyticsPage />)} />
+                      <Route path="/servers/:id" element={section('servers', <ServerDetail />)} />
+                      <Route path="/qbittorrent" element={section('media', <QBittorrentPage />)} />
+                      <Route path="/updates" element={section('apps', <UpdatesPage />)} />
+                      <Route path="/apps" element={section('apps', <AppsPage />)} />
+                      <Route path="/logs" element={gated(<LogsPage />)} />
+                      {/* The docs hold nothing private, so they open before signing in too: they explain how to. */}
+                      <Route path="/docs" element={<DocsPage />} />
+                      <Route path="/docs/:slug" element={<DocsPage />} />
+                      <Route path="/notifications" element={gated(<NotificationsPage />)} />
+                      <Route path="/notifications/rules" element={gated(<NotificationsPage />)} />
+                      <Route path="/settings" element={signedOut ? gate : viewer ? <ViewerAccountPage /> : <SettingsPage />} />
+                      <Route path="/setup" element={adminOnly(<SetupPage />)} />
+                      <Route path="/status-page" element={adminOnly(<StatusDesignerPage />)} />
+                      <Route path="/plugins" element={adminOnly(<PluginsPage />)} />
+                      <Route path="/services/:name" element={gated(<ServiceDetail />)} />
+                      <Route path="*" element={gated(<NotFound />)} />
+                    </Routes>
+                  </div>
+                </ErrorBoundary>
               </Suspense>
               {!signedOut && <Freshness version={config?.version} />}
             </div>

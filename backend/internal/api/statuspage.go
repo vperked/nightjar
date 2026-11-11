@@ -153,6 +153,26 @@ func (s *Server) renameInDesign(oldName, newName string) {
 	}
 }
 
+// removeFromDesign takes a deleted check off the page.
+func (s *Server) removeFromDesign(name string) {
+	d := s.design()
+	if d == nil || name == "" {
+		return
+	}
+	changed := false
+	for gi := range d.Groups {
+		g := &d.Groups[gi]
+		kept := slices.DeleteFunc(g.Items, func(it StatusItem) bool { return it.Check == name })
+		changed = changed || len(kept) != len(g.Items)
+		g.Items = kept
+	}
+	if changed {
+		if data, err := json.Marshal(d); err == nil {
+			s.cfg.Store.SetMeta(designKey, string(data))
+		}
+	}
+}
+
 // statusPageDesign serves the design for the editor, with the checks there are to choose from.
 func (s *Server) statusPageDesign(w http.ResponseWriter, r *http.Request) {
 	cfg := s.ctx.Config()
@@ -241,17 +261,23 @@ func (s *Server) checkDays() map[string][]publicDay {
 	}
 	out := map[string][]publicDay{}
 	if s.ctx.Services != nil {
-		_, offset := time.Now().Zone()
-		today := (time.Now().Unix() + int64(offset)) / 86400
+		// Each day starts at its own local midnight: one offset for all of them would put the days
+		// before a clock change an hour out.
+		now := time.Now()
+		y, m, day := now.Date()
+		starts := make([]float64, statusDays)
+		for i := range starts {
+			starts[i] = float64(time.Date(y, m, day-(statusDays-1-i), 0, 0, 0, 0, time.Local).Unix())
+		}
+		end := float64(time.Date(y, m, day+1, 0, 0, 0, 0, time.Local).Unix())
 		for _, spec := range s.ctx.Services.Specs() {
 			byDay := map[float64]publicDay{}
-			for _, d := range s.cfg.Store.Days(spec.Name, statusDays, offset) {
+			for _, d := range s.cfg.Store.Days(spec.Name, starts, end) {
 				u := 100 * float64(d.Ups) / float64(d.Checks)
 				byDay[d.Start] = publicDay{T: d.Start, Uptime: &u, DownS: float64(d.Checks-d.Ups) * spec.Interval, checks: d.Checks}
 			}
 			days := make([]publicDay, 0, statusDays)
-			for i := int64(statusDays - 1); i >= 0; i-- {
-				t := float64((today-i)*86400 - int64(offset))
+			for _, t := range starts {
 				if d, ok := byDay[t]; ok {
 					days = append(days, d)
 				} else {

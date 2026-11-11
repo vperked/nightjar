@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import { useServices } from '../api/ServicesContext';
 import type { SettingsResponse, Unit } from '../api/types';
 import { DOCS } from '../docs';
+import { useDialog } from '../hooks/useDialog';
 import { useToast } from './Toasts';
 
 // The finder (Ctrl+K, ⌘K or /) jumps anywhere: a page, an uptime check, a system service, a
@@ -63,9 +65,15 @@ export function Finder({ onToggleTheme }: { onToggleTheme: () => void }) {
   const [units, setUnits] = useState<Unit[]>([]);
   const [settings, setSettings] = useState<SettingsResponse>();
   const input = useRef<HTMLInputElement>(null);
+  // Focus starts in the search box (its first control), Tab stays in the finder, and closing it
+  // puts focus back where it was.
+  const box = useRef<HTMLDivElement>(null);
+  useDialog(box, open);
   const navigate = useNavigate();
   const notify = useToast();
   const { data: checks } = useServices();
+  // A viewer gets no actions that change things, and no settings, which are the admin's.
+  const canEdit = useCanEdit();
 
   // Ctrl+K / ⌘K anywhere, or / when not typing in a field.
   useEffect(() => {
@@ -94,32 +102,32 @@ export function Finder({ onToggleTheme }: { onToggleTheme: () => void }) {
       (r) => setUnits(r.units),
       () => undefined,
     );
-    if (!settings) api.settings().then(setSettings, () => undefined);
-    requestAnimationFrame(() => input.current?.focus());
+    if (!settings && canEdit) api.settings().then(setSettings, () => undefined);
   }, [open]); // only on opening: settings arriving later must not clear what was typed
 
   const items = useMemo<Item[]>(() => {
     const go = (to: string) => () => navigate(to);
     const out: Item[] = PAGES.map(([label, to, words]) => ({ kind: 'Page', label, words: `${label} ${words}`.toLowerCase(), run: go(to) }));
     for (const d of DOCS) out.push({ kind: 'Help', label: d.title, hint: d.group, words: `${d.title} ${d.words} help docs how`.toLowerCase(), run: go(`/docs/${d.slug}`) });
-    out.push(
-      { kind: 'Action', label: 'Add an uptime check', words: 'add new uptime check monitor service', run: go('/services#add') },
-      { kind: 'Action', label: 'Add a torrent', words: 'add torrent magnet download qbittorrent', run: go('/qbittorrent?add=1') },
-      {
-        kind: 'Action',
-        label: 'Check for updates now',
-        words: 'check for updates now upgrade',
-        run: () => {
-          api.checkUpdates().then(
-            () => notify({ tone: 'info', title: 'Checking for updates', body: 'Results appear on the Updates page.' }),
-            (e: Error) => notify({ tone: 'error', title: 'Could not start the check', body: e.message }),
-          );
-          navigate('/updates');
+    if (canEdit)
+      out.push(
+        { kind: 'Action', label: 'Add an uptime check', words: 'add new uptime check monitor service', run: go('/services#add') },
+        { kind: 'Action', label: 'Add a torrent', words: 'add torrent magnet download qbittorrent', run: go('/qbittorrent?add=1') },
+        {
+          kind: 'Action',
+          label: 'Check for updates now',
+          words: 'check for updates now upgrade',
+          run: () => {
+            api.checkUpdates().then(
+              () => notify({ tone: 'info', title: 'Checking for updates', body: 'Results appear on the Updates page.' }),
+              (e: Error) => notify({ tone: 'error', title: 'Could not start the check', body: e.message }),
+            );
+            navigate('/updates');
+          },
         },
-      },
-      { kind: 'Action', label: 'Send a test alert', words: 'send test alert notification discord', run: go('/settings?find=test%20alert') },
-      { kind: 'Action', label: 'Switch light / dark theme', words: 'theme dark light mode toggle', run: onToggleTheme },
-    );
+        { kind: 'Action', label: 'Send a test alert', words: 'send test alert notification discord', run: go('/settings?find=test%20alert') },
+      );
+    out.push({ kind: 'Action', label: 'Switch light / dark theme', words: 'theme dark light mode toggle', run: onToggleTheme });
     for (const c of checks?.services ?? []) {
       out.push({ kind: 'Check', label: c.name, hint: `${c.status} · ${c.target}`, words: `${c.name} ${c.target} ${c.type}`.toLowerCase(), run: go(`/services/${encodeURIComponent(c.name)}`) });
     }
@@ -133,7 +141,7 @@ export function Finder({ onToggleTheme }: { onToggleTheme: () => void }) {
       }
     }
     return out;
-  }, [checks, units, settings, navigate, notify, onToggleTheme]);
+  }, [checks, units, settings, navigate, notify, onToggleTheme, canEdit]);
 
   const shown = useMemo(() => match(items, query), [items, query]);
   useEffect(() => setActive(0), [query]);
@@ -158,14 +166,16 @@ export function Finder({ onToggleTheme }: { onToggleTheme: () => void }) {
       e.preventDefault();
       choose(shown[active]);
     } else if (e.key === 'Escape') {
+      // Escape closes only the finder, not a sheet or menu open underneath it.
       e.preventDefault();
+      e.stopPropagation();
       setOpen(false);
     }
   };
 
   return (
     <div className="finder-backdrop" onMouseDown={() => setOpen(false)}>
-      <div className="finder" role="dialog" aria-modal="true" aria-label="Find" onMouseDown={(e) => e.stopPropagation()}>
+      <div ref={box} className="finder" role="dialog" aria-modal="true" aria-label="Find" onMouseDown={(e) => e.stopPropagation()}>
         <div className="finder-input">
           <SearchIcon />
           <input

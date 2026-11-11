@@ -26,9 +26,12 @@ const LEAVE_MS = 160;
 
 const GLYPH: Record<Tone, string> = { ok: 'M7.5 12.5l3 3 6-6.5', info: 'M12 11v5.5M12 7.5v.5', warning: 'M12 7v6M12 16.5v.5', error: 'M8 8l8 8M16 8l-8 8' };
 
-// ToastItem counts down its own time, paused while the pointer is over it, and shows what is left as a hairline.
+// ToastItem counts down its own time, paused while the pointer is over it or keyboard focus is in it
+// (on its Dismiss button), and shows what is left as a hairline.
 function ToastItem({ toast, onDone }: { toast: Toast; onDone: (id: number) => void }) {
-  const [paused, setPaused] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const paused = hovered || focused;
   const left = useRef(DURATION[toast.tone]);
   useEffect(() => {
     if (paused || toast.leaving) return;
@@ -43,8 +46,10 @@ function ToastItem({ toast, onDone }: { toast: Toast; onDone: (id: number) => vo
     <div
       className={`toast ${toast.tone} ${toast.leaving ? 'leaving' : ''} ${paused ? 'paused' : ''}`}
       style={{ ['--toast-time' as string]: `${DURATION[toast.tone]}ms` }}
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setFocused(false)}
     >
       <span className="toast-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24">

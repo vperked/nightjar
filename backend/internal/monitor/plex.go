@@ -34,6 +34,9 @@ func (h *plexWatcher) check(s *Snapshot) {
 			}, "plex_down", true)
 		case plex.EventUp:
 			h.log.Info(fmt.Sprintf("[RECOVERED] Plex reachable again after %s", format.Duration(e.Downtime)))
+			// EventDown comes once per outage, so the next outage must alert at once: left in its
+			// cooldown it would be dropped, and the last word the user had would be "back up".
+			h.ctx.Gates.Clear("plex:down")
 			if hook != nil {
 				hook.SendEmbed("Plex is back up", "Plex Media Server answers again.", discord.OK, []discord.Field{
 					field("Down for", discord.Span(e.Downtime), true),

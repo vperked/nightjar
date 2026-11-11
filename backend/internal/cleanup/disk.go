@@ -451,10 +451,59 @@ func (c *Cleaner) CleanDiskSpace(mount string, targetFreePercent float64) Stats 
 	return st
 }
 
-// cleanPackageCaches empties the given (already resolved) package caches.
+// aptLocks are what apt and dpkg lock while they work. Packages an update is installing sit in
+// apt's cache meanwhile, and deleting them under it breaks the update.
+var aptLocks = []string{"/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock", "/var/cache/apt/archives/lock"}
+
+// pacmanLock exists while pacman runs.
+const pacmanLock = "/var/lib/pacman/db.lck"
+
+// packagesBusy reports whether the package manager owning a cache is at work (an update applying,
+// say), so the cache is left alone. Tests replace it.
+var packagesBusy = func(cache string) bool {
+	switch {
+	case strings.Contains(cache, "/apt/") || strings.HasSuffix(cache, "/apt"):
+		for _, p := range aptLocks {
+			if lockHeld(p) {
+				return true
+			}
+		}
+	case strings.Contains(cache, "/pacman/") || strings.HasSuffix(cache, "/pacman"):
+		_, err := os.Lstat(pacmanLock)
+		return err == nil
+	}
+	return false
+}
+
+// lockHeld reports whether some process holds path locked, as apt and dpkg lock their files: with
+// fcntl record locks, which flock neither sees nor takes. A missing file is no lock; one that
+// cannot be looked at counts as locked, to be safe.
+func lockHeld(path string) bool {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	defer unix.Close(fd)
+	// An open file description lock query: it reports traditional locks too, even this process's.
+	lk := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0}
+	if err := unix.FcntlFlock(uintptr(fd), unix.F_OFD_GETLK, &lk); err != nil {
+		return true
+	}
+	return lk.Type != unix.F_UNLCK
+}
+
+// cleanPackageCaches empties the given (already resolved) package caches, except those whose
+// package manager is at work.
 func cleanPackageCaches(paths []string) Stats {
 	var st Stats
 	for _, path := range paths {
+		if packagesBusy(path) {
+			diskLog.Info("[CLEANUP] Skipping " + path + ": the package manager is at work")
+			continue
+		}
 		if strings.Contains(path, "apt/archives") {
 			entries, err := os.ReadDir(path)
 			if err != nil {
@@ -516,6 +565,10 @@ func (c *Cleaner) EmergencyClean(mount string) Stats {
 		diskLog.Info("[EMERGENCY] Step 3: Cleaning additional cache directories...")
 	}
 	for _, dir := range caches {
+		if packagesBusy(dir) {
+			diskLog.Warn("[EMERGENCY] Skipping " + dir + ": the package manager is at work")
+			continue
+		}
 		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
 			CleanTree(dir, 24*time.Hour, &st, time.Now())
 		}

@@ -123,10 +123,66 @@ func (m *Manager) install(ctx context.Context, s Spec, res Result, auto bool) (s
 	case KindGit:
 		return m.installGit(ctx, s)
 	case KindRelease:
-		_, err := m.run(ctx, Command{Argv: shell(s.UpdateCommand), Env: versionEnv(res.Latest), Root: true, Timeout: long})
+		c := Command{Argv: shell(s.UpdateCommand), Env: versionEnv(res.Latest), Root: true, Timeout: long}
+		if s.Asset != "" {
+			url, sum, err := m.releaseAsset(ctx, cmp.Or(s.AssetRepo, s.Repo), s.Asset)
+			if err != nil {
+				return "", err
+			}
+			c.Env = append(c.Env, "ASSET_URL="+url, "ASSET_SHA256="+sum)
+		}
+		// In a folder, as its owner (as git targets are): a build run as root in a folder another
+		// account can change would run whatever that account put there as root.
+		if s.Dir != "" {
+			as, err := owner(s.Dir)
+			if err != nil {
+				return "", err
+			}
+			c.Dir = s.Dir
+			if as != "" && as != "root" {
+				c.User, c.Root = as, false
+			}
+		}
+		_, err := m.run(ctx, c)
 		return "", err
 	}
 	return "", fmt.Errorf("unknown kind %q", s.Kind)
+}
+
+var (
+	sha256RE   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	safeURLRE  = regexp.MustCompile(`^https://[A-Za-z0-9._~:/?#\[\]@!&()*+,;=%-]+$`)
+	errNoCheck = errors.New("GitHub lists no SHA-256 checksum for it, so the download cannot be checked and is not installed")
+)
+
+// releaseAsset is the download address and SHA-256 of a file of a repository's latest release.
+func (m *Manager) releaseAsset(ctx context.Context, repo, name string) (string, string, error) {
+	var rel struct {
+		Tag    string `json:"tag_name"`
+		Assets []struct {
+			Name   string `json:"name"`
+			URL    string `json:"browser_download_url"`
+			Digest string `json:"digest"` // "sha256:…", for releases since mid-2025
+		} `json:"assets"`
+	}
+	api := strings.TrimRight(m.opt.GitHubAPI, "/") + "/repos/" + repo + "/releases/latest"
+	if err := m.getJSON(ctx, api, "", &rel); err != nil {
+		return "", "", fmt.Errorf("GitHub %s: %w", repo, err)
+	}
+	for _, a := range rel.Assets {
+		if a.Name != name {
+			continue
+		}
+		sum, ok := strings.CutPrefix(strings.ToLower(a.Digest), "sha256:")
+		if !ok || !sha256RE.MatchString(sum) {
+			return "", "", fmt.Errorf("%s in %s %s: %w", name, repo, rel.Tag, errNoCheck)
+		}
+		if !safeURLRE.MatchString(a.URL) {
+			return "", "", fmt.Errorf("%s in %s %s has an unexpected download address %q", name, repo, rel.Tag, a.URL)
+		}
+		return a.URL, sum, nil
+	}
+	return "", "", fmt.Errorf("the latest release of %s (%s) has no %s", repo, rel.Tag, name)
 }
 
 func versionEnv(latest string) []string {

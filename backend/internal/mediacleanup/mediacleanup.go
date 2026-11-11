@@ -122,10 +122,20 @@ type Manager struct {
 	removing map[string]bool
 }
 
-func (m *Manager) load() state {
+// errState means the stored list could not be read. Nothing is saved over it then: an empty list
+// saved in its place would forget what the owner kept, and those titles would be removed later.
+var errState = errors.New("the cleanup list could not be read")
+
+func (m *Manager) load() (state, error) {
 	st := state{Items: map[string]*Item{}, Kept: map[string]Kept{}, Notified: map[string]bool{}}
-	if raw := m.Store.Meta(stateKey); raw != "" {
-		json.Unmarshal([]byte(raw), &st)
+	raw, err := m.Store.MetaValue(stateKey)
+	if err != nil {
+		return st, fmt.Errorf("%w: %v", errState, err)
+	}
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &st); err != nil {
+			return state{Items: map[string]*Item{}, Kept: map[string]Kept{}, Notified: map[string]bool{}}, fmt.Errorf("%w: %v", errState, err)
+		}
 	}
 	if st.Items == nil {
 		st.Items = map[string]*Item{}
@@ -136,12 +146,14 @@ func (m *Manager) load() state {
 	if st.Notified == nil {
 		st.Notified = map[string]bool{}
 	}
-	return st
+	return st, nil
 }
 
 func (m *Manager) save(st state) {
 	data, _ := json.Marshal(st)
-	m.Store.SetMeta(stateKey, string(data))
+	if err := m.Store.SetMeta(stateKey, string(data)); err != nil {
+		log.Warn("Could not save the media cleanup list", "err", err)
+	}
 }
 
 // View is the list for the dashboard.
@@ -164,8 +176,11 @@ type View struct {
 // View is the current list, soonest to go first, then what was removed lately.
 func (m *Manager) View() View {
 	m.mu.Lock()
-	st := m.load()
+	st, err := m.load()
 	m.mu.Unlock()
+	if err != nil {
+		st.Error = err.Error()
+	}
 	cfg := m.Config()
 	v := View{Enabled: cfg.MediaCleanup, Items: []Item{}, Kept: []Kept{}, Scanned: st.Scanned, Error: st.Error, Freed: st.Freed,
 		Days: cfg.MediaCleanupDays, NoticeDays: cfg.MediaCleanupNoticeDays, Ratio: cfg.MediaCleanupRatio, RatioDays: cfg.MediaCleanupRatioDays, Managers: []string{}, Found: []string{}}
@@ -199,7 +214,10 @@ var ErrUnknown = errors.New("that is not on the cleanup list")
 func (m *Manager) Keep(key string, keep bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	st := m.load()
+	st, err := m.load()
+	if err != nil {
+		return err
+	}
 	if keep {
 		it, ok := st.Items[key]
 		if !ok {
@@ -235,7 +253,13 @@ func (m *Manager) Scan(ctx context.Context) error {
 	t := float64(now.Unix())
 	err := m.scan(ctx, cfg, src, t)
 	m.mu.Lock()
-	st := m.load()
+	defer m.mu.Unlock()
+	st, lerr := m.load()
+	if lerr != nil {
+		// Saving the time and error over a list that could not be read would wipe it.
+		log.Warn("Media cleanup pass could not read its list; nothing was saved", "err", lerr)
+		return cmp.Or(err, lerr)
+	}
 	st.Scanned = t
 	st.Error = ""
 	if err != nil {
@@ -243,7 +267,6 @@ func (m *Manager) Scan(ctx context.Context) error {
 		log.Warn("Media cleanup pass failed", "err", err)
 	}
 	m.save(st)
-	m.mu.Unlock()
 	return err
 }
 
@@ -277,8 +300,11 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 	}
 
 	m.mu.Lock()
-	st := m.load()
+	st, err := m.load()
 	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	cutoff := t - float64(cfg.MediaCleanupDays)*86400
 	qualifies := map[string]plex.Item{}
 	for _, it := range found {
@@ -396,12 +422,18 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 		}
 	}
 
-	// What is due goes, a few at a time.
+	// What is due goes, a few at a time. Attempts count, not only removals: a fault that makes
+	// every removal fail halfway (torrents gone, media not) must not go through the whole list.
 	var gone []*Item
 	if cfg.MediaCleanup {
 		giveUp := float64(cfg.MediaCleanupRatioDays) * 86400
+		attempts := 0
 		for _, it := range sortedDue(st.Items, t) {
-			if len(gone) >= maxRemovals {
+			if attempts >= maxRemovals {
+				break
+			}
+			// Stopping (Nightjar shutting down, or out of time): what was done so far is saved below.
+			if ctx.Err() != nil {
 				break
 			}
 			if why, ok := unsure[it.Key]; ok {
@@ -415,9 +447,12 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 				it.Reason = fmt.Sprintf("seeding to ratio %.2f: at %.2f; removed anyway on %s", cfg.MediaCleanupRatio, tr.Ratio, time.Unix(int64(it.LeavingAt+giveUp), 0).Format("Mon 2 Jan"))
 				continue
 			}
-			// Kept since the pass began: it stays. Otherwise Keep is refused from here on.
+			// Kept since the pass began: it stays. Otherwise Keep is refused from here on. A list that
+			// cannot be read now counts as kept: whether it was is unknown.
 			m.mu.Lock()
-			_, kept := m.load().Kept[it.Key]
+			latest, err := m.load()
+			_, kept := latest.Kept[it.Key]
+			kept = kept || err != nil
 			if !kept {
 				if m.removing == nil {
 					m.removing = map[string]bool{}
@@ -428,7 +463,13 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 			if kept {
 				continue
 			}
-			if err := m.remove(ctx, src, it, entries); err != nil {
+			attempts++
+			// Once begun, an item's removal is finished even if the pass is told to stop, so it is
+			// not left with its torrents gone and its media still there.
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			err = m.remove(rctx, src, it, entries)
+			cancel()
+			if err != nil {
 				it.Status, it.Reason = Failed, err.Error()
 				log.Warn("Could not remove "+it.Title, "err", err)
 				m.mu.Lock()
@@ -447,17 +488,20 @@ func (m *Manager) scan(ctx context.Context, cfg config.Settings, src Sources, t 
 	}
 
 	m.mu.Lock()
-	// Keep and unkeep may have happened meanwhile: theirs wins.
-	latest := m.load()
-	for key := range latest.Kept {
-		delete(st.Items, key)
+	// Keep and unkeep may have happened meanwhile: theirs wins. Unread, the list is not saved over:
+	// what this pass removed is gone from Plex, so the next pass drops it anyway.
+	latest, err := m.load()
+	if err == nil {
+		for key := range latest.Kept {
+			delete(st.Items, key)
+		}
+		st.Kept = latest.Kept
+		m.save(st)
 	}
-	st.Kept = latest.Kept
-	m.save(st)
 	m.removing = nil
 	m.mu.Unlock()
 	m.announce(newly, gone, cfg)
-	return nil
+	return err
 }
 
 // sortedDue is what should go by t, soonest first.
@@ -479,26 +523,44 @@ func sortedDue(items map[string]*Item, t float64) []*Item {
 }
 
 // remove deletes the torrents (with their files, when they are the item's alone), then the media
-// through whoever manages it.
+// through whoever manages it. Who that is, and that they still have it, is settled before any
+// torrent goes, so a failure there leaves everything as it was.
 func (m *Manager) remove(ctx context.Context, src Sources, it *Item, entries map[string][]arr.Entry) error {
-	for _, tr := range it.Torrents {
-		if src.QB == nil || src.QB.Delete(tr.Hash, tr.withFiles) == nil {
-			return fmt.Errorf("qBittorrent did not remove the torrent %s", tr.Name)
-		}
-	}
+	var media func() error
 	switch it.Manager {
 	case "sonarr", "radarr":
-		c := src.Radarr
+		c, name := src.Radarr, "Radarr"
 		if it.Manager == "sonarr" {
-			c = src.Sonarr
+			c, name = src.Sonarr, "Sonarr"
+		}
+		if c == nil {
+			return fmt.Errorf("%s is not connected", name)
 		}
 		e, ok := arr.Match(entries[it.Manager], it.guids, it.files)
 		if !ok {
 			return fmt.Errorf("%s no longer has it", c.Name())
 		}
-		return c.Delete(ctx, e.ID)
+		media = func() error { return c.Delete(ctx, e.ID) }
+	case "plex":
+		if src.Plex == nil {
+			return errors.New("Plex is not connected")
+		}
+		media = func() error { return src.Plex.DeleteItem(it.Key) }
+	default:
+		return fmt.Errorf("nothing removes what %q manages", it.Manager)
 	}
-	return src.Plex.DeleteItem(it.Key)
+	if len(it.Torrents) > 0 && src.QB == nil {
+		return errors.New("qBittorrent is not connected, so its torrents cannot go first")
+	}
+	for _, tr := range it.Torrents {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if src.QB.Delete(tr.Hash, tr.withFiles) == nil {
+			return fmt.Errorf("qBittorrent did not remove the torrent %s", tr.Name)
+		}
+	}
+	return media()
 }
 
 var wordRE = regexp.MustCompile(`[^a-z0-9]+`)
@@ -594,7 +656,8 @@ func noun(n int) string {
 // although the fault (often fixed by the update that restarted the monitor) may be gone.
 func (m *Manager) FirstWait() time.Duration {
 	m.mu.Lock()
-	failed := m.load().Error != ""
+	st, err := m.load()
+	failed := err != nil || st.Error != ""
 	m.mu.Unlock()
 	if failed {
 		return 2 * time.Minute
@@ -613,7 +676,15 @@ func (m *Manager) Loop(stop <-chan struct{}) {
 		}
 		wait = 6 * time.Hour
 		if m.Config().PlexMonitor {
+			// Stopping ends the pass too: no new removal starts, and what was done is saved.
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			go func() {
+				select {
+				case <-stop:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
 			m.Scan(ctx)
 			cancel()
 		}

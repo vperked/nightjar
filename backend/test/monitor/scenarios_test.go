@@ -384,6 +384,12 @@ func TestPlexAlerts(t *testing.T) {
 	pms.down.Store(false)
 	eval(monitor.Snapshot{Now: 60})
 	expectTitles(t, wh, "Plex is transcoding", "Now playing: Thief", "Plex is down", "Plex is back up")
+
+	// A second outage inside the first one's cooldown still alerts: Plex says "down" once per outage.
+	pms.down.Store(true)
+	eval(monitor.Snapshot{Now: 75})
+	eval(monitor.Snapshot{Now: 90})
+	expectTitles(t, wh, "Plex is transcoding", "Now playing: Thief", "Plex is down", "Plex is back up", "Plex is down")
 }
 
 func TestHardwareErrorDescriptions(t *testing.T) {

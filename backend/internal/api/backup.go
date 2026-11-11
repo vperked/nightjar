@@ -9,6 +9,11 @@ import (
 	"time"
 
 	"nightjar/internal/config"
+	"nightjar/internal/incidents"
+	"nightjar/internal/maintenance"
+	"nightjar/internal/notify"
+	"nightjar/internal/plugins"
+	"nightjar/internal/remote"
 	"nightjar/internal/services"
 )
 
@@ -31,6 +36,10 @@ type backup struct {
 	Meta     map[string]any    `json:"meta"`
 }
 
+// backupSecrets are settings shown in the dashboard that a backup without secrets still leaves out:
+// on ntfy.sh, whoever knows the topic in NTFY_URL can read the alerts and send their own.
+var backupSecrets = map[string]bool{"NTFY_URL": true}
+
 // maxBackup is how big a backup may be to restore.
 const maxBackup = 16 << 20
 
@@ -39,11 +48,18 @@ func (s *Server) makeBackup(w http.ResponseWriter, r *http.Request) {
 	b := backup{Nightjar: s.cfg.Version, Made: nowSeconds(), Secrets: withSecrets, Checks: []services.Spec{}, Settings: map[string]string{}, Meta: map[string]any{}}
 	if s.ctx.Services != nil {
 		b.Checks = s.ctx.Services.Specs()
+		if !withSecrets {
+			// A redis check's password, a heartbeat's token (which alone lets a job ping), and the
+			// password or token in an address all stay behind.
+			for i := range b.Checks {
+				b.Checks[i] = b.Checks[i].WithoutSecrets()
+			}
+		}
 	}
 	secret := map[string]bool{}
 	cfg := s.ctx.Config()
 	for _, f := range cfg.Fields() {
-		secret[f.Key] = f.Kind == config.KindSecret
+		secret[f.Key] = f.Kind == config.KindSecret || backupSecrets[f.Key]
 	}
 	for k, v := range s.cfg.Store.Settings() {
 		if !secret[k] || withSecrets {
@@ -70,6 +86,13 @@ func (s *Server) makeBackup(w http.ResponseWriter, r *http.Request) {
 // restoreBackup puts a backup's setup back: its checks are added or replaced (others are left),
 // its settings saved, and the rest replaced. Nightjar restarts when settings that need it changed.
 func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
+	// The parts restored are kept in memory too, and saved from there; only the restart that follows
+	// stops that undoing the restore. An update under way holds the restart until it ends, so the
+	// restore waits for it instead.
+	if s.ctx.Updates != nil && s.ctx.Updates.Applying() != "" {
+		writeJSON(w, http.StatusConflict, errBody("An update is being applied; restore the backup once it has finished"))
+		return
+	}
 	var b backup
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBackup)).Decode(&b); err != nil || b.Nightjar == "" {
 		writeJSON(w, http.StatusBadRequest, errBody("That is not a Nightjar backup"))
@@ -78,6 +101,11 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 	// Everything is checked before anything is changed.
 	var specs []services.Spec
 	for _, raw := range b.Checks {
+		// A backup without secrets leaves them out: the same check here keeps its own. This comes
+		// before parsing, which would give a heartbeat without a token a new one.
+		if !b.Secrets && s.ctx.Services != nil {
+			raw.KeepSecrets(s.ctx.Services.SpecOf(raw.Name))
+		}
 		data, _ := json.Marshal(raw)
 		spec, err := services.ParseSpec(data)
 		if err != nil {
@@ -90,11 +118,21 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Some settings in the backup are not valid", "fields": problems})
 		return
 	}
-	for k := range b.Meta {
+	meta := map[string]string{}
+	for k, v := range b.Meta {
 		if !contains(backupKeys, k) {
 			writeJSON(w, http.StatusBadRequest, errBody(fmt.Sprintf("The backup holds %q, which Nightjar does not restore", k)))
 			return
 		}
+		if !b.Secrets {
+			v = s.keepSecrets(k, v)
+		}
+		data, _ := json.Marshal(v)
+		if err := checkPart(k, data); err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody(fmt.Sprintf("The backup's %q is not valid: %v", k, err)))
+			return
+		}
+		meta[k] = string(data)
 	}
 
 	done := map[string]int{}
@@ -111,23 +149,16 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 			done["checks"]++
 		}
 	}
-	for k, v := range b.Meta {
-		if !b.Secrets {
-			v = s.keepSecrets(k, v)
-		}
-		data, _ := json.Marshal(v)
-		if err := s.cfg.Store.SetMeta(k, string(data)); err != nil {
+	// The rest goes in at once, or not at all.
+	if len(meta) > 0 || len(b.Settings) > 0 {
+		if err := s.cfg.Store.Restore(meta, b.Settings); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 			return
 		}
-		done["parts"]++
 	}
+	done["parts"] = len(meta)
 	restart := false
 	if len(b.Settings) > 0 {
-		if err := s.cfg.Store.SaveSettings(b.Settings); err != nil {
-			writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
-			return
-		}
 		done["settings"] = len(b.Settings)
 		restart = true
 	}
@@ -138,6 +169,42 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 	if restart {
 		time.AfterFunc(300*time.Millisecond, s.cfg.Restart)
 	}
+}
+
+// checkPart reports whether a part of a backup reads as what Nightjar keeps under its key, so a
+// part it could not load (and would then start without, or overwrite) is never restored.
+func checkPart(key string, data []byte) error {
+	if string(data) == "null" {
+		return errors.New("it is empty")
+	}
+	var err error
+	switch key {
+	case "notify.prefs":
+		err = json.Unmarshal(data, new(notify.Prefs))
+	case "maintenance.windows":
+		err = json.Unmarshal(data, new([]maintenance.Window))
+	case "dashboard.appearance":
+		var a Appearance
+		if err = json.Unmarshal(data, &a); err == nil {
+			err = a.validate()
+		}
+	case "statuspage.design":
+		// Not validated as a saved design is: renaming checks may have left one Nightjar shows as it
+		// is but would not take from the editor.
+		err = json.Unmarshal(data, new(StatusDesign))
+	case "remote.hosts":
+		err = json.Unmarshal(data, new([]remote.Host))
+	case "plugins.state":
+		err = json.Unmarshal(data, new(map[string]plugins.State))
+	case "incidents.feedback":
+		err = json.Unmarshal(data, new(map[int64]incidents.Feedback))
+	case "incidents.notices":
+		err = json.Unmarshal(data, new(map[int64]incidents.Notice))
+	default:
+		// The media cleanup's state is its own; it is at least an object.
+		err = json.Unmarshal(data, new(map[string]any))
+	}
+	return err
 }
 
 // Besides the secret settings, two parts hold secrets: each server's agent token in remote.hosts

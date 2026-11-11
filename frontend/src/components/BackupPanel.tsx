@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react';
-import { api } from '../api/client';
+import { api, waitForRestart } from '../api/client';
+import { plural } from '../format';
 import { SettingsGroup } from './SettingsGroup';
+import { Working } from './Skeleton';
 import { useToast } from './Toasts';
 
 // Backup and restore: Nightjar's own setup in one file, for a new machine or to undo a mistake.
@@ -21,6 +23,7 @@ export function BackupPanel() {
   const file = useRef<HTMLInputElement>(null);
   const [pending, setPending] = useState<{ name: string; data: Record<string, unknown> }>();
   const [busy, setBusy] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const download = async (secrets: boolean) => {
     try {
       const b = await api.backup(secrets);
@@ -53,9 +56,15 @@ export function BackupPanel() {
       notify({
         tone: 'ok',
         title: 'Backup restored',
-        body: `${r.restored.checks ?? 0} checks, ${r.restored.settings ?? 0} settings and ${r.restored.parts ?? 0} other parts.${r.restarting ? ' Nightjar is restarting to put them in force.' : ''}`,
+        body: `${plural(r.restored.checks ?? 0, 'check')}, ${plural(r.restored.settings ?? 0, 'setting')} and ${plural(r.restored.parts ?? 0, 'other part')}.${r.restarting ? ' Nightjar is restarting to put them in force.' : ''}`,
       });
       setPending(undefined);
+      // As with saving settings: wait for the monitor to come back, then reload so the page
+      // shows the restored setup rather than what was there before.
+      if (r.restarting) {
+        setRestarting(true);
+        await waitForRestart();
+      }
     } catch (e) {
       notify({ tone: 'error', title: 'Could not restore it', body: (e as Error).message });
     } finally {
@@ -63,6 +72,13 @@ export function BackupPanel() {
     }
   };
   const checks = Array.isArray(pending?.data.checks) ? (pending!.data.checks as unknown[]).length : 0;
+  if (restarting) {
+    return (
+      <SettingsGroup id="backup" name="Backup">
+        <Working text="Restored. Restarting the monitor to put the backup in force…" />
+      </SettingsGroup>
+    );
+  }
   return (
     <SettingsGroup id="backup" name="Backup">
       <div className="backup-row">
@@ -95,7 +111,7 @@ export function BackupPanel() {
         <div className="backup-confirm">
           <span>
             Restore <strong>{pending.name}</strong>
-            {typeof pending.data.made === 'number' ? `, made ${new Date((pending.data.made as number) * 1000).toLocaleString()}` : ''}, with {checks} checks?
+            {typeof pending.data.made === 'number' ? `, made ${new Date((pending.data.made as number) * 1000).toLocaleString()}` : ''}, with {plural(checks, 'check')}?
           </span>
           <span className="inline-fields">
             <button type="button" className="btn-quiet" onClick={() => setPending(undefined)}>

@@ -68,6 +68,17 @@ function heroLine(data: PublicStatus): string {
   return VERDICT[data.overall].sub;
 }
 
+// overallUptime is the mean of the listed services' figures, over 90 days (30 from an older monitor),
+// for the headline; null when the design hides uptime or there is none yet.
+function overallUptime(data: PublicStatus): { value: number; days: number } | null {
+  if (data.show_uptime === false) return null;
+  const listed = data.services.filter((s) => s.status !== 'paused');
+  const long = listed.map((s) => s.uptime_90d).filter((v): v is number => typeof v === 'number');
+  const short = listed.map((s) => s.uptime_30d).filter((v): v is number => typeof v === 'number');
+  const [values, days] = long.length ? [long, 90] : [short, 30];
+  return values.length ? { value: values.reduce((a, b) => a + b, 0) / values.length, days } : null;
+}
+
 function ago(seconds: number): string {
   if (seconds < 10) return 'just now';
   if (seconds < 60) return `${Math.floor(seconds / 10) * 10} seconds ago`;
@@ -75,9 +86,31 @@ function ago(seconds: number): string {
   return m === 1 ? 'a minute ago' : `${m} minutes ago`;
 }
 
-// DayBars is a service's last 90 days. Hovering a day, or moving along with the arrow keys, says
-// how that day went.
-function DayBars({ days, name }: { days: PublicDay[]; name: string }) {
+// PHONE matches the stylesheet's phone width, where the bars show only the last 30 days.
+const PHONE = '(max-width: 640px)';
+const PHONE_DAYS = 30;
+
+// usePhone follows whether the page is at phone width.
+function usePhone(): boolean {
+  const [phone, setPhone] = useState(() => typeof window !== 'undefined' && !!window.matchMedia?.(PHONE).matches);
+  useEffect(() => {
+    const mq = window.matchMedia?.(PHONE);
+    if (!mq) return;
+    const change = () => setPhone(mq.matches);
+    change();
+    mq.addEventListener?.('change', change);
+    return () => mq.removeEventListener?.('change', change);
+  }, []);
+  return phone;
+}
+
+// DayBars is a service's last 90 days, or 30 on a phone. Hovering a day, or moving along with the
+// arrow keys, says how that day went.
+function DayBars({ days: all, name }: { days: PublicDay[]; name: string }) {
+  // A phone draws only the days it shows, so the tooltip sits over the bar it describes and the
+  // arrow keys cannot walk into days that are not there.
+  const phone = usePhone();
+  const days = phone ? all.slice(-PHONE_DAYS) : all;
   const [at, setAt] = useState<number | null>(null);
   const bad = days.filter((d) => d.uptime !== null && d.uptime < 99.9).length;
   const keys = (e: KeyboardEvent) => {
@@ -85,7 +118,7 @@ function DayBars({ days, name }: { days: PublicDay[]; name: string }) {
     e.preventDefault();
     setAt((i) => Math.max(0, Math.min(days.length - 1, (i ?? days.length) + (e.key === 'ArrowLeft' ? -1 : 1))));
   };
-  const d = at === null ? null : days[at];
+  const d = at === null ? undefined : days[at];
   return (
     <div className="day-bars-wrap">
       <div
@@ -118,35 +151,33 @@ function DayBars({ days, name }: { days: PublicDay[]; name: string }) {
   );
 }
 
+// Uptime is a service's figure over the days its bars show: 90 days, or 30 on a phone, which draws
+// only the last 30 bars.
+function Uptime({ long, short }: { long: number; short: number | null | undefined }) {
+  if (short === null || short === undefined || percent(short) === percent(long)) return <span className="status-row-uptime num">{percent(long)} uptime</span>;
+  return (
+    <span className="status-row-uptime num">
+      <span className="long">{percent(long)} uptime</span>
+      <span className="short">{percent(short)} uptime</span>
+    </span>
+  );
+}
+
 function Row({ s, data }: { s: PublicService; data: PublicStatus }) {
   const days = data.show_history !== false ? (s.days ?? []) : [];
   // An older monitor sends no days; the page still says how the service has done.
   const uptime = data.show_uptime !== false ? (s.uptime_90d ?? s.uptime_30d) : null;
   return (
-    <div className="status-row">
+    <div className={`status-row ${days.length ? 'has-days' : ''}`}>
       <div className="status-row-head">
         <span className="status-name">{s.name}</span>
+        {uptime !== null && uptime !== undefined && <Uptime long={uptime} short={days.length ? s.uptime_30d : null} />}
         <span className={`status-state ${s.status}`}>
           <span className="status-dot" aria-hidden="true" />
           {STATE[s.status]}
         </span>
       </div>
-      {days.length > 0 && (
-        <>
-          <DayBars days={days} name={s.name} />
-          <div className="status-scale">
-            <span>
-              <span className="long">{days.length} days ago</span>
-              <span className="short">30 days ago</span>
-            </span>
-            <span className="status-scale-rule" aria-hidden="true" />
-            {uptime !== null && uptime !== undefined && <span className="status-scale-uptime">{percent(uptime)} uptime</span>}
-            <span className="status-scale-rule" aria-hidden="true" />
-            <span>Today</span>
-          </div>
-        </>
-      )}
-      {days.length === 0 && uptime !== null && uptime !== undefined && <div className="status-scale-uptime solo">{percent(uptime)} uptime</div>}
+      {days.length > 0 && <DayBars days={days} name={s.name} />}
     </div>
   );
 }
@@ -157,6 +188,8 @@ function Group({ name, services, data }: { name: string; services: PublicService
   const down = watched.filter((s) => s.status === 'down').length;
   // Red when all are down, amber when some are, grey when some only rest (maintenance, checking).
   const tone = down ? (down === watched.length ? 'down' : 'some') : up < watched.length ? 'quiet' : '';
+  // One scale under the whole list, rather than under every row.
+  const span = data.show_history !== false ? Math.max(0, ...services.map((s) => (s.days ?? []).length)) : 0;
   return (
     <section className="status-group">
       <div className="status-group-head">
@@ -167,6 +200,16 @@ function Group({ name, services, data }: { name: string; services: PublicService
         {services.map((s) => (
           <Row key={s.name} s={s} data={data} />
         ))}
+        {span > 0 && (
+          <div className="status-scale" aria-hidden="true">
+            <span>
+              <span className="long">{plural(span, 'day')} ago</span>
+              <span className="short">{plural(Math.min(span, PHONE_DAYS), 'day')} ago</span>
+            </span>
+            <span className="status-scale-rule" />
+            <span>Today</span>
+          </div>
+        )}
       </div>
     </section>
   );
@@ -190,6 +233,7 @@ export function StatusView({ data, scope }: { data: PublicStatus; scope?: string
   const incidents = data.incidents ?? [];
   const ongoing = incidents.filter((n) => n.ended === null);
   const settled = incidents.filter((n) => n.ended !== null);
+  const overall = overallUptime(data);
   return (
     <main className="status-page">
       {css && <style>{css}</style>}
@@ -209,17 +253,32 @@ export function StatusView({ data, scope }: { data: PublicStatus; scope?: string
         </div>
       )}
 
-      <div className={`status-hero ${data.overall}`} role="status">
-        <span className="status-hero-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24">
-            <path d={ICON[data.overall]} />
-          </svg>
-        </span>
-        <div className="min0">
-          <strong>{verdict.title}</strong>
-          <span>{heroLine(data)}</span>
+      {/* Only the verdict is a live region: a screen reader hears when it changes, not the
+          "Updated" time beside it, which moves on every few seconds. */}
+      <div className={`status-hero ${data.overall}`}>
+        <div className="status-hero-main" role="status">
+          <span className="status-hero-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d={ICON[data.overall]} />
+            </svg>
+          </span>
+          <div className="min0">
+            <strong>{verdict.title}</strong>
+            <span>{heroLine(data)}</span>
+          </div>
         </div>
-        <span className="status-hero-when num">Updated {ago(Math.max(0, now - data.updated))}</span>
+        <div className="status-hero-facts">
+          {overall && (
+            <span className="status-fact">
+              <b className="num">{percent(overall.value)}</b> uptime over {overall.days} days
+            </span>
+          )}
+          <span className="status-fact">{plural(data.services.length, 'service')}</span>
+          <span className="status-hero-when num">
+            <i className="status-live" aria-hidden="true" />
+            Updated {ago(Math.max(0, now - data.updated))}
+          </span>
+        </div>
       </div>
 
       {(ongoing.length > 0 || (data.maintenance ?? []).length > 0) && (
@@ -293,7 +352,7 @@ export function StatusView({ data, scope }: { data: PublicStatus; scope?: string
       <Custom html={data.footer_html} where="bottom" />
       <footer className="status-footer">
         <span>{data.footer || 'Nightjar'}</span>
-        <span>{plural(data.services.length, 'service')} · refreshes every 30 seconds</span>
+        <span>Refreshes every 30 seconds</span>
       </footer>
     </main>
   );
@@ -320,14 +379,16 @@ export function StatusPage() {
           <h1>Status</h1>
         </header>
         <div className="status-hero unknown" role="status">
-          <span className="status-hero-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24">
-              <path d="M12 7.5v5.5M12 16.5h.01" />
-            </svg>
-          </span>
-          <div className="min0">
-            <strong>The status page is not available</strong>
-            <span>It could not be reached just now. This page tries again every 30 seconds.</span>
+          <div className="status-hero-main">
+            <span className="status-hero-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M12 7.5v5.5M12 16.5h.01" />
+              </svg>
+            </span>
+            <div className="min0">
+              <strong>The status page is not available</strong>
+              <span>It could not be reached just now. This page tries again every 30 seconds.</span>
+            </div>
           </div>
         </div>
       </main>

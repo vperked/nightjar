@@ -1,5 +1,6 @@
-import { Fragment, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useRef, type ReactNode } from 'react';
 import { Link } from 'react-router';
+import { useCopy } from '../clipboard';
 
 // Markdown renders the small Markdown the docs are written in: headings, paragraphs, bullet and
 // numbered lists (with indented blocks inside items), tables, fenced code, quotes, and inline
@@ -201,31 +202,20 @@ const LANGS: Record<string, string> = { bash: 'Shell', sh: 'Shell', nginx: 'ngin
 
 // CodeBlock is a fenced block with its language and a copy button.
 export function CodeBlock({ lang, text }: { lang: string; text: string }) {
-  const [copied, setCopied] = useState(false);
   const code = useRef<HTMLElement>(null);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch {
-      // Plain http has no clipboard: select it, so Ctrl+C copies.
-      const range = document.createRange();
-      if (code.current) range.selectNodeContents(code.current);
-      window.getSelection()?.removeAllRanges();
-      window.getSelection()?.addRange(range);
-    }
-  };
+  // On plain http, with no clipboard, the code is selected and the button says to press Ctrl+C.
+  const { state, copy, label } = useCopy(text, code);
+  const copied = state === 'copied';
   const lines = text.split('\n');
   return (
     <figure className="doc-code">
       <figcaption>
         <span className="doc-code-lang">{LANGS[lang] ?? (lang || 'Text')}</span>
-        <button type="button" className={`doc-code-copy ${copied ? 'done' : ''}`} onClick={copy} aria-label={copied ? 'Copied' : 'Copy to clipboard'}>
+        <button type="button" className={`doc-code-copy ${copied ? 'done' : ''}`} onClick={copy} aria-label={state ? label() : 'Copy to clipboard'}>
           <svg viewBox="0 0 24 24" aria-hidden="true">
             {copied ? <path d="M5 12.5l4.2 4.2L19 7" /> : <path d="M9 9h10v11H9zM5 15V4h10" />}
           </svg>
-          {copied ? 'Copied' : 'Copy'}
+          {label()}
         </button>
       </figcaption>
       <pre>

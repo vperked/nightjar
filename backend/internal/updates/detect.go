@@ -7,6 +7,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -41,8 +42,7 @@ func Detect(run Runner) []Spec {
 	if qb := d.firstUnit("qbittorrent@*", "qbittorrent", "qbittorrent-nox"); qb != "" && d.dpkgHas("qbittorrent-nox") {
 		// swizzin builds qBittorrent from source, interactively, and only up to 5.1. The official
 		// static build replaces its program instead: one file, any version, in seconds.
-		add(Spec{ID: "qbittorrent", Name: "qBittorrent", Kind: KindRelease, Repo: "qbittorrent/qBittorrent", TagPrefix: "release-",
-			VersionCommand: qbVersion, UpdateCommand: qbStaticUpdate, Unit: qb, Restart: true}, true)
+		add(QBittorrentStatic(qb, runtime.GOARCH), true)
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		for _, dir := range []string{"/opt/uptime-kuma", filepath.Join(home, "uptime-kuma")} {
@@ -193,9 +193,42 @@ func (d detector) release(id, name, repo, marker, versionCommand, unit string) (
 // qbVersion asks the program itself, which is right whichever build is installed.
 const qbVersion = "/usr/bin/qbittorrent-nox --version"
 
+// QBittorrentStatic is qBittorrent run by unit, updated to the official static build for goarch.
+func QBittorrentStatic(unit, goarch string) Spec {
+	return Spec{ID: "qbittorrent", Name: "qBittorrent", Kind: KindRelease, Repo: "qbittorrent/qBittorrent", TagPrefix: "release-",
+		VersionCommand: qbVersion, UpdateCommand: qbStaticUpdate, Asset: qbStaticAsset(goarch), AssetRepo: qbStaticRepo, Unit: unit, Restart: true}
+}
+
+// qbStaticRepo publishes the official static builds of qBittorrent.
+const qbStaticRepo = "userdocs/qbittorrent-nox-static"
+
+// qbStaticAsset is the static build for this machine's architecture, or "" when there is none.
+func qbStaticAsset(goarch string) string {
+	switch goarch {
+	case "amd64":
+		return "x86_64-qbittorrent-nox"
+	case "arm64":
+		return "aarch64-qbittorrent-nox"
+	}
+	return ""
+}
+
 // qbStaticUpdate puts the newest official static build in place of /usr/bin/qbittorrent-nox: it
-// downloads it, checks it runs, then swaps it in with a rename, which works while the old one runs.
+// downloads the build Nightjar found (with the SHA-256 GitHub lists for it), checks the download
+// is that build, checks it runs (as nobody: a program not yet trusted gets no root), then swaps it
+// in with a rename, which works while the old one runs.
 const qbStaticUpdate = `set -e
+[ -n "$ASSET_URL" ] && [ -n "$ASSET_SHA256" ] || { echo "no checked static qBittorrent build for $(uname -m)"; exit 1; }
+tmp=$(mktemp /usr/bin/.qbittorrent-nox.XXXXXX); trap 'rm -f "$tmp"' EXIT
+curl -fsSL --retry 3 -o "$tmp" "$ASSET_URL"
+echo "$ASSET_SHA256  $tmp" | sha256sum -c --status - || { echo "the download is not the build GitHub lists (SHA-256 mismatch); nothing was changed"; exit 1; }
+chmod 755 "$tmp"
+setpriv --reuid=65534 --regid=65534 --clear-groups env HOME=/nonexistent "$tmp" --version
+mv -f "$tmp" /usr/bin/qbittorrent-nox
+trap - EXIT`
+
+// qbStaticUpdateV1 is qbStaticUpdate as Nightjar wrote it before it checked the download.
+const qbStaticUpdateV1 = `set -e
 case "$(uname -m)" in x86_64) arch=x86_64 ;; aarch64) arch=aarch64 ;; *) echo "no static qBittorrent build for $(uname -m)"; exit 1 ;; esac
 tmp=$(mktemp /usr/bin/.qbittorrent-nox.XXXXXX); trap 'rm -f "$tmp"' EXIT
 curl -fsSL --retry 3 -o "$tmp" "https://github.com/userdocs/qbittorrent-nox-static/releases/latest/download/${arch}-qbittorrent-nox"
@@ -212,6 +245,7 @@ const seerrFetch = `git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"`
 // and otherwise untouched, gets the new line.
 var superseded = [][2]string{
 	{"git fetch --tags --quiet origin", seerrFetch},
+	{qbStaticUpdateV1, qbStaticUpdate},
 }
 
 // seerr is Seerr in a git checkout: an update checks out the new tag and rebuilds it with the Node
@@ -225,6 +259,8 @@ func (d detector) seerr() (Spec, bool) {
 	if args := d.execArgs(s.Unit); len(args) > 0 && filepath.Base(args[0]) == "node" {
 		path = "export PATH=" + shellQuote(filepath.Dir(args[0])) + ":$PATH\n"
 	}
+	// It runs as the checkout's owner: pnpm runs the project's own install scripts.
+	s.Dir = "/opt/seerr"
 	s.UpdateCommand = "set -e\n" + path + `cd /opt/seerr
 ` + seerrFetch + `
 git -c advice.detachedHead=false checkout --quiet "$TAG"

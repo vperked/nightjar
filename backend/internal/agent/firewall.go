@@ -57,6 +57,9 @@ func newFirewall(port uint16) *firewall.Manager {
 type FirewallView struct {
 	Firewall firewall.Status   `json:"firewall"`
 	Defense  *ddos.DefenseView `json:"defense,omitempty"`
+	// Dashboard is the address the dashboard asking comes from, as this machine sees it: what a rule
+	// letting only the dashboard in (to the agent's port, say) must name.
+	Dashboard string `json:"dashboard,omitempty"`
 }
 
 func firewallRoutes(mux *http.ServeMux, s *Sampler, authorized func(*http.Request) bool, secure bool) {
@@ -81,6 +84,9 @@ func firewallRoutes(mux *http.ServeMux, s *Sampler, authorized func(*http.Reques
 	}
 	view := func(w http.ResponseWriter, r *http.Request) {
 		v := FirewallView{Firewall: s.firewall.Status(r.Context())}
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			v.Dashboard = host
+		}
 		if s.attacks != nil && s.attacks.Defender != nil {
 			d := s.attacks.Defender.View()
 			v.Defense = &d
@@ -156,7 +162,7 @@ func firewallRoutes(mux *http.ServeMux, s *Sampler, authorized func(*http.Reques
 			http.Error(w, `expected {"ids": [...]}`, http.StatusBadRequest)
 			return
 		}
-		if err := s.firewall.Order(r.Context(), body.IDs); err != nil {
+		if err := s.firewall.Order(r.Context(), body.IDs, keep(r)...); err != nil {
 			refuse(w, err)
 			return
 		}
@@ -200,7 +206,7 @@ func firewallRoutes(mux *http.ServeMux, s *Sampler, authorized func(*http.Reques
 		if !guard(w, r, true) {
 			return
 		}
-		if err := s.firewall.Remove(r.Context(), r.PathValue("id")); err != nil {
+		if err := s.firewall.Remove(r.Context(), r.PathValue("id"), keep(r)...); err != nil {
 			refuse(w, err)
 			return
 		}

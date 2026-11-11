@@ -33,9 +33,11 @@ import (
 
 var log = logx.Component("Firewall")
 
-// The chains the rules live in: incoming, then outgoing.
+// The chains the rules live in: incoming, then outgoing. INPUT jumps to Chain just after the
+// defender's chain (ddos.Chain), whose limits and blocks answer a flood before any allow here can let
+// it in.
 const (
-	Chain    = "NIGHTJAR-RULES"
+	Chain    = ddos.RulesChain
 	OutChain = "NIGHTJAR-OUT"
 )
 
@@ -170,6 +172,7 @@ type Manager struct {
 	pending *pendingChange
 	applied time.Time
 	built   string // what was last put in place, for each family
+	v6Err   string // why IPv6 last turned the rules down
 }
 
 type pendingChange struct {
@@ -253,8 +256,11 @@ func (m *Manager) checkLocked(ctx context.Context) {
 	}
 	needIn, needOut, rules := m.wantLocked()
 	if strings.Join(rules, "") != m.built {
-		// The ports to keep open changed, or the last try to put the rules in place failed.
-		log.Info("Putting the firewall rules in place again", "open", fmt.Sprint(m.openLocked()))
+		// The ports to keep open changed, or the last try to put the rules in place failed (for IPv6
+		// alone, already said).
+		if m.v6Err == "" {
+			log.Info("Putting the firewall rules in place again", "open", fmt.Sprint(m.openLocked()))
+		}
 	} else {
 		gone := false
 		for _, cmd := range m.familiesLocked() {
@@ -263,15 +269,15 @@ func (m *Manager) checkLocked(ctx context.Context) {
 				need        bool
 			}{{Chain, "INPUT", needIn}, {OutChain, "OUTPUT", needOut}} {
 				if c.need && !gone {
-					_, err := m.run(ctx, nil, cmd, "-w", "-C", c.hook, "-j", c.chain)
-					gone = err != nil
+					_, _, placed, _ := m.jumpsLocked(ctx, cmd, c.chain, c.hook)
+					gone = !placed
 				}
 			}
 		}
 		if !gone {
 			return
 		}
-		log.Warn("The firewall rules were taken out of the firewall; putting them back")
+		log.Warn("The firewall rules were taken out of the firewall, or put before the attack defence; putting them back")
 	}
 	if err := m.applyLocked(ctx); err != nil {
 		log.Warn("Could not put the firewall rules back in place", "err", err)
@@ -321,8 +327,18 @@ func (m *Manager) startLocked(ctx context.Context) {
 			m.problem = "iptables is not installed here."
 			return
 		}
-		_, err := exec.LookPath("ip6tables-restore")
-		m.ipv6 = err == nil
+		if _, err := exec.LookPath("ip6tables-restore"); err == nil {
+			// ip6tables can be installed on a kernel booted without IPv6 (ipv6.disable=1), where every
+			// change to it fails: the rules are then for IPv4 alone.
+			if _, err := m.run(ctx, nil, "ip6tables", "-w", "-S", "INPUT"); err != nil {
+				log.Info("IPv6 has no firewall here; the rules are for IPv4 only", "err", err)
+				// Should it have taken them in an earlier run, they would stay as they were.
+				m.takeOutLocked(ctx, "ip6tables", Chain, "INPUT")
+				m.takeOutLocked(ctx, "ip6tables", OutChain, "OUTPUT")
+			} else {
+				m.ipv6 = true
+			}
+		}
 	} else {
 		m.ipv6 = true
 	}
@@ -444,7 +460,9 @@ func Allowed(p Port, rules []Rule, open []Open) bool {
 
 // Add checks a rule, puts it in place and keeps it. keep are those who must keep reaching the machine
 // besides whoever is logged in over SSH, which it finds itself. A new allow goes last; a new block or
-// limit goes before the allows, so it is not lifted by one.
+// limit goes before the allows, so it is not lifted by one, except those that only let in part of
+// what it stops: they are exceptions to it ("allow the dashboard on 9101" before "block everyone on
+// 9101"), so it goes after them.
 func (m *Manager) Add(ctx context.Context, r Rule, keep []Reach) (Rule, error) {
 	r, err := m.check(r, keep)
 	if err != nil {
@@ -465,11 +483,13 @@ func (m *Manager) Add(ctx context.Context, r Rule, keep []Reach) (Rule, error) {
 	r.Added = float64(m.now().Unix())
 	at := len(m.rules)
 	if r.Action != "allow" {
-		if i := slices.IndexFunc(m.rules, func(o Rule) bool { return o.Action == "allow" && o.Out() == r.Out() }); i >= 0 {
-			at = i
-		}
+		at = blockAt(m.rules, r)
 	}
-	if err := m.changeLocked(ctx, slices.Insert(slices.Clone(m.rules), at, r)); err != nil {
+	rules := slices.Insert(slices.Clone(m.rules), at, r)
+	if err := m.guardLocked(rules, keep); err != nil {
+		return r, err
+	}
+	if err := m.changeLocked(ctx, rules); err != nil {
 		return r, err
 	}
 	log.Info("Firewall rule added", "rule", Describe(r))
@@ -498,6 +518,9 @@ func (m *Manager) Update(ctx context.Context, id string, r Rule, keep []Reach) (
 	r.ID, r.Added = id, m.rules[i].Added
 	rules := slices.Clone(m.rules)
 	rules[i] = r
+	if err := m.guardLocked(rules, keep); err != nil {
+		return r, err
+	}
 	if err := m.changeLocked(ctx, rules); err != nil {
 		return r, err
 	}
@@ -505,8 +528,10 @@ func (m *Manager) Update(ctx context.Context, id string, r Rule, keep []Reach) (
 	return r, nil
 }
 
-// Order puts the rules in the order given, which must name each of them once.
-func (m *Manager) Order(ctx context.Context, ids []string) error {
+// Order puts the rules in the order given, which must name each of them once. An order that would
+// cut off one in keep (or an SSH login) is refused: an allow moved below the block it is an
+// exception to.
+func (m *Manager) Order(ctx context.Context, ids []string, keep ...Reach) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.readyLocked(ctx); err != nil {
@@ -528,11 +553,15 @@ func (m *Manager) Order(ctx context.Context, ids []string) error {
 		delete(byID, id)
 		rules = append(rules, r)
 	}
+	if err := m.guardLocked(rules, keep); err != nil {
+		return err
+	}
 	return m.changeLocked(ctx, rules)
 }
 
-// Remove takes a rule out.
-func (m *Manager) Remove(ctx context.Context, id string) error {
+// Remove takes a rule out, unless that would cut off one in keep (or an SSH login): the allow that a
+// block behind it makes an exception for.
+func (m *Manager) Remove(ctx context.Context, id string, keep ...Reach) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	i := slices.IndexFunc(m.rules, func(r Rule) bool { return r.ID == id })
@@ -543,7 +572,11 @@ func (m *Manager) Remove(ctx context.Context, id string) error {
 		return errors.New(m.problem)
 	}
 	gone := m.rules[i]
-	if err := m.changeLocked(ctx, slices.Delete(slices.Clone(m.rules), i, i+1)); err != nil {
+	rules := slices.Delete(slices.Clone(m.rules), i, i+1)
+	if err := m.guardLocked(rules, keep); err != nil {
+		return err
+	}
+	if err := m.changeLocked(ctx, rules); err != nil {
 		return err
 	}
 	log.Info("Firewall rule removed", "rule", Describe(gone))
@@ -624,13 +657,15 @@ func (m *Manager) lapse(p *pendingChange) {
 // ErrNotFound is a rule that is not there.
 var ErrNotFound = errors.New("no such rule")
 
-// check puts a rule in one form and refuses one that would cut off those in keep or an SSH login.
-func (m *Manager) check(r Rule, keep []Reach) (Rule, error) {
-	r, err := Normalize(r)
-	if err != nil || r.Paused || r.Out() {
-		return r, err
-	}
-	return r, guard(r, append(keep, sshLogins(m.proc())...))
+// check puts a rule in one form; whether it may go in is for guardLocked, on the rules it would join.
+func (m *Manager) check(r Rule, _ []Reach) (Rule, error) {
+	return Normalize(r)
+}
+
+// guardLocked refuses rules, as they would stand after a change, that cut off those in keep or
+// whoever is logged in over SSH.
+func (m *Manager) guardLocked(rules []Rule, keep []Reach) error {
+	return guard(rules, append(slices.Clone(keep), sshLogins(m.proc())...))
 }
 
 func (m *Manager) readyLocked(ctx context.Context) error {
@@ -718,31 +753,95 @@ func (m *Manager) takeOutLocked(ctx context.Context, cmd, chain, hook string) {
 }
 
 // applyLocked puts the rules in place, in both families, and takes away a chain with nothing in it.
+// IPv6 turning them down is said in the log but does not stop IPv4 having them.
 func (m *Manager) applyLocked(ctx context.Context) error {
 	needIn, needOut, rules := m.wantLocked()
 	m.built = ""
+	built := ""
+	v6Err := ""
 	for i, cmd := range m.familiesLocked() {
+		var family string
 		if needIn || needOut {
-			if _, err := m.run(ctx, []byte(rules[i]), cmd+"-restore", "-w", "--noflush"); err != nil {
-				return fmt.Errorf("%s turned the rules down: %w", cmd, err)
-			}
+			family = rules[i]
 		}
-		for _, c := range []struct {
-			chain, hook string
-			need        bool
-		}{{Chain, "INPUT", needIn}, {OutChain, "OUTPUT", needOut}} {
-			if !c.need {
-				m.takeOutLocked(ctx, cmd, c.chain, c.hook)
-				continue
+		if err := m.applyFamilyLocked(ctx, cmd, family, needIn, needOut); err != nil {
+			if cmd != "ip6tables" {
+				return err
 			}
-			if _, err := m.run(ctx, nil, cmd, "-w", "-C", c.hook, "-j", c.chain); err != nil {
-				if _, err := m.run(ctx, nil, cmd, "-w", "-I", c.hook, "1", "-j", c.chain); err != nil {
-					return fmt.Errorf("could not send traffic through the rules: %w", err)
-				}
+			// Left out of what was built, so the next check tries again.
+			if v6Err = err.Error(); v6Err != m.v6Err {
+				log.Warn("Could not put the firewall rules in place for IPv6; IPv4 has them", "err", err)
 			}
+			continue
+		}
+		built += family
+	}
+	m.applied, m.built, m.v6Err = m.now(), built, v6Err
+	return nil
+}
+
+// applyFamilyLocked puts one family's rules (empty for none) in place, and its chains in their hooks
+// or out of them.
+func (m *Manager) applyFamilyLocked(ctx context.Context, cmd, rules string, needIn, needOut bool) error {
+	if rules != "" {
+		if _, err := m.run(ctx, []byte(rules), cmd+"-restore", "-w", "--noflush"); err != nil {
+			return fmt.Errorf("%s turned the rules down: %w", cmd, err)
 		}
 	}
-	m.applied, m.built = m.now(), strings.Join(rules, "")
+	for _, c := range []struct {
+		chain, hook string
+		need        bool
+	}{{Chain, "INPUT", needIn}, {OutChain, "OUTPUT", needOut}} {
+		if !c.need {
+			m.takeOutLocked(ctx, cmd, c.chain, c.hook)
+			continue
+		}
+		if err := m.jumpLocked(ctx, cmd, c.chain, c.hook); err != nil {
+			return fmt.Errorf("could not send traffic through the rules: %w", err)
+		}
+	}
+	return nil
+}
+
+// jumpsLocked reads where hook jumps to chain and, in INPUT, to the defender's chain; placed is a
+// jump to chain that comes after the defender's, when there is one. err is INPUT that could not be
+// read.
+func (m *Manager) jumpsLocked(ctx context.Context, cmd, chain, hook string) (own, defender []int, placed bool, err error) {
+	if hook != "INPUT" {
+		_, err := m.run(ctx, nil, cmd, "-w", "-C", hook, "-j", chain)
+		return nil, nil, err == nil, nil
+	}
+	listing, err := m.run(ctx, nil, cmd, "-w", "-S", hook)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	own, defender = ddos.JumpPositions(listing, hook, chain), ddos.JumpPositions(listing, hook, ddos.Chain)
+	return own, defender, len(own) > 0 && (len(defender) == 0 || own[0] > defender[0]), nil
+}
+
+// jumpLocked sends hook through chain. In INPUT the jump goes just after the defender's, or first
+// when it is not there: it inserts its own at the top as it starts defending. A jump found before the
+// defender's is moved after it, the new one put in before the old one is taken out, so the rules are
+// never out of the way.
+func (m *Manager) jumpLocked(ctx context.Context, cmd, chain, hook string) error {
+	own, defender, placed, err := m.jumpsLocked(ctx, cmd, chain, hook)
+	if placed || err != nil {
+		return err
+	}
+	at := 1
+	if len(defender) > 0 {
+		at = defender[0] + 1
+	}
+	if _, err := m.run(ctx, nil, cmd, "-w", "-I", hook, strconv.Itoa(at), "-j", chain); err != nil {
+		return err
+	}
+	// Deleting by match takes the first jump each time, and those before the defender's come before
+	// the new one.
+	for _, p := range own {
+		if p < at {
+			m.run(ctx, nil, cmd, "-w", "-D", hook, "-j", chain)
+		}
+	}
 	return nil
 }
 
@@ -891,34 +990,125 @@ func covers(r Rule, p uint16) bool {
 // minKeptPerMinute is the tightest limit allowed on the ports the dashboard and SSH logins use.
 const minKeptPerMinute = 6
 
-// guard refuses a block, or a limit too tight, that would catch one that must keep reaching the
-// machine.
-func guard(r Rule, keep []Reach) error {
-	switch {
-	case r.Action == "allow":
-		return nil
-	case r.Action == "limit" && perMinute(r.Rate) >= minKeptPerMinute:
-		return nil
-	}
-	var n *net.IPNet
-	if r.Source != "" {
-		_, n, _ = net.ParseCIDR(cidr(r.Source))
-	}
+// guard refuses rules that would cut off one who must keep reaching the machine. It reads them as
+// iptables does, in order with the first match deciding, so a block is fine behind an allow that lets
+// that one through first ("allow the dashboard on 9101, then block everyone on 9101"), and taking that
+// allow away, pausing it or moving it below the block is refused in turn. A limit loose enough lets
+// them through like an allow; a tighter one is refused.
+func guard(rules []Rule, keep []Reach) error {
 	for _, k := range keep {
 		ip := net.ParseIP(k.Address)
-		if ip == nil || (n != nil && !n.Contains(ip)) {
+		if ip == nil {
 			continue
 		}
 		for _, p := range k.Ports {
-			if covers(r, p) && (r.Proto == "" || r.Proto == "tcp") {
-				if r.Action == "limit" {
-					return fmt.Errorf("that limit is too tight for %s (%s, port %d); allow at least %d a minute", k.What, k.Address, p, minKeptPerMinute)
+			for _, r := range rules {
+				if r.Paused || r.Out() || !catches(r, ip, p) {
+					continue
 				}
-				return fmt.Errorf("that would cut off %s (%s, port %d)", k.What, k.Address, p)
+				switch {
+				case r.Action == "allow", r.Action == "limit" && perMinute(r.Rate) >= minKeptPerMinute:
+				case r.Action == "limit":
+					return fmt.Errorf("that limit is too tight for %s (%s, port %d); allow at least %d a minute", k.What, k.Address, p, minKeptPerMinute)
+				default:
+					return fmt.Errorf("that would cut off %s (%s, port %d)", k.What, k.Address, p)
+				}
+				break // the first rule that matches decides
 			}
 		}
 	}
 	return nil
+}
+
+// blockAt is where a new block or limit r goes: before the first allow that would lift it for some of
+// what it stops. Allows for other traffic do not meet it, wherever they stand, and an allow within it
+// is an exception to it, which belongs before it ("allow the dashboard on 9101", then "block everyone
+// on 9101").
+func blockAt(rules []Rule, r Rule) int {
+	if i := slices.IndexFunc(rules, func(o Rule) bool { return o.Action == "allow" && overlaps(o, r) && !within(o, r) }); i >= 0 {
+		return i
+	}
+	return len(rules)
+}
+
+// overlaps says whether some traffic matches both rules.
+func overlaps(a, b Rule) bool {
+	if a.Out() != b.Out() || (a.Proto != "" && b.Proto != "" && a.Proto != b.Proto) {
+		return false
+	}
+	if a.Source != "" && b.Source != "" {
+		_, an, errA := net.ParseCIDR(cidr(a.Source))
+		_, bn, errB := net.ParseCIDR(cidr(b.Source))
+		if errA != nil || errB != nil || !(an.Contains(bn.IP) || bn.Contains(an.IP)) {
+			return false
+		}
+	}
+	if a.Port == "" || b.Port == "" {
+		return true
+	}
+	return slices.ContainsFunc(ports(a), func(p uint16) bool { return covers(b, p) })
+}
+
+// ports lists every port a rule names (not one with no ports, which is every port).
+func ports(r Rule) []uint16 {
+	var out []uint16
+	for item := range strings.SplitSeq(r.Port, ",") {
+		lo, hi, ok := strings.Cut(item, ":")
+		from, _ := strconv.Atoi(lo)
+		to := from
+		if ok {
+			to, _ = strconv.Atoi(hi)
+		}
+		for p := from; p <= to && p <= 65535; p++ {
+			out = append(out, uint16(p))
+		}
+	}
+	return out
+}
+
+// catches says whether an incoming rule matches TCP from ip to port p, as one who must keep reaching
+// the machine uses it.
+func catches(r Rule, ip net.IP, p uint16) bool {
+	if r.Proto != "" && r.Proto != "tcp" {
+		return false
+	}
+	if r.Source != "" {
+		if _, n, err := net.ParseCIDR(cidr(r.Source)); err != nil || !n.Contains(ip) {
+			return false
+		}
+	}
+	return covers(r, p)
+}
+
+// within says whether everything allow a matches, b matches too: then a is an exception carved out of
+// b ("allow the dashboard on 9101" out of "block everyone on 9101"), and a block b belongs behind it.
+func within(a, b Rule) bool {
+	if a.Out() != b.Out() || (b.Proto != "" && a.Proto != b.Proto) {
+		return false
+	}
+	if b.Source != "" {
+		_, bn, err := net.ParseCIDR(cidr(b.Source))
+		if err != nil || a.Source == "" {
+			return false
+		}
+		_, an, err := net.ParseCIDR(cidr(a.Source))
+		if err != nil {
+			return false
+		}
+		aBits, _ := an.Mask.Size()
+		bBits, _ := bn.Mask.Size()
+		if !bn.Contains(an.IP) || aBits < bBits {
+			return false
+		}
+	}
+	if b.Port == "" {
+		return true
+	}
+	if a.Port == "" {
+		return false
+	}
+	// Every port a names must be one b covers.
+	return !slices.ContainsFunc(ports(a), func(p uint16) bool { return !covers(b, p) })
 }
 
 // sshLogins are the addresses logged in over SSH now, which a block must not catch: those sshd let in,

@@ -38,6 +38,10 @@ func (c *Client) Name() string {
 	return "Radarr"
 }
 
+// MaxAnswer is the most of an answer read. Sonarr and Radarr are local services Nightjar trusts,
+// and a big library's list runs to tens of megabytes. Tests lower it.
+var MaxAnswer int64 = 256 << 20
+
 func (c *Client) do(ctx context.Context, method, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.base+"/api/v3"+path, nil)
 	if err != nil {
@@ -50,12 +54,20 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 		return fmt.Errorf("%s: %v", c.Name(), err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		return fmt.Errorf("%s refused the API key", c.Name())
 	case resp.StatusCode >= 300:
 		return fmt.Errorf("%s answered HTTP %d", c.Name(), resp.StatusCode)
+	}
+	// One byte more than the most it takes tells a big answer from one cut short, which would
+	// otherwise read as broken JSON.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxAnswer+1))
+	if err != nil {
+		return fmt.Errorf("%s: reading its answer: %v", c.Name(), err)
+	}
+	if int64(len(body)) > MaxAnswer {
+		return fmt.Errorf("%s's answer to %s is too large (over %d MB)", c.Name(), path, MaxAnswer>>20)
 	}
 	if out != nil {
 		return json.Unmarshal(body, out)

@@ -31,9 +31,11 @@
 .test-result.fail {
   --tone: var(--crit);
 }
+/* The mark red with the page's own ground for text, as the bell's badge: white on the night
+   theme's lighter red would be too faint to read. */
 .btn.btn-warn {
-  background: var(--crit);
-  color: #fff;
+  background: var(--crit-mark);
+  color: var(--bg);
 }
 .row-edit {
   min-width: 30px;

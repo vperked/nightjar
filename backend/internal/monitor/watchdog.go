@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -180,19 +181,24 @@ func runningUnderSystemd() bool {
 	return false
 }
 
-func (w *Watchdog) restart() bool {
+// canRestart says whether systemd can restart this service.
+func canRestart() bool {
 	if _, err := exec.LookPath("systemctl"); err != nil || !runningUnderSystemd() {
 		log.Warn("[WATCHDOG] Cannot restart: not running as a systemd service")
 		return false
 	}
-	log.Info("[WATCHDOG] Attempting to restart service: " + w.ServiceName)
+	return true
+}
+
+// restart asks systemd to restart the service and returns at once. Nightjar is in that service, so
+// a blocking restart would be killed along with it before it returned; --no-block only queues it.
+func (w *Watchdog) restart() {
+	log.Info("[WATCHDOG] Restarting service: " + w.ServiceName)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if out, err := exec.CommandContext(ctx, "systemctl", "restart", w.ServiceName+".service").CombinedOutput(); err != nil {
-		log.Error("[WATCHDOG] Failed to restart service", "err", strings.TrimSpace(string(out)))
-		return false
+	if out, err := exec.CommandContext(ctx, "systemctl", "--no-block", "restart", w.ServiceName+".service").CombinedOutput(); err != nil {
+		log.Error("[WATCHDOG] Failed to restart service", "err", cmp.Or(strings.TrimSpace(string(out)), err.Error()))
 	}
-	return true
 }
 
 func (w *Watchdog) loop() {
@@ -213,11 +219,11 @@ func (w *Watchdog) loop() {
 		}
 		log.Error(fmt.Sprintf("[WATCHDOG] CRITICAL: Monitoring loop appears to have stopped! No heartbeat for %.1fs (timeout: %.1fs)", since.Seconds(), w.Timeout.Seconds()))
 
-		attempted, restarted := false, false
+		// The alert goes first: the restart ends this process, and the alert with it.
+		attempted, restarting := false, false
 		if w.AutoRestart {
 			if time.Since(w.lastRestart) >= w.RestartCooldown {
-				attempted = true
-				restarted = w.restart()
+				attempted, restarting = true, canRestart()
 				w.lastRestart = time.Now()
 				w.restartCount++
 			} else {
@@ -231,7 +237,7 @@ func (w *Watchdog) loop() {
 			}
 			desc := fmt.Sprintf("Its checks have not run for %s, so nothing is being watched.", discord.Span(since.Seconds()))
 			if attempted {
-				outcome := map[bool]string{true: "restarted it", false: "tried to restart it, and failed"}[restarted]
+				outcome := map[bool]string{true: "is restarting it now", false: "cannot restart it: Nightjar is not running as a systemd service"}[restarting]
 				fields = append(fields, discord.Field{Name: "Restarts", Value: fmt.Sprint(w.restartCount), Inline: true})
 				desc += " The watchdog " + outcome + "."
 			}
@@ -242,5 +248,8 @@ func (w *Watchdog) loop() {
 		w.mu.Lock()
 		w.alertSent, w.lastAlert = true, time.Now()
 		w.mu.Unlock()
+		if restarting {
+			w.restart()
+		}
 	}
 }

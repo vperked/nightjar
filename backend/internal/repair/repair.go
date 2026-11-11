@@ -19,10 +19,13 @@ import (
 
 	"nightjar/internal/config"
 	"nightjar/internal/docker"
+	"nightjar/internal/logx"
 	"nightjar/internal/services"
 	"nightjar/internal/storage"
 	"nightjar/internal/units"
 )
+
+var log = logx.Component("Repair")
 
 // scriptTimeout is how long a repair script may run.
 const scriptTimeout = 2 * time.Minute
@@ -178,46 +181,38 @@ func (r *Runner) runScript(ctx context.Context, spec services.Spec, detail strin
 		return false, err.Error(), ""
 	}
 	// A program the script starts in the background (the usual way to bring back one systemd does
-	// not run) keeps the script's output. The output goes to a pipe Nightjar keeps reading, not one
-	// Wait copies from, so the repair finishes when the script does rather than when the program
-	// does, and the program can go on writing without filling a pipe or a file.
-	pr, pw, err := os.Pipe()
+	// not run) keeps the script's output. That output goes to a temp file, unlinked at once, not to
+	// a pipe Nightjar reads: the repair finishes when the script does, and the program never gets
+	// SIGPIPE (and dies) when Nightjar restarts and the reading end goes away.
+	out, err := os.CreateTemp("", "nightjar-repair-*")
 	if err != nil {
 		return false, err.Error(), ""
 	}
+	os.Remove(out.Name())
+	defer out.Close()
 	ctx, cancel := context.WithTimeout(ctx, scriptTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path)
+	// Outside Nightjar's own service, so the program lives on when Nightjar restarts: systemd
+	// stops a service with everything in it.
+	if scope := ScopeCommand(); len(scope) > 0 {
+		cmd = exec.CommandContext(ctx, scope[0], append(scope[1:], path)...)
+	}
 	cmd.Dir = filepath.Dir(path)
 	// Without Nightjar's secrets (webhooks, tokens, passwords): a script has no need of them.
 	cmd.Env = append(config.Environ(),
 		"NIGHTJAR_CHECK="+spec.Name, "NIGHTJAR_TYPE="+spec.Type, "NIGHTJAR_TARGET="+spec.Target, "NIGHTJAR_DETAIL="+detail,
 		"NIGHTJAR_ATTEMPT="+strconv.Itoa(r.Attempts(spec.Name)))
-	cmd.Stdout, cmd.Stderr = pw, pw
-	// A script that runs out of time is stopped with everything it started.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout, cmd.Stderr = out, out
+	// Its own session (and so process group): a script that runs out of time is stopped with
+	// everything it started, and a program it leaves running is not tied to Nightjar's terminal.
+	// systemd-run --scope runs the script in its own place, so the group is the script's.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	err = cmd.Start()
-	pw.Close()
-	if err != nil {
-		pr.Close()
-		return false, err.Error(), ""
-	}
-	out := &outputTail{}
-	eof := make(chan struct{})
-	go func() {
-		defer close(eof)
-		defer pr.Close()
-		out.drain(pr)
-	}()
-	err = cmd.Wait()
-	// What the script wrote last may still be in the pipe. With a program still holding it, the
-	// end never comes, so the wait is short.
-	select {
-	case <-eof:
-	case <-time.After(time.Second):
-	}
-	text := out.stop()
+	cmd.WaitDelay = 5 * time.Second
+	err = cmd.Run()
+	// What the script wrote; a program it started may go on writing, which is not kept.
+	text := tail(out)
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
 		return false, fmt.Sprintf("%s ran longer than %s and was stopped", spec.Repair.Script, scriptTimeout), text
@@ -231,40 +226,50 @@ func (r *Runner) runScript(ctx context.Context, spec services.Spec, detail strin
 	return true, "ran " + spec.Repair.Script, text
 }
 
-// outputTail keeps the last maxOutput bytes a script writes. It goes on reading after the
-// script is done, for any program the script started, but keeps nothing more.
-type outputTail struct {
-	mu   sync.Mutex
-	buf  []byte
-	done bool
-}
-
-func (o *outputTail) drain(f *os.File) {
-	chunk := make([]byte, 32*1024)
-	for {
-		n, err := f.Read(chunk)
-		if n > 0 {
-			o.mu.Lock()
-			if !o.done {
-				o.buf = append(o.buf, chunk[:n]...)
-				if len(o.buf) > maxOutput {
-					o.buf = append(o.buf[:0], o.buf[len(o.buf)-maxOutput:]...)
-				}
-			}
-			o.mu.Unlock()
-		}
-		if err != nil {
-			return
-		}
+// ScopeCommand is how a script is started outside Nightjar's service: a transient systemd scope,
+// collected when the script and whatever it started are gone. Without systemd, or without root to
+// ask it, the script runs directly (in its own session). Tests replace it.
+var ScopeCommand = func() []string {
+	if os.Getenv("NIGHTJAR_REPAIR_NO_SYSTEMD") != "" {
+		return nil
 	}
+	return scopeCommand()
 }
 
-// stop is what was kept; anything read after it is dropped.
-func (o *outputTail) stop() string {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.done = true
-	return string(o.buf)
+// scopeCommand tries a scope once: one that cannot be made (no systemd, not root, a container
+// without its bus) would fail every repair before the script even ran.
+var scopeCommand = sync.OnceValue(func() []string {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	if _, err := os.Stat("/run/systemd/system"); err != nil {
+		return nil
+	}
+	bin, err := exec.LookPath("systemd-run")
+	if err != nil {
+		return nil
+	}
+	argv := []string{bin, "--scope", "--collect", "--quiet", "--description=Nightjar repair script"}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, argv[0], append(argv[1:], "true")...).CombinedOutput(); err != nil {
+		log.Warn("Repair scripts run inside Nightjar's service: systemd would not start a scope for them, so programs they start stop when Nightjar does", "err", strings.TrimSpace(string(out)))
+		return nil
+	}
+	return argv
+})
+
+// tail is the last maxOutput bytes of what was written to f so far.
+func tail(f *os.File) string {
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	size := info.Size()
+	from := max(0, size-maxOutput)
+	buf := make([]byte, size-from)
+	n, _ := f.ReadAt(buf, from)
+	return string(buf[:n])
 }
 
 // script is the path of a repair script, when it may run. Like plugins, and like sshd with its

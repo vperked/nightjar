@@ -46,10 +46,18 @@ type Spec struct {
 	APIKey     string `json:"api_key,omitempty"`     // arr: read from ConfigFile when empty
 	ConfigFile string `json:"config_file,omitempty"` // arr: the app's config.xml
 
-	Dir string `json:"dir,omitempty"` // git
+	// Dir is the checkout (git), or the folder a release's UpdateCommand works in (release): either
+	// runs as the folder's owner, so what it builds or installs cannot act as root on their files.
+	Dir string `json:"dir,omitempty"`
 
 	Repo      string `json:"repo,omitempty"`       // release: GitHub owner/name
 	TagPrefix string `json:"tag_prefix,omitempty"` // release: compare tags with this prefix instead of releases
+
+	// Asset is a file of the latest release of AssetRepo (Repo when empty) that UpdateCommand
+	// installs. Nightjar finds it and the SHA-256 GitHub lists for it, refuses to update when there
+	// is none, and gives the command both as $ASSET_URL and $ASSET_SHA256 (release).
+	Asset     string `json:"asset,omitempty"`
+	AssetRepo string `json:"asset_repo,omitempty"`
 
 	// VersionCommand prints the installed version (release). UpdateCommand installs the update
 	// (release), or builds after pulling (git); it sees $VERSION and $TAG.
@@ -61,10 +69,11 @@ type Spec struct {
 }
 
 var (
-	idRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
-	repoRE = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
-	unitRE = regexp.MustCompile(`^\w[\w@.:-]*$`)
-	pkgRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]+$`)
+	idRE    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
+	repoRE  = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
+	unitRE  = regexp.MustCompile(`^\w[\w@.:-]*$`)
+	pkgRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]+$`)
+	assetRE = regexp.MustCompile(`^[\w][\w.+-]{0,199}$`)
 
 	ErrNotFound = errors.New("no update target with that id")
 	ErrExists   = errors.New("an update target with that id already exists")
@@ -102,7 +111,7 @@ func ParseSpec(data []byte) (Spec, error) {
 }
 
 func (s *Spec) normalize() error {
-	for _, p := range []*string{&s.ID, &s.Name, &s.Unit, &s.Package, &s.URL, &s.APIKey, &s.ConfigFile, &s.Dir, &s.Repo, &s.TagPrefix, &s.VersionCommand, &s.UpdateCommand} {
+	for _, p := range []*string{&s.ID, &s.Name, &s.Unit, &s.Package, &s.URL, &s.APIKey, &s.ConfigFile, &s.Dir, &s.Repo, &s.TagPrefix, &s.VersionCommand, &s.UpdateCommand, &s.Asset, &s.AssetRepo} {
 		*p = strings.TrimSpace(*p)
 	}
 	s.URL = strings.TrimRight(s.URL, "/")
@@ -137,6 +146,12 @@ func (s *Spec) normalize() error {
 		}
 		if s.VersionCommand == "" {
 			return errors.New("a command that prints the installed version is required")
+		}
+		if s.Asset != "" && !assetRE.MatchString(s.Asset) {
+			return errors.New("asset must be a release file's name")
+		}
+		if s.AssetRepo != "" && !repoRE.MatchString(s.AssetRepo) {
+			return errors.New("asset repository must look like owner/name")
 		}
 	default:
 		return fmt.Errorf("kind must be one of %v", Kinds)

@@ -1,8 +1,11 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { api } from '../api/client';
+import { browserZone, useCanEdit, useServerZone } from '../api/ConfigContext';
 import { useServices } from '../api/ServicesContext';
 import type { MaintenanceWindow } from '../api/types';
+import { Editable } from '../components/Editable';
 import { Skeleton } from '../components/Skeleton';
+import { inYourTime, ServerTime } from '../components/TimePicker';
 import { useToast } from '../components/Toasts';
 import { Seg } from '../components/ui';
 import { formatDuration } from '../format';
@@ -41,19 +44,31 @@ function blank(): MaintenanceWindow {
 function WindowForm({ initial, onDone }: { initial: MaintenanceWindow; onDone: (saved: boolean) => void }) {
   const [w, setW] = useState(initial);
   const [error, setError] = useState('');
+  // While a save is out, the button is off and a second submit (a double click) does nothing,
+  // so one click adds one window.
+  const [saving, setSaving] = useState(false);
+  const busy = useRef(false);
   const checks = useServices().data?.services.map((s) => s.name) ?? [];
+  const zone = useServerZone();
   const weekly = !!w.days?.length || (w.days !== undefined && w.from !== undefined);
   const set = (patch: Partial<MaintenanceWindow>) => setW((x) => ({ ...x, ...patch }));
   const notify = useToast();
   const toggle = <T,>(list: T[], v: T) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (busy.current) return;
+    busy.current = true;
+    setSaving(true);
+    setError('');
     try {
       await api.saveMaintenance(w);
       notify({ tone: 'ok', title: initial.id ? 'Window saved' : 'Window added' });
       onDone(true);
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      busy.current = false;
+      setSaving(false);
     }
   };
   return (
@@ -106,6 +121,8 @@ function WindowForm({ initial, onDone }: { initial: MaintenanceWindow; onDone: (
               <label>
                 to <input className="field short" type="time" aria-label="To" value={w.to ?? ''} onChange={(e) => set({ to: e.target.value })} />
               </label>
+              {/* Weekly windows follow the server's clock, which may not be this browser's. */}
+              <ServerTime from={w.from} to={w.to} days={w.days} />
             </div>
           ) : (
             <div className="maint-when">
@@ -115,7 +132,13 @@ function WindowForm({ initial, onDone }: { initial: MaintenanceWindow; onDone: (
               <label>
                 to <input className="field" type="datetime-local" aria-label="Ends" value={local(w.end)} onChange={(e) => set({ end: unix(e.target.value) })} />
               </label>
-              {w.start && w.end && w.end > w.start && <span className="form-help">{formatDuration(w.end - w.start)}</span>}
+              {w.start && w.end && w.end > w.start && (
+                <span className="form-help">
+                  {formatDuration(w.end - w.start)}
+                  {/* A one-off window is set in the browser's time; said only where the server's differs. */}
+                  {zone?.shift ? ` · your time (${browserZone()})` : ''}
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -158,8 +181,8 @@ function WindowForm({ initial, onDone }: { initial: MaintenanceWindow; onDone: (
         <button type="button" className="btn-quiet" onClick={() => onDone(false)}>
           Cancel
         </button>
-        <button type="submit" className="btn">
-          {initial.id ? 'Save window' : 'Add window'}
+        <button type="submit" className="btn" disabled={saving}>
+          {saving ? 'saving…' : initial.id ? 'Save window' : 'Add window'}
         </button>
       </div>
     </form>
@@ -172,6 +195,7 @@ export function MaintenancePage() {
   const [confirm, setConfirm] = useState('');
   const now = useNow(15000);
   const notify = useToast();
+  const canEdit = useCanEdit();
   const remove = async (w: MaintenanceWindow) => {
     try {
       await api.deleteMaintenance(w.id);
@@ -182,6 +206,7 @@ export function MaintenancePage() {
     }
   };
   const next = new Map((data?.upcoming ?? []).map((o) => [o.window.id, o]));
+  const zone = useServerZone();
   return (
     <main>
       <div className="page-title">
@@ -190,13 +215,13 @@ export function MaintenancePage() {
           <div className="page-sub">Planned downtime: no alerts, no repairs, and nothing against uptime.</div>
           <IncidentsTabs current="/incidents/maintenance" />
         </div>
-        {!editing && (
+        {canEdit && !editing && (
           <button className="btn" onClick={() => setEditing(blank())}>
             Plan maintenance
           </button>
         )}
       </div>
-      {editing && (
+      {canEdit && editing && (
         <WindowForm
           // Keyed so Edit on another window while the form is open starts it afresh;
           // the form holds its own copy and would otherwise save over the first one.
@@ -231,24 +256,29 @@ export function MaintenancePage() {
                   <span className="min0">
                     <strong>{w.title}</strong>
                     <span className="maint-meta">
-                      {describe(w)} · {w.checks.length ? w.checks.join(', ') : 'everything'}
+                      {describe(w)}
+                      {/* A weekly window is on the server's clock: where this browser's differs, both are given. */}
+                      {w.days?.length && zone?.shift ? ` server time (${inYourTime(w.from ?? '', w.to ?? '', zone.shift, w.days)} your time)` : ''} ·{' '}
+                      {w.checks.length ? w.checks.join(', ') : 'everything'}
                       {w.public ? ' · on the status page' : ''}
                     </span>
                   </span>
-                  <span className="maint-actions">
-                    <button className="btn-quiet" onClick={() => setEditing(w)}>
-                      Edit
-                    </button>
-                    {confirm === w.id ? (
-                      <button className="btn-quiet danger" onClick={() => remove(w)}>
-                        Remove it
+                  <Editable>
+                    <span className="maint-actions">
+                      <button className="btn-quiet" onClick={() => setEditing(w)}>
+                        Edit
                       </button>
-                    ) : (
-                      <button className="btn-quiet" onClick={() => setConfirm(w.id)}>
-                        Remove
-                      </button>
-                    )}
-                  </span>
+                      {confirm === w.id ? (
+                        <button className="btn-quiet danger" onClick={() => remove(w)}>
+                          Remove it
+                        </button>
+                      ) : (
+                        <button className="btn-quiet" onClick={() => setConfirm(w.id)}>
+                          Remove
+                        </button>
+                      )}
+                    </span>
+                  </Editable>
                 </li>
               );
             })}

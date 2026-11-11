@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import type { FirewallStatus, RemoteHost } from '../api/types';
 import { plural } from '../format';
 import { TOOL } from './Firewall';
@@ -8,6 +9,7 @@ import { Section } from './ui';
 
 // FirewallSummary is a server's firewall in a line, on its page, with the way to manage all of it.
 export function FirewallSummary({ h }: { h: Pick<RemoteHost, 'id' | 'name'> }) {
+  const canEdit = useCanEdit();
   const [st, setSt] = useState<FirewallStatus>();
   const [error, setError] = useState('');
   useEffect(() => {
@@ -21,7 +23,7 @@ export function FirewallSummary({ h }: { h: Pick<RemoteHost, 'id' | 'name'> }) {
   const outRules = st?.rules.filter((r) => r.direction === 'out' && !r.paused).length ?? 0;
   const dropped = st?.drops?.length ?? 0;
   return (
-    <Section label="Firewall" aside={<Link to={to}>manage →</Link>}>
+    <Section label="Firewall" aside={<Link to={to}>{canEdit ? 'manage' : 'view'} →</Link>}>
       {error ? (
         <p className="note">{error}</p>
       ) : !st ? (

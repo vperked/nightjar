@@ -3,10 +3,10 @@ package monitor
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"regexp"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"nightjar/internal/analytics"
 	"nightjar/internal/diagnose"
@@ -48,8 +48,13 @@ func (h *serviceChecks) check(s *Snapshot) {
 				r = services.Run(spec)
 			}
 			<-h.slots
-			// A check renamed while it ran is reported under its new name.
-			name, change := m.RecordAs(spec.Name, r, now)
+			// A check renamed while it ran is reported under its new name. A result dropped (the
+			// check was paused, deleted or changed while it ran) neither alerts nor repairs: the
+			// spec it ran with may restart a service the owner has just taken over.
+			name, change, recorded := m.RecordAs(spec.Name, r, now)
+			if !recorded {
+				return
+			}
 			if name != spec.Name {
 				if st := m.State(name); st.Spec.Name == name {
 					spec = st.Spec
@@ -141,8 +146,9 @@ func (h *serviceChecks) why(spec services.Spec, r services.Result, now float64) 
 func (h *serviceChecks) send(spec services.Spec, title string, r services.Result, sev discord.Severity, now float64, extra ...discord.Field) bool {
 	// The title says which check and what happened; the description is what the check saw.
 	desc := r.Detail
-	if desc != "" {
-		desc = strings.ToUpper(desc[:1]) + desc[1:]
+	if first, size := utf8.DecodeRuneInString(desc); size > 0 && first != utf8.RuneError {
+		// The first letter, not the first byte: one of several bytes would be cut in two.
+		desc = string(unicode.ToUpper(first)) + desc[size:]
 	}
 	var fields []discord.Field
 	if target := alertTarget(spec); target != "" {
@@ -168,46 +174,7 @@ func (h *serviceChecks) send(spec services.Spec, title string, r services.Result
 	return discord.About(h.ctx.Webhook, "check:"+spec.Name).SendEmbed(spec.Name+" "+title, desc, sev, fields, "Uptime")
 }
 
-// sensitiveParam matches query parameters that usually carry a credential.
-var sensitiveParam = regexp.MustCompile(`(?i)key|token|secret|pass|pwd|auth|sig|session|credential`)
-
 // alertTarget is what an alert may show of a check's target. Alerts reach chat channels and the
 // notification history, read by people who are not the dashboard's admins, so it never carries a
-// secret: a heartbeat's target is the token that alone authenticates its pings, so it is left out,
-// and an address loses its user and password and the values of credential-like query parameters.
-func alertTarget(spec services.Spec) string {
-	if spec.Type == "heartbeat" {
-		return ""
-	}
-	u, err := url.Parse(spec.Target)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return withoutPassword(spec.Target)
-	}
-	u.User = nil
-	if u.RawQuery != "" {
-		q := u.Query()
-		for k := range q {
-			if sensitiveParam.MatchString(k) {
-				q[k] = []string{"REDACTED"}
-			}
-		}
-		u.RawQuery = q.Encode()
-	}
-	return u.String()
-}
-
-// withoutPassword drops a "user:password@" from a target that is not a well-formed URL.
-func withoutPassword(target string) string {
-	at := strings.LastIndex(target, "@")
-	if at < 0 {
-		return target
-	}
-	start := 0
-	if i := strings.Index(target, "://"); i >= 0 && i < at {
-		start = i + 3
-	}
-	if userinfo := target[start:at]; !strings.Contains(userinfo, ":") || strings.Contains(userinfo, "/") {
-		return target
-	}
-	return target[:start] + target[at+1:]
-}
+// secret (see services.ShownTarget).
+func alertTarget(spec services.Spec) string { return services.ShownTarget(spec) }

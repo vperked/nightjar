@@ -9,13 +9,16 @@ import { Pager, usePaged } from '../components/Pager';
 import { formatBytes, formatDuration } from '../format';
 import { usePoll } from '../hooks/usePoll';
 
-// Analytics: every server, this one included, over a day, a week or a month. Each is kept as one
-// row a minute, so a range reads back as about 300 points of means and peaks.
+// Analytics: every server, this one included, over a day up to a year. Each is kept as one row a
+// minute, rolled up into hours for the long ranges, so a range reads back as about 300 points of
+// means and peaks.
 
 const RANGES: { value: AnalyticsRangeName; label: string }[] = [
   { value: '24h', label: '24 hours' },
   { value: '7d', label: '7 days' },
   { value: '30d', label: '30 days' },
+  { value: '90d', label: '90 days' },
+  { value: '1y', label: '1 year' },
 ];
 
 type Metric = 'cpu' | 'temp' | 'mem' | 'disk';
@@ -282,7 +285,9 @@ export function AnalyticsPage() {
       <div className="page-title">
         <div>
           <h1>Analytics</h1>
-          <div className="page-sub">Every server, this one included, over the last {label}. Kept a minute at a time.</div>
+          <div className="page-sub">
+            Every server, this one included, over the last {label}. {data && data.step >= 3600 ? 'Read from hourly summaries of each minute.' : 'Kept a minute at a time.'}
+          </div>
           <ServersTabs current="/servers/analytics" />
         </div>
         <Seg label="Range" value={range} onChange={setRange} options={RANGES} />

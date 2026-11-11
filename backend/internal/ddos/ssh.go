@@ -7,6 +7,7 @@ package ddos
 
 import (
 	"bufio"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -57,6 +58,7 @@ func SSHLogins(proc string) []Login {
 // SSHConfigPorts are the ports an sshd config file names, with the files it includes: each Port (22
 // when none does), and the port of each ListenAddress that gives one; nil when it cannot be read.
 func SSHConfigPorts(path string) []uint16 {
+	base := filepath.Dir(path)
 	var ports, listenPorts []uint16
 	bare := false // a ListenAddress without a port, which takes Port's
 	listens := false
@@ -84,10 +86,11 @@ func SSHConfigPorts(path string) []uint16 {
 					bare = true
 				}
 			case "include":
-				// Relative names are in the folder of the main config, /etc/ssh.
+				// Relative names are in the folder of the main config, /etc/ssh, even inside an
+				// included file, as sshd reads them.
 				for _, pattern := range args {
 					if !filepath.IsAbs(pattern) {
-						pattern = filepath.Join(filepath.Dir(path), pattern)
+						pattern = filepath.Join(base, pattern)
 					}
 					files, _ := filepath.Glob(pattern)
 					slices.Sort(files)
@@ -187,6 +190,65 @@ func socketUnitPorts(path string) []uint16 {
 	return ports
 }
 
+// sshdDirs are the folders a packaged sshd runs from: sshd itself in sbin or bin, and OpenSSH 9.8's
+// sshd-session (and 10's sshd-auth) where each distribution keeps its helpers.
+var sshdDirs = []string{
+	"/usr/sbin", "/usr/bin", "/sbin", "/bin", "/usr/local/sbin", "/usr/local/bin",
+	"/usr/lib/openssh", "/usr/libexec/openssh", "/usr/lib/ssh", "/usr/libexec", "/usr/local/libexec",
+	"/usr/lib64/misc", "/usr/lib/misc",
+}
+
+// sshdBinary says whether a program path is sshd's own: a process can call itself anything, in its
+// name and its command line, but not change the program it runs. A program replaced by an upgrade
+// since it started reads "(deleted)", and is still sshd.
+func sshdBinary(exe string) bool {
+	exe = strings.TrimSuffix(exe, " (deleted)")
+	dir, name := filepath.Split(exe)
+	if name != "sshd" && name != "sshd-session" && name != "sshd-auth" {
+		return false
+	}
+	dir = strings.TrimSuffix(dir, "/")
+	// NixOS keeps it in the store, which only root writes to.
+	if strings.HasPrefix(dir, "/nix/store/") && strings.Count(dir, "/") == 4 && strings.Contains(dir, "-openssh-") &&
+		(strings.HasSuffix(dir, "/bin") || strings.HasSuffix(dir, "/libexec")) {
+		return true
+	}
+	return slices.Contains(sshdDirs, dir)
+}
+
+// sshdProcess is what is known of one process that may be sshd's.
+type sshdProcess struct {
+	sshd bool // it runs sshd's program
+	root bool // its real user is root
+	ppid string
+}
+
+// readSSHDProcess reads a process's program, user and parent from its folder in /proc. A process
+// whose program cannot be read (it can always be by root, which Nightjar runs as) is judged by its
+// name instead, still only trusted when root runs it, or its parent for a session.
+func readSSHDProcess(dir string) sshdProcess {
+	var p sshdProcess
+	if exe, err := os.Readlink(filepath.Join(dir, "exe")); err == nil {
+		p.sshd = sshdBinary(exe)
+	} else if errors.Is(err, os.ErrPermission) {
+		comm, _ := os.ReadFile(filepath.Join(dir, "comm"))
+		name := strings.TrimSpace(string(comm))
+		p.sshd = name == "sshd" || name == "sshd-session"
+	}
+	status, _ := os.ReadFile(filepath.Join(dir, "status"))
+	for line := range strings.Lines(string(status)) {
+		key, value, _ := strings.Cut(line, ":")
+		f := strings.Fields(value)
+		switch {
+		case key == "Uid" && len(f) > 0:
+			p.root = f[0] == "0"
+		case key == "PPid" && len(f) > 0:
+			p.ppid = f[0]
+		}
+	}
+	return p
+}
+
 // sessionTitle is the name sshd gives a session's process once it has let someone in. Before that
 // its processes are "[listener]", "[accepted]", "user [priv]", "user [net]" or "[preauth]".
 var sessionTitle = regexp.MustCompile(`^sshd(-session)?: [^\s@\[\]]+@\S+$`)
@@ -194,6 +256,12 @@ var sessionTitle = regexp.MustCompile(`^sshd(-session)?: [^\s@\[\]]+@\S+$`)
 // sshdSockets reads sshd's processes: the ports sshd listens on (those configured, with those its
 // listening sockets are on; 22 when none says), and the addresses of the connections its logged-in
 // sessions hold to one of them.
+//
+// Only sshd's own processes count: any user can start a program named sshd, with a title like a
+// session's, and must not get its port kept open under a default drop, or its address spared from
+// blocks. A listener must run sshd's program as root. A session runs sshd's program too, as root or
+// as the user it let in (OpenSSH's privilege separation), and then its parent is sshd's root process
+// for that connection: a user cannot make that parent theirs.
 func sshdSockets(proc string) (ports []uint16, logins []Login) {
 	ports = configuredSSHPorts()
 	sessions, others := map[string]bool{}, map[string]bool{}
@@ -207,11 +275,23 @@ func sshdSockets(proc string) (ports []uint16, logins []Login) {
 		if name := strings.TrimSpace(string(comm)); err != nil || (name != "sshd" && name != "sshd-session") {
 			continue
 		}
+		p := readSSHDProcess(dir)
+		if !p.sshd {
+			continue
+		}
 		cmdline, _ := os.ReadFile(filepath.Join(dir, "cmdline"))
 		title := strings.TrimSpace(strings.ReplaceAll(string(cmdline), "\x00", " "))
 		into := others
 		if sessionTitle.MatchString(title) {
 			into = sessions
+			if !p.root {
+				parent := readSSHDProcess(filepath.Join(proc, p.ppid))
+				if p.ppid == "" || !parent.sshd || !parent.root {
+					continue
+				}
+			}
+		} else if !p.root {
+			continue
 		}
 		fds, _ := os.ReadDir(filepath.Join(dir, "fd"))
 		for _, fd := range fds {

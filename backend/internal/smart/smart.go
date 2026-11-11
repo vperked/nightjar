@@ -48,6 +48,9 @@ type Drive struct {
 	Asleep  bool    `json:"asleep"`            // in standby at the last check, so not read
 	Checked float64 `json:"checked,omitempty"` // when the reading below was taken
 	Error   string  `json:"error,omitempty"`
+	// Missing is when the scan stopped finding a drive it found before: a failing disk often drops
+	// off the bus. Zero while it is found. Its last reading stays, for a while (see forgetMissing).
+	Missing float64 `json:"missing,omitempty"`
 
 	Health   string   `json:"health"` // good, warning, failing or unknown
 	Problems []string `json:"problems,omitempty"`
@@ -108,11 +111,39 @@ func (r *Reader) Read(ctx context.Context, now time.Time, limits Limits) ([]Driv
 	var drives []Drive
 	for _, dev := range scan.Devices {
 		d := r.readOne(ctx, dev.Name, dev.Type, now)
+		d.Missing = 0
 		Assess(&d, limits)
 		drives = append(drives, d)
 	}
 	r.mu.Lock()
 	r.err = ""
+	found := map[string]bool{}
+	serials := map[string]bool{}
+	for _, d := range drives {
+		found[key(d.Device, d.Type)] = true
+		if d.Serial != "" {
+			serials[d.Serial] = true
+		}
+	}
+	// A drive listed before and not found now is kept, marked missing, rather than dropped without a
+	// word; one found under another name (device names can change at a reboot) is not missing.
+	var missing []Drive
+	for _, k := range r.order {
+		if found[k] {
+			continue
+		}
+		d := r.drives[k]
+		delete(r.drives, k)
+		if d.Missing == 0 {
+			d.Missing = float64(now.Unix())
+		}
+		if (d.Serial != "" && serials[d.Serial]) || now.Sub(time.Unix(int64(d.Missing), 0)) > forgetMissing {
+			continue
+		}
+		d.Asleep, d.Error = false, "no longer found by smartctl --scan: the drive may have failed, or its cable come loose"
+		missing = append(missing, d)
+	}
+	drives = append(drives, missing...)
 	r.order = r.order[:0]
 	for _, d := range drives {
 		r.drives[key(d.Device, d.Type)] = d
@@ -121,6 +152,10 @@ func (r *Reader) Read(ctx context.Context, now time.Time, limits Limits) ([]Driv
 	r.mu.Unlock()
 	return drives, nil
 }
+
+// forgetMissing is how long a drive the scan no longer finds is still listed: one taken out on
+// purpose goes away by itself.
+const forgetMissing = 7 * 24 * time.Hour
 
 func (r *Reader) setErr(err error) {
 	r.mu.Lock()

@@ -15,6 +15,9 @@ import (
 
 // who is whoever sent the request: the admin by name, or the API token.
 func (s *Server) who(r *http.Request) string {
+	if who := whoFrom(r); who.Username != "" {
+		return who.Username
+	}
 	if s.cfg.AuthToken != "" && subtle.ConstantTimeCompare([]byte(presentedToken(r)), []byte(s.cfg.AuthToken)) == 1 {
 		return "API token"
 	}
@@ -89,6 +92,9 @@ var actions = map[string][2]string{
 	"POST /api/updates/{id}/update":                {"updates", "Updated {id}"},
 	"PUT /api/updates/{id}":                        {"updates", "Changed how {id} is updated"},
 	"DELETE /api/updates/{id}":                     {"updates", "Stopped watching {id} for updates"},
+	"POST /api/auth/viewers":                       {"account", "Added a viewer"},
+	"PUT /api/auth/viewers/{name}":                 {"account", "Set a new password for the viewer {name}"},
+	"DELETE /api/auth/viewers/{name}":              {"account", "Removed the viewer {name}"},
 }
 
 // skipped changes record nothing: trying things out, and the reads that use POST. They are routes,

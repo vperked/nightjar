@@ -35,19 +35,34 @@ func (s *Store) Settings() map[string]string {
 // SaveSettings stores dashboard settings; an empty value removes the key, restoring the
 // environment's value or the default.
 func (s *Store) SaveSettings(values map[string]string) error {
+	return s.tx(func(tx *sql.Tx) error { return saveSettings(tx, values) })
+}
+
+func saveSettings(tx *sql.Tx, values map[string]string) error {
+	for k, v := range values {
+		var err error
+		if v == "" {
+			_, err = tx.Exec("DELETE FROM settings WHERE key = ?", k)
+		} else {
+			_, err = tx.Exec("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", k, v)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Restore saves meta values and settings (as SaveSettings does) in one transaction, so a backup is
+// put back whole or not at all.
+func (s *Store) Restore(meta, settings map[string]string) error {
 	return s.tx(func(tx *sql.Tx) error {
-		for k, v := range values {
-			var err error
-			if v == "" {
-				_, err = tx.Exec("DELETE FROM settings WHERE key = ?", k)
-			} else {
-				_, err = tx.Exec("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", k, v)
-			}
-			if err != nil {
+		for k, v := range meta {
+			if _, err := tx.Exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", k, v); err != nil {
 				return err
 			}
 		}
-		return nil
+		return saveSettings(tx, settings)
 	})
 }
 

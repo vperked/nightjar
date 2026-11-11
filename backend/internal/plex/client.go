@@ -248,6 +248,8 @@ type rawSession struct {
 		State    string `json:"state"`
 		Local    flag   `json:"local"`
 		Address  string `json:"address"`
+		// MachineIdentifier names the player device; one player plays one thing at a time.
+		MachineIdentifier string `json:"machineIdentifier"`
 	}
 	Session struct {
 		ID        string `json:"id"`
@@ -500,10 +502,37 @@ func (c *Client) Sessions() ([]Stream, error) {
 		return nil, err
 	}
 	out := make([]Stream, 0, len(r.MediaContainer.Metadata))
+	// When a player restarts playback (a seek, a quality change, a transcode restart), Plex opens a new
+	// session and keeps listing the old one for a few minutes, so one player would show two streams.
+	// A player plays one thing at a time: keep only its newest session.
+	byPlayer := map[string]int{}
 	for _, m := range r.MediaContainer.Metadata {
-		out = append(out, m.stream())
+		s := m.stream()
+		id := m.Player.MachineIdentifier
+		if id == "" {
+			out = append(out, s)
+			continue
+		}
+		if i, ok := byPlayer[id]; ok {
+			if newerSession(m.SessionKey, out[i].ID) {
+				out[i] = s
+			}
+			continue
+		}
+		byPlayer[id] = len(out)
+		out = append(out, s)
 	}
 	return out, nil
+}
+
+// newerSession reports whether session key a came after b; Plex numbers sessions in order.
+func newerSession(a, b string) bool {
+	x, errA := strconv.Atoi(a)
+	y, errB := strconv.Atoi(b)
+	if errA != nil || errB != nil {
+		return true // unnumbered: Plex lists sessions oldest first
+	}
+	return x > y
 }
 
 var (

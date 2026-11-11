@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -111,6 +114,49 @@ func TestURLsThatAreSecretsAreMasked(t *testing.T) {
 	} {
 		if got := logx.Redact(s); strings.Contains(got, "secretTOKEN") || !strings.Contains(got, "***") {
 			t.Errorf("not masked: %s", got)
+		}
+	}
+}
+
+// A rotation that moved the log away but could not open a new one (out of file descriptors here)
+// leaves the backups where they are: only the open is tried again at the next write, not another
+// rotation that would push every backup along.
+func TestARotationThatCannotOpenItsFileKeepsTheBackups(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nightjar.log")
+	r, err := logx.OpenRotating(path, 10, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Write([]byte("0123456789"))
+	os.WriteFile(path+".1", []byte("one"), 0o640)
+	os.WriteFile(path+".2", []byte("two"), 0o640)
+
+	var limit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limit); err != nil {
+		t.Skip(err)
+	}
+	none := limit
+	none.Cur = 0
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &none); err != nil {
+		t.Skip(err)
+	}
+	var errs int
+	for range 4 {
+		if _, err := r.Write([]byte("x")); err != nil {
+			errs++
+		}
+	}
+	syscall.Setrlimit(syscall.RLIMIT_NOFILE, &limit)
+	if errs != 4 {
+		t.Fatalf("%d of 4 writes failed with no file to write to", errs)
+	}
+	if _, err := r.Write([]byte("back")); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{path: "back", path + ".1": "0123456789", path + ".2": "one", path + ".3": "two"} {
+		if b, _ := os.ReadFile(name); string(b) != want {
+			t.Errorf("%s: %q, want %q", filepath.Base(name), b, want)
 		}
 	}
 }

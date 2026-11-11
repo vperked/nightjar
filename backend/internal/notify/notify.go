@@ -84,7 +84,7 @@ type base struct {
 func newBase(name string, render func(Alert) (*http.Request, error)) *base {
 	return &base{
 		name: name, render: render,
-		client:  &http.Client{Timeout: 10 * time.Second},
+		client:  &http.Client{Timeout: 10 * time.Second, CheckRedirect: discord.KeepMethod},
 		breaker: discord.NewCircuitBreaker(5, time.Minute, 2).Named(name),
 	}
 }
@@ -106,6 +106,9 @@ func (b *base) deliver(a Alert) error {
 			return withoutURL(err)
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			return discord.RedirectError(resp)
+		}
 		if resp.StatusCode >= 300 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
 			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))

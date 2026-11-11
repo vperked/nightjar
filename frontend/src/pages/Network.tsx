@@ -23,23 +23,29 @@ const mbit = (bps: number) => {
   const v = (bps * 8) / 1e6;
   return v >= 100 ? `${Math.round(v)} Mbit/s` : v >= 10 ? `${v.toFixed(1)} Mbit/s` : `${v.toFixed(2)} Mbit/s`;
 };
-const axis = (v: number) => formatRate(v).replace('/s', '');
 
 // failuresBeforeAlert is how many polls in a row must fail before the page says so: one lost poll in
 // a second-by-second meter is a blip, and the last reading stays on screen through it.
 const failuresBeforeAlert = 3;
 
-// useNetwork polls once a second, asking only for samples newer than those it has. failures counts
-// the polls that failed in a row.
+// HISTORY_EVERY is how often the half-hour view is fetched again. The monitor sends it only to a poll
+// without `since`, so asking for newer samples alone would leave it as it was when the page opened.
+const HISTORY_EVERY = 15_000;
+
+// useNetwork polls once a second, asking only for samples newer than those it has, and every
+// HISTORY_EVERY for everything, which brings the half hour up to date. failures counts the polls that
+// failed in a row.
 function useNetwork() {
   const samples = useRef<Record<string, NetSample[]>>({});
   const history = useRef<Sample[]>([]);
+  const historyAt = useRef(0);
   const [failures, setFailures] = useState(0);
   const fetchNetwork = useCallback(async (): Promise<NetworkResponse> => {
     const lasts = Object.values(samples.current)
       .map((s) => s.at(-1)?.ts ?? 0)
       .filter(Boolean);
-    const since = lasts.length ? Math.min(...lasts) : undefined;
+    const stale = Date.now() - historyAt.current >= HISTORY_EVERY;
+    const since = lasts.length && !stale ? Math.min(...lasts) : undefined;
     let r: NetworkResponse;
     try {
       r = await api.network(since);
@@ -48,6 +54,7 @@ function useNetwork() {
       throw err;
     }
     setFailures(0);
+    if (since === undefined) historyAt.current = Date.now();
     if (r.history) history.current = r.history;
     if (r.network) {
       // A monitor from before this sent null for an empty list (an interface with nothing new).
@@ -271,7 +278,7 @@ function Body({ net, history }: { net: NetworkView; history: Sample[] }) {
               ]}
             />
           </div>
-          <TrendChart series={series} height={220} format={axis} tip={formatRate} emptyText="measuring…" />
+          <TrendChart series={series} height={220} format={formatRate} emptyText="measuring…" />
           <div className="chart-note small ink-3 num">
             {range === 'live' ? `${iface.rx_pps.toFixed(0)} packets/s in · ${iface.tx_pps.toFixed(0)} out` : 'all interfaces, every monitoring cycle'}
             {iface.new_errors || iface.new_drops ? (

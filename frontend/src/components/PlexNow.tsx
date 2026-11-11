@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import type { PlexState, PlexStream } from '../api/types';
 import { formatClock, formatKbps, plural } from '../format';
 import { usePoll } from '../hooks/usePoll';
@@ -40,6 +41,8 @@ function Progress({ stream }: { stream: PlexStream }) {
 
 // With onManage, each row opens that stream's details and controls.
 export function NowPlaying({ streams, compact = false, onManage }: { streams: PlexStream[]; compact?: boolean; onManage?: (s: PlexStream) => void }) {
+  // A viewer opens the same sheet, without its controls, so it reads as Details.
+  const manage = useCanEdit() ? 'Manage' : 'Details';
   if (streams.length === 0)
     return (
       <p className="note" style={{ padding: '4px 0 0' }}>
@@ -57,7 +60,7 @@ export function NowPlaying({ streams, compact = false, onManage }: { streams: Pl
           <th className="r">Bandwidth</th>
           {onManage && (
             <th className="shrink hide-sm">
-              <span className="sr-only">Manage</span>
+              <span className="sr-only">{manage}</span>
             </th>
           )}
         </tr>
@@ -74,9 +77,25 @@ export function NowPlaying({ streams, compact = false, onManage }: { streams: Pl
               )}
             </td>
             <td className="fill np-title">
-              <div className="truncate" title={s.title}>
-                {s.title}
-              </div>
+              {/* The title opens the stream from the keyboard, at any width (Manage hides on a phone). */}
+              {onManage ? (
+                <button
+                  type="button"
+                  className="qb-name"
+                  title={s.title}
+                  aria-label={`${manage} ${s.user}'s stream of ${s.title}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onManage(s);
+                  }}
+                >
+                  <span className="truncate">{s.title}</span>
+                </button>
+              ) : (
+                <div className="truncate" title={s.title}>
+                  {s.title}
+                </div>
+              )}
               <div className="sub truncate">{s.subtitle}</div>
             </td>
             <td className="shrink np-stream">
@@ -99,16 +118,18 @@ export function NowPlaying({ streams, compact = false, onManage }: { streams: Pl
             </td>
             {onManage && (
               <td className="shrink r hide-sm">
+                {/* For the pointer only: the keyboard opens the stream from its title, which a phone shows too. */}
                 <button
                   type="button"
+                  tabIndex={-1}
                   className="btn-ghost np-manage"
-                  aria-label={`Manage ${s.user}'s stream of ${s.title}`}
+                  aria-label={`${manage} ${s.user}'s stream of ${s.title}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     onManage(s);
                   }}
                 >
-                  Manage
+                  {manage}
                 </button>
               </td>
             )}

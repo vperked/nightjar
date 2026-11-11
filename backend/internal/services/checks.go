@@ -1,4 +1,5 @@
-// Package services runs uptime checks (HTTP(S), TCP, ping, TLS expiry) and tracks each service's status.
+// Package services runs uptime checks (HTTP(S), TCP, ping, TLS expiry, DNS, PostgreSQL, MySQL, Redis)
+// and tracks each service's status.
 package services
 
 import (
@@ -24,7 +25,7 @@ import (
 	"time"
 )
 
-var CheckTypes = []string{"http", "tcp", "ping", "tls", "plugin", "heartbeat", "docker"}
+var CheckTypes = []string{"http", "tcp", "ping", "tls", "dns", "postgres", "mysql", "redis", "plugin", "heartbeat", "docker"}
 
 // PluginCheck runs a plugin's check, whose target is the plugin's id and, after a colon, its
 // argument. Nightjar sets it when it loads plugins.
@@ -47,6 +48,9 @@ func PluginTarget(target string) (id, argument string) {
 const minInterval = 5.0
 
 var hostRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.\-:]*[A-Za-z0-9])?$`)
+
+// validHost is a host name or an IP address (IPv6 included, without brackets).
+func validHost(h string) bool { return net.ParseIP(h) != nil || hostRE.MatchString(h) }
 
 // Spec is one configured service check.
 type Spec struct {
@@ -71,6 +75,13 @@ type Spec struct {
 	Schedule   string  `json:"schedule,omitempty"`
 	Grace      float64 `json:"grace,omitempty"`
 	MaxRuntime float64 `json:"max_runtime,omitempty"`
+	// A dns check asks for RecordType records (A by default), from DNSServer (host[:port]) when it
+	// is set and the system's resolver otherwise. Keyword, when set, must be in one of the answers.
+	RecordType string `json:"record_type,omitempty"`
+	DNSServer  string `json:"dns_server,omitempty"`
+	// Password is a redis check's, sent with AUTH before PING. It is stored with the check but
+	// never sent to the browser (see Public).
+	Password string `json:"password,omitempty"`
 	// Repair is what Nightjar does to bring the check back when it goes down.
 	Repair *Repair `json:"repair,omitempty"`
 	// Server is the id of the watched server the checked thing runs on; empty for none.
@@ -469,6 +480,14 @@ func Run(s Spec) (r Result) {
 		return CheckPing(s)
 	case "tls":
 		return CheckTLS(s)
+	case "dns":
+		return CheckDNS(s)
+	case "postgres":
+		return CheckPostgres(s)
+	case "mysql":
+		return CheckMySQL(s)
+	case "redis":
+		return CheckRedis(s)
 	case "plugin":
 		if PluginCheck == nil {
 			return down("plugins are not loaded")
@@ -505,6 +524,9 @@ type rawSpec struct {
 	Schedule       string   `json:"schedule"`
 	Grace          *float64 `json:"grace"`
 	MaxRuntime     *float64 `json:"max_runtime"`
+	RecordType     string   `json:"record_type"`
+	DNSServer      string   `json:"dns_server"`
+	Password       string   `json:"password"`
 	Repair         *Repair  `json:"repair"`
 	Server         string   `json:"server"`
 }
@@ -552,9 +574,41 @@ func (r rawSpec) spec() (Spec, error) {
 		if _, err := ParseSchedule(r.Schedule); err != nil {
 			return Spec{}, fmt.Errorf("%s: %v", name, err)
 		}
+	case "dns":
+		target = strings.TrimSuffix(target, ".")
+		if !dnsNameRE.MatchString(target) {
+			return Spec{}, fmt.Errorf("%s: a DNS check's target is a domain name, such as example.com", name)
+		}
+		recordType := strings.ToUpper(strings.TrimSpace(r.RecordType))
+		if recordType == "" {
+			recordType = "A"
+		}
+		if !slices.Contains(RecordTypes, recordType) {
+			return Spec{}, fmt.Errorf("%s: record type must be one of %s", name, strings.Join(RecordTypes, ", "))
+		}
+		r.RecordType = recordType
+		r.DNSServer = strings.TrimSpace(r.DNSServer)
+		if r.DNSServer != "" {
+			host, port, err := splitHostPort(r.DNSServer, 53)
+			if n, perr := strconv.Atoi(port); err != nil || perr != nil || n < 1 || n > 65535 || !validHost(host) {
+				return Spec{}, fmt.Errorf("%s: the DNS server is an address such as 1.1.1.1 or 9.9.9.9:53", name)
+			}
+		}
+	case "postgres", "mysql", "redis":
+		host, port, err := splitHostPort(target, 1)
+		if n, perr := strconv.Atoi(port); err != nil || perr != nil || n < 1 || n > 65535 || !validHost(host) {
+			return Spec{}, fmt.Errorf("%s: target is host or host:port, such as db.lan or 10.0.0.5:%d", name, map[string]int{"postgres": postgresPort, "mysql": mysqlPort, "redis": redisPort}[kind])
+		}
 	case "tcp", "tls":
 	default:
 		return Spec{}, fmt.Errorf("%s: type must be one of %s", name, strings.Join(CheckTypes, ", "))
+	}
+	// Only a redis check signs in.
+	if kind != "redis" {
+		r.Password = ""
+	}
+	if len(r.Password) > 512 {
+		return Spec{}, fmt.Errorf("%s: that password is too long", name)
 	}
 	if r.Repair != nil {
 		if err := r.Repair.validate(name); err != nil {
@@ -592,6 +646,9 @@ func (r rawSpec) spec() (Spec, error) {
 		RetryInterval:  min(interval, max(minInterval, orDefault(r.RetryInterval, defaultRetryInterval))),
 		PingCount:      min(maxPingCount, max(1, orDefault(r.PingCount, defaultPingCount))),
 		PingInterval:   min(maxPingInterval, max(minPingInterval, orDefault(r.PingInterval, defaultPingInterval))),
+		RecordType:     r.RecordType,
+		DNSServer:      r.DNSServer,
+		Password:       r.Password,
 		Repair:         r.Repair,
 		Server:         server,
 	}, nil
@@ -648,4 +705,92 @@ func Load(path string, warn func(string)) []Spec {
 		warn(fmt.Sprintf("could not parse services file %s: %v", path, err))
 	}
 	return specs
+}
+
+// PublicSpec is a check as the browser sees it: its password left out, and whether it has one.
+type PublicSpec struct {
+	Spec
+	PasswordSet bool `json:"password_set,omitempty"`
+}
+
+// Public is the spec without its password, for the admin's dashboard.
+func (s Spec) Public() PublicSpec {
+	set := s.Password != ""
+	s.Password = ""
+	return PublicSpec{Spec: s, PasswordSet: set}
+}
+
+// ForViewer is the spec as a read-only account sees it: Public, and its target only as ShownTarget
+// has it. A viewer with a heartbeat's token could ping it, hiding a failed job or raising false alerts.
+func (s Spec) ForViewer() PublicSpec {
+	s.Target = ShownTarget(s)
+	return s.Public()
+}
+
+// WithoutSecrets is the spec for a backup made without secrets: no password, and its target as
+// ShownTarget has it. KeepSecrets puts them back on restore.
+func (s Spec) WithoutSecrets() Spec {
+	s.Password, s.Target = "", ShownTarget(s)
+	return s
+}
+
+// KeepSecrets gives a check restored from a backup without secrets the ones the same check (old,
+// when ok) has here: its password when none came, and its full target when the backup's is this
+// one's shown form (a heartbeat's empty token, an address without its password). A heartbeat new
+// here is left without a token, so it gets a new one.
+func (s *Spec) KeepSecrets(old Spec, ok bool) {
+	if !ok || old.Type != s.Type {
+		return
+	}
+	if s.Password == "" && s.Type == "redis" {
+		s.Password = old.Password
+	}
+	if s.Target == ShownTarget(old) {
+		s.Target = old.Target
+	}
+}
+
+// sensitiveParam matches query parameters that usually carry a credential.
+var sensitiveParam = regexp.MustCompile(`(?i)key|token|secret|pass|pwd|auth|sig|session|credential`)
+
+// ShownTarget is what may be shown of a check's target to those who must not be able to act as the
+// check: viewers, alerts (which reach chat channels and the notification history), and backups made
+// without secrets. A heartbeat's target is the token that alone authenticates its pings, so it is
+// left out, and an address loses its user and password and the values of credential-like query
+// parameters.
+func ShownTarget(s Spec) string {
+	if s.Type == "heartbeat" {
+		return ""
+	}
+	u, err := url.Parse(s.Target)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return withoutPassword(s.Target)
+	}
+	u.User = nil
+	if u.RawQuery != "" {
+		q := u.Query()
+		for k := range q {
+			if sensitiveParam.MatchString(k) {
+				q[k] = []string{"REDACTED"}
+			}
+		}
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+// withoutPassword drops a "user:password@" from a target that is not a well-formed URL.
+func withoutPassword(target string) string {
+	at := strings.LastIndex(target, "@")
+	if at < 0 {
+		return target
+	}
+	start := 0
+	if i := strings.Index(target, "://"); i >= 0 && i < at {
+		start = i + 3
+	}
+	if userinfo := target[start:at]; !strings.Contains(userinfo, ":") || strings.Contains(userinfo, "/") {
+		return target
+	}
+	return target[:start] + target[at+1:]
 }

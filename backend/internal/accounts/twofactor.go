@@ -109,8 +109,9 @@ func (a *Accounts) BeginTwoFactor() (secret, link string, err error) {
 
 // EnableTwoFactor turns it on with the password, so a session left open cannot tie the account to
 // someone else's authenticator, once a code from the new secret proves the authenticator has it. It
-// returns the recovery codes, shown this once.
-func (a *Accounts) EnableTwoFactor(password, code string) ([]string, error) {
+// returns the recovery codes, shown this once. Like a password change, it signs out the admin's
+// other browsers (keeping the one with keepToken): they signed in without a code.
+func (a *Accounts) EnableTwoFactor(password, code, keepToken string) ([]string, error) {
 	a.mu.Lock()
 	ad := a.admin
 	a.mu.Unlock()
@@ -152,6 +153,7 @@ func (a *Accounts) EnableTwoFactor(password, code string) ([]string, error) {
 		return nil, err
 	}
 	a.admin, a.pending = &next, ""
+	a.endOthersLocked(keepToken)
 	log.Info("Two-factor sign-in turned on")
 	return codes, nil
 }
@@ -183,8 +185,9 @@ func (a *Accounts) CheckCode(code string) error {
 	return nil
 }
 
-// DisableTwoFactor turns it off, with the password and a current code.
-func (a *Accounts) DisableTwoFactor(password, code string) error {
+// DisableTwoFactor turns it off, with the password and a current code, and signs out the admin's
+// other browsers (keeping the one with keepToken), as a password change does.
+func (a *Accounts) DisableTwoFactor(password, code, keepToken string) error {
 	a.mu.Lock()
 	ad := a.admin
 	a.mu.Unlock()
@@ -205,6 +208,7 @@ func (a *Accounts) DisableTwoFactor(password, code string) error {
 		return err
 	}
 	a.admin = &next
+	a.endOthersLocked(keepToken)
 	log.Info("Two-factor sign-in turned off")
 	return nil
 }

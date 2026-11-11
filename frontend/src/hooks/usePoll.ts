@@ -6,6 +6,9 @@ export interface Poll<T> {
   error: Error | undefined;
   unauthorized: boolean;
   loading: boolean;
+  // stale is true while data is the last fetcher's (a range just changed and its reply is not in), so a
+  // page that labels data with its range can show it loading rather than old numbers under a new label.
+  stale: boolean;
   refresh: () => void;
 }
 
@@ -13,7 +16,8 @@ export interface Poll<T> {
 // A new fetcher (e.g. a different time range) refetches at once and discards replies to the old one,
 // so fetchers must be stable: module-level functions or useCallback.
 export function usePoll<T>(fetcher: () => Promise<T>, intervalMs: number, enabled = true): Poll<T> {
-  const [data, setData] = useState<T>();
+  // data remembers which fetcher it came from, for stale.
+  const [got, setGot] = useState<{ data: T; from: () => Promise<T> }>();
   const [error, setError] = useState<Error>();
   const [unauthorized, setUnauthorized] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -35,7 +39,7 @@ export function usePoll<T>(fetcher: () => Promise<T>, intervalMs: number, enable
       const next = await f();
       // A reply that may predate a change waits for the one asked for after it.
       if (current.current !== f || again.current) return;
-      setData(next);
+      setGot({ data: next, from: f });
       setError(undefined);
       setUnauthorized(false);
     } catch (e) {
@@ -62,5 +66,6 @@ export function usePoll<T>(fetcher: () => Promise<T>, intervalMs: number, enable
     return () => clearInterval(id);
   }, [fetcher, run, intervalMs, enabled]);
 
-  return { data, error, unauthorized, loading, refresh };
+  // Data is kept when the fetcher changes, so pages that ignore stale do not flicker.
+  return { data: got?.data, error, unauthorized, loading, stale: got !== undefined && got.from !== fetcher, refresh };
 }

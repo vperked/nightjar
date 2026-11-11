@@ -154,7 +154,8 @@ func (l *Loop) Evaluate(s *Snapshot) {
 		ctx.Notifications.Tick()
 	}
 	ctx.Analytics.Add(analytics.Local, localReading(s))
-	ctx.Analytics.Prune(time.Duration(ctx.Config().HistoryRetentionDays) * 24 * time.Hour)
+	cfg := ctx.Config()
+	ctx.Analytics.Prune(time.Duration(cfg.HistoryRetentionDays)*24*time.Hour, time.Duration(cfg.LongTermRetentionDays)*24*time.Hour)
 	ctx.setLatest(s)
 }
 

@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -47,11 +48,27 @@ func flooding() *Flood {
 	if err != nil {
 		return nil
 	}
-	return ParseFlood(out)
+	return ParseFlood(out, uptime())
 }
 
-// ParseFlood measures a dmesg listing ("[seconds since boot] message").
-func ParseFlood(out []byte) *Flood {
+// uptime is the seconds since boot, what dmesg's times count; 0 when unknown.
+func uptime() float64 {
+	b, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0
+	}
+	f := strings.Fields(string(b))
+	if len(f) == 0 {
+		return 0
+	}
+	up, _ := strconv.ParseFloat(f[0], 64)
+	return up
+}
+
+// ParseFlood measures a dmesg listing ("[seconds since boot] message") at now, in seconds since boot
+// (0 when unknown). The rate runs up to now, not to the newest message: a kernel that flooded and went
+// quiet leaves a buffer of messages seconds apart, and is not flooding any more.
+func ParseFlood(out []byte, now float64) *Flood {
 	var first, last float64
 	n := 0
 	counts := map[string]int{}
@@ -86,7 +103,9 @@ func ParseFlood(out []byte) *Flood {
 			return "…"
 		})]++
 	}
-	span := last - first
+	// dmesg's clock stops while the machine is suspended and /proc/uptime's does not, which can only
+	// make the rate look lower: a flood is then missed, never made up.
+	span := max(last, now) - first
 	if n < 1000 || span <= 0 {
 		return nil // too little to say, or all in one instant at boot
 	}

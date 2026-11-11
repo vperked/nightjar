@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../api/client';
-import type { FirewallDrop, FirewallPort, FirewallRule, FirewallStatus } from '../api/types';
+import { useCanEdit } from '../api/ConfigContext';
+import type { AgentFirewall, FirewallDrop, FirewallPort, FirewallRule, FirewallStatus } from '../api/types';
 import { formatAgo, formatBytes, plural } from '../format';
 import { useNow } from '../hooks/useNow';
 import { Pager, usePaged } from './Pager';
@@ -46,6 +47,9 @@ const portWords = (r: Pick<FirewallRule, 'port' | 'proto'>) => {
   const list = r.port.replaceAll(':', '–').replaceAll(',', ', ');
   return `${r.proto ? `${r.proto} ` : ''}${r.port.includes(',') ? 'ports' : 'port'} ${list}`;
 };
+
+// sourceWords names who a rule is for: "Nightjar" for the address Nightjar reaches a server from.
+const sourceWords = (source: string, dashboard?: string) => (source && source === dashboard ? 'Nightjar' : source || 'anyone');
 
 // describeRule puts a rule in words: "Block 203.0.113.7 on every port", "Limit anyone on tcp port 22
 // to 6 a minute each", "Block outgoing connections on port 25", "Allow outgoing to 192.0.2.25 on every port".
@@ -96,16 +100,20 @@ export const localFirewall: FirewallTarget = {
   keep: (keep) => api.keepFirewallDefault(keep).then((r) => r.firewall),
 };
 
+// withDashboard puts the address the agent saw Nightjar ask from onto its firewall, for the form's
+// "Nightjar" choice.
+const withDashboard = (v: AgentFirewall): FirewallStatus => (v.dashboard ? { ...v.firewall, dashboard: v.dashboard } : v.firewall);
+
 export const hostFirewall = (h: { id: string; name: string }): FirewallTarget => ({
   key: h.id,
   name: h.name,
-  load: () => api.hostFirewall(h.id).then((v) => v.firewall),
-  add: (rule) => api.addHostRule(h.id, rule).then((v) => v.firewall),
-  update: (id, rule) => api.updateHostRule(h.id, id, rule).then((v) => v.firewall),
-  remove: (id) => api.removeHostRule(h.id, id).then((v) => v.firewall),
-  order: (ids) => api.orderHostRules(h.id, ids).then((v) => v.firewall),
-  setDefault: (def) => api.setHostDefault(h.id, def).then((v) => v.firewall),
-  keep: (keep) => api.keepHostDefault(h.id, keep).then((v) => v.firewall),
+  load: () => api.hostFirewall(h.id).then(withDashboard),
+  add: (rule) => api.addHostRule(h.id, rule).then(withDashboard),
+  update: (id, rule) => api.updateHostRule(h.id, id, rule).then(withDashboard),
+  remove: (id) => api.removeHostRule(h.id, id).then(withDashboard),
+  order: (ids) => api.orderHostRules(h.id, ids).then(withDashboard),
+  setDefault: (def) => api.setHostDefault(h.id, def).then(withDashboard),
+  keep: (keep) => api.keepHostDefault(h.id, keep).then(withDashboard),
 });
 
 interface Draft {
@@ -122,9 +130,12 @@ interface Draft {
   count: string;
   unit: 'sec' | 'min' | 'hour';
   note: string;
+  // alone also blocks everyone else on the port, for a new allow from one address: the allow is then
+  // the only way in ("only Nightjar may reach 9101").
+  alone: boolean;
 }
 
-const EMPTY: Draft = { action: '', who: 'any', source: '', ports: 'all', port: '', proto: '', count: '6', unit: 'min', note: '' };
+const EMPTY: Draft = { action: '', who: 'any', source: '', ports: 'all', port: '', proto: '', count: '6', unit: 'min', note: '', alone: false };
 
 // startDraft is a new rule's form filled with what is known: an address, a port, an action.
 const startDraft = (d: Partial<Draft>): Draft => ({ ...EMPTY, ...d, who: d.source ? 'some' : 'any', ports: d.port ? 'some' : 'all' });
@@ -141,8 +152,14 @@ const draftOf = (r: FirewallRule): Draft => {
     count,
     unit: (unit as Draft['unit']) || 'min',
     note: r.note ?? '',
+    alone: false,
   };
 };
+
+// keepsOthersOut says whether a draft can also block everyone else: a new incoming allow from one
+// address or network, to given ports.
+const keepsOthersOut = (draft: Draft, dir: 'in' | 'out', editing: boolean) =>
+  !editing && dir === 'in' && draft.action === 'allow' && draft.who === 'some' && !!draft.source.trim() && draft.ports === 'some' && !!draft.port.trim();
 
 // ruleOf is the rule a draft makes, as the API takes it.
 const ruleOf = (draft: Draft, dir: 'in' | 'out'): Partial<FirewallRule> => {
@@ -193,12 +210,12 @@ function presets(st: FirewallStatus): Preset[] {
   ];
 }
 
-// hitWords says what a rule caught: "dropped 1,204 · 82 KB", "let in 30".
+// hitWords says what a rule caught: "dropped 1,204 · 82 KB", "let in 30" ("let out" for an outgoing rule).
 function hitWords(r: FirewallRule, hits: FirewallStatus['hits']): string {
   const h = hits?.[r.id];
   if (!h || !h.packets) return 'nothing caught yet';
   const n = `${h.packets.toLocaleString()} · ${formatBytes(h.bytes)}`;
-  return r.action === 'allow' ? `let in ${n}` : r.action === 'limit' ? `dropped ${n} over the limit` : `dropped ${n}`;
+  return r.action === 'allow' ? `let ${r.direction === 'out' ? 'out' : 'in'} ${n}` : r.action === 'limit' ? `dropped ${n} over the limit` : `dropped ${n}`;
 }
 
 // withLists fills in the open ports when an answer has none: an agent from before they were read, or
@@ -209,6 +226,8 @@ const withLists = (s: FirewallStatus | undefined): FirewallStatus | undefined =>
 // for what the rules caught.
 export function FirewallManager({ target }: { target: FirewallTarget }) {
   const notify = useToast();
+  // A viewer sees the rules, without what would change them.
+  const canEdit = useCanEdit();
   const [st, setSt] = useState<FirewallStatus>();
   const [off, setOff] = useState(false);
   const [error, setError] = useState('');
@@ -220,27 +239,38 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
   // adding is whether the rule form is open: it opens from Add a rule, a port, a dropped address or Edit.
   const [adding, setAdding] = useState(false);
   const [asking, setAsking] = useState(false);
+  // removing is the rule whose Remove is waiting on a yes: one click should not drop a rule.
+  const [removing, setRemoving] = useState('');
   const busyRef = useRef('');
   busyRef.current = busy;
+  // epoch moves on when a change starts or ends, and with each machine. A read that went out before
+  // then may predate the change, and would bring back the old firewall (dropping the Keep/Undo banner
+  // while the revert still counts down), so its reply is let go; the next read brings the new one.
+  const epoch = useRef(0);
 
-  const refresh = useCallback(
-    () =>
-      target.load().then(
-        (s) => {
-          setOff(!s);
-          setSt(withLists(s));
-          setError('');
-        },
-        (e) => setError(errText(e)),
-      ),
-    [target],
-  );
+  const refresh = useCallback(() => {
+    const at = epoch.current;
+    return target.load().then(
+      (s) => {
+        if (epoch.current !== at) return;
+        setOff(!s);
+        setSt(withLists(s));
+        setError('');
+      },
+      (e) => {
+        if (epoch.current === at) setError(errText(e));
+      },
+    );
+  }, [target]);
   useEffect(() => {
+    epoch.current++;
     setSt(undefined);
+    setError('');
     setDraft(EMPTY);
     setEditing(undefined);
     setAdding(false);
     setAsking(false);
+    setRemoving('');
     refresh();
     const t = window.setInterval(() => {
       if (document.visibilityState === 'visible' && !busyRef.current) refresh();
@@ -251,15 +281,20 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
   // run makes a change, shows the firewall after it, and says how it went.
   const run = async (key: string, change: () => Promise<FirewallStatus | undefined>, ok?: { title: string; body?: string }) => {
     setBusy(key);
+    epoch.current++;
     try {
       const s = await change();
-      if (s) setSt(withLists(s));
+      if (s) {
+        setSt(withLists(s));
+        setError('');
+      }
       if (ok) notify({ tone: 'ok', ...ok });
       return true;
     } catch (err) {
       notify({ tone: 'error', title: `Could not change the firewall · ${target.name}`, body: errText(err) });
       return false;
     } finally {
+      epoch.current++;
       setBusy('');
     }
   };
@@ -295,10 +330,33 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
     if (missing(draft, dir)) return;
     setBusy('form');
     setFormError('');
+    epoch.current++;
     const rule: Partial<FirewallRule> = { ...ruleOf(draft, dir), paused: editing?.paused };
+    const alone = draft.alone && keepsOthersOut(draft, dir, !!editing);
     try {
-      const s = editing ? await target.update(editing.id, rule) : await target.add(rule);
-      if (s) setSt(withLists(s));
+      let s = editing ? await target.update(editing.id, rule) : await target.add(rule);
+      if (s) {
+        setSt(withLists(s));
+        setError('');
+      }
+      if (alone) {
+        // The block for everyone else goes in behind the allow (the firewall puts it after an allow it
+        // is an exception to), so the allow is the only way in. Should it be refused, the allow stays.
+        const rest: Partial<FirewallRule> = { action: 'block', port: rule.port, proto: rule.proto, note: `everyone but ${sourceWords(rule.source ?? '', st?.dashboard)}` };
+        try {
+          s = await target.add(rest);
+          if (s) setSt(withLists(s));
+        } catch (err) {
+          notify({ tone: 'error', title: `Added the allow, but not the block for everyone else · ${target.name}`, body: errText(err) });
+          setDraft(EMPTY);
+          setAdding(false);
+          return;
+        }
+        notify({ tone: 'ok', title: `Rules added · ${target.name}`, body: `Only ${sourceWords(rule.source ?? '', st?.dashboard)} may reach ${portWords(rule as FirewallRule)}.` });
+        setDraft(EMPTY);
+        setAdding(false);
+        return;
+      }
       notify({ tone: 'ok', title: `${editing ? 'Rule changed' : 'Rule added'} · ${target.name}`, body: describeRule(rule as FirewallRule) });
       setDraft(EMPTY);
       setEditing(undefined);
@@ -306,6 +364,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
     } catch (err) {
       setFormError(errText(err));
     } finally {
+      epoch.current++;
       setBusy('');
     }
   };
@@ -325,7 +384,9 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
     run(r.id, () => target.order(ids));
   };
 
-  if (error)
+  // A failed read with nothing read yet is all there is to show; after one, the last firewall read
+  // stays (with the Keep/Undo banner and a rule being typed) under a note that it could not be read.
+  if (error && !st)
     return (
       <Section label="Firewall">
         <p className="form-error">{error}</p>
@@ -345,7 +406,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
     );
 
   const full = !!st.full;
-  const canChange = !st.problem;
+  const canChange = !st.problem && canEdit;
   const tool = TOOL[st.tool];
   const aside = `${tool}${st.policy ? ` · on its own ${st.policy === 'DROP' ? 'drops' : 'lets in'} what no rule decides` : ''}`;
   const closing = st.listening.filter((p) => !p.local && !p.allowed);
@@ -357,6 +418,11 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
   const busiest = Math.log1p(Math.max(1, ...shown.map((r) => caught(st.hits, r.id))));
   return (
     <>
+      {error && (
+        <p className="alert" role="alert">
+          Could not read the firewall again ({error}). This is how it was last read; retrying.
+        </p>
+      )}
       {full && <Glance st={st} rules={rules} tool={tool} />}
       {full && (
         <Section label="Firewall" aside={<span className="small ink-3">{aside}</span>}>
@@ -433,12 +499,16 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
                       <span className="fw-order num" title="Checked in this order">
                         {i + 1}
                       </span>
-                      <button type="button" className="icon-btn" aria-label={`Move up: ${describeRule(r)}`} disabled={!!busy || i === 0 || !canChange} onClick={() => move(r, -1)}>
-                        ↑
-                      </button>
-                      <button type="button" className="icon-btn" aria-label={`Move down: ${describeRule(r)}`} disabled={!!busy || i === shown.length - 1 || !canChange} onClick={() => move(r, 1)}>
-                        ↓
-                      </button>
+                      {canEdit && (
+                        <>
+                          <button type="button" className="icon-btn" aria-label={`Move up: ${describeRule(r)}`} disabled={!!busy || i === 0 || !canChange} onClick={() => move(r, -1)}>
+                            ↑
+                          </button>
+                          <button type="button" className="icon-btn" aria-label={`Move down: ${describeRule(r)}`} disabled={!!busy || i === shown.length - 1 || !canChange} onClick={() => move(r, 1)}>
+                            ↓
+                          </button>
+                        </>
+                      )}
                     </span>
                   )}
                   <span className={`fw-action ${r.action}`}>
@@ -449,7 +519,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
                     <span className="fw-rule-head">
                       <span className="fw-rule-who mono">
                         {r.direction === 'out' && <span className="fw-to">to </span>}
-                        {r.source || 'Anyone'}
+                        {r.source && r.source === st.dashboard ? <span title={r.source}>Nightjar</span> : r.source || 'Anyone'}
                       </span>
                       <span className="fw-tag">{portWords(r)}</span>
                       {r.action === 'limit' && <span className="fw-tag">at most {rateWords(r.rate)} each</span>}
@@ -466,33 +536,47 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
                       </span>
                     )}
                   </span>
-                  <span className="fw-rule-acts">
-                    {full && (
-                      <>
-                        <button
-                          type="button"
-                          className="btn-quiet"
-                          disabled={!!busy || !canChange}
-                          onClick={() =>
-                            run(r.id, () => target.update(r.id, { ...r, paused: !r.paused }), { title: `${r.paused ? 'Rule back in place' : 'Rule paused'} · ${target.name}`, body: describeRule(r) })
-                          }
-                        >
-                          {r.paused ? 'Resume' : 'Pause'}
+                  {canEdit && (
+                    <span className="fw-rule-acts">
+                      {full && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-quiet"
+                            disabled={!!busy || !canChange}
+                            onClick={() =>
+                              run(r.id, () => target.update(r.id, { ...r, paused: !r.paused }), { title: `${r.paused ? 'Rule back in place' : 'Rule paused'} · ${target.name}`, body: describeRule(r) })
+                            }
+                          >
+                            {r.paused ? 'Resume' : 'Pause'}
+                          </button>
+                          <button type="button" className="btn-quiet" disabled={!!busy || !canChange} onClick={() => edit(r)}>
+                            Edit
+                          </button>
+                        </>
+                      )}
+                      {removing === r.id ? (
+                        <span className="confirm">
+                          <span className="small ink-3">Remove?</span>
+                          <button
+                            type="button"
+                            className="btn-quiet danger"
+                            disabled={!!busy || !canChange}
+                            onClick={() => run(r.id, () => target.remove(r.id), { title: `Rule removed · ${target.name}`, body: describeRule(r) }).then(() => setRemoving(''))}
+                          >
+                            {busy === r.id ? '…' : 'Remove'}
+                          </button>
+                          <button type="button" className="btn-quiet" onClick={() => setRemoving('')}>
+                            Keep
+                          </button>
+                        </span>
+                      ) : (
+                        <button type="button" className="btn-quiet fw-remove" disabled={!!busy || !canChange} onClick={() => setRemoving(r.id)}>
+                          Remove…
                         </button>
-                        <button type="button" className="btn-quiet" disabled={!!busy || !canChange} onClick={() => edit(r)}>
-                          Edit
-                        </button>
-                      </>
-                    )}
-                    <button
-                      type="button"
-                      className="btn-quiet fw-remove"
-                      disabled={!!busy || !canChange}
-                      onClick={() => run(r.id, () => target.remove(r.id), { title: `Rule removed · ${target.name}`, body: describeRule(r) })}
-                    >
-                      {busy === r.id ? '…' : 'Remove'}
-                    </button>
-                  </span>
+                      )}
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>
@@ -553,6 +637,9 @@ function RuleForm({
 }) {
   const set = (d: Partial<Draft>) => setDraft({ ...draft, ...d });
   const out = dir === 'out';
+  // nightjar is the address a server's firewall sees Nightjar ask from (none for this machine's own).
+  const nightjar = out ? undefined : st.dashboard;
+  const fromNightjar = !!nightjar && draft.who === 'some' && draft.source.trim() === nightjar;
   const gap = missing(draft, dir);
   const who = out ? 'To' : 'From';
   const actions: { value: FirewallRule['action']; title: string; body: string }[] = out
@@ -629,16 +716,24 @@ function RuleForm({
             <input type="radio" name="fw-who" checked={draft.who === 'any'} onChange={() => set({ who: 'any' })} />
             {out ? 'Anywhere' : 'Anyone'}
           </label>
+          {nightjar && (
+            // A server's firewall: Nightjar itself, by the address that server sees it ask from. It also
+            // ticks "keep everyone else out", since letting only Nightjar in is what it is for.
+            <label className="fw-radio" title={`The address this server sees Nightjar ask from: ${nightjar}`}>
+              <input type="radio" name="fw-who" checked={fromNightjar} onChange={() => set({ who: 'some', source: nightjar, alone: true })} />
+              Nightjar <span className="mono small ink-3">{nightjar}</span>
+            </label>
+          )}
           <label className="fw-radio">
-            <input type="radio" name="fw-who" checked={draft.who === 'some'} onChange={() => set({ who: 'some' })} />
+            <input type="radio" name="fw-who" checked={draft.who === 'some' && !fromNightjar} onChange={() => set({ who: 'some', ...(fromNightjar ? { source: '', alone: false } : {}) })} />
             Only
           </label>
           <input
             className="field mono"
             name="who"
-            value={draft.source}
+            value={fromNightjar ? '' : draft.source}
             onChange={(e) => set({ source: e.target.value, ...(e.target.value.trim() ? { who: 'some' as const } : {}) })}
-            onFocus={() => set({ who: 'some' })}
+            onFocus={() => set({ who: 'some', ...(fromNightjar ? { source: '', alone: false } : {}) })}
             placeholder="203.0.113.7 or 198.51.100.0/24"
             aria-label={who}
             spellCheck={false}
@@ -695,6 +790,16 @@ function RuleForm({
         </div>
       )}
 
+      {keepsOthersOut(draft, dir, !!editing) && (
+        <label className="fw-step fw-alone">
+          <span className="fw-step-label" aria-hidden="true" />
+          <span className="fw-radio">
+            <input type="checkbox" checked={draft.alone} onChange={(e) => set({ alone: e.target.checked })} />
+            Keep everyone else out: also block {portWords(ruleOf(draft, dir) as FirewallRule)} for everyone but {sourceWords(draft.source.trim(), nightjar)}
+          </span>
+        </label>
+      )}
+
       <label className="fw-step">
         <span className="fw-step-label">Note</span>
         <input className="field" value={draft.note} onChange={(e) => set({ note: e.target.value })} placeholder="optional: why, for later" aria-label="Note" maxLength={200} />
@@ -734,7 +839,9 @@ function Glance({ st, rules, tool }: { st: FirewallStatus; rules: FirewallRule[]
   const stopped = rules.filter((r) => r.action !== 'allow');
   const dropped = caught(st.hits, 'default') + stopped.reduce((n, r) => n + caught(st.hits, r.id), 0);
   const droppedBytes = (st.hits?.default?.bytes ?? 0) + stopped.reduce((n, r) => n + (st.hits?.[r.id]?.bytes ?? 0), 0);
-  const reachable = st.listening.filter((p) => !p.local && (p.allowed || st.default !== 'drop'));
+  // Reachable by the same test as the first tile: with the machine's own firewall dropping, only a
+  // port a rule allows (or one kept open) gets through.
+  const reachable = st.listening.filter((p) => !p.local && (p.allowed || !dropping));
   return (
     <div className="stats-row fw-glance">
       <div className={dropping ? 'fw-glance-good' : 'fw-glance-warn'}>
@@ -791,6 +898,7 @@ function DefaultChoice({
   disabled: boolean;
 }) {
   const now = useNow(1000);
+  const canEdit = useCanEdit();
   const tool = TOOL[st.tool];
   const def = st.default ?? '';
   const [keepOpen, setKeepOpen] = useState<Set<string>>(new Set());
@@ -824,15 +932,25 @@ function DefaultChoice({
   };
 
   const left = st.pending ? Math.max(0, Math.round(st.pending.until - now)) : 0;
+  // A viewer still sees which way it is set: the choices stay, greyed out.
+  const viewerTitle = canEdit ? undefined : "Viewers can't change this";
   return (
     <div className="fw-default">
       <span className="label">Incoming traffic no rule decides</span>
       <div className="fw-default-choices" role="radiogroup" aria-label="Incoming traffic no rule decides">
-        <button type="button" role="radio" aria-checked={def === ''} className={`fw-choice${def === '' ? ' on' : ''}`} disabled={disabled || !!busy} onClick={() => choose('')}>
+        <button type="button" role="radio" aria-checked={def === ''} className={`fw-choice${def === '' ? ' on' : ''}`} disabled={disabled || !!busy} onClick={() => choose('')} title={viewerTitle}>
           <strong>Leave it to {tool}</strong>
           <span>{st.policy === 'DROP' ? `${tool} drops it, unless its own rules let it in.` : st.policy === 'ACCEPT' ? `${tool} lets it in, unless its own rules drop it.` : `${tool} decides.`}</span>
         </button>
-        <button type="button" role="radio" aria-checked={def === 'drop'} className={`fw-choice${def === 'drop' ? ' on' : ''}`} disabled={disabled || !!busy} onClick={() => choose('drop')}>
+        <button
+          type="button"
+          role="radio"
+          aria-checked={def === 'drop'}
+          className={`fw-choice${def === 'drop' ? ' on' : ''}`}
+          disabled={disabled || !!busy}
+          onClick={() => choose('drop')}
+          title={viewerTitle}
+        >
           <strong>Drop it</strong>
           <span>Only what a rule allows gets in, besides what is always open.</span>
         </button>
@@ -887,19 +1005,21 @@ function DefaultChoice({
             <strong>{st.pending.default === 'drop' ? 'Now dropping what no rule allows.' : `Now leaving it to ${tool}.`}</strong> If this page still answers, keep it. It goes back by itself in{' '}
             <span className="num">{left}s</span>, so a change that cut you off undoes itself.
           </p>
-          <div className="fw-ask-acts">
-            <button type="button" className="btn-quiet" disabled={!!busy} onClick={() => run('keep', () => target.keep(false), { title: `Put back · ${target.name}` })}>
-              Undo
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={!!busy}
-              onClick={() => run('keep', () => target.keep(true), { title: `Kept · ${target.name}`, body: st.pending?.default === 'drop' ? 'Only what a rule allows gets in.' : undefined })}
-            >
-              Keep it
-            </button>
-          </div>
+          {canEdit && (
+            <div className="fw-ask-acts">
+              <button type="button" className="btn-quiet" disabled={!!busy} onClick={() => run('keep', () => target.keep(false), { title: `Put back · ${target.name}` })}>
+                Undo
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={!!busy}
+                onClick={() => run('keep', () => target.keep(true), { title: `Kept · ${target.name}`, body: st.pending?.default === 'drop' ? 'Only what a rule allows gets in.' : undefined })}
+              >
+                Keep it
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

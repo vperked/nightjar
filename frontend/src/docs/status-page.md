@@ -4,11 +4,11 @@ A status page shows chosen uptime checks to anyone, without signing in. Nothing 
 
 ## What visitors see
 
-- **A headline** saying whether everything is up, some services are having trouble, or everything is down, with when the page last updated. When only some are down, it names them (_API is down. Everything else is running normally._), and it names services under planned maintenance the same way. It refreshes itself every 30 seconds, and the browser tab says so too when something is wrong.
+- **A headline** saying whether everything is up, some services are having trouble, or everything is down, with the average uptime of the services listed and when the page last updated. When only some are down, it names them (_API is down. Everything else is running normally._), and it names services under planned maintenance the same way. It refreshes itself every 30 seconds, and the browser tab says so too when something is wrong.
 - **Ongoing incidents and planned maintenance**, right under the headline: each [incident notice](/docs/incidents) you published that hasn't ended yet, then each maintenance window you chose to show, marked _Maintenance now_ while it is on.
 - **Each group** of services, with how many are working: amber when some are down, red when all are.
 - **Each service's last 90 days**, one bar a day: green with no downtime, amber with some, red for a major outage, grey before there was any data. Hovering a day (or moving along with the arrow keys) shows its uptime and about how long it was down. A phone shows the last 30 days.
-- **Its uptime** over those 90 days.
+- **Its uptime** over those 90 days, beside its state; on a phone, over the 30 days its bars show.
 - **Recent incidents** at the foot: notices for incidents that have ended, marked _Resolved_ with when they started and ended.
 
 If the page can't get its data, it says so and tries again every 30 seconds.

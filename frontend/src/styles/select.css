@@ -88,6 +88,12 @@
   transform-origin: top left;
   animation: select-open 0.12s ease-out;
 }
+/* Here too, not only in forms.css: that file comes first, so this menu's animation would win. */
+@media (prefers-reduced-motion: reduce) {
+  .select-menu {
+    animation: none;
+  }
+}
 .select-menu.above {
   top: auto;
   bottom: calc(100% + 6px);

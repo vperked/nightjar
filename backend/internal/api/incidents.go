@@ -71,7 +71,11 @@ func (s *Server) saveFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		incidents.SetFeedback(s.cfg.Store, inc.ID, nil)
+		// Not taken back (the store could not be read or written) is not a 204.
+		if err := incidents.SetFeedback(s.cfg.Store, inc.ID, nil); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, errBody(err.Error()))
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -103,7 +107,11 @@ func (s *Server) saveNotice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		incidents.SetNotice(s.cfg.Store, inc.ID, nil)
+		// Not taken back (the store could not be read or written) is not a 204.
+		if err := incidents.SetNotice(s.cfg.Store, inc.ID, nil); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, errBody(err.Error()))
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

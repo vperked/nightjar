@@ -709,6 +709,24 @@ func (m *Monitor) recordLocked(e *entry, r *agent.Readings, err error) {
 		key := "drive:" + d.Device
 		seen[key] = true
 		name := cmp.Or(d.Model, d.Device)
+		gone := "drive-gone:" + d.Device
+		if d.Missing != 0 {
+			// The scan no longer finds it: a failing disk often drops off the bus. Its health alert, if
+			// any, stays as it was.
+			seen[gone] = true
+			sev, also := discord.Warning, ""
+			switch d.Health {
+			case "failing":
+				sev, also = discord.Critical, " It was already failing."
+			case "warning":
+				sev, also = discord.Critical, " It already needed attention."
+			}
+			m.raise(e, gone, sev, fmt.Sprintf("%s: drive %s disappeared", e.host.Name, d.Device),
+				fmt.Sprintf("%s (%s) is no longer found by smartctl. A drive that drops off like this has often failed, or its cable came loose: check it, and back up what is on it.%s", name, d.Device, also),
+				fmt.Sprintf("Drive %s disappeared", d.Device))
+			continue
+		}
+		m.clear(e, gone, fmt.Sprintf("%s: drive %s is back", e.host.Name, d.Device), name+" is found again.")
 		switch d.Health {
 		case "failing", "warning":
 			sev := discord.Warning
@@ -726,9 +744,12 @@ func (m *Monitor) recordLocked(e *entry, r *agent.Readings, err error) {
 			m.clear(e, key, fmt.Sprintf("%s: drive %s is healthy again", e.host.Name, d.Device), name+" passes its checks again.")
 		}
 	}
-	// A disk or drive that disappeared from the readings has nothing left to alert about.
+	// A disk that disappeared from the readings has nothing left to alert about, nor a drive the agent
+	// stopped listing (it lists a missing drive for a week, above). Before the agent's first drive
+	// read since it started, the drives are not known yet: their alerts stay.
 	for k := range e.problems {
-		if (strings.HasPrefix(k, "disk:") || strings.HasPrefix(k, "drive:")) && !seen[k] {
+		drive := strings.HasPrefix(k, "drive:") || strings.HasPrefix(k, "drive-gone:")
+		if (strings.HasPrefix(k, "disk:") || (drive && !r.DrivesPending)) && !seen[k] {
 			delete(e.problems, k)
 			m.saveLocked()
 		}

@@ -1,19 +1,37 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { ApiError, api } from '../api/client';
-import type { CheckResult, CheckSpec, CheckType, ContainersResponse, Plugin, Repair, RepairsResponse } from '../api/types';
+import type { CheckResult, CheckSpec, CheckType, ContainersResponse, DNSRecordType, Plugin, Repair, RepairsResponse } from '../api/types';
 import { pingURL } from '../components/CheckExtras';
 import { Select } from '../components/Select';
 import { useToast } from '../components/Toasts';
 import { Seg } from '../components/ui';
 
-const TYPES: CheckType[] = ['http', 'tcp', 'ping', 'tls', 'docker', 'plugin', 'heartbeat'];
+const TYPES: { value: CheckType; label: string; hint: string }[] = [
+  { value: 'http', label: 'HTTP(S)', hint: 'a web page or API answers' },
+  { value: 'tcp', label: 'TCP port', hint: 'a port accepts connections' },
+  { value: 'ping', label: 'Ping', hint: 'a host answers ICMP echoes' },
+  { value: 'tls', label: 'TLS certificate', hint: 'warns before it expires' },
+  { value: 'dns', label: 'DNS', hint: 'a name resolves, optionally to an expected answer' },
+  { value: 'postgres', label: 'PostgreSQL', hint: 'accepting connections, like pg_isready' },
+  { value: 'mysql', label: 'MySQL / MariaDB', hint: 'accepting connections' },
+  { value: 'redis', label: 'Redis', hint: 'answers PING' },
+  { value: 'docker', label: 'Docker container', hint: 'running and healthy' },
+  { value: 'plugin', label: 'Plugin', hint: 'a plugin decides' },
+  { value: 'heartbeat', label: 'Heartbeat', hint: 'a job pings Nightjar on schedule' },
+];
+
+const RECORD_TYPES: DNSRecordType[] = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS'];
 
 const TARGET_HINT: Record<CheckType, string> = {
   http: 'https://example.com/health',
   tcp: 'host:port',
   ping: 'host',
   tls: 'host:443',
+  dns: 'example.com',
+  postgres: 'host or host:5432',
+  mysql: 'host or host:3306',
+  redis: 'host or host:6379',
   plugin: 'plugin-id:argument',
   heartbeat: '',
   docker: 'container name',
@@ -87,18 +105,60 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 function NumberInput({ value, onChange, unit, label, min, max, step }: { value: number; onChange: (v: number) => void; unit?: string; label: string; min?: number; max?: number; step?: number }) {
   return (
     <span className="with-unit">
-      <input className="field short" type="number" aria-label={label} min={min} max={max} step={step} value={value} onChange={(e) => onChange(e.target.valueAsNumber)} />
+      {/* Emptied, it holds NaN (sent as null, which the server would quietly swap for its
+          default): it shows as empty, and `required` and blankNumber stop it being saved. */}
+      <input
+        className="field short"
+        type="number"
+        aria-label={label}
+        min={min}
+        max={max}
+        step={step}
+        value={Number.isNaN(value) ? '' : value}
+        onChange={(e) => onChange(e.target.valueAsNumber)}
+        required
+      />
       {unit && <span className="unit">{unit}</span>}
     </span>
   );
 }
 
-const parseStatuses = (raw: string) =>
-  raw
-    .split(/[\s,]+/)
-    .filter(Boolean)
-    .map(Number)
-    .filter((n) => Number.isInteger(n));
+// parseStatuses reads the expected status codes, and any entry that is not one (the server takes
+// a list of single codes, so "200-299" is one of those) rather than quietly dropping it.
+const parseStatuses = (raw: string) => {
+  const codes: number[] = [];
+  const bad: string[] = [];
+  for (const word of raw.split(/[\s,]+/).filter(Boolean)) {
+    const n = Number(word);
+    if (/^\d+$/.test(word) && n >= 100 && n <= 599) codes.push(n);
+    else bad.push(word);
+  }
+  return { codes, bad };
+};
+
+// blankNumber names the first number field on show that was left empty, if any.
+const blankNumber = (d: CheckSpec): string | undefined => {
+  const shown: [string, number | undefined][] =
+    d.type === 'heartbeat'
+      ? [
+          ['Grace', d.grace],
+          ['May run for', d.max_runtime],
+        ]
+      : [
+          ['Interval', d.interval],
+          ['Timeout', d.timeout],
+          ['Retries', d.retries],
+          ['Retry interval', d.retry_interval],
+        ];
+  if (d.type === 'ping') shown.push(['Pings per check', d.ping_count], ['Seconds between pings', d.ping_interval]);
+  if (d.type === 'tls') shown.push(['Warn before expiry', d.tls_warn_days]);
+  if (d.repair) shown.push(['Repair attempts', d.repair.max], ['Seconds between attempts', d.repair.wait]);
+  return shown.find(([, v]) => Number.isNaN(v))?.[0];
+};
+
+// A target means something different for these types: a heartbeat's is its ping token, a Docker
+// check's a container name, a plugin check's the plugin's id.
+const OWN_TARGET: CheckType[] = ['heartbeat', 'docker', 'plugin'];
 
 // TestResult says whether the target answered the test, in words as well as colour.
 function TestResult({ result, target }: { result: CheckResult; target: string }) {
@@ -281,15 +341,51 @@ export function CheckForm({ initial, server, onSaved, onCancel }: { initial?: Ch
   const notify = useToast();
   const set = <K extends keyof CheckSpec>(key: K, value: CheckSpec[K]) => setDraft((d) => ({ ...d, [key]: value }));
 
-  const spec = (): CheckSpec => ({ ...draft, expected_status: draft.type === 'http' ? parseStatuses(statuses) : null });
-  const keyOf = (s: CheckSpec) => JSON.stringify([s.type, s.target, s.timeout, s.expected_status, s.keyword, s.verify_tls, s.tls_warn_days, s.ping_count, s.ping_interval]);
+  const spec = (): CheckSpec => ({ ...draft, expected_status: draft.type === 'http' ? parseStatuses(statuses).codes : null });
+  // invalid says what must be fixed before the check can be tested or saved.
+  const invalid = (): string | undefined => {
+    const blank = blankNumber(draft);
+    if (blank) return `${blank} is empty. Give it a number.`;
+    const { bad } = draft.type === 'http' ? parseStatuses(statuses) : { bad: [] };
+    if (bad.length) return `${bad.map((b) => `“${b}”`).join(', ')} ${bad.length === 1 ? 'is not a status code' : 'are not status codes'}. List single codes, such as 200, 204.`;
+  };
+  // Changing to or from one of those types starts the target afresh, as on a new check (a new
+  // heartbeat is given its token when it is added); a hidden old target would otherwise be saved
+  // with it. Going back to an edited check's own type brings its target back.
+  const setType = (type: CheckType) =>
+    setDraft((d) => {
+      if (type === d.type) return d;
+      const fresh = OWN_TARGET.includes(type) || OWN_TARGET.includes(d.type);
+      return { ...d, type, target: !fresh ? d.target : initial?.type === type ? initial.target : '' };
+    });
+  const keyOf = (s: CheckSpec) =>
+    JSON.stringify([
+      s.type,
+      s.target,
+      s.timeout,
+      s.expected_status,
+      s.keyword,
+      s.verify_tls,
+      s.tls_warn_days,
+      s.ping_count,
+      s.ping_interval,
+      s.record_type,
+      s.dns_server,
+      s.password,
+      s.clear_password,
+    ]);
   const current = tested && tested.key === keyOf(spec()) ? tested.result : undefined;
 
   const runTest = async (s: CheckSpec): Promise<CheckResult | undefined> => {
+    const problem = invalid();
+    if (problem) {
+      setError(problem);
+      return;
+    }
     setTesting(true);
     setError('');
     try {
-      const { result } = await api.testCheck({ ...s, name: s.name || 'test' });
+      const { result } = await api.testCheck({ ...s, name: s.name || 'test' }, initial?.name);
       setTested({ result, key: keyOf(s) });
       return result;
     } catch (err) {
@@ -303,6 +399,11 @@ export function CheckForm({ initial, server, onSaved, onCancel }: { initial?: Ch
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     const s = spec();
+    const problem = invalid();
+    if (problem) {
+      setError(problem);
+      return;
+    }
     // A heartbeat has nothing to reach; it waits for its job's pings.
     if (!s.paused && !current && s.type !== 'heartbeat') {
       const result = await runTest(s);
@@ -331,7 +432,7 @@ export function CheckForm({ initial, server, onSaved, onCancel }: { initial?: Ch
         <input className="field" value={draft.name} onChange={(e) => set('name', e.target.value)} required autoFocus={!initial} aria-label="Name" />
       </Row>
       <Row label="Type">
-        <Seg<CheckType> label="Check type" value={draft.type} onChange={(t) => set('type', t)} options={TYPES.map((t) => ({ value: t, label: t }))} />
+        <Select label="Check type" value={draft.type} onChange={(t) => setType(t as CheckType)} options={TYPES} />
       </Row>
       {draft.type === 'heartbeat' ? (
         <>
@@ -367,7 +468,11 @@ export function CheckForm({ initial, server, onSaved, onCancel }: { initial?: Ch
                   ? 'The plugin that checks'
                   : draft.type === 'docker'
                     ? 'Up while running and not unhealthy'
-                    : 'Host and port'
+                    : draft.type === 'dns'
+                      ? 'The domain name to look up'
+                      : draft.type === 'postgres' || draft.type === 'mysql' || draft.type === 'redis'
+                        ? 'Host, with the port if it is not the usual one'
+                        : 'Host and port'
           }
         >
           {draft.type === 'plugin' ? (
@@ -427,6 +532,53 @@ export function CheckForm({ initial, server, onSaved, onCancel }: { initial?: Ch
             </label>
           </Row>
         </>
+      )}
+      {draft.type === 'dns' && (
+        <>
+          <Row label="Record type">
+            <Seg<DNSRecordType> label="Record type" value={draft.record_type ?? 'A'} onChange={(t) => set('record_type', t)} options={RECORD_TYPES.map((t) => ({ value: t, label: t }))} />
+          </Row>
+          <Row label="DNS server" hint="Empty uses this machine's resolver; set one, such as 1.1.1.1, to check a particular server">
+            <input
+              className="field mono"
+              value={draft.dns_server ?? ''}
+              placeholder="1.1.1.1 or 10.0.0.1:53"
+              onChange={(e) => set('dns_server', e.target.value || undefined)}
+              aria-label="DNS server"
+            />
+          </Row>
+          <Row label="Expected answer" hint="Optional: one of the answers must contain it, such as an IP address">
+            <input className="field mono" value={draft.keyword} onChange={(e) => set('keyword', e.target.value)} aria-label="Expected answer" />
+          </Row>
+        </>
+      )}
+      {(draft.type === 'postgres' || draft.type === 'mysql' || draft.type === 'redis') && (
+        <p className="form-help">
+          Checks that the server is accepting connections without signing in, so it needs no password. A server that asks for one still counts as up
+          {draft.type === 'redis' ? ', but then a Redis still loading its data after a restart looks up too: give its password below to catch that.' : '.'}
+        </p>
+      )}
+      {draft.type === 'redis' && (
+        <Row label="Password" hint="Optional: sent with AUTH before PING. Kept on the server and never shown again">
+          <span className="inline-fields">
+            <input
+              className="field"
+              type="password"
+              autoComplete="new-password"
+              aria-label="Redis password"
+              placeholder={draft.password_set && !draft.clear_password ? 'saved: leave empty to keep it' : 'none'}
+              value={draft.password ?? ''}
+              disabled={!!draft.clear_password}
+              onChange={(e) => set('password', e.target.value || undefined)}
+            />
+            {draft.password_set && (
+              <label className="check">
+                <input type="checkbox" checked={!!draft.clear_password} onChange={(e) => setDraft((d) => ({ ...d, clear_password: e.target.checked || undefined, password: undefined }))} /> Remove the
+                saved password
+              </label>
+            )}
+          </span>
+        </Row>
       )}
       {draft.type === 'tls' && (
         <Row label="Warn before expiry">

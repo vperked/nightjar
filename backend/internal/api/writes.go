@@ -9,14 +9,14 @@ import (
 
 const maxBody = 64 << 10
 
-// writable guards changes: a signed-in admin (via auth), then fromDashboard.
+// writable guards changes: a signed-in admin (via auth; a viewer is turned away), then fromDashboard.
 func (s *Server) writable(next http.HandlerFunc) http.Handler {
 	return s.writableUpTo(maxBody, next)
 }
 
 // writableUpTo is writable for a change whose body may be larger than most.
 func (s *Server) writableUpTo(limit int64, next http.HandlerFunc) http.Handler {
-	return s.auth(s.fromDashboardUpTo(limit, s.logged(next)))
+	return s.auth(adminOnly(s.fromDashboardUpTo(limit, s.logged(next))))
 }
 
 // fromDashboard accepts only a JSON body and, when the browser names one, a same-origin Origin. A
@@ -46,6 +46,9 @@ func (s *Server) fromDashboardUpTo(limit int64, next http.HandlerFunc) http.Hand
 // the host the proxy says it was asked for (X-Forwarded-Host), and the one in DASHBOARD_URL, count
 // too. A cross-site fetch cannot set X-Forwarded-Host itself: a header of its own needs the server's
 // leave first, which only the site named in WEB_ALLOWED_ORIGIN gets, and that only for reads.
+//
+// A page rebound by DNS to this machine is its own origin, Host and all, and would pass; headers turns
+// those away first (see knownHost).
 func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {

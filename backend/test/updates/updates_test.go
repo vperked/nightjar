@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -801,5 +802,141 @@ func TestArrBoundToOneAddress(t *testing.T) {
 	st := settle(t, m, "radarr", func(s updates.Status) bool { return s.Checked > 0 })
 	if st.Error != "" || st.Installed != "4.0.15.2941" {
 		t.Fatalf("check: %+v", st.State)
+	}
+}
+
+// assetGitHub serves acme/app's latest release, v1.3.0, and acme/builds' latest, with one file
+// whose digest is digest ("" for none).
+func assetGitHub(t *testing.T, digest string) *httptest.Server {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/app/releases/latest":
+			json.NewEncoder(w).Encode(map[string]string{"tag_name": "v1.3.0"})
+		case "/repos/acme/builds/releases/latest":
+			asset := map[string]string{"name": "x86_64-app", "browser_download_url": "https://github.com/acme/builds/releases/download/b1/x86_64-app"}
+			if digest != "" {
+				asset["digest"] = digest
+			}
+			json.NewEncoder(w).Encode(map[string]any{"tag_name": "b1", "assets": []map[string]string{asset, {"name": "other", "digest": "sha256:" + strings.Repeat("f", 64)}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A release update that installs a download gets its address and the SHA-256 GitHub lists for it,
+// and does not run at all when GitHub lists none.
+func TestReleaseDownloadsAreChecked(t *testing.T) {
+	sum := strings.Repeat("ab", 32)
+	spec := app
+	spec.Asset, spec.AssetRepo = "x86_64-app", "acme/builds"
+
+	host := &fakeHost{version: "v1.2.0", next: "v1.3.0", active: true}
+	m := newManager(t, openStore(t), host.run, assetGitHub(t, "sha256:"+sum).URL, nil)
+	if _, err := m.Save("", spec); err != nil {
+		t.Fatal(err)
+	}
+	settle(t, m, "app", func(s updates.Status) bool { return s.Checked > 0 })
+	m.Apply("app")
+	st := settle(t, m, "app", func(s updates.Status) bool { return len(s.Runs) == 1 })
+	c := host.ranLine("install-app")
+	if !st.Runs[0].OK || c == nil || !slices.Contains(c.Env, "ASSET_SHA256="+sum) || !slices.Contains(c.Env, "ASSET_URL=https://github.com/acme/builds/releases/download/b1/x86_64-app") {
+		t.Fatalf("run %+v, command %+v", st.Runs, c)
+	}
+
+	host = &fakeHost{version: "v1.2.0", next: "v1.3.0", active: true}
+	m = newManager(t, openStore(t), host.run, assetGitHub(t, "").URL, nil)
+	m.Save("", spec)
+	settle(t, m, "app", func(s updates.Status) bool { return s.Checked > 0 })
+	m.Apply("app")
+	st = settle(t, m, "app", func(s updates.Status) bool { return len(s.Runs) == 1 })
+	if st.Runs[0].OK || !strings.Contains(st.Runs[0].Detail, "SHA-256") || host.ranLine("install-app") != nil {
+		t.Fatalf("an unchecked download was installed: %+v", st.Runs[0])
+	}
+}
+
+// A dashboard save, which does not send the download a recipe checks, keeps it.
+func TestSavingFromTheDashboardKeepsTheCheckedDownload(t *testing.T) {
+	spec := app
+	spec.Asset, spec.AssetRepo = "x86_64-app", "acme/builds"
+	m := newManager(t, openStore(t), (&fakeHost{active: true}).run, "", nil)
+	if _, err := m.Save("", spec); err != nil {
+		t.Fatal(err)
+	}
+	edited := app
+	edited.Auto = true
+	if st, err := m.Save("app", edited); err != nil || st.Asset != "x86_64-app" || st.AssetRepo != "acme/builds" {
+		t.Fatalf("saved %+v, %v", st.Spec, err)
+	}
+}
+
+// A release update that works in a folder runs as the folder's owner, not as root.
+func TestReleaseUpdateInAFolderRunsAsItsOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to give the folder away")
+	}
+	nobody, err := user.Lookup("nobody")
+	if err != nil {
+		t.Skip("no nobody account")
+	}
+	uid, _ := strconv.Atoi(nobody.Uid)
+	dir := t.TempDir()
+	os.Chown(dir, uid, -1)
+	spec := app
+	spec.Dir = dir
+	host := &fakeHost{version: "v1.2.0", next: "v1.3.0", active: true}
+	m := newManager(t, openStore(t), host.run, github(t, "v1.3.0").URL, nil)
+	m.Save("", spec)
+	settle(t, m, "app", func(s updates.Status) bool { return s.Checked > 0 })
+	m.Apply("app")
+	settle(t, m, "app", func(s updates.Status) bool { return len(s.Runs) == 1 })
+	c := host.ranLine("install-app")
+	if c == nil || c.User != "nobody" || c.Root || c.Dir != dir {
+		t.Fatalf("ran %+v", c)
+	}
+}
+
+// The qBittorrent recipe as an older Nightjar saved it, which ran an unchecked download as root,
+// is replaced with the one that checks it, along with the download it checks.
+func TestTheUncheckedQBittorrentRecipeIsReplaced(t *testing.T) {
+	const v1 = `set -e
+case "$(uname -m)" in x86_64) arch=x86_64 ;; aarch64) arch=aarch64 ;; *) echo "no static qBittorrent build for $(uname -m)"; exit 1 ;; esac
+tmp=$(mktemp /usr/bin/.qbittorrent-nox.XXXXXX); trap 'rm -f "$tmp"' EXIT
+curl -fsSL --retry 3 -o "$tmp" "https://github.com/userdocs/qbittorrent-nox-static/releases/latest/download/${arch}-qbittorrent-nox"
+chmod 755 "$tmp"
+"$tmp" --version
+mv -f "$tmp" /usr/bin/qbittorrent-nox
+trap - EXIT`
+	store := openStore(t)
+	host := &fakeHost{active: true}
+	saved := updates.Spec{ID: "qbittorrent", Name: "qBittorrent", Kind: updates.KindRelease, Repo: "qbittorrent/qBittorrent", TagPrefix: "release-", VersionCommand: "/usr/bin/qbittorrent-nox --version", UpdateCommand: v1, Unit: "qbittorrent@perked", Restart: true}
+	updates.New(updates.Options{Store: store, Run: host.run}, func() []updates.Spec { return []updates.Spec{saved} }, false)
+	store.SetMeta("updates.recipes", "3")
+	recipe := updates.QBittorrentStatic("qbittorrent@perked", "amd64")
+	if strings.Contains(recipe.UpdateCommand, "\n\"$tmp\" --version") || !strings.Contains(recipe.UpdateCommand, "sha256sum -c") || !strings.Contains(recipe.UpdateCommand, "setpriv") {
+		t.Fatalf("recipe: %s", recipe.UpdateCommand)
+	}
+	m := updates.New(updates.Options{Store: store, Run: host.run}, func() []updates.Spec { return []updates.Spec{recipe} }, false)
+	qb, _ := m.Get("qbittorrent")
+	if qb.UpdateCommand != recipe.UpdateCommand || qb.Asset != "x86_64-qbittorrent-nox" || qb.AssetRepo != "userdocs/qbittorrent-nox-static" {
+		t.Fatalf("not replaced: %+v", qb.Spec)
+	}
+}
+
+// A target saved from today's recipe gets what now goes with it, such as the folder its build runs
+// in as that folder's owner, without its command changing.
+func TestSavedRecipesLearnWhoRunsThem(t *testing.T) {
+	store := openStore(t)
+	host := &fakeHost{active: true}
+	saved := updates.Spec{ID: "seerr", Name: "Seerr", Kind: updates.KindRelease, Repo: "seerr-team/seerr", VersionCommand: "cat v", UpdateCommand: "build-it", Restart: true}
+	updates.New(updates.Options{Store: store, Run: host.run}, func() []updates.Spec { return []updates.Spec{saved} }, false)
+	store.SetMeta("updates.recipes", "3")
+	recipe := saved
+	recipe.Dir = "/opt/seerr"
+	m := updates.New(updates.Options{Store: store, Run: host.run}, func() []updates.Spec { return []updates.Spec{recipe} }, false)
+	if s, _ := m.Get("seerr"); s.Dir != "/opt/seerr" || s.UpdateCommand != "build-it" {
+		t.Fatalf("seerr: %+v", s.Spec)
 	}
 }

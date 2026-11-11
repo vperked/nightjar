@@ -105,16 +105,21 @@ function PluginItem({ p, onChanged }: { p: Plugin; onChanged: (p: Plugin) => voi
   const dirty = Object.keys(changed).length > 0 || clear.length > 0;
   const valueOf = (s: PluginSetting) => values[s.key] ?? (s.type === 'secret' ? '' : (p.values[s.key] ?? ''));
 
+  // save sends the settings typed (Save), or only the on/off state (the switch): flipping it should
+  // not also save half-typed fields, which stay in the form to save or discard.
   const save = async (enabled?: boolean) => {
-    setBusy(enabled === undefined ? 'save' : 'toggle');
+    const toggling = enabled !== undefined;
+    setBusy(toggling ? 'toggle' : 'save');
     try {
-      const { plugin } = await api.configurePlugin(p.id, { enabled, settings: Object.keys(changed).length ? changed : undefined, clear: clear.length ? clear : undefined });
-      setValues({});
-      setClear([]);
+      const { plugin } = await api.configurePlugin(p.id, toggling ? { enabled } : { settings: Object.keys(changed).length ? changed : undefined, clear: clear.length ? clear : undefined });
+      if (!toggling) {
+        setValues({});
+        setClear([]);
+      }
       onChanged(plugin);
       notify({
         tone: 'ok',
-        title: enabled === undefined ? `${p.name}: settings saved` : `${p.name} is ${enabled ? 'on' : 'off'}`,
+        title: toggling ? `${p.name} is ${enabled ? 'on' : 'off'}` : `${p.name}: settings saved`,
         body: enabled && (p.provides ?? []).includes('notify') ? 'Choose what it hears about under Notifications.' : undefined,
       });
     } catch (err) {
@@ -276,12 +281,14 @@ export function PluginsPage() {
   useEffect(() => {
     api.plugins().then(setData, (e: Error) => setError(e.message));
   }, []);
+  // Look again also retries a first read that failed, so the page is not stuck on its error.
   const rescan = async () => {
     setScanning(true);
     try {
       const next = await api.rescanPlugins();
-      const added = next.plugins.length - (data?.plugins.length ?? 0);
+      const added = data ? next.plugins.length - data.plugins.length : 0;
       setData(next);
+      setError('');
       const found = added > 0 ? `Found ${added} new.` : `${next.plugins.length} plugins.`;
       // A plugin that delivers alerts, added, renamed or removed, gets its channel when Nightjar starts.
       notify({ tone: 'ok', title: 'Looked in the plugins folder', body: next.restarting ? `${found} Restarting to set up its alert channel; the page reconnects by itself.` : found });
@@ -308,7 +315,7 @@ export function PluginsPage() {
           <Link className="btn-quiet" to="/docs/plugins">
             Write a plugin
           </Link>
-          <button type="button" className="btn-quiet" onClick={rescan} disabled={scanning || !data}>
+          <button type="button" className="btn-quiet" onClick={rescan} disabled={scanning || (!data && !error)}>
             {scanning ? 'Looking…' : 'Look again'}
           </button>
         </div>

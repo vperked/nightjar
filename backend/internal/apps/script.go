@@ -21,6 +21,7 @@ type plan struct {
 	app     App
 	url     string // the release to download
 	version string
+	sha256  string // its checksum, when the source lists one
 	port    int
 	user    string
 }
@@ -71,6 +72,11 @@ func (p plan) installScript() string {
 	w(`step "Downloading %s %s"`, a.Name, p.version)
 	w(`tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT`)
 	w(`curl -fL --retry 3 --progress-bar -o "$tmp/download" '%s' 2>&1 | tr '\r' '\n' | tail -n 1`, strings.ReplaceAll(p.url, "'", `'\''`))
+	if p.sha256 != "" {
+		// Checked before the running app is stopped or anything replaced.
+		w(`got=$(sha256sum "$tmp/download" | cut -d' ' -f1)`)
+		w(`[ "$got" = %s ] || { echo "The download's SHA-256 is $got, not the %s its release lists; nothing was changed"; exit 1; }`, p.sha256, p.sha256)
+	}
 	w(`systemctl stop %s 2>/dev/null || true`, p.unit())
 	if a.source.single {
 		w(`mkdir -p %s && install -m 0755 "$tmp/download" %s/%s`, p.dir(), p.dir(), a.binary)

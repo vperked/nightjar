@@ -152,13 +152,14 @@ func (m *Monitor) Claim(now float64) []Spec {
 // Results for a check deleted or paused while it ran, or whose type or target changed, are
 // dropped; one renamed while it ran is recorded under its new name.
 func (m *Monitor) Record(name string, r Result, now float64) string {
-	_, change := m.RecordAs(name, r, now)
+	_, change, _ := m.RecordAs(name, r, now)
 	return change
 }
 
-// RecordAs is Record, also saying the name the result went to: the new one, for a check renamed
-// while it ran.
-func (m *Monitor) RecordAs(name string, r Result, now float64) (recorded, change string) {
+// RecordAs is Record, also saying the name the result went to (the new one, for a check renamed
+// while it ran) and whether it was recorded at all: a dropped result must not alert or repair, since
+// the check it was for has been paused, deleted or changed since.
+func (m *Monitor) RecordAs(name string, r Result, now float64) (to, change string, recorded bool) {
 	m.mu.Lock()
 	st, ok := m.states[name]
 	// A check of this name that is not running has no result coming: this one is for the check
@@ -174,7 +175,7 @@ func (m *Monitor) RecordAs(name string, r Result, now float64) (recorded, change
 	}
 	if !ok || st.Spec.Paused || stale {
 		m.mu.Unlock()
-		return name, ""
+		return name, "", false
 	}
 	st.LastCheck, st.runNow = now, false
 	st.LastResult = &r
@@ -206,7 +207,7 @@ func (m *Monitor) RecordAs(name string, r Result, now float64) (recorded, change
 	if m.store != nil {
 		m.store.Record(name, now, r.Up, r.LatencyMS, r.Detail)
 	}
-	return name, change
+	return name, change, true
 }
 
 // Uptime is the percent up since `since` (at 5-minute resolution, up to 30 days back).
@@ -263,7 +264,8 @@ type Beat struct {
 	LatencyMS *float64 `json:"latency_ms"`
 }
 
-// Summary is one service's row in the API.
+// Summary is one service's row in the API. Viewers read it too, so its Target is only what may be
+// shown of the check's (see ShownTarget): empty for a heartbeat.
 type Summary struct {
 	Name       string   `json:"name"`
 	Type       string   `json:"type"`
@@ -295,7 +297,7 @@ func (m *Monitor) Summaries(now float64) []Summary {
 	rows := make([]Summary, 0, len(m.order))
 	for _, name := range m.order {
 		st := m.states[name]
-		row := Summary{Name: name, Type: st.Spec.Type, Target: st.Spec.Target, Status: st.Status, LastChange: st.LastChange, Recent: []Beat{}, Repair: st.Spec.Repair, Server: st.Spec.Server}
+		row := Summary{Name: name, Type: st.Spec.Type, Target: ShownTarget(st.Spec), Status: st.Status, LastChange: st.LastChange, Recent: []Beat{}, Repair: st.Spec.Repair, Server: st.Spec.Server}
 		if st.Spec.Type == "heartbeat" {
 			row.Schedule = st.Spec.Schedule
 			if p, ok := m.heartbeats[st.Spec.Target]; ok {

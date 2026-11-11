@@ -94,10 +94,10 @@ func TestTwoFactorTakesThePasswordAndKeepsThroughAPasswordChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().Unix()
-	if _, err := a.EnableTwoFactor("not the password", accounts.TOTP(secret, now)); !errors.Is(err, accounts.ErrWrongCurrent) || a.TwoFactor() {
+	if _, err := a.EnableTwoFactor("not the password", accounts.TOTP(secret, now), ""); !errors.Is(err, accounts.ErrWrongCurrent) || a.TwoFactor() {
 		t.Fatalf("turned on without the password: %v", err)
 	}
-	if _, err := a.EnableTwoFactor("correct horse battery", accounts.TOTP(secret, now)); err != nil || !a.TwoFactor() {
+	if _, err := a.EnableTwoFactor("correct horse battery", accounts.TOTP(secret, now), ""); err != nil || !a.TwoFactor() {
 		t.Fatalf("enable: %v", err)
 	}
 	// Another authenticator only after turning it off, which takes the password and a code.

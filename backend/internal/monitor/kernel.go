@@ -19,9 +19,13 @@ type kernelChecks struct {
 	stabilitySent                  bool
 	lastStabilityAlert             float64
 	lastStabilityHash              string
-	crashSent                      bool
-	lastCrashAlert                 float64
-	lastHardwareAlert              map[string]float64
+	// Critical early warnings have their own cooldown. Reboots and crashes have none: the kernel
+	// package hands each over only once, so one held back by a cooldown would be lost for good.
+	warningSent      bool
+	lastWarningAlert float64
+	// heldWarnings are critical warnings seen during the cooldown, sent with the next warning alert.
+	heldWarnings      []kernel.Event
+	lastHardwareAlert map[string]float64
 	// lastFloodAlert is when a kernel flooding its log was last reported.
 	lastFloodAlert float64
 }
@@ -114,11 +118,13 @@ func (h *kernelChecks) checkStability(s *Snapshot) {
 	}
 }
 
-func (h *kernelChecks) due(now float64) bool {
-	return !h.crashSent || now-h.lastCrashAlert >= h.ctx.Cfg.AlertCooldown
+// warningDue says whether a critical early warning may alert now.
+func (h *kernelChecks) warningDue(now float64) bool {
+	return !h.warningSent || now-h.lastWarningAlert >= h.ctx.Cfg.AlertCooldown
 }
 
-func (h *kernelChecks) mark(now float64) { h.lastCrashAlert, h.crashSent = now, true }
+// maxHeldWarnings caps the critical warnings kept for the next alert; the embed shows five anyway.
+const maxHeldWarnings = 50
 
 func hardwareKey(e kernel.Event) string { return e.Type + "_" + e.Device + "_" + e.Source }
 
@@ -139,16 +145,21 @@ func (h *kernelChecks) checkCrashes(s *Snapshot) {
 		h.lastFloodAlert = now
 		h.alertFlood(*f)
 	}
-	if r.Reboot != nil && h.due(now) {
+	// A reboot is reported once per boot, so it always goes out: after an unexpected one, the
+	// crash below is what explains it.
+	if r.Reboot != nil {
 		h.alertReboot(*r.Reboot)
-		h.mark(now)
 	}
-	var critical []kernel.Event
+	critical := h.heldWarnings
 	for _, w := range r.EarlyWarnings {
 		if w.Severity == "critical" {
 			critical = append(critical, w)
 		}
 	}
+	if len(critical) > maxHeldWarnings {
+		critical = critical[len(critical)-maxHeldWarnings:]
+	}
+	h.heldWarnings = nil
 	hardwareDue := false
 	for _, e := range r.HardwareErrors {
 		cooldown := cfg.AlertCooldown
@@ -159,19 +170,20 @@ func (h *kernelChecks) checkCrashes(s *Snapshot) {
 			hardwareDue = true
 		}
 	}
-	if (len(critical) > 0 && h.due(now)) || hardwareDue {
+	warningDue := len(critical) > 0 && h.warningDue(now)
+	switch {
+	case warningDue || hardwareDue:
 		h.alertEarlyWarnings(critical, r.HardwareErrors, now)
 		if len(critical) > 0 {
-			h.mark(now)
+			h.lastWarningAlert, h.warningSent = now, true
 		}
+	case len(critical) > 0:
+		// Each warning is handed over once: keep it for the alert after the cooldown.
+		h.heldWarnings = critical
 	}
+	// Crashes are already deduplicated, so each new one is told; a cooldown would only drop them.
 	if len(r.Crashes) > 0 {
-		if h.due(now) {
-			h.alertCrashes(r.Crashes)
-			h.mark(now)
-		}
-	} else {
-		h.crashSent = false
+		h.alertCrashes(r.Crashes)
 	}
 }
 

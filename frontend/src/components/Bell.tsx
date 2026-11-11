@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import { useNotifications } from '../api/NotificationsContext';
 import type { Notification, Severity } from '../api/types';
 import { formatAgo, plural } from '../format';
+import { useDialog } from '../hooks/useDialog';
 import { useNow } from '../hooks/useNow';
 import { AREA_SHORT, delivery, linkFor, plain } from './notifications';
+import { useToast } from './Toasts';
 
 // The header's bell: how many alerts are unread, and a panel with the latest few.
 
@@ -53,22 +56,34 @@ export function Bell() {
   const [items, setItems] = useState<Notification[]>();
   const [ringing, setRinging] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  // The panel is not modal: opening it puts focus on the panel itself (so the first thing Tab
+  // reaches is the first control, not a surprise "Mark all read"), and closing it while focus is
+  // inside, with Escape or a link, puts focus back on the bell.
+  const panel = useRef<HTMLDivElement>(null);
+  useDialog(panel, open, { modal: false, focus: 'self' });
   const seen = useRef<number>();
+  const ringTimer = useRef<ReturnType<typeof setTimeout>>();
+  const notify = useToast();
   const navigate = useNavigate();
   const now = useNow(30000);
   const counts = summary?.counts;
+  // Read state is shared with the admin, so a viewer reads without marking anything.
+  const canEdit = useCanEdit();
 
-  // The bell rings once when a new warning or critical arrives.
+  // The bell rings once when a new warning or critical arrives. The timer that stops it lives in a
+  // ref, not this effect's cleanup: counts change on every refresh, and a refresh within the ring
+  // would otherwise cancel the stop and leave the bell ringing for good.
   useEffect(() => {
     if (!counts) return;
     const before = seen.current;
     seen.current = counts.latest;
     if (before !== undefined && counts.latest > before && counts.alerts > 0) {
       setRinging(true);
-      const id = setTimeout(() => setRinging(false), 1200);
-      return () => clearTimeout(id);
+      clearTimeout(ringTimer.current);
+      ringTimer.current = setTimeout(() => setRinging(false), 1200);
     }
   }, [counts]);
+  useEffect(() => () => clearTimeout(ringTimer.current), []);
 
   // The panel loads when it opens, and again when something new arrives while it is open.
   useEffect(() => {
@@ -98,11 +113,17 @@ export function Bell() {
     navigate(to);
   };
   const openItem = (n: Notification) => {
-    if (!n.read) api.markRead([n.id]).then(refresh, () => undefined);
+    if (!n.read && canEdit) api.markRead([n.id]).then(refresh, () => undefined);
     go(linkFor(n));
   };
+  // Only marked read here once the server has them read too; otherwise they would come back unread.
   const readAll = async () => {
-    await api.markRead().catch(() => undefined);
+    try {
+      await api.markRead();
+    } catch (e) {
+      notify({ tone: 'error', title: 'Could not mark them read', body: (e as Error).message });
+      return;
+    }
     setItems((list) => list?.map((n) => ({ ...n, read: true })));
     refresh();
   };
@@ -123,13 +144,13 @@ export function Bell() {
         )}
       </button>
       {open && (
-        <div className="bell-panel" role="dialog" aria-label="Latest notifications">
+        <div ref={panel} className="bell-panel" role="dialog" aria-label="Latest notifications">
           <div className="bell-head">
             <strong>
               Notifications
               {unread > 0 && <span className="bell-count">{unread > 99 ? '99+' : unread} new</span>}
             </strong>
-            {unread > 0 && (
+            {unread > 0 && canEdit && (
               <button type="button" className="btn-quiet" onClick={readAll}>
                 Mark all read
               </button>

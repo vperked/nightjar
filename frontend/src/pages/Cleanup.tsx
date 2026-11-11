@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import type { CleanupItem, CleanupView } from '../api/types';
+import { Editable } from '../components/Editable';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { MediaTabs, Section } from '../components/ui';
@@ -40,13 +42,17 @@ export function CleanupPage() {
   const [view, setView] = useState<CleanupView>();
   const notify = useToast();
   const now = useNow(30000);
-  // view is the reply to Check now or Keep, shown until the next poll lands with newer news.
+  const canEdit = useCanEdit();
+  // view is the reply to Check now or Keep, shown until the next poll lands. Each change asks for a
+  // refresh too: usePoll then lets go of a poll already out, whose older list could bring back an item
+  // just kept, so the next poll to land is one sent after the change.
   useEffect(() => setView(undefined), [data]);
   const v = view ?? data;
   const scan = async () => {
     setScanning(true);
     try {
       setView(await api.cleanupScan());
+      refresh();
       notify({ tone: 'ok', title: 'Libraries checked' });
     } catch (e) {
       notify({ tone: 'error', title: 'The check failed', body: (e as Error).message });
@@ -58,6 +64,7 @@ export function CleanupPage() {
   const keep = async (key: string, on: boolean, title: string) => {
     try {
       setView(await api.cleanupKeep(key, on));
+      refresh();
       notify({ tone: 'ok', title: on ? `${title} is kept` : `${title} can be listed again` });
     } catch (e) {
       notify({ tone: 'error', title: 'Could not change it', body: (e as Error).message });
@@ -81,12 +88,14 @@ export function CleanupPage() {
           <MediaTabs current="/plex/cleanup" />
         </div>
         <span className="title-actions">
-          <Link className="btn-quiet" to="/settings?find=cleanup">
-            Settings
-          </Link>
-          <button className="btn" onClick={scan} disabled={scanning}>
-            {scanning ? 'Checking…' : 'Check now'}
-          </button>
+          <Editable>
+            <Link className="btn-quiet" to="/settings?find=cleanup">
+              Settings
+            </Link>
+            <button className="btn" onClick={scan} disabled={scanning}>
+              {scanning ? 'Checking…' : 'Check now'}
+            </button>
+          </Editable>
         </span>
       </div>
       {error && !v && <p className="alert">Could not load the cleanup: {error.message}</p>}
@@ -140,7 +149,7 @@ export function CleanupPage() {
                     <th className="r hide-sm">Size</th>
                     <th className="hide-sm">Torrent</th>
                     <th className="hide-sm">Leaves</th>
-                    <th className="shrink" />
+                    {canEdit && <th className="shrink" />}
                   </tr>
                 </thead>
                 <tbody>
@@ -175,11 +184,13 @@ export function CleanupPage() {
                       <td className="num hide-sm">
                         <When it={it} now={now} />
                       </td>
-                      <td className="shrink">
-                        <button className="btn-quiet" onClick={() => keep(it.key, true, it.title)}>
-                          Keep
-                        </button>
-                      </td>
+                      {canEdit && (
+                        <td className="shrink">
+                          <button className="btn-quiet" onClick={() => keep(it.key, true, it.title)}>
+                            Keep
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -218,9 +229,11 @@ export function CleanupPage() {
                     {v.kept.map((k) => (
                       <li key={k.key} className="cleanup-kept">
                         <span>{k.title}</span>
-                        <button className="btn-ghost" onClick={() => keep(k.key, false, k.title)}>
-                          Let it go
-                        </button>
+                        <Editable>
+                          <button className="btn-ghost" onClick={() => keep(k.key, false, k.title)}>
+                            Let it go
+                          </button>
+                        </Editable>
                       </li>
                     ))}
                   </ul>

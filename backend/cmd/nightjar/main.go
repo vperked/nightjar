@@ -534,15 +534,18 @@ func run(cfg config.Settings, db *storage.Store, envFile string) (restart bool) 
 		}
 	}()
 
-	// An update under way (apt or dpkg) holds a restart until it ends: shutting down waits for it
-	// anyway, and this way the dashboard stays up meanwhile.
+	// An update under way (apt or dpkg), or an app store install or removal, holds a restart until
+	// it ends: shutting down waits for them anyway, and this way the dashboard stays up meanwhile.
+	busy := func() bool {
+		return (ctx.Updates != nil && ctx.Updates.Applying() != "") || (ctx.Apps != nil && ctx.Apps.Running())
+	}
 	requestRestart := func() {
 		once.Do(func() {
 			go func() {
 				defer close(restartRequested)
-				if u := ctx.Updates; u != nil && u.Applying() != "" {
-					log.Info("Restarting once the update under way has finished")
-					for u.Applying() != "" && stop.Err() == nil {
+				if busy() {
+					log.Info("Restarting once the update or app install under way has finished")
+					for busy() && stop.Err() == nil {
 						time.Sleep(time.Second)
 					}
 				}
@@ -631,7 +634,7 @@ func run(cfg config.Settings, db *storage.Store, envFile string) (restart bool) 
 		tick := time.NewTicker(20 * time.Second)
 		defer tick.Stop()
 		for {
-			if ctx.Updates != nil && ctx.Updates.Applying() != "" {
+			if busy() {
 				if err := systemd.Notify("EXTEND_TIMEOUT_USEC=60000000"); err != nil {
 					log.Debug("Could not ask systemd for more time to stop", "err", err)
 				}
@@ -649,6 +652,12 @@ func run(cfg config.Settings, db *storage.Store, envFile string) (restart bool) 
 		scancel()
 	}
 	loop.Wait() // running uptime checks still record their results
+	// An app install runs as its own unit and goes on without Nightjar, but its log, and the check
+	// added once it is done, need Nightjar; its script stops after half an hour at most.
+	if ctx.Apps != nil && ctx.Apps.Running() {
+		log.Info("Waiting for the app install under way to finish before stopping")
+		ctx.Apps.Wait(31 * time.Minute)
+	}
 	<-remoteDone
 	// A media cleanup pass halfway through its removals gets a while to finish and save what it did.
 	if !waitFor(&background, 15*time.Second) {

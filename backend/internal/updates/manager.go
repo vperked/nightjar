@@ -26,7 +26,7 @@ const (
 	seededKey    = "updates.seeded"
 	// recipesKey is the version of the update recipes last filled into saved targets.
 	recipesKey = "updates.recipes"
-	recipes    = "3"
+	recipes    = "4"
 	// probeTimeout is the longest one check may take.
 	probeTimeout = 15 * time.Minute
 )
@@ -239,6 +239,11 @@ func (m *Manager) Save(oldID string, spec Spec) (Status, error) {
 	if spec.APIKey == "" {
 		spec.APIKey = t.spec.APIKey
 	}
+	// The dashboard does not send the release download a recipe checks; with the same command, it
+	// stays (without it, the command refuses to install an unchecked download).
+	if spec.Asset == "" && spec.UpdateCommand == t.spec.UpdateCommand {
+		spec.Asset, spec.AssetRepo = t.spec.Asset, t.spec.AssetRepo
+	}
 	data, _ := json.Marshal(spec)
 	if err := m.opt.Store.SaveUpdateTarget(spec.ID, data); err != nil {
 		return Status{}, err
@@ -319,13 +324,21 @@ func (m *Manager) fillRecipes(detected []Spec) {
 		if t == nil || d.UpdateCommand == "" || t.spec.Kind != d.Kind || t.busy != "" {
 			continue
 		}
-		// One set up by hand stays; one from an older recipe gets the newer.
-		if t.spec.UpdateCommand != "" && !fromOlderRecipe(t.spec.UpdateCommand, d.UpdateCommand) {
+		// One set up by hand stays; one from an older recipe gets the newer. One from this recipe
+		// gets what goes with it now: who runs it, and the download it checks.
+		same := t.spec.UpdateCommand == d.UpdateCommand
+		if t.spec.UpdateCommand != "" && !same && !fromOlderRecipe(t.spec.UpdateCommand, d.UpdateCommand) {
+			continue
+		}
+		if same && (d.Kind != KindRelease || (t.spec.Dir == d.Dir && t.spec.Asset == d.Asset && t.spec.AssetRepo == d.AssetRepo)) {
 			continue
 		}
 		spec := t.spec
 		spec.UpdateCommand, spec.VersionCommand, spec.Restart = d.UpdateCommand, d.VersionCommand, d.Restart
 		spec.Unit = cmp.Or(spec.Unit, d.Unit)
+		if d.Kind == KindRelease {
+			spec.Dir, spec.Asset, spec.AssetRepo = d.Dir, d.Asset, d.AssetRepo
+		}
 		data, _ := json.Marshal(spec)
 		if err := m.opt.Store.SaveUpdateTarget(spec.ID, data); err != nil {
 			log.Warn("Could not give a target its update command", "target", spec.Name, "err", err)

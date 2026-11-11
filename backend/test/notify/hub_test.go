@@ -350,6 +350,11 @@ func TestAQuietHoursSummaryThatFailsIsRetried(t *testing.T) {
 	c.fail = false
 	c.mu.Unlock()
 	hub.Tick()
+	if h := history(db); h[0].Status != "held" || len(c.sent()) != 1 {
+		t.Fatalf("the retry waits a while rather than coming on the very next tick, got %+v, sent %v", h[0], c.sent())
+	}
+	hub.Now = func() time.Time { return at("07:02") }
+	hub.Tick()
 	if h := history(db); h[0].Status != "digest" {
 		t.Fatalf("the retry delivers it, got %+v", h[0])
 	}
@@ -357,15 +362,88 @@ func TestAQuietHoursSummaryThatFailsIsRetried(t *testing.T) {
 	// A channel that stays down gives up after a few tries.
 	hub.Now = func() time.Time { return at("02:00") }
 	hub.Route("services").SendEmbed("radarr keeps restarting", "", discord.Warning, nil, "Services")
-	hub.Now = func() time.Time { return at("07:01") }
 	c.mu.Lock()
 	c.fail = true
 	c.mu.Unlock()
-	for range 10 {
+	// Ticks every few seconds for 50 minutes: a few tries with growing waits, and still held.
+	start, now := at("07:01"), at("07:01")
+	hub.Now = func() time.Time { return now }
+	before := len(c.sent())
+	for ; now.Sub(start) < 50*time.Minute; now = now.Add(5 * time.Second) {
+		hub.Tick()
+	}
+	if tries := len(c.sent()) - before; tries < 4 || tries > 12 {
+		t.Fatalf("want a handful of tries spread over the minutes, got %d", tries)
+	}
+	if h := history(db); h[0].Status != "held" {
+		t.Fatalf("a channel down for minutes keeps the summary held, got %+v", h[0])
+	}
+	// It gives up an hour or so after the first try.
+	for ; now.Sub(start) < 80*time.Minute; now = now.Add(5 * time.Second) {
 		hub.Tick()
 	}
 	if h := history(db); h[0].Status != "failed" {
 		t.Fatalf("after the retries it is marked failed, got %+v", h[0])
+	}
+}
+
+// With Critical set, a critical alert's recovery goes out during quiet hours like the alert did,
+// while other recoveries are still held.
+func TestQuietHoursLetARecoveryFollowItsCriticalAlert(t *testing.T) {
+	c := &fake{name: "Discord"}
+	hub, db := newHub(t, notify.Destination{Channel: c})
+	hub.SetRules(nil, notify.Quiet{Enabled: true, Start: "23:00", End: "07:00", Critical: true})
+	hub.Now = func() time.Time { return at("02:00") }
+	plex := discord.About(hub.Route("uptime"), "check:plex")
+	plex.SendEmbed("plex is down", "", discord.Critical, nil, "Uptime")
+	plex.SendEmbed("plex is back up", "", discord.OK, nil, "Uptime")
+	discord.About(hub.Route("uptime"), "check:api").SendEmbed("api is back up", "", discord.OK, nil, "Uptime")
+	// Subjectless alerts (Plex's own) pair up by area.
+	hub.Route("media").SendEmbed("Plex is down", "", discord.Critical, nil, "")
+	hub.Route("media").SendEmbed("Plex is back up", "", discord.OK, nil, "")
+	// Only once: a second recovery has no critical alert before it.
+	plex.SendEmbed("plex is back up", "", discord.OK, nil, "Uptime")
+	if got := strings.Join(c.sent(), ","); got != "plex is down,plex is back up,Plex is down,Plex is back up" {
+		t.Fatalf("got %v", got)
+	}
+	if _, held := hub.QuietNow(); held != 2 {
+		t.Fatalf("the other recoveries stay held, got %d (%+v)", held, history(db))
+	}
+
+	// Without Critical, the critical alert and its recovery are both held.
+	hub.SetRules(nil, notify.Quiet{Enabled: true, Start: "23:00", End: "07:00"})
+	before := len(c.sent())
+	plex.SendEmbed("plex is down", "", discord.Critical, nil, "Uptime")
+	plex.SendEmbed("plex is back up", "", discord.OK, nil, "Uptime")
+	if len(c.sent()) != before {
+		t.Fatalf("nothing goes out, got %v", c.sent()[before:])
+	}
+}
+
+// A summary to slow channels is sent to them all at once while telling the watchdog the loop is
+// busy, not stuck.
+func TestASlowSummaryKeepsTheWatchdogFed(t *testing.T) {
+	old := notify.WaitBeat
+	notify.WaitBeat = 10 * time.Millisecond
+	defer func() { notify.WaitBeat = old }()
+	a, b := &fake{name: "Discord", delay: 100 * time.Millisecond}, &fake{name: "ntfy", delay: 100 * time.Millisecond}
+	hub, _ := newHub(t, notify.Destination{Channel: a}, notify.Destination{Channel: b})
+	hub.SetRules(nil, notify.Quiet{Enabled: true, Start: "23:00", End: "07:00"})
+	var beats atomic.Int32
+	hub.Waiting = func() { beats.Add(1) }
+	hub.Now = func() time.Time { return at("02:00") }
+	hub.Route("services").SendEmbed("sonarr keeps restarting", "", discord.Warning, nil, "Services")
+	hub.Now = func() time.Time { return at("07:01") }
+	start := time.Now()
+	hub.Tick()
+	if len(a.sent()) != 1 || len(b.sent()) != 1 {
+		t.Fatalf("both channels get the summary: %v %v", a.sent(), b.sent())
+	}
+	if took := time.Since(start); took > 180*time.Millisecond {
+		t.Fatalf("channels are sent to at once, took %s", took)
+	}
+	if beats.Load() < 2 {
+		t.Fatalf("the hub said it was waiting %d times", beats.Load())
 	}
 }
 

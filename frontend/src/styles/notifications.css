@@ -640,6 +640,11 @@
   gap: 12px 20px;
   margin-top: 12px;
 }
+/* Whose clock the quiet hours are on, under the fields. */
+.quiet-form + .server-time {
+  display: block;
+  margin-top: 10px;
+}
 .quiet-time {
   display: inline-flex;
   align-items: center;

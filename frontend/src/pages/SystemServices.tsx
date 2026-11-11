@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { ApiError, api, UnauthorizedError, waitForRestart } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
+import { useNotifications } from '../api/NotificationsContext';
 import type { Finding, Unit, UnitAction, UnitsResponse } from '../api/types';
 import { CauseLine, Diagnosis } from '../components/Diagnosis';
 import { MuteButton, MutedTag } from '../components/MuteButton';
@@ -86,6 +88,8 @@ function UnitRow({ u, self, open, focus, onToggle, onChanged, now }: { u: Unit; 
   const [busy, setBusy] = useState<UnitAction>();
   const [confirmStop, setConfirmStop] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
+  const canEdit = useCanEdit();
+  const muted = !!useNotifications().mutedUntil(`unit:${u.name}`);
   const [tone, word] = verdict(u);
   const isSelf = u.name === self;
   const act = async (action: UnitAction) => {
@@ -142,36 +146,39 @@ function UnitRow({ u, self, open, focus, onToggle, onChanged, now }: { u: Unit; 
               <span className="unit-desc truncate">{[u.description, why].filter(Boolean).join(' · ')}</span>
             )}
           </span>
-          <MutedTag subject={`unit:${u.name}`} label={short(u.name)} compact />
+          {/* Inside the row's button, so only a tag; the unmute is in the opened row, by Stop. */}
+          <MutedTag subject={`unit:${u.name}`} label={short(u.name)} compact readOnly />
           <span className="upd-change num">{u.flapping ? `${u.flapping} restarts in 10 min` : u.since ? `${running ? 'up' : 'since'} ${formatAgo(u.since, now).replace(' ago', '')}` : ''}</span>
           <svg className="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
             <path d="m6 9 6 6 6-6" />
           </svg>
         </button>
-        <div className="upd-controls">
-          {/* Down services get the strong button; running ones a quiet one; finished one-shot jobs none. */}
-          {u.sub === 'exited' ? (
-            <span className="small-btn-space" />
-          ) : confirmRestart ? (
-            <span className="confirm">
-              <span className="small ink-3">{isSelf ? 'Restart the monitor? The dashboard is away for a moment' : `Restart ${short(u.name)}? What runs on it restarts or drops too`}</span>
-              <button className="btn-quiet danger" disabled={!!busy} onClick={() => act('restart')}>
-                Restart
+        {canEdit && (
+          <div className="upd-controls">
+            {/* Down services get the strong button; running ones a quiet one; finished one-shot jobs none. */}
+            {u.sub === 'exited' ? (
+              <span className="small-btn-space" />
+            ) : confirmRestart ? (
+              <span className="confirm">
+                <span className="small ink-3">{isSelf ? 'Restart the monitor? The dashboard is away for a moment' : `Restart ${short(u.name)}? What runs on it restarts or drops too`}</span>
+                <button className="btn-quiet danger" disabled={!!busy} onClick={() => act('restart')}>
+                  Restart
+                </button>
+                <button className="btn-quiet" onClick={() => setConfirmRestart(false)}>
+                  Keep running
+                </button>
+              </span>
+            ) : (
+              <button
+                className={tone === 'crit' || !running ? 'btn small-btn' : 'btn-ghost small-btn'}
+                disabled={!!busy}
+                onClick={() => (running && (isSelf || CAREFUL.test(u.name)) ? setConfirmRestart(true) : act(running ? 'restart' : 'start'))}
+              >
+                {busy === 'restart' ? 'Restarting…' : busy === 'start' ? 'Starting…' : running ? 'Restart' : 'Start'}
               </button>
-              <button className="btn-quiet" onClick={() => setConfirmRestart(false)}>
-                Keep running
-              </button>
-            </span>
-          ) : (
-            <button
-              className={tone === 'crit' || !running ? 'btn small-btn' : 'btn-ghost small-btn'}
-              disabled={!!busy}
-              onClick={() => (running && (isSelf || CAREFUL.test(u.name)) ? setConfirmRestart(true) : act(running ? 'restart' : 'start'))}
-            >
-              {busy === 'restart' ? 'Restarting…' : busy === 'start' ? 'Starting…' : running ? 'Restart' : 'Start'}
-            </button>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
       {open && (
         <div className="upd-details">
@@ -196,41 +203,46 @@ function UnitRow({ u, self, open, focus, onToggle, onChanged, now }: { u: Unit; 
               <dd className="num">{u.restarts}</dd>
             </div>
           </dl>
-          <Logs name={u.name} />
-          <div className="upd-actions unit-foot">
-            {/* An ignored service never alerts, so there is nothing to mute. */}
-            {!u.ignored && <MuteButton subject={`unit:${u.name}`} label={short(u.name)} />}
-            {running && u.name !== self && (
-              <>
-                {confirmStop ? (
-                  <span className="confirm">
-                    stop {short(u.name)}? it stays stopped until started{' '}
-                    <button className="btn-quiet danger" disabled={!!busy} onClick={() => act('stop')}>
-                      Stop
+          {/* A service's journal can hold secrets (qBittorrent's first password), so only the admin reads it. */}
+          {canEdit && <Logs name={u.name} />}
+          {/* A viewer has no controls here, only the note on an ignored service. */}
+          {(canEdit || u.ignored) && (
+            <div className="upd-actions unit-foot">
+              {/* An ignored service never alerts, so there is nothing to mute; one muted before it was
+                  ignored still gets its unmute, as the row's own tag can't do it. */}
+              {canEdit && (!u.ignored || muted) && <MuteButton subject={`unit:${u.name}`} label={short(u.name)} />}
+              {canEdit && running && u.name !== self && (
+                <>
+                  {confirmStop ? (
+                    <span className="confirm">
+                      stop {short(u.name)}? it stays stopped until started{' '}
+                      <button className="btn-quiet danger" disabled={!!busy} onClick={() => act('stop')}>
+                        Stop
+                      </button>
+                      <button className="btn-quiet" onClick={() => setConfirmStop(false)}>
+                        Keep running
+                      </button>
+                    </span>
+                  ) : (
+                    <button className="btn-quiet" disabled={!!busy} onClick={() => setConfirmStop(true)}>
+                      Stop…
                     </button>
-                    <button className="btn-quiet" onClick={() => setConfirmStop(false)}>
-                      Keep running
-                    </button>
+                  )}
+                </>
+              )}
+              {u.ignored && (
+                <span className="unit-note">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M12 11v5M12 8h.01" />
+                  </svg>
+                  <span>
+                    Ignored in <Link to="/settings#system-services">Settings → System services</Link>, so it never alerts.
                   </span>
-                ) : (
-                  <button className="btn-quiet" disabled={!!busy} onClick={() => setConfirmStop(true)}>
-                    Stop…
-                  </button>
-                )}
-              </>
-            )}
-            {u.ignored && (
-              <span className="unit-note">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true">
-                  <circle cx="12" cy="12" r="9" />
-                  <path d="M12 11v5M12 8h.01" />
-                </svg>
-                <span>
-                  Ignored in <Link to="/settings#system-services">Settings → System services</Link>, so it never alerts.
                 </span>
-              </span>
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </li>

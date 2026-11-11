@@ -2,12 +2,14 @@ package storage
 
 import "database/sql"
 
-// Session is a signed-in browser, known by a hash of its cookie.
+// Session is a signed-in browser, known by a hash of its cookie. User is the viewer it belongs to,
+// or "" for the admin.
 type Session struct {
 	Hash    string
 	Created float64
 	Seen    float64
 	Agent   string
+	User    string
 }
 
 // Sessions returns every stored session.
@@ -17,7 +19,7 @@ func (s *Store) Sessions() []Session {
 	if db == nil {
 		return nil
 	}
-	rows, err := db.Query("SELECT hash, created, seen, agent FROM sessions")
+	rows, err := db.Query("SELECT hash, created, seen, agent, user FROM sessions")
 	if err != nil {
 		log.Warn("Session query failed", "err", err)
 		return nil
@@ -26,7 +28,7 @@ func (s *Store) Sessions() []Session {
 	var out []Session
 	for rows.Next() {
 		var x Session
-		if rows.Scan(&x.Hash, &x.Created, &x.Seen, &x.Agent) == nil {
+		if rows.Scan(&x.Hash, &x.Created, &x.Seen, &x.Agent, &x.User) == nil {
 			out = append(out, x)
 		}
 	}
@@ -36,8 +38,8 @@ func (s *Store) Sessions() []Session {
 // SaveSession inserts a session or updates when it was last seen.
 func (s *Store) SaveSession(x Session) error {
 	return s.tx(func(tx *sql.Tx) error {
-		_, err := tx.Exec(`INSERT INTO sessions (hash, created, seen, agent) VALUES (?, ?, ?, ?)
-			ON CONFLICT(hash) DO UPDATE SET seen = excluded.seen`, x.Hash, x.Created, x.Seen, x.Agent)
+		_, err := tx.Exec(`INSERT INTO sessions (hash, created, seen, agent, user) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(hash) DO UPDATE SET seen = excluded.seen`, x.Hash, x.Created, x.Seen, x.Agent, x.User)
 		return err
 	})
 }

@@ -144,3 +144,55 @@ func TestDrivesBehindARaidControllerAreKeptApart(t *testing.T) {
 		t.Fatalf("got %+v", drives)
 	}
 }
+
+// A drive the scan stops finding, which is how a failing disk often goes (it drops off the bus), is
+// kept with its last reading and marked missing, not dropped without a word; found again, it is not.
+// One found under another device name after a reboot is not missing, and one taken out for good is
+// forgotten after a week.
+func TestADriveThatDisappearsIsMarkedMissing(t *testing.T) {
+	scan := `{"devices":[{"name":"/dev/sda","type":"sat"},{"name":"/dev/nvme0","type":"nvme"}]}`
+	f := &fake{sda: hdd, nvme: nvme}
+	r := smart.NewReader()
+	r.Run = func(ctx context.Context, args ...string) ([]byte, error) {
+		if args[len(args)-1] == "--json" {
+			return []byte(scan), nil
+		}
+		return f.run(ctx, args...)
+	}
+	r.Read(context.Background(), time.Unix(1000, 0), limits)
+	scan = `{"devices":[{"name":"/dev/nvme0","type":"nvme"}]}`
+	drives, err := r.Read(context.Background(), time.Unix(2000, 0), limits)
+	if err != nil || len(drives) != 2 {
+		t.Fatalf("%+v %v", drives, err)
+	}
+	sda := drives[1]
+	if sda.Device != "/dev/sda" || sda.Missing != 2000 || !strings.Contains(sda.Error, "no longer found") || sda.Health != "warning" || sda.Checked != 1000 || sda.Model != "WDC WD80EFAX" {
+		t.Fatalf("missing: %+v", sda)
+	}
+	// Still gone: it keeps the time it went missing.
+	drives, _ = r.Read(context.Background(), time.Unix(3000, 0), limits)
+	if len(drives) != 2 || drives[1].Missing != 2000 {
+		t.Fatalf("still missing: %+v", drives)
+	}
+	// Back: read again, not missing.
+	scan = `{"devices":[{"name":"/dev/sda","type":"sat"},{"name":"/dev/nvme0","type":"nvme"}]}`
+	drives, _ = r.Read(context.Background(), time.Unix(4000, 0), limits)
+	if len(drives) != 2 || drives[0].Missing != 0 || drives[0].Error != "" || drives[0].Checked != 4000 {
+		t.Fatalf("back: %+v", drives)
+	}
+
+	// After a restart, the saved readings stand for the last scan; a drive that came back under
+	// another name is the same drive.
+	fresh := smart.NewReader()
+	fresh.Restore([]smart.Drive{{Device: "/dev/sdb", Type: "sat", Serial: "S1"}, {Device: "/dev/sdc", Type: "sat", Serial: "S9", Checked: 100}})
+	fresh.Run = r.Run
+	drives, _ = fresh.Read(context.Background(), time.Unix(5000, 0), limits)
+	if len(drives) != 3 || drives[2].Device != "/dev/sdc" || drives[2].Missing != 5000 {
+		t.Fatalf("after a restart: %+v", drives)
+	}
+	// A week on, it is forgotten.
+	drives, _ = fresh.Read(context.Background(), time.Unix(5000+8*24*3600, 0), limits)
+	if len(drives) != 2 {
+		t.Fatalf("not forgotten: %+v", drives)
+	}
+}

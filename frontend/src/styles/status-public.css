@@ -2,7 +2,8 @@
 
 .status-page {
   /* Bars, dots and badges use the bright marks; text keeps the darker tones that read on white. */
-  --day-good: var(--good-mark);
+  /* Good days are a touch quieter than the marks, so a bad day stands out from ninety good ones. */
+  --day-good: color-mix(in srgb, var(--good-mark) 80%, var(--surface));
   --day-minor: var(--warn-mark);
   --day-major: var(--crit-mark);
   --day-none: color-mix(in srgb, var(--ink) 12%, transparent);
@@ -74,13 +75,10 @@
 .status-hero {
   --tone: var(--good);
   --mark: var(--good-mark);
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 20px 22px;
-  border: 1px solid color-mix(in srgb, var(--mark) 32%, var(--rule));
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--mark) 34%, var(--rule));
   border-radius: var(--radius);
-  background: linear-gradient(120deg, color-mix(in srgb, var(--mark) 12%, var(--surface)), color-mix(in srgb, var(--mark) 3%, var(--surface)) 70%);
+  background: linear-gradient(120deg, color-mix(in srgb, var(--mark) 13%, var(--surface)), color-mix(in srgb, var(--mark) 3%, var(--surface)) 70%);
   box-shadow: var(--shadow);
 }
 .status-hero.degraded {
@@ -96,19 +94,26 @@
   --mark: var(--ink-3);
   box-shadow: none;
 }
+.status-hero-main {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 24px 24px 22px;
+}
 .status-hero-icon {
   position: relative;
   display: grid;
   flex: none;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: 46px;
+  height: 46px;
   border-radius: 50%;
   background: var(--mark);
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--mark) 16%, transparent);
 }
 .status-hero-icon svg {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   fill: none;
   stroke: var(--surface);
   stroke-width: 2.6;
@@ -140,28 +145,57 @@
     opacity: 0;
   }
 }
-.status-hero > .min0 {
+.status-hero-main > .min0 {
   flex: 1 1 0;
 }
 .status-hero strong {
   display: block;
-  font-size: 19px;
+  font-size: 22px;
   font-weight: 650;
-  letter-spacing: -0.015em;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
 }
 .status-hero .min0 > span {
   display: block;
-  margin-top: 3px;
+  margin-top: 4px;
   line-height: 1.5;
   color: var(--ink-2);
-  font-size: 13.5px;
+  font-size: 14px;
+}
+/* The facts under the verdict: uptime, how many services, and how fresh it is. */
+.status-hero-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 22px;
+  padding: 11px 24px;
+  border-top: 1px solid color-mix(in srgb, var(--mark) 20%, var(--rule));
+  background: color-mix(in srgb, var(--mark) 4%, transparent);
+  color: var(--ink-3);
+  font-size: 13px;
+}
+.status-fact b {
+  color: var(--ink);
+  font-weight: 650;
 }
 .status-hero-when {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   margin-left: auto;
-  align-self: flex-start;
-  color: var(--ink-3);
-  font-size: 12.5px;
   white-space: nowrap;
+}
+.status-live {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--good-mark);
+  animation: status-live 2.4s ease-in-out infinite;
+}
+@keyframes status-live {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 /* ---------- groups and services ---------- */
@@ -202,7 +236,7 @@
   box-shadow: var(--shadow);
 }
 .status-row {
-  padding: 18px 22px;
+  padding: 15px 20px 16px;
 }
 .status-row + .status-row {
   border-top: 1px solid var(--rule);
@@ -210,12 +244,22 @@
 .status-row-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
 }
 .status-name {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 15px;
   font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.status-row-uptime {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.status-row-uptime .short {
+  display: none;
 }
 .status-state {
   --tone: var(--good);
@@ -262,12 +306,12 @@
 
 .day-bars-wrap {
   position: relative;
-  margin-top: 14px;
+  margin-top: 11px;
 }
 .day-bars {
   display: flex;
   gap: 2px;
-  height: 34px;
+  height: 28px;
   border-radius: 4px;
   outline-offset: 4px;
 }
@@ -332,11 +376,13 @@
 .day-tip-sub {
   color: var(--ink-3);
 }
+/* One scale at the foot of each list, for every row's bars. */
 .status-scale {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 8px;
+  padding: 9px 20px 11px;
+  border-top: 1px solid var(--rule);
   color: var(--ink-3);
   font-size: 12px;
 }
@@ -344,14 +390,6 @@
   flex: 1;
   height: 1px;
   background: var(--rule);
-}
-.status-scale-uptime {
-  color: var(--ink-2);
-  font-weight: 550;
-}
-.status-scale-uptime.solo {
-  margin-top: 6px;
-  font-size: 12.5px;
 }
 .status-scale .short {
   display: none;
@@ -362,7 +400,7 @@
   flex-wrap: wrap;
   justify-content: center;
   gap: 8px 20px;
-  margin-top: 22px;
+  margin-top: 18px;
   color: var(--ink-3);
   font-size: 12.5px;
 }
@@ -398,22 +436,39 @@
   .status-page h1 {
     font-size: 26px;
   }
-  .status-hero {
-    flex-wrap: wrap;
-    padding: 16px 18px;
+  .status-hero-main {
+    align-items: flex-start;
+    gap: 14px;
+    padding: 18px 18px 16px;
+  }
+  .status-hero-icon {
+    width: 38px;
+    height: 38px;
+  }
+  .status-hero strong {
+    font-size: 19px;
+  }
+  .status-hero-facts {
+    gap: 4px 16px;
+    padding: 10px 18px;
   }
   .status-hero-when {
-    width: 100%;
-    margin-left: 56px;
-    margin-top: -6px;
+    margin-left: 0;
   }
   .status-row {
-    padding: 16px;
+    padding: 14px 16px;
   }
-  /* A phone shows the last 30 days, which still have room to read. */
-  .day-bars .day:nth-child(-n + 60) {
+  .status-scale {
+    padding: 9px 16px 11px;
+  }
+  /* The bars show 30 days here, so the figure beside them is the 30-day one. */
+  .status-row.has-days .status-row-uptime .long {
     display: none;
   }
+  .status-row.has-days .status-row-uptime .short {
+    display: inline;
+  }
+  /* A phone shows the last 30 days, which still have room to read: DayBars draws only those. */
   .day-bars {
     gap: 3px;
   }
@@ -440,7 +495,8 @@
   .day-bars .day {
     transition: none;
   }
-  .status-state.down .status-dot {
+  .status-state.down .status-dot,
+  .status-live {
     animation: none;
   }
 }
@@ -541,21 +597,48 @@
   font-size: 12.5px;
 }
 
-/* Settled incidents, at the foot. */
+/* Settled incidents, at the foot: a timeline, newest first. */
 .status-incidents {
-  margin-top: 32px;
+  margin-top: 36px;
 }
 .status-incidents h2 {
-  margin: 0 4px 10px;
+  margin: 0 4px 6px;
   font-size: 15px;
   font-weight: 620;
 }
 .status-incident {
-  padding: 14px 4px;
-  border-top: 1px solid var(--rule);
+  position: relative;
+  padding: 14px 4px 14px 28px;
 }
-.status-incident:last-child {
-  border-bottom: 1px solid var(--rule);
+/* The rail, and each incident's dot on it. */
+.status-incident::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 8px;
+  width: 2px;
+  background: var(--rule);
+}
+.status-incident:first-of-type::before {
+  top: 22px;
+}
+.status-incident:last-of-type::before {
+  bottom: calc(100% - 22px);
+}
+.status-incident:only-of-type::before {
+  display: none;
+}
+.status-incident::after {
+  content: '';
+  position: absolute;
+  top: 17px;
+  left: 3px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--good-mark);
+  border-radius: 50%;
+  background: var(--bg);
 }
 .status-incident-head {
   display: flex;
@@ -575,7 +658,11 @@
   font-size: 12.5px;
 }
 .status-resolved {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--good-mark) 14%, transparent);
   color: var(--good);
+  font-size: 12px;
   font-weight: 600;
 }
 .status-incident p {

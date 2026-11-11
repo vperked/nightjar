@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useMemo, useState } from 'react';
+import { type KeyboardEvent, useCallback, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
 import type { PlexPlay, PlexResponse, PlexState } from '../api/types';
@@ -14,6 +14,12 @@ import { usePoll } from '../hooks/usePoll';
 
 const count = (v: number) => String(Math.round(v));
 const mbps = (v: number) => (v === 0 ? '0' : v.toFixed(v < 10 ? 1 : 0));
+// sinceWhen is when the charts start: "3:15 PM" today, "Nov 10, 3:15 PM" on an earlier day.
+const sinceWhen = (ts: number) => {
+  const d = new Date(ts * 1000);
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+};
 const KIND: Record<string, string> = { movie: 'movies', show: 'shows', artist: 'artists', photo: 'photos' };
 
 // Recent lists the streams that finished; each opens how it was delivered.
@@ -126,7 +132,7 @@ function Body({ p, onChange }: { p: PlexState; onChange: (r: PlexResponse) => vo
           <Section label="Concurrent streams" aside={<Legend series={streams} />}>
             <TrendChart series={streams} raw height={150} max={countMax} format={count} tip={(v) => `${Math.round(v)} ${Math.round(v) === 1 ? 'stream' : 'streams'}`} emptyText="collecting data…" />
             <div className="chart-note small ink-3 num">
-              peak {peakTotal} at once since {p.samples.length ? new Date(p.samples[0].ts * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '—'}
+              peak {peakTotal} at once since {p.samples.length ? sinceWhen(p.samples[0].ts) : '—'}
             </div>
           </Section>
           <Section label="Bandwidth" aside={<span className="small ink-3">Mbps</span>}>
@@ -189,10 +195,55 @@ function Body({ p, onChange }: { p: PlexState; onChange: (r: PlexResponse) => vo
   );
 }
 
-const fetchFull = () => api.plex('full');
+// FULL_EVERY is how often the page fetches the whole state: the chart samples, finished plays and
+// libraries. In between it polls the light summary (the streams and the readings, a few KB instead of
+// hundreds of samples every 5 seconds), and adds each new check's counts to the charts itself.
+const FULL_EVERY = 60_000;
+
+const ids = (p: PlexState) => p.streams.map((s) => s.id).join();
+
+// usePlex polls Plex every 5 seconds: the summary, and the whole state every FULL_EVERY, when a
+// stream starts or ends (so it shows under Recently finished at once), and when the libraries were
+// counted again.
+function usePlex() {
+  const full = useRef<PlexState>();
+  const fullAt = useRef(0);
+  // recheck asks for the whole state once more after the next check: a stream stopped from here
+  // leaves the list at once, but reaches the finished plays only when Plex is checked again.
+  const recheck = useRef(0);
+  const fetchPlex = useCallback(async (): Promise<PlexResponse> => {
+    const have = full.current;
+    const whole = async () => {
+      const r = await api.plex('full');
+      full.current = r.plex;
+      fullAt.current = Date.now();
+      return r;
+    };
+    if (!have || Date.now() - fullAt.current >= FULL_EVERY) return whole();
+    const r = await api.plex('summary');
+    const now = r.plex;
+    if (!r.enabled || !now) {
+      full.current = undefined;
+      return r;
+    }
+    const changed = ids(now) !== ids(have);
+    if (changed || now.libraries_at > have.libraries_at || (recheck.current && now.checked_at > recheck.current)) {
+      recheck.current = changed ? now.checked_at : 0;
+      return whole();
+    }
+    // A successful check recorded one sample of these counts; failed checks record none.
+    const last = have.samples.at(-1)?.ts ?? 0;
+    if (now.status === 'up' && !now.detail && now.checked_at > last) {
+      full.current = { ...have, samples: [...have.samples, { ts: now.checked_at, direct: now.direct, transcode: now.transcode, bandwidth_kbps: now.bandwidth_kbps }] };
+    }
+    const kept = full.current ?? have;
+    return { ...r, plex: { ...now, samples: kept.samples, recent: kept.recent, libraries: kept.libraries } };
+  }, []);
+  return usePoll(fetchPlex, 5000);
+}
 
 export function PlexPage() {
-  const plex = usePoll(fetchFull, 5000);
+  const plex = usePlex();
   return (
     <main>
       {plex.error && !plex.unauthorized && (

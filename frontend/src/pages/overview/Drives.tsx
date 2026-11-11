@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { useCanEdit } from '../../api/ConfigContext';
 import type { Drive, DrivesResponse } from '../../api/types';
 import { MuteButton } from '../../components/MuteButton';
 import { Section } from '../../components/ui';
@@ -15,6 +16,7 @@ function hours(h: number): string {
 // DriveRow is one disk's verdict, temperature, age and whatever counters say it is wearing out.
 // Another server's drives have no mute of their own: its alerts are muted per server.
 export function DriveRow({ d, now, mutable = true }: { d: Drive; now: number; mutable?: boolean }) {
+  const canEdit = useCanEdit();
   const [tone, word] = d.asleep && d.health === 'unknown' ? ['idle', 'Asleep'] : HEALTH[d.health];
   const facts = [
     d.capacity ? formatBytes(d.capacity) : '',
@@ -32,7 +34,7 @@ export function DriveRow({ d, now, mutable = true }: { d: Drive; now: number; mu
           {d.model && <span className="sub mono">{d.device}</span>}
         </span>
         <span className="drive-state">
-          {mutable && <MuteButton subject={`drive:${d.serial || d.device}`} label={d.model || d.device} compact />}
+          {mutable && canEdit && <MuteButton subject={`drive:${d.serial || d.device}`} label={d.model || d.device} compact />}
           <span className={`state ${tone}`}>{word}</span>
         </span>
       </div>

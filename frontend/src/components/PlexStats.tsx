@@ -111,8 +111,9 @@ export function PlexStatsBody({ st }: { st: PlexStats }) {
 export function PlexStatsSection() {
   const [days, setDays] = useState(7);
   const fetch = useCallback(() => api.plexStats(days), [days]);
-  const { data } = usePoll(fetch, 60000);
-  const st = data?.stats;
+  const { data, error, stale } = usePoll(fetch, 60000);
+  // The other range's numbers would sit under this one's label until it answers.
+  const st = stale ? undefined : data?.stats;
   return (
     <Section
       label={`The last ${days === 7 ? 'week' : `${days} days`}`}
@@ -128,7 +129,7 @@ export function PlexStatsSection() {
         />
       }
     >
-      {st ? <PlexStatsBody st={st} /> : <p className="note plex-stats-none">Counting…</p>}
+      {st ? <PlexStatsBody st={st} /> : error ? <div className="alert">{error.message}</div> : <p className="note plex-stats-none">Counting…</p>}
     </Section>
   );
 }

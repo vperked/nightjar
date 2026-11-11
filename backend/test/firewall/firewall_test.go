@@ -1,6 +1,7 @@
 package firewall_test
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -65,13 +67,23 @@ func (f *fake) ran(prefix string) bool {
 // sshPort is the port sshd's config names here.
 func sshPort() uint16 { return ddos.SSHPorts("/nonexistent")[0] }
 
-// process puts a process in a fake /proc, with its name, its title and the sockets it holds.
+// process puts a process in a fake /proc, with its name, its title and the sockets it holds. It runs
+// as root, from the program its name says (sshd's own for sshd and sshd-session).
 func process(t *testing.T, dir string, pid int, comm, title string, sockets ...int) {
+	t.Helper()
+	exe := map[string]string{"sshd": "/usr/sbin/sshd", "sshd-session": "/usr/lib/openssh/sshd-session"}[comm]
+	runAs(t, dir, pid, comm, title, cmp.Or(exe, "/usr/bin/"+comm), 0, 1, sockets...)
+}
+
+// runAs puts a process in a fake /proc with its program, real user and parent too.
+func runAs(t *testing.T, dir string, pid int, comm, title, exe string, uid, ppid int, sockets ...int) {
 	t.Helper()
 	p := filepath.Join(dir, fmt.Sprint(pid))
 	os.MkdirAll(filepath.Join(p, "fd"), 0o755)
 	os.WriteFile(filepath.Join(p, "comm"), []byte(comm+"\n"), 0o644)
 	os.WriteFile(filepath.Join(p, "cmdline"), []byte(title+"\x00\x00"), 0o644)
+	os.WriteFile(filepath.Join(p, "status"), []byte(fmt.Sprintf("Name:\t%s\nPPid:\t%d\nUid:\t%d\t%d\t%d\t%d\n", comm, ppid, uid, uid, uid, uid)), 0o644)
+	os.Symlink(exe, filepath.Join(p, "exe"))
 	for i, s := range sockets {
 		if err := os.Symlink(fmt.Sprintf("socket:[%d]", s), filepath.Join(p, "fd", fmt.Sprint(3+i))); err != nil {
 			t.Fatal(err)
@@ -664,23 +676,70 @@ func (f *fake) count(prefix string) int {
 	return n
 }
 
+// hooks keeps INPUT's and OUTPUT's jumps for each family, in order, in front of a fake.
+type hooks struct {
+	mu   sync.Mutex
+	f    *fake
+	jump map[string][]string // by "iptables INPUT"
+}
+
+func (h *hooks) exec(ctx context.Context, stdin []byte, name string, args ...string) (string, error) {
+	if (name == "iptables" || name == "ip6tables") && len(args) >= 3 && (args[2] == "INPUT" || args[2] == "OUTPUT") {
+		h.mu.Lock()
+		key := name + " " + args[2]
+		in := h.jump[key]
+		var out string
+		var err error
+		switch args[1] {
+		case "-S":
+			out = "-P " + args[2] + " ACCEPT\n"
+			for _, target := range in {
+				out += "-A " + args[2] + " -j " + target + "\n"
+			}
+		case "-C":
+			if !slices.Contains(in, args[4]) {
+				err = os.ErrNotExist
+			}
+		case "-I":
+			at, _ := strconv.Atoi(args[3])
+			if at < 1 || at > len(in)+1 {
+				err = fmt.Errorf("index of insertion too big")
+			} else {
+				h.jump[key] = slices.Insert(slices.Clone(in), at-1, args[5])
+			}
+		case "-D":
+			if i := slices.Index(in, args[4]); i < 0 {
+				err = os.ErrNotExist
+			} else {
+				h.jump[key] = slices.Delete(slices.Clone(in), i, i+1)
+			}
+		}
+		h.mu.Unlock()
+		h.f.exec(ctx, stdin, name, args...) // recorded
+		return out, err
+	}
+	return h.f.exec(ctx, stdin, name, args...)
+}
+
+func (h *hooks) get(key string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return fmt.Sprint(h.jump[key])
+}
+
+func (h *hooks) set(key string, targets ...string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.jump[key] = targets
+}
+
 func TestRulesTakenOutFromOutsideArePutBack(t *testing.T) {
 	f := &fake{}
 	var saved []byte
 	m := newManager(t, f, &saved)
 	m.CheckEvery = 10 * time.Millisecond
-	present := true
-	var mu sync.Mutex
-	m.Exec = func(ctx context.Context, stdin []byte, name string, args ...string) (string, error) {
-		mu.Lock()
-		there := present
-		mu.Unlock()
-		if there && slices.Contains(args, "-C") {
-			f.exec(ctx, stdin, name, args...)
-			return "", nil
-		}
-		return f.exec(ctx, stdin, name, args...)
-	}
+	h := &hooks{f: f, jump: map[string][]string{}}
+	m.Exec = h.exec
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	m.Start(ctx)
@@ -690,21 +749,97 @@ func TestRulesTakenOutFromOutsideArePutBack(t *testing.T) {
 	// Still there: checked, left alone.
 	before := f.count("iptables-restore")
 	deadline := time.Now().Add(3 * time.Second)
-	for f.count("iptables -w -C INPUT -j NIGHTJAR-RULES") < 3 && time.Now().Before(deadline) {
+	for f.count("iptables -w -S INPUT") < 4 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if f.count("iptables-restore") != before {
 		t.Fatalf("rules in place were put in place again: %v", f.calls)
 	}
 	// A reload of the whole firewall took the jump out: it is put back.
-	mu.Lock()
-	present = false
-	mu.Unlock()
+	h.set("iptables INPUT")
 	for f.count("iptables-restore") == before && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if f.count("iptables-restore") == before {
 		t.Fatal("rules taken out were not put back")
+	}
+	for h.get("iptables INPUT") != "[NIGHTJAR-RULES]" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := h.get("iptables INPUT"); got != "[NIGHTJAR-RULES]" {
+		t.Fatalf("INPUT: %s", got)
+	}
+}
+
+// The attack defence's jump (NIGHTJAR) comes before the rules' in INPUT: an allow among the rules
+// would otherwise let a flood in before the defence's limits and blocks see it. The rules go in just
+// after it, and are moved there at the next check when found before it, never leaving INPUT without
+// them in between.
+func TestTheRulesComeAfterTheAttackDefence(t *testing.T) {
+	f := &fake{}
+	var saved []byte
+	m := newManager(t, f, &saved)
+	m.CheckEvery = 10 * time.Millisecond
+	h := &hooks{f: f, jump: map[string][]string{
+		"iptables INPUT":  {"NIGHTJAR", "ufw-before-input"},
+		"ip6tables INPUT": {"NIGHTJAR"},
+	}}
+	m.Exec = h.exec
+	ctx := context.Background()
+	if _, err := m.Add(ctx, firewall.Rule{Action: "allow", Port: "443", Proto: "tcp"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.get("iptables INPUT"); got != "[NIGHTJAR NIGHTJAR-RULES ufw-before-input]" {
+		t.Fatalf("iptables INPUT: %s", got)
+	}
+	if got := h.get("ip6tables INPUT"); got != "[NIGHTJAR NIGHTJAR-RULES]" {
+		t.Fatalf("ip6tables INPUT: %s", got)
+	}
+	// Without the defence, the rules go first.
+	h.set("ip6tables INPUT", "ufw-before-input")
+	if _, err := m.Add(ctx, firewall.Rule{Action: "allow", Port: "80", Proto: "tcp"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.get("ip6tables INPUT"); got != "[NIGHTJAR-RULES ufw-before-input]" {
+		t.Fatalf("ip6tables INPUT without the defence: %s", got)
+	}
+
+	// The defence started after the rules were put before it (as an older version did): the
+	// periodic check moves them after it.
+	h.set("iptables INPUT", "NIGHTJAR-RULES", "NIGHTJAR", "ufw-before-input")
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	m.Start(cctx)
+	deadline := time.Now().Add(3 * time.Second)
+	for h.get("iptables INPUT") != "[NIGHTJAR NIGHTJAR-RULES ufw-before-input]" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := h.get("iptables INPUT"); got != "[NIGHTJAR NIGHTJAR-RULES ufw-before-input]" {
+		t.Fatalf("not moved after the defence: %s", got)
+	}
+	f.mu.Lock()
+	moved := strings.Contains(strings.Join(f.calls, "|"), "iptables -w -S INPUT|iptables -w -I INPUT 3 -j NIGHTJAR-RULES|iptables -w -D INPUT -j NIGHTJAR-RULES|")
+	f.mu.Unlock()
+	if !moved {
+		t.Fatalf("the old jump went before the new one was in: %v", f.calls)
+	}
+}
+
+// IPv6 that turns the rules down (a kernel booted with ipv6.disable=1) does not keep them from IPv4.
+func TestIPv6TurningTheRulesDownLeavesIPv4WithThem(t *testing.T) {
+	f := &fake{fail: "ip6tables"}
+	var saved []byte
+	m := newManager(t, f, &saved)
+	if _, err := m.Add(context.Background(), firewall.Rule{Action: "block", Source: "203.0.113.7"}, nil); err != nil {
+		t.Fatalf("refused for IPv6's sake: %v", err)
+	}
+	if !strings.Contains(f.v4Now(), "-s 203.0.113.7") || len(m.Status(context.Background()).Rules) != 1 {
+		t.Fatalf("IPv4 rules: %s", f.v4Now())
+	}
+	// IPv4 turning them down still undoes the change.
+	f.fail = "iptables-restore"
+	if _, err := m.Add(context.Background(), firewall.Rule{Action: "block", Source: "203.0.113.8"}, nil); err == nil || len(m.Status(context.Background()).Rules) != 1 {
+		t.Fatalf("an IPv4 refusal: %v", err)
 	}
 }
 
@@ -734,5 +869,92 @@ func TestUninstallTakesTheRulesOut(t *testing.T) {
 	}
 	if len(saved) == 0 {
 		t.Fatal("the saved rules are left alone")
+	}
+}
+
+// Letting only the dashboard reach the agent's port: an allow for it, then a block for everyone on that
+// port. The block goes behind the allow it is an exception to, and is fine there; taking the allow
+// away, pausing it or moving it below the block would cut the dashboard off, so each is refused.
+func TestOnlyTheDashboardMayReachAPort(t *testing.T) {
+	f := &fake{}
+	var saved []byte
+	m := newManager(t, f, &saved)
+	ctx := context.Background()
+	dashboard := []firewall.Reach{{Address: "45.33.1.2", Ports: []uint16{9101}, What: "the dashboard"}}
+
+	web, err := m.Add(ctx, firewall.Rule{Action: "allow", Port: "443", Proto: "tcp"}, dashboard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// On its own, a block on the port is still refused.
+	if _, err := m.Add(ctx, firewall.Rule{Action: "block", Port: "9101", Proto: "tcp"}, dashboard); err == nil || !strings.Contains(err.Error(), "cut off the dashboard") {
+		t.Fatalf("block before the exception: %v", err)
+	}
+	only, err := m.Add(ctx, firewall.Rule{Action: "allow", Source: "45.33.1.2", Port: "9101", Proto: "tcp", Note: "the dashboard only"}, dashboard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest, err := m.Add(ctx, firewall.Rule{Action: "block", Port: "9101", Proto: "tcp"}, dashboard)
+	if err != nil {
+		t.Fatalf("block behind the exception: %v", err)
+	}
+	ids := func() []string {
+		var out []string
+		for _, r := range m.Status(ctx).Rules {
+			out = append(out, r.ID)
+		}
+		return out
+	}
+	// The block went behind the dashboard's allow; the allow for another port does not meet it.
+	if got := ids(); !slices.Equal(got, []string{web.ID, only.ID, rest.ID}) && !slices.Equal(got, []string{only.ID, rest.ID, web.ID}) {
+		t.Fatalf("order: %v (web %s, only %s, rest %s)", got, web.ID, only.ID, rest.ID)
+	}
+	// And iptables gets them in that order: the dashboard's ACCEPT before everyone's DROP.
+	v4 := f.v4Now()
+	allow, drop := strings.Index(v4, "-s 45.33.1.2 -p tcp --dport 9101"), strings.Index(v4, "-A NIGHTJAR-RULES -p tcp --dport 9101")
+	if allow < 0 || drop < 0 || allow > drop {
+		t.Fatalf("iptables order:\n%s", v4)
+	}
+
+	// What would undo the exception is refused, and the rules stay as they were.
+	if err := m.Remove(ctx, only.ID, dashboard...); err == nil || !strings.Contains(err.Error(), "cut off the dashboard") {
+		t.Fatalf("remove the exception: %v", err)
+	}
+	paused := only
+	paused.Paused = true
+	if _, err := m.Update(ctx, only.ID, paused, dashboard); err == nil {
+		t.Fatal("pausing the exception was let through")
+	}
+	if err := m.Order(ctx, []string{rest.ID, only.ID, web.ID}, dashboard...); err == nil {
+		t.Fatal("moving the block above the exception was let through")
+	}
+	if len(m.Status(ctx).Rules) != 3 {
+		t.Fatalf("rules changed: %+v", m.Status(ctx).Rules)
+	}
+	// Taking the block away first, then the exception, is fine.
+	if err := m.Remove(ctx, rest.ID, dashboard...); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Remove(ctx, only.ID, dashboard...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A block still goes before an allow it narrows: blocking one address on a port everyone may reach.
+func TestABlockStillGoesBeforeABroaderAllow(t *testing.T) {
+	f := &fake{}
+	var saved []byte
+	m := newManager(t, f, &saved)
+	ctx := context.Background()
+	web, err := m.Add(ctx, firewall.Rule{Action: "allow", Port: "443", Proto: "tcp"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad, err := m.Add(ctx, firewall.Rule{Action: "block", Source: "203.0.113.9", Port: "443", Proto: "tcp"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Status(ctx).Rules; len(got) != 2 || got[0].ID != bad.ID || got[1].ID != web.ID {
+		t.Fatalf("order: %+v", got)
 	}
 }

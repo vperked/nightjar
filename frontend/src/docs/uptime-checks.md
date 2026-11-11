@@ -12,6 +12,10 @@ Go to **[Services](/services)** and press **Add check**. Pick a type and a targe
 | TCP       | `nas.local:22`               | the port accepts a connection                                                                |
 | Ping      | `192.168.0.1`                | it replies to ping                                                                           |
 | TLS       | `example.com:443`            | its certificate is valid and not about to expire                                             |
+| DNS       | `example.com`                | the name has records of the type you pick, and one contains the expected answer if you set one |
+| PostgreSQL | `db.lan` or `db.lan:5432`   | the server is accepting connections. See [Databases](/docs/uptime-checks#databases)          |
+| MySQL     | `db.lan` or `db.lan:3306`    | the server (MySQL or MariaDB) is accepting connections                                       |
+| Redis     | `cache.lan` or `cache.lan:6379` | it answers PING                                                                           |
 | Docker    | `sonarr`                     | the container is running, not unhealthy, and not restarting over and over                    |
 | Heartbeat | none: the job pings Nightjar | the job reports in on schedule. See [Heartbeats](/docs/uptime-checks#heartbeats)             |
 
@@ -23,6 +27,17 @@ Each check also has:
 - **Timeout**: how long one try may take.
 - **Retries**: how many extra failures in a row before it counts as down. A single blip is not an outage.
 - For HTTP, **expected status codes** and a **keyword** the page must contain. For TLS, how many days ahead to warn about expiry.
+- For DNS, the **record type** (A, AAAA, CNAME, MX, TXT or NS), a **DNS server** to ask (empty uses this machine's resolver; set `1.1.1.1` or your own server to check that one), and an **expected answer**, such as the IP address the name should point to.
+
+## Databases
+
+The PostgreSQL, MySQL and Redis checks tell a database that is taking connections from one that is up but refusing them, without signing in, so they need no password:
+
+- **PostgreSQL** sends the opening message a client sends, as `pg_isready` does. Being asked for a password, or turned away for an unknown user, counts as up. Starting up, shutting down, recovering, or _too many clients_ is down. The server may log a failed login for the user `nightjar`; that is the check.
+- **MySQL and MariaDB** read the greeting the server sends on connect, and show its version. _Too many connections_ or a blocked host is down.
+- **Redis** sends `PING`. `PONG` is up, and so is being asked for a password. `LOADING` (still reading its data after a restart) and other errors are down. A Redis with a password hides `LOADING` from a check without one, so give the check its **password** to catch that: it is sent with `AUTH` first, a refused password is down, and the password is kept on the server and never shown in the dashboard or in a backup without secrets.
+
+The default port is used when the target has none.
 
 ## Heartbeats
 

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"nightjar/internal/plugins"
 )
@@ -124,5 +125,50 @@ func TestChoicesThatCannotBeReadAreNotSavedOver(t *testing.T) {
 	}
 	if !m.Enabled("a") || !m.Enabled("b") {
 		t.Fatal("both are on once the choices can be read")
+	}
+}
+
+// A plugins folder anywhere under a folder others can write to is refused, however far up: whoever can
+// write there can swap the whole tree for their own (audit #95).
+func TestPluginUnderWritableAncestorIsRefused(t *testing.T) {
+	outer := t.TempDir()
+	open := filepath.Join(outer, "shared")
+	root := filepath.Join(open, "deep", "plugins")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(outer, 0o755)
+	os.Chmod(open, 0o775) // group-writable, not sticky, two levels above the plugins folder
+	plugin(t, root, "far", `{"name":"Far","provides":["check"],"run":"run.sh"}`, `echo '{"up":true}'`)
+	m := plugins.New(root, memStore{})
+	m.Scan()
+	if p := find(m, "far"); !strings.Contains(p.Problem, "shared can be changed by other users") {
+		t.Fatalf("problem %q, want the writable ancestor named", p.Problem)
+	}
+	// Made safe, it runs; the check is asked again rather than remembered.
+	os.Chmod(open, 0o755)
+	m.Scan()
+	if p := find(m, "far"); p.Problem != "" {
+		t.Fatalf("after chmod: problem %q", p.Problem)
+	}
+}
+
+// Choices that could not be read when Nightjar started are read once they can be, without the
+// owner having to change anything; until then every plugin is off.
+func TestChoicesAreReadOnceTheyCanBe(t *testing.T) {
+	defer func(old time.Duration) { plugins.StateRetry = old }(plugins.StateRetry)
+	plugins.StateRetry = 0
+	root := t.TempDir()
+	os.Chmod(root, 0o755)
+	plugin(t, root, "a", `{"id":"a","provides":["check"],"run":"run.sh"}`, "true\n")
+	store := &failingStore{memStore: memStore{"plugins.state": `{"a":{"enabled":true}}`}, broken: true}
+	m := plugins.New(root, store)
+	m.Scan()
+	if m.Enabled("a") {
+		t.Fatal("on without its choices")
+	}
+	store.broken = false
+	if !m.Enabled("a") {
+		t.Fatal("still off once its choices can be read")
 	}
 }

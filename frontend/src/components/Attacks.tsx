@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useCanEdit } from '../api/ConfigContext';
 import type { Attack, AttackDefense, AttackFinding, AttackMethod, AttackSource, AttackView } from '../api/types';
 import { formatAgo, formatRate } from '../format';
 import { Section } from './ui';
@@ -36,9 +37,11 @@ export function describe(a: Attack, methods = ATTACK_METHODS): string {
   return names.length <= 1 ? (names[0] ?? 'an attack') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 }
 
+// lasted is how long an attack went on. Whole seconds first: rounding the remainder of a fractional
+// span would read "2m 60s".
 const lasted = (a: Attack, now: number) => {
-  const s = Math.max(0, (a.end || now) - a.start);
-  return s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${Math.round(s)}s`;
+  const s = Math.floor(Math.max(0, (a.end || now) - a.start));
+  return s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
 };
 
 function Sources({ sources, blocked }: { sources: AttackSource[]; blocked: Set<string> }) {
@@ -96,6 +99,8 @@ function Defense({
   onUnblock?: (address: string) => Promise<void>;
 }) {
   const [busy, setBusy] = useState('');
+  // A viewer sees the defense, without the switch or the unblock buttons.
+  const canEdit = useCanEdit();
   const blockedPages = usePaged(d.blocked, 10);
   const act = async (key: string, fn: () => Promise<void>) => {
     setBusy(key);
@@ -105,11 +110,28 @@ function Defense({
       setBusy('');
     }
   };
-  const toggle = onToggle && (
-    <button type="button" className="btn-quiet" disabled={!!busy} onClick={() => act('toggle', () => onToggle(!d.on))}>
-      {busy === 'toggle' ? 'Saving…' : d.on ? 'Turn off' : 'Turn on'}
-    </button>
-  );
+  // Turning the defense off mid-attack lifts its blocks at once, so that click asks first.
+  const [asking, setAsking] = useState(false);
+  const risky = d.on && (attacking || d.active);
+  const flip = () => act('toggle', () => onToggle!(!d.on)).finally(() => setAsking(false));
+  const toggle =
+    canEdit &&
+    onToggle &&
+    (asking && risky ? (
+      <span className="confirm">
+        <span className="small ink-3">Turn off the defense during an attack? Its blocks are lifted.</span>
+        <button type="button" className="btn-quiet danger" disabled={!!busy} onClick={flip}>
+          {busy === 'toggle' ? 'Saving…' : 'Turn off'}
+        </button>
+        <button type="button" className="btn-quiet" onClick={() => setAsking(false)}>
+          Keep on
+        </button>
+      </span>
+    ) : (
+      <button type="button" className="btn-quiet" disabled={!!busy} onClick={() => (risky ? setAsking(true) : flip())}>
+        {busy === 'toggle' ? 'Saving…' : d.on ? (risky ? 'Turn off…' : 'Turn off') : 'Turn on'}
+      </button>
+    ));
   const state = d.problem ? 'Can’t defend here' : !d.on ? 'Off: attacks are only watched' : d.active ? 'Defending' : 'On, ready';
   return (
     <div className={`attack-defense ${d.active ? 'active' : ''} ${d.problem || !d.on ? 'idle' : ''}`}>
@@ -150,7 +172,7 @@ function Defense({
                   <span className="attack-row-why">{b.why}</span>
                 </span>
                 <span className="attack-row-nums">{left(b.until, now)}</span>
-                {onUnblock && (
+                {canEdit && onUnblock && (
                   <button type="button" className="btn-quiet" disabled={!!busy} onClick={() => act(b.address, () => onUnblock(b.address))}>
                     {busy === b.address ? 'Unblocking…' : 'Unblock'}
                   </button>
@@ -227,7 +249,7 @@ export function AttackWatch({
           <Sources sources={view.current.sources} blocked={blocked} />
         </div>
       ) : (
-        <p className="note">Nothing flooding this machine. Watching for SYN, UDP, ping, connection and HTTP floods and traffic enough to fill the line, every 5 seconds.</p>
+        <p className="note attack-calm">No flood under way. Watching for SYN, UDP, ping, connection and HTTP floods and traffic enough to fill the line, every 5 seconds.</p>
       )}
       {view.defense && <Defense d={view.defense} attacking={view.attacking} now={now} onToggle={onToggle} onUnblock={onUnblock} />}
       {explained.length > 0 && (

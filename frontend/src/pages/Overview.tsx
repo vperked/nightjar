@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router';
 import { api } from '../api/client';
 import { useCharts } from '../appearance';
 import { useServices } from '../api/ServicesContext';
+import { useCanEdit } from '../api/ConfigContext';
 import type { Process, Sample, Stats } from '../api/types';
 import { LatestIncident } from '../components/LatestIncident';
 import { Num } from '../components/Num';
@@ -117,12 +118,19 @@ function NetworkReadout({ stats, rx, tx }: { stats: Stats; rx: Point[]; tx: Poin
 function ServicesSection() {
   const { data } = useServices();
   const navigate = useNavigate();
+  const canEdit = useCanEdit();
   if (!data) return null;
   if (data.services.length === 0) {
     return (
       <Section label="Services">
         <p className="note" style={{ padding: 0 }}>
-          No uptime checks yet. <Link to="/services#add">Add one →</Link>
+          No uptime checks yet.
+          {canEdit && (
+            <>
+              {' '}
+              <Link to="/services#add">Add one →</Link>
+            </>
+          )}
         </p>
       </Section>
     );

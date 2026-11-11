@@ -57,6 +57,9 @@ type Readings struct {
 	// Drives are SMART readings, refreshed every few minutes; empty without smartmontools.
 	Drives      []smart.Drive `json:"drives"`
 	DrivesError string        `json:"drives_error,omitempty"`
+	// DrivesPending is the first SMART read since the agent started not done yet: Drives is empty
+	// for now, not because the drives are gone.
+	DrivesPending bool `json:"drives_pending,omitempty"`
 	// Attacks is the agent's own watch for denial-of-service attacks on this machine.
 	Attacks *ddos.View `json:"attacks,omitempty"`
 }
@@ -99,6 +102,8 @@ type Sampler struct {
 	lastIO  collect.IO
 	lastAt  time.Time
 	drivesT time.Time
+	// drivesBusy is SMART being read, in the background; drivesRead is a read having finished.
+	drivesBusy, drivesRead bool
 }
 
 func NewSampler(build string) *Sampler {
@@ -192,16 +197,24 @@ func (s *Sampler) Sample(ctx context.Context) {
 	}
 
 	s.mu.Lock()
-	readDrives := now.Sub(s.drivesT) >= drivesEvery
+	readDrives := now.Sub(s.drivesT) >= drivesEvery && !s.drivesBusy
 	if readDrives {
-		s.drivesT = now
+		s.drivesT, s.drivesBusy = now, true
 	}
+	r.DrivesPending = !s.drivesRead
 	s.mu.Unlock()
 	if readDrives {
-		dctx, cancel := context.WithTimeout(ctx, time.Minute)
-		_, err := s.drives.Read(dctx, now, smart.Limits{HDD: 50, SSD: 70})
-		cancel()
-		_ = err // kept by the reader and reported below
+		// SMART can take up to a minute. Read on its own, it holds up no sample: the first one, after
+		// every start and self-update, is served at once instead of the dashboard getting no answer
+		// for that long and calling the server offline. The drives show from the sample after.
+		go func() {
+			dctx, cancel := context.WithTimeout(ctx, time.Minute)
+			defer cancel()
+			s.drives.Read(dctx, now, smart.Limits{HDD: 50, SSD: 70}) // kept by the reader, read below
+			s.mu.Lock()
+			s.drivesBusy, s.drivesRead = false, true
+			s.mu.Unlock()
+		}()
 	}
 	r.Drives, r.DrivesError = s.drives.Drives()
 	if s.attacks != nil {

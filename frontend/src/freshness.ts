@@ -48,7 +48,7 @@ export function useUnsaved(dirty: boolean) {
 }
 
 // A reload now loses nothing: nothing edited, no draft open and no change waiting for its answer.
-const safe = () => !typed && drafts === 0 && !writesPending();
+export const safe = () => !typed && drafts === 0 && !writesPending();
 
 // useNewBuild reports whether a newer build is live, and reloads onto it itself when that is safe.
 // Pass the current path: a page change is a safe moment.

@@ -66,6 +66,8 @@ func TestOnlyThoseSSHLetInAreLoggedIn(t *testing.T) {
 		os.MkdirAll(filepath.Join(p, "fd"), 0o755)
 		os.WriteFile(filepath.Join(p, "comm"), []byte("sshd\n"), 0o644)
 		os.WriteFile(filepath.Join(p, "cmdline"), []byte(title+"\x00"), 0o644)
+		os.WriteFile(filepath.Join(p, "status"), []byte("PPid:\t1\nUid:\t0\t0\t0\t0\n"), 0o644)
+		os.Symlink("/usr/sbin/sshd", filepath.Join(p, "exe"))
 		os.Symlink(fmt.Sprintf("socket:[%d]", inode), filepath.Join(p, "fd", "3"))
 	}
 	proc(1, "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups", 10)

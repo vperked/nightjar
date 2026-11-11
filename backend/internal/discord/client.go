@@ -228,7 +228,7 @@ func NewWebhook(url, alertLogPath string) (*Webhook, error) {
 	return &Webhook{
 		URL:          url,
 		AlertLogPath: alertLogPath,
-		client:       &http.Client{Timeout: 10 * time.Second},
+		client:       &http.Client{Timeout: 10 * time.Second, CheckRedirect: KeepMethod},
 		limiter:      &rateLimiter{max: 30, period: 60 * time.Second},
 		breaker:      NewCircuitBreaker(5, 60*time.Second, 2).Named("Discord"),
 		RetryWaits:   []time.Duration{time.Second, 3 * time.Second, 6 * time.Second},
@@ -342,6 +342,9 @@ func (w *Webhook) send(target string, payload any) (int, error) {
 			log.Warn("Discord returned 429", "retry_after", resp.Header.Get("Retry-After"))
 			return errRateLimited
 		}
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			return RedirectError(resp)
+		}
 		if resp.StatusCode >= 400 {
 			// Discord says why in the body; keep a little of it for the dashboard.
 			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
@@ -356,6 +359,31 @@ func (w *Webhook) send(target string, payload any) (int, error) {
 		log.Warn("Webhook request failed", "err", err)
 	}
 	return status, err
+}
+
+// KeepMethod is an http.Client's CheckRedirect for alert deliveries. A 301, 302 or 303 turns a POST
+// into a GET without its body, which a server may well answer 2xx: the alert would count as sent
+// though nothing arrived. Those come back as the response instead, for RedirectError; 307 and 308
+// keep the method and body, so they are followed.
+func KeepMethod(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if req.Method != via[0].Method {
+		return http.ErrUseLastResponse
+	}
+	return nil
+}
+
+// RedirectError says a delivery was redirected rather than taken, and where to, so the address can
+// be fixed (often http:// that should be https://). Only the scheme and host are named: the rest of
+// a webhook's address is its secret.
+func RedirectError(resp *http.Response) error {
+	where := "elsewhere"
+	if loc, err := resp.Location(); err == nil && loc.Host != "" {
+		where = loc.Scheme + "://" + loc.Host + "/…"
+	}
+	return fmt.Errorf("HTTP %d: the address redirects to %s; use that address instead", resp.StatusCode, where)
 }
 
 // withoutURL drops the request URL from a network error: a webhook's URL holds its token, and the

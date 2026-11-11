@@ -180,6 +180,8 @@ type Settings struct {
 	DockerSocket         string
 	HistoryDB            string
 	HistoryRetentionDays int
+	// LongTermRetentionDays is how long the hourly analytics rollups are kept.
+	LongTermRetentionDays int
 
 	LogLevel       string
 	LogFormat      string
@@ -202,7 +204,7 @@ func (s *Settings) Fields() []Field {
 // liveKeys are read by the monitoring loop on every cycle, never baked into a client, webhook or
 // timer at startup, so changing them needs no restart.
 var liveKeys = keySet(
-	"CHECK_INTERVAL", "HISTORY_RETENTION_DAYS", "METRICS_REPORT_INTERVAL",
+	"CHECK_INTERVAL", "HISTORY_RETENTION_DAYS", "HISTORY_LONG_TERM_DAYS", "METRICS_REPORT_INTERVAL",
 	"CPU_THRESHOLD", "MEMORY_THRESHOLD", "GPU_THRESHOLD", "TEMP_THRESHOLD", "TEMP_ALERT_DURATION", "NETWORK_BANDWIDTH_THRESHOLD",
 	"PROCESS_CPU_THRESHOLD", "PROCESS_MEMORY_THRESHOLD",
 	"DISK_THRESHOLD", "DISK_EARLY_WARNING_THRESHOLD", "DISK_CLEANUP_THRESHOLD", "DISK_EMERGENCY_THRESHOLD", "MONITOR_INDIVIDUAL_PARTITIONS",
@@ -254,6 +256,7 @@ func (s *Settings) declare() []Field {
 			number(&s.AlertRecoverySeconds, "ALERT_RECOVERY_SECONDS", 300, 0).describe("Recovery period", "s", "How long a condition must stay clear before its cooldown resets."),
 			number(&s.MetricsReportInterval, "METRICS_REPORT_INTERVAL", 3600, 60).describe("Metrics report every", "s", "The monitor's own health report to Discord."),
 			integer(&s.HistoryRetentionDays, "HISTORY_RETENTION_DAYS", 90, 1, 3650).describe("Keep check history", "days", ""),
+			integer(&s.LongTermRetentionDays, "HISTORY_LONG_TERM_DAYS", 400, 1, 3650).describe("Keep hourly analytics", "days", "Analytics keep every minute for the check history's days, then one row an hour for this long, for trends over months."),
 		),
 		group("Notifications",
 			secret(&s.WebhookURL, "WEBHOOK").describe("Discord webhook", "", "Where alerts go. The webhooks below split alerts out; empty ones fall back to this one."),

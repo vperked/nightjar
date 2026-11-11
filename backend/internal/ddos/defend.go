@@ -130,6 +130,7 @@ type Defender struct {
 	blocked  map[string]Block
 	pardoned map[string]time.Time // unblocked by hand: left alone until then
 	lastErr  string
+	v6Err    string // why IPv6 last could not take the rules
 	web      string // the deny file as last written
 	// webStale is a deny file left by an earlier run, whose content is not web's.
 	webStale bool
@@ -144,6 +145,31 @@ const (
 	chain    = "NIGHTJAR"
 	udpChain = "NIGHTJAR-UDP"
 )
+
+// Chain is the defender's chain, which INPUT jumps to first. The firewall's own rules (RulesChain)
+// come after it: an allow there would otherwise let a flood in before its limits and blocks see it.
+const Chain = chain
+
+// RulesChain is where the firewall the dashboard manages keeps its incoming rules.
+const RulesChain = "NIGHTJAR-RULES"
+
+// JumpPositions are the places, counting from 1, of hook's plain jumps to target in a listing of
+// "iptables -S hook".
+func JumpPositions(listing, hook, target string) []int {
+	var out []int
+	n := 0
+	for line := range strings.Lines(listing) {
+		f := strings.Fields(line)
+		if len(f) < 2 || f[0] != "-A" || f[1] != hook {
+			continue
+		}
+		n++
+		if len(f) == 4 && f[2] == "-j" && f[3] == target {
+			out = append(out, n)
+		}
+	}
+	return out
+}
 
 // pardonFor is how long an address unblocked by hand is left alone.
 const pardonFor = time.Hour
@@ -211,8 +237,11 @@ func (d *Defender) startLocked(ctx context.Context) {
 	} else {
 		d.ipv6 = true
 	}
+	works := d.ipv6 && ipv6Works(ctx, d.run)
+	// What an earlier run left goes from both families, in case IPv6 took rules then.
 	d.present = true
 	d.removeLocked(ctx)
+	d.ipv6 = works
 	if d.WebBlockFile != "" {
 		if _, err := os.Stat(d.WebBlockFile); err == nil {
 			// Blocks from an earlier run are forgotten with its chains.
@@ -345,35 +374,82 @@ func (d *Defender) syncLocked(ctx context.Context, p plan, trust trustList) {
 		families = append(families, family{"ip6tables", v6})
 	}
 	if v4+v6 == d.applied {
-		// Unchanged, as long as they are still there: a tool that reloads the whole firewall
-		// (netfilter-persistent, iptables-restore) takes them out without a word.
+		// Unchanged, as long as they are still there and first: a tool that reloads the whole
+		// firewall (netfilter-persistent, iptables-restore) takes them out without a word. IPv6 that
+		// could not take them is left until they change.
 		gone := slices.ContainsFunc(families, func(f family) bool {
-			_, err := d.run(ctx, nil, f.cmd, "-w", "-C", "INPUT", "-j", chain)
-			return err != nil
+			if f.cmd == "ip6tables" && d.v6Err != "" {
+				return false
+			}
+			_, ok := d.jumpPlaced(ctx, f.cmd)
+			return !ok
 		})
 		if !gone {
 			return
 		}
-		log.Warn("Nightjar's defence was taken out of the firewall; putting it back")
+		log.Warn("Nightjar's defence was taken out of the firewall, or moved after its other rules; putting it back first")
 	}
+	v6Err := ""
 	for _, f := range families {
-		if _, err := d.run(ctx, []byte(f.rules), f.cmd+"-restore", "-w", "--noflush"); err != nil {
-			d.lastErr = "could not put the firewall rules in place: " + err.Error()
+		if err := d.applyFamilyLocked(ctx, f.cmd, f.rules); err != nil {
+			if f.cmd == "ip6tables" {
+				// IPv6 that cannot take rules is no reason to leave IPv4 undefended.
+				if v6Err = err.Error(); v6Err != d.v6Err {
+					log.Warn("Could not defend over IPv6; IPv4 is defended", "err", err)
+				}
+				continue
+			}
+			d.lastErr = err.Error()
 			log.Warn("Could not defend against the attack", "cmd", f.cmd, "err", err)
 			return
-		}
-		d.present = true
-		if _, err := d.run(ctx, nil, f.cmd, "-w", "-C", "INPUT", "-j", chain); err != nil {
-			if _, err := d.run(ctx, nil, f.cmd, "-w", "-I", "INPUT", "1", "-j", chain); err != nil {
-				d.lastErr = "could not send traffic through Nightjar's rules: " + err.Error()
-				return
-			}
 		}
 	}
 	if !d.active {
 		log.Info("Defending against the attack", "measures", len(p.measures), "blocked", len(fw))
 	}
-	d.applied, d.active, d.lastErr = v4+v6, true, ""
+	d.applied, d.active, d.lastErr, d.v6Err = v4+v6, true, "", v6Err
+}
+
+// applyFamilyLocked fills one family's chains and sends INPUT through them first.
+func (d *Defender) applyFamilyLocked(ctx context.Context, cmd, rules string) error {
+	if _, err := d.run(ctx, []byte(rules), cmd+"-restore", "-w", "--noflush"); err != nil {
+		return fmt.Errorf("could not put the firewall rules in place: %w", err)
+	}
+	d.present = true
+	jumps, ok := d.jumpPlaced(ctx, cmd)
+	if ok {
+		return nil
+	}
+	// A jump below the firewall's rules is taken out before the new one goes first: deleting by
+	// match takes the first, which would be the new one. Only the defender's own jump is touched.
+	for range jumps {
+		d.run(ctx, nil, cmd, "-w", "-D", "INPUT", "-j", chain)
+	}
+	if _, err := d.run(ctx, nil, cmd, "-w", "-I", "INPUT", "1", "-j", chain); err != nil {
+		return fmt.Errorf("could not send traffic through Nightjar's rules: %w", err)
+	}
+	return nil
+}
+
+// jumpPlaced reads where INPUT jumps to the defender's chain; ok is a jump there before any jump to
+// the firewall's rules.
+func (d *Defender) jumpPlaced(ctx context.Context, cmd string) (jumps []int, ok bool) {
+	listing, err := d.run(ctx, nil, cmd, "-w", "-S", "INPUT")
+	if err != nil {
+		return nil, false
+	}
+	jumps, rules := JumpPositions(listing, "INPUT", chain), JumpPositions(listing, "INPUT", RulesChain)
+	return jumps, len(jumps) > 0 && (len(rules) == 0 || jumps[0] < rules[0])
+}
+
+// ipv6Works says whether IPv6 has a firewall to put rules in: ip6tables can be installed on a kernel
+// booted without IPv6 (ipv6.disable=1), where every change to it fails.
+func ipv6Works(ctx context.Context, run func(ctx context.Context, stdin []byte, name string, args ...string) (string, error)) bool {
+	if _, err := run(ctx, nil, "ip6tables", "-w", "-S", "INPUT"); err != nil {
+		log.Info("IPv6 has no firewall here; defending over IPv4 only", "err", err)
+		return false
+	}
+	return true
 }
 
 // removeLocked takes the jump out of INPUT and deletes the defender's chains, in both families.
@@ -401,7 +477,7 @@ func (d *Defender) removeLocked(ctx context.Context) {
 	if d.active {
 		log.Info("Stopped defending: the attack is over and its blocks have run out")
 	}
-	d.applied, d.active, d.present, d.lastErr = "", false, false, ""
+	d.applied, d.active, d.present, d.lastErr, d.v6Err = "", false, false, "", ""
 }
 
 // writeWebLocked writes the nginx deny file and reloads nginx when it changed; an empty file is

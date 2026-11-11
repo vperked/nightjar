@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,9 +23,11 @@ type fakeFirewall struct {
 	mu     sync.Mutex
 	rules  string // IPv4
 	rules6 string
-	jumps  map[string]bool // whether INPUT jumps to the defender's chain, by command
+	input  map[string][]string // INPUT's jumps, in order, by command
 	calls  []string
 	fail   bool
+	// failCmd is a command that fails, by its start.
+	failCmd string
 	// nginxFails is nginx turning down its config.
 	nginxFails bool
 }
@@ -33,11 +36,11 @@ func (f *fakeFirewall) exec(_ context.Context, stdin []byte, name string, args .
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
-	if f.fail {
+	if f.fail || (f.failCmd != "" && strings.HasPrefix(name+" "+strings.Join(args, " "), f.failCmd)) {
 		return "", os.ErrPermission
 	}
-	if f.jumps == nil {
-		f.jumps = map[string]bool{}
+	if f.input == nil {
+		f.input = map[string][]string{}
 	}
 	switch name {
 	case "iptables-restore":
@@ -49,18 +52,30 @@ func (f *fakeFirewall) exec(_ context.Context, stdin []byte, name string, args .
 			return "", errors.New("nginx: [emerg] cannot load certificate")
 		}
 	case "iptables", "ip6tables":
+		in := f.input[name]
 		switch args[1] {
+		case "-S":
+			out := "-P INPUT ACCEPT\n"
+			for _, target := range in {
+				out += "-A INPUT -j " + target + "\n"
+			}
+			return out, nil
 		case "-C":
-			if !f.jumps[name] {
+			if !slices.Contains(in, args[4]) {
 				return "", os.ErrNotExist
 			}
 		case "-I":
-			f.jumps[name] = true
+			at, _ := strconv.Atoi(args[3])
+			if at < 1 || at > len(in)+1 {
+				return "", errors.New("index of insertion too big")
+			}
+			f.input[name] = slices.Insert(in, at-1, args[5])
 		case "-D":
-			if !f.jumps[name] {
+			i := slices.Index(in, args[4])
+			if i < 0 {
 				return "", os.ErrNotExist
 			}
-			f.jumps[name] = false
+			f.input[name] = slices.Delete(in, i, i+1)
 		case "-F":
 			f.rules, f.rules6 = "", ""
 		}
@@ -72,7 +87,7 @@ func (f *fakeFirewall) exec(_ context.Context, stdin []byte, name string, args .
 func (f *fakeFirewall) reload() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.rules, f.rules6, f.jumps = "", "", nil
+	f.rules, f.rules6, f.input = "", "", nil
 }
 
 func (f *fakeFirewall) Count(prefix string) int {
@@ -225,7 +240,7 @@ func TestEachKindOfAttackGetsItsDefence(t *testing.T) {
 	clock = clock.Add(5 * time.Second)
 	d.Update(ctx, everything())
 	for _, c := range f.calls[before:] {
-		if !strings.Contains(c, " -C INPUT -j NIGHTJAR") {
+		if !strings.Contains(c, " -S INPUT") {
 			t.Fatalf("an unchanged situation rewrote the rules: %v", f.calls[before:])
 		}
 	}
@@ -482,5 +497,67 @@ func TestALeftoverNginxFileIsNeverReplacedWithJunk(t *testing.T) {
 	d.Update(ctx, ddos.Situation{})
 	if f.Count("nginx -s reload") != 1 {
 		t.Fatalf("reloaded: %v", f.calls)
+	}
+}
+
+// The defender's jump comes before the firewall's rules in INPUT, whichever went in first, and is
+// put back first when something moves it: an allow among the rules would otherwise let a flood in
+// before the defender's limits and blocks see it.
+func TestTheDefenceComesBeforeTheFirewallRules(t *testing.T) {
+	f := &fakeFirewall{input: map[string][]string{"iptables": {"NIGHTJAR-RULES"}, "ip6tables": {"NIGHTJAR-RULES"}}}
+	clock := time.Unix(1_800_000_000, 0)
+	d := defender(f, &clock, "")
+	ctx := context.Background()
+	d.Update(ctx, everything())
+	for _, cmd := range []string{"iptables", "ip6tables"} {
+		if got := fmt.Sprint(f.input[cmd]); got != "[NIGHTJAR NIGHTJAR-RULES]" {
+			t.Fatalf("%s INPUT: %s", cmd, got)
+		}
+	}
+	// Moved after the rules (a reload put them back in another order): put first again, and only
+	// the defender's own jump is touched.
+	f.mu.Lock()
+	f.input["iptables"] = []string{"NIGHTJAR-RULES", "NIGHTJAR"}
+	f.calls = nil
+	f.mu.Unlock()
+	clock = clock.Add(5 * time.Second)
+	d.Update(ctx, everything())
+	if got := fmt.Sprint(f.input["iptables"]); got != "[NIGHTJAR NIGHTJAR-RULES]" {
+		t.Fatalf("not put first again: %s\n%v", got, f.calls)
+	}
+	for _, c := range f.calls {
+		if strings.Contains(c, "NIGHTJAR-RULES") {
+			t.Fatalf("touched the firewall's jump: %s", c)
+		}
+	}
+	if !d.View().Active {
+		t.Fatal("not defending")
+	}
+}
+
+// IPv6 that cannot take the rules (a kernel booted with ipv6.disable=1) does not stop the defence
+// over IPv4.
+func TestIPv6TurningTheRulesDownLeavesIPv4Defended(t *testing.T) {
+	// No IPv6 firewall at all, found at the start; and one that turns the rules down.
+	for _, fail := range []string{"ip6tables", "ip6tables-restore"} {
+		f := &fakeFirewall{failCmd: fail}
+		clock := time.Unix(1_800_000_000, 0)
+		d := defender(f, &clock, "")
+		ctx := context.Background()
+		d.Update(ctx, everything())
+		v := d.View()
+		if !v.Active || v.Error != "" || !strings.Contains(f.rules, "-s 198.51.100.9 -j DROP") || fmt.Sprint(f.input["iptables"]) != "[NIGHTJAR]" {
+			t.Fatalf("%s: IPv4 not defended: %+v\n%v", fail, v, f.calls)
+		}
+		if want := map[string]int{"ip6tables": 0, "ip6tables-restore": 1}[fail]; f.Count("ip6tables-restore") != want {
+			t.Fatalf("%s: IPv6 tried %d times: %v", fail, f.Count("ip6tables-restore"), f.calls)
+		}
+		// Unchanged, it is not tried again every few seconds.
+		before := f.Count("ip6tables-restore")
+		clock = clock.Add(5 * time.Second)
+		d.Update(ctx, everything())
+		if f.Count("ip6tables-restore") != before || f.Count("iptables-restore") != 1 {
+			t.Fatalf("%s: retried: %v", fail, f.calls)
+		}
 	}
 }

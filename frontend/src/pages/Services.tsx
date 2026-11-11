@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import { useServices } from '../api/ServicesContext';
 import type { CheckSpec, Service } from '../api/types';
+import { Editable } from '../components/Editable';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { Pct, Seg, State, Ticks } from '../components/ui';
@@ -43,7 +45,8 @@ export function ServiceRow({ s, now, onEdit, server }: { s: Service; now: number
       <td className="r num hide-sm">{formatResponse(s)}</td>
       <td className="r num ink-3 hide-sm">{formatAgo(s.last_check, now)}</td>
       <td className="r">
-        <Pct value={s.uptime_24h} />
+        {/* A paused check has no figure; it shows the same dash as every other empty cell. */}
+        {s.uptime_24h === null ? <span className="ink-3">—</span> : <Pct value={s.uptime_24h} />}
       </td>
       {onEdit && (
         <td className="shrink r">
@@ -70,7 +73,10 @@ export function ServicesPage() {
   const { data, loading, refresh } = useServices();
   const location = useLocation();
   const navigate = useNavigate();
-  const [adding, setAdding] = useState(location.hash === '#add');
+  const canEdit = useCanEdit();
+  // A viewer cannot add or edit checks, so #add opens nothing for them.
+  const [addOpen, setAdding] = useState(location.hash === '#add');
+  const adding = canEdit && addOpen;
   // A server's page opens the form for a check of something on it (?server=id#add).
   const presetServer = new URLSearchParams(location.search).get('server') ?? undefined;
   const servers = useServerNames();
@@ -124,7 +130,7 @@ export function ServicesPage() {
             }))}
           />
           <input className="search" placeholder="Filter checks…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Filter services" />
-          {!adding && list.length > 0 && (
+          {canEdit && !adding && list.length > 0 && (
             <button
               className="btn"
               onClick={() => {
@@ -137,7 +143,7 @@ export function ServicesPage() {
           )}
         </div>
       </div>
-      {editing && (
+      {canEdit && editing && (
         <CheckForm
           key={editing.name}
           initial={editing}
@@ -165,11 +171,13 @@ export function ServicesPage() {
           <div className="empty">
             <strong>No uptime checks yet</strong>
             Watch a website, an open port, a host or a TLS certificate.
-            <div>
-              <button className="btn" onClick={() => setAdding(true)}>
-                Add your first check
-              </button>
-            </div>
+            <Editable>
+              <div>
+                <button className="btn" onClick={() => setAdding(true)}>
+                  Add your first check
+                </button>
+              </div>
+            </Editable>
           </div>
         )
       ) : shown.length === 0 ? (
@@ -185,14 +193,16 @@ export function ServicesPage() {
                 <th className="r hide-sm">Resp.</th>
                 <th className="r hide-sm">Checked</th>
                 <th className="r">24h</th>
-                <th className="shrink">
-                  <span className="sr-only">Edit</span>
-                </th>
+                {canEdit && (
+                  <th className="shrink">
+                    <span className="sr-only">Edit</span>
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody>
               {shown.map((s) => (
-                <ServiceRow key={s.name} s={s} now={now} onEdit={() => edit(s.name)} server={s.server ? servers[s.server] : undefined} />
+                <ServiceRow key={s.name} s={s} now={now} onEdit={canEdit ? () => edit(s.name) : undefined} server={s.server ? servers[s.server] : undefined} />
               ))}
             </tbody>
           </table>

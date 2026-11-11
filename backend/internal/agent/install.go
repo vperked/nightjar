@@ -241,15 +241,17 @@ func Uninstall(out io.Writer) error {
 		return errors.New("removing the agent needs root: run it with sudo")
 	}
 	exec.Command("systemctl", "disable", "--now", UnitName).Run()
-	if saved, ok := savedSettings(); ok && saved.Firewall != "" && saved.Firewall != FirewallOff && saved.Firewall != FirewallNone {
-		ClosePort(saved.Firewall, saved.Listen, out)
-	}
 	// The agent takes its chains out as it stops; these are for one that was killed or never got
-	// to. Otherwise its rules, blocks and a kept default drop would stay until the next reboot.
+	// to. Otherwise its rules, blocks and a kept default drop would stay until the next reboot. They
+	// go before the port is closed, which saves the firewall: saved with them, they would come back
+	// at every boot with no agent left to lift them.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	(&firewall.Manager{}).Uninstall(ctx)
 	(&ddos.Defender{}).Stop(ctx)
 	cancel()
+	if saved, ok := savedSettings(); ok && saved.Firewall != "" && saved.Firewall != FirewallOff && saved.Firewall != FirewallNone {
+		ClosePort(saved.Firewall, saved.Listen, out)
+	}
 	for _, p := range []string{UnitPath, EnvPath, BinPath} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err

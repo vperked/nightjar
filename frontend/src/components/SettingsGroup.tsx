@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 
 const ICONS: Record<string, string> = {
   Account: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 20a8 8 0 0 1 16 0',
+  Viewers: 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   Sections: 'M4 5h16M4 12h16M4 19h10M18 17l2 2 3-3',
   Activity: 'M4 6h16M4 12h10M4 18h7M17 15l2 2 3-4',
   Backup: 'M12 3v12M7 10l5 5 5-5M4 19h16',
@@ -29,6 +30,7 @@ const ICONS: Record<string, string> = {
 
 const TEXT: Record<string, string> = {
   Account: 'Your sign-in. Changing the password signs out every other browser.',
+  Viewers: 'Read-only accounts, for people who should see the dashboard but not change it.',
   Sections: "Hide what you don't use. Monitoring and alerts carry on; only the dashboard leaves it out.",
   Activity: 'What was changed and by whom: here, through Discord, or by Nightjar.',
   Backup: "Nightjar's own setup in one file, for a new machine or to undo a mistake.",

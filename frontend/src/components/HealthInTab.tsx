@@ -5,8 +5,16 @@ import { useServices } from '../api/ServicesContext';
 import { usePoll } from '../hooks/usePoll';
 import { isProblem } from './unitState';
 
+// The page's name in the tab, by address; the first that starts the path wins, so a page under
+// another (/incidents/report) comes before it.
 const PAGE: [string, string][] = [
   ['/services', 'Services'],
+  ['/incidents/maintenance', 'Maintenance'],
+  ['/incidents/report', 'Weekly report'],
+  ['/incidents', 'Incidents'],
+  ['/servers/analytics', 'Analytics'],
+  ['/servers', 'Servers'],
+  ['/docs', 'Help and docs'],
   ['/system', 'System services'],
   ['/network', 'Network'],
   ['/plex', 'Plex'],

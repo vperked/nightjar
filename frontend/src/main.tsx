@@ -9,19 +9,8 @@ import { startingTheme } from './theme';
 // Apply the theme before first paint to avoid a flash (the same choice as useTheme in App).
 document.documentElement.dataset.theme = startingTheme();
 
-// A tab left open across a UI update can ask for a page file that is no longer there; load the new
-// build instead of showing a broken page. Once a minute at most, so a real outage can't loop.
-window.addEventListener('vite:preloadError', (e) => {
-  try {
-    const last = Number(sessionStorage.getItem('nightjar.reloaded') || 0);
-    if (Date.now() - last < 60_000) return;
-    sessionStorage.setItem('nightjar.reloaded', String(Date.now()));
-  } catch {
-    return;
-  }
-  e.preventDefault();
-  window.location.reload();
-});
+// A page file that fails to download (vite:preloadError) is left to App: Vite cannot tell an opened
+// page from the idle prefetch, and only the first is worth a reload (see opened in App.tsx).
 
 connect().then(() =>
   createRoot(document.getElementById('root')!).render(

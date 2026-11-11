@@ -72,6 +72,7 @@ import type {
   PlexStats,
   CleanupView,
   ActivityEntry,
+  Viewer,
 } from './types';
 
 export class UnauthorizedError extends Error {
@@ -136,6 +137,11 @@ let writing = 0;
 // writesPending reports whether a change (any request but a GET) is still on its way.
 export const writesPending = () => writing > 0;
 
+// The only calls made without a session, where a 401 means a wrong password or code (the
+// authenticator code is checked by login itself). Every other /api/auth/ call needs a session,
+// so a 401 there means it ended.
+const signInPaths = new Set(['/api/auth/login', '/api/auth/setup']);
+
 async function request<T>(path: string, init: { method?: string; body?: unknown } = {}, timeoutMs = 15000): Promise<T> {
   const method = init.method ?? 'GET';
   // The server takes changes only as JSON, so one with nothing to say still sends an empty object.
@@ -150,7 +156,7 @@ async function request<T>(path: string, init: { method?: string; body?: unknown 
   try {
     const res = await transport(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal, cache: 'no-store' });
     // A refused sign-in is an answer to show, not a sign that the session ended.
-    if (res.status === 401 && !path.startsWith('/api/auth/')) {
+    if (res.status === 401 && !signInPaths.has(path)) {
       unauthorizedHandler();
       throw new UnauthorizedError();
     }
@@ -200,6 +206,10 @@ export const api = {
   backup: (secrets: boolean) => request<Record<string, unknown>>(`/api/backup${secrets ? '?secrets=1' : ''}`),
   restoreBackup: (backup: unknown) => request<{ restored: Record<string, number>; restarting: boolean }>('/api/backup/restore', { method: 'POST', body: backup }),
   logout: () => request<void>('/api/auth/logout', { method: 'POST', body: {} }),
+  viewers: () => request<{ viewers: Viewer[] }>('/api/auth/viewers'),
+  addViewer: (username: string, password: string) => request<{ viewers: Viewer[] }>('/api/auth/viewers', { method: 'POST', body: { username, password } }),
+  setViewerPassword: (username: string, password: string) => request<{ viewers: Viewer[] }>(`/api/auth/viewers/${encodeURIComponent(username)}`, { method: 'PUT', body: { password } }),
+  removeViewer: (username: string) => request<{ viewers: Viewer[] }>(`/api/auth/viewers/${encodeURIComponent(username)}`, { method: 'DELETE' }),
   // changePassword signs every other browser out.
   changePassword: (current: string, next: string) => request<{ changed: boolean }>('/api/auth/password', { method: 'POST', body: { current, new: next } }),
   // stats with `since` returns only history samples newer than it.
@@ -244,7 +254,8 @@ export const api = {
     original ? request<{ check: CheckSpec }>(checkPath(original), { method: 'PUT', body: spec }) : request<{ check: CheckSpec }>('/api/checks', { method: 'POST', body: spec }),
   deleteCheck: (name: string) => request<void>(checkPath(name), { method: 'DELETE' }),
   // testCheck runs a check once without saving it (its timeout is capped at 20s).
-  testCheck: (spec: CheckSpec) => request<{ result: CheckResult }>('/api/checks/test', { method: 'POST', body: spec }, 30000),
+  // original names the saved check being edited, so a test without the password retyped uses its saved one.
+  testCheck: (spec: CheckSpec, original?: string) => request<{ result: CheckResult }>('/api/checks/test', { method: 'POST', body: { ...spec, original } }, 30000),
   settings: () => request<SettingsResponse>('/api/settings'),
   // testAlerts sends a test message to every configured channel (Discord, ntfy, email…).
   testAlerts: () => request<{ results: AlertTestResult[] }>('/api/alerts/test', { method: 'POST', body: {} }),
@@ -293,7 +304,7 @@ export const api = {
   unblockHost: (id: string, address: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/blocked/${encodeURIComponent(address)}`, { method: 'DELETE' }, 40000),
   network: (since?: number) => request<NetworkResponse>(since === undefined ? '/api/network' : `/api/network?since=${since}`, {}, 5000),
   // logs is the monitor's own recent log; with `after` only newer entries, for following it.
-  logs: (q: { after?: number; level?: string; component?: string; q?: string }) => {
+  logs: (q: { after?: number; level?: string; component?: string; q?: string; limit?: number }) => {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(q)) if (v) p.set(k, String(v));
     return request<LogsResponse>(`/api/logs?${p}`);

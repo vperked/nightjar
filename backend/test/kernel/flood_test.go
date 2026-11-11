@@ -41,7 +41,7 @@ func TestAKernelRepeatingAWarningIsSeenAndNamed(t *testing.T) {
 	for i := range 200 { // 2600 lines in a tenth of a second
 		b.WriteString(warning(2062668+float64(i)*0.0005, "0000:01:00.0"))
 	}
-	f := kernel.ParseFlood([]byte(b.String()))
+	f := kernel.ParseFlood([]byte(b.String()), 2062668.2)
 	if f == nil || f.PerSecond < 10000 {
 		t.Fatalf("flood: %+v", f)
 	}
@@ -54,7 +54,17 @@ func TestAKernelRepeatingAWarningIsSeenAndNamed(t *testing.T) {
 	for i := range 2000 {
 		fmt.Fprintf(&q, "[%12.6f] usb 1-%d: new high-speed USB device number %d\n", float64(i)*43.2, i%4, i)
 	}
-	if f := kernel.ParseFlood([]byte(q.String())); f != nil {
+	if f := kernel.ParseFlood([]byte(q.String()), 2000*43.2); f != nil {
 		t.Fatalf("a quiet kernel is not a flood: %+v", f)
+	}
+
+	// The same flood, over two minutes ago: the kernel went quiet since, so it is not flooding now
+	// (and the journal's crash checks, skipped during a flood, run again).
+	if f := kernel.ParseFlood([]byte(b.String()), 2062668+130); f != nil {
+		t.Fatalf("an old flood is still a flood: %+v", f)
+	}
+	// Without the time, measured to the newest message, as before.
+	if f := kernel.ParseFlood([]byte(b.String()), 0); f == nil {
+		t.Fatal("a flood without the time")
 	}
 }

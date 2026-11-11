@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, waitForRestart } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import type { AppJob, AppsResponse, StoreApp } from '../api/types';
+import { Editable } from '../components/Editable';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { AppsTabs, Seg } from '../components/ui';
@@ -59,7 +61,9 @@ const opens = (a: StoreApp) => (a.installed ? a.by === 'store' : a.available);
 
 function AppCard({ a, busy, onOpen }: { a: StoreApp; busy: boolean; onOpen: () => void }) {
   const url = address(a);
-  const clickable = opens(a) && !busy;
+  // A viewer can't install or remove, so the card opens no sheet.
+  const canEdit = useCanEdit();
+  const clickable = canEdit && opens(a) && !busy;
   return (
     // The whole card opens the app's sheet; its own links and buttons keep doing what they say.
     <article
@@ -84,7 +88,7 @@ function AppCard({ a, busy, onOpen }: { a: StoreApp; busy: boolean; onOpen: () =
               Open ↗
             </a>
           )}
-          {!a.installed ? (
+          {!canEdit ? null : !a.installed ? (
             <button className="btn small-btn" onClick={onOpen} disabled={busy || !a.available}>
               Install
             </button>
@@ -164,6 +168,9 @@ function InstallSheet({ a, job, user, onClose, onStarted }: { a: StoreApp; job: 
   const [purge, setPurge] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [error, setError] = useState('');
+  // starting is the action whose request is out: the buttons wait for it, so a double click does not
+  // send a second one (which the server would turn away as busy).
+  const [starting, setStarting] = useState<'' | 'install' | 'remove'>('');
   // The sheet follows a job that is running, or one started from it; an old finished job would
   // otherwise hide the reinstall and remove buttons.
   const [followed, setFollowed] = useState(job && job.app === a.id && !job.finished ? job.id : 0);
@@ -176,26 +183,22 @@ function InstallSheet({ a, job, user, onClose, onStarted }: { a: StoreApp; job: 
     return () => window.removeEventListener('keydown', esc);
   }, [onClose, running]);
 
-  const install = async () => {
+  const start = async (what: 'install' | 'remove', send: () => Promise<{ job: AppJob }>) => {
+    if (starting) return;
     setError('');
+    setStarting(what);
     try {
-      const { job } = await api.installApp(a.id, Number(port) || 0, check);
+      const { job } = await send();
       setFollowed(job.id);
       onStarted(job);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setStarting('');
     }
   };
-  const remove = async () => {
-    setError('');
-    try {
-      const { job } = await api.removeApp(a.id, purge);
-      setFollowed(job.id);
-      onStarted(job);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-    }
-  };
+  const install = () => start('install', () => api.installApp(a.id, Number(port) || 0, check));
+  const remove = () => start('remove', () => api.removeApp(a.id, purge));
 
   const done = mine?.finished;
   return (
@@ -236,7 +239,11 @@ function InstallSheet({ a, job, user, onClose, onStarted }: { a: StoreApp; job: 
                     Open {a.name} ↗
                   </a>
                 )}
-                {a.id === 'ntfy' && <NtfyHookup a={{ ...a, port: Number(port) || a.port }} />}
+                {a.id === 'ntfy' && (
+                  <Editable>
+                    <NtfyHookup a={{ ...a, port: Number(port) || a.port }} />
+                  </Editable>
+                )}
               </div>
             )}
           </>
@@ -266,9 +273,11 @@ function InstallSheet({ a, job, user, onClose, onStarted }: { a: StoreApp; job: 
               </dd>
             </dl>
             {error && <p className="form-error">{error}</p>}
-            <button className="btn" onClick={install}>
-              Install {a.name}
-            </button>
+            <Editable>
+              <button className="btn" onClick={install} disabled={!!starting}>
+                {starting ? 'Starting…' : `Install ${a.name}`}
+              </button>
+            </Editable>
           </div>
         ) : (
           <div className="install-form">
@@ -298,30 +307,36 @@ function InstallSheet({ a, job, user, onClose, onStarted }: { a: StoreApp; job: 
             </dl>
             <p className="form-help">Reinstalling fetches the latest release and keeps its settings.</p>
             {a.sign_in && <p className="form-help">{a.sign_in}</p>}
-            {a.id === 'ntfy' && <NtfyHookup a={a} />}
+            {a.id === 'ntfy' && (
+              <Editable>
+                <NtfyHookup a={a} />
+              </Editable>
+            )}
             {error && <p className="form-error">{error}</p>}
-            <div className="install-manage">
-              <button className="btn-quiet" onClick={install}>
-                Reinstall latest
-              </button>
-              {confirmRemove ? (
-                <span className="confirm">
-                  <label className="check">
-                    <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} /> Also delete its settings and data
-                  </label>
-                  <button className="btn-quiet danger" onClick={remove}>
-                    Remove
-                  </button>
-                  <button className="btn-quiet" onClick={() => setConfirmRemove(false)}>
-                    Keep
-                  </button>
-                </span>
-              ) : (
-                <button className="btn-quiet danger" onClick={() => setConfirmRemove(true)}>
-                  Remove…
+            <Editable>
+              <div className="install-manage">
+                <button className="btn-quiet" onClick={install} disabled={!!starting}>
+                  {starting === 'install' ? 'Starting…' : 'Reinstall latest'}
                 </button>
-              )}
-            </div>
+                {confirmRemove ? (
+                  <span className="confirm">
+                    <label className="check">
+                      <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} /> Also delete its settings and data
+                    </label>
+                    <button className="btn-quiet danger" onClick={remove} disabled={!!starting}>
+                      {starting === 'remove' ? 'Removing…' : 'Remove'}
+                    </button>
+                    <button className="btn-quiet" onClick={() => setConfirmRemove(false)}>
+                      Keep
+                    </button>
+                  </span>
+                ) : (
+                  <button className="btn-quiet danger" onClick={() => setConfirmRemove(true)} disabled={!!starting}>
+                    Remove…
+                  </button>
+                )}
+              </div>
+            </Editable>
           </div>
         )}
       </div>
@@ -338,12 +353,16 @@ export function AppsPage() {
   const [open, setOpen] = useState<string>();
   const [job, setJob] = useState<AppJob | null>(null);
   const notify = useToast();
+  const canEdit = useCanEdit();
 
+  // load reads the apps. A failure is kept until a read works again; the page shows it in place of
+  // the list only when there is no list yet.
   const load = useCallback(
     () =>
       api.apps().then(
         (r) => {
           setData(r);
+          setError('');
           setJob((j) => j ?? r.job);
         },
         (e: Error) => setError(e.message),
@@ -408,7 +427,17 @@ export function AppsPage() {
     return n;
   }, [data]);
 
-  if (error) return <main className="alert">{error}</main>;
+  if (error && !data)
+    return (
+      <main>
+        <p className="alert">
+          Could not load the apps: {error}{' '}
+          <button type="button" className="btn-quiet" onClick={() => load()}>
+            Try again
+          </button>
+        </p>
+      </main>
+    );
   if (!data) return <Skeleton kind="dashboard" />;
   const byId = new Map(data.apps.map((a) => [a.id, a]));
   const installed = data.apps.filter((a) => a.installed).length;
@@ -426,6 +455,16 @@ export function AppsPage() {
           <AppsTabs current="/apps" />
         </div>
       </div>
+
+      {/* A reload after an install or removal failed: the list shown is the one from before it. */}
+      {error && (
+        <p className="alert" role="alert">
+          Could not reload the apps ({error}), so this list may be out of date.{' '}
+          <button type="button" className="btn-quiet" onClick={() => load()}>
+            Try again
+          </button>
+        </p>
+      )}
 
       {runningApp && job && (
         <button className="install-banner" onClick={() => setOpen(runningApp.id)}>
@@ -451,11 +490,15 @@ export function AppsPage() {
             if (!a) return null;
             return (
               <li key={id} className={a.installed ? (a.running ? 'on' : 'stopped') : 'off'}>
-                <button onClick={() => !a.installed && setOpen(id)} disabled={a.installed} title={a.installed ? `${a.name}: ${a.running ? 'running' : 'stopped'}` : `Install ${a.name}`}>
+                <button
+                  onClick={() => !a.installed && setOpen(id)}
+                  disabled={a.installed || !canEdit}
+                  title={a.installed ? `${a.name}: ${a.running ? 'running' : 'stopped'}` : canEdit ? `Install ${a.name}` : "Viewers can't change this"}
+                >
                   <Tile a={a} size={34} />
                   <span className="min0">
                     <strong>{a.name}</strong>
-                    <span>{a.installed ? (a.running ? 'running' : 'stopped') : `+ install · ${role}`}</span>
+                    <span>{a.installed ? (a.running ? 'running' : 'stopped') : canEdit ? `+ install · ${role}` : `not installed · ${role}`}</span>
                   </span>
                 </button>
               </li>

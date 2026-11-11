@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/host"
@@ -360,7 +362,7 @@ type journalEntry struct {
 }
 
 // journalEntries reads the kernel's journal lines since sinceMinutes ago, newest first. complete is
-// false when journalctl could not run or timed out, so the span has to be read again.
+// false when journalctl could not run, failed or timed out, so the span has to be read again.
 func journalEntries(sinceMinutes int, priority, pattern string) (entries []journalEntry, complete bool) {
 	since := time.Now().Add(-time.Duration(sinceMinutes) * time.Minute).Format("2006-01-02 15:04:05")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -368,8 +370,16 @@ func journalEntries(sinceMinutes int, priority, pattern string) (entries []journ
 	// Only what the kernel itself logged, across boots, so a crash before a reboot still shows.
 	// Newest first, so when there is more than maxJournalEntries it is the oldest that is left out.
 	cmd := exec.CommandContext(ctx, "journalctl", "_TRANSPORT=kernel", "--since", since, "--priority", priority, "--grep", pattern, "--reverse", "--no-pager", "--output", "json")
+	var stderr bytes.Buffer
+	cmd.Stderr = &limitedWriter{w: &stderr, n: 4 << 10}
 	stdout, err := cmd.StdoutPipe()
-	if err != nil || cmd.Start() != nil {
+	if err != nil {
+		return nil, false
+	}
+	if err := cmd.Start(); err != nil {
+		if !errors.Is(err, exec.ErrNotFound) { // no journal at all is no news: dmesg and the logs are read
+			journalProblem(err.Error())
+		}
 		return nil, false
 	}
 	// Read as it comes and stop at maxJournalEntries, so a busy journal cannot fill memory.
@@ -382,18 +392,95 @@ func journalEntries(sinceMinutes int, priority, pattern string) (entries []journ
 		}
 	}
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+	stopped := len(entries) >= maxJournalEntries || sc.Err() != nil
 	cancel() // stops journalctl if it has more to say
-	cmd.Wait()
+	waitErr := cmd.Wait()
 	if timedOut && len(entries) == 0 {
 		// A flooded journal makes this slow; say so rather than report "nothing found".
 		log.Warn("journalctl timed out after 15s; these kernel checks were skipped (is something flooding the journal?)", "priority", priority)
 	}
-	return entries, !timedOut
+	if timedOut {
+		return entries, false
+	}
+	complete, problem := journalOutcome(waitErr, stderr.String(), stopped, sc.Err() != nil)
+	journalProblem(problem)
+	return entries, complete
 }
 
+// journalOutcome judges how a journalctl read ended. With --grep, journalctl exits 1 when nothing
+// matches, saying nothing: a read that is complete. Exiting with something on stderr is a failure
+// (a journalctl built without --grep, a pattern it cannot read, a journal it cannot open), as is being
+// stopped any other way than by this side having read enough. complete is false then, so the span is
+// read again, and problem says why.
+func journalOutcome(waitErr error, stderr string, stoppedEarly, readFailed bool) (complete bool, problem string) {
+	stderr = strings.TrimSpace(stderr)
+	var exit *exec.ExitError
+	switch {
+	case readFailed:
+		return false, "journalctl's output could not be read"
+	case waitErr == nil:
+		return true, ""
+	case stoppedEarly:
+		return true, "" // stopped here, having read all that is kept
+	case errors.As(waitErr, &exit) && exit.ExitCode() == 1 && stderr == "":
+		return true, ""
+	case stderr != "":
+		lines := strings.Split(stderr, "\n")
+		return false, strings.TrimSpace(lines[len(lines)-1])
+	}
+	return false, waitErr.Error()
+}
+
+// journalFailure is the last journalctl failure said in the log, so each is said once rather than at
+// every check, and a new one, or the same after it worked again, is said again.
+var journalFailure struct {
+	sync.Mutex
+	last string
+}
+
+func journalProblem(problem string) {
+	journalFailure.Lock()
+	defer journalFailure.Unlock()
+	if problem != "" && problem != journalFailure.last {
+		log.Warn("journalctl could not read the kernel's journal; crashes and early warnings there are not seen until it can", "err", problem)
+	}
+	journalFailure.last = problem
+}
+
+// limitedWriter keeps the first n bytes written to it and drops the rest.
+type limitedWriter struct {
+	w io.Writer
+	n int
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if l.n > 0 {
+		k := min(len(p), l.n)
+		l.w.Write(p[:k])
+		l.n -= k
+	}
+	return len(p), nil
+}
+
+// message is the entry's text. journalctl writes a message that is not valid UTF-8, or holds control
+// bytes, as an array of byte values; those are put back together, invalid bytes replaced, so crash
+// keywords in them are still found.
 func (e journalEntry) message() string {
-	if s, ok := e.Message.(string); ok {
-		return s
+	switch m := e.Message.(type) {
+	case string:
+		return m
+	case []any:
+		b := make([]byte, 0, len(m))
+		for _, v := range m {
+			n, ok := v.(float64)
+			if !ok || n < 0 || n > 255 {
+				return fmt.Sprint(e.Message)
+			}
+			b = append(b, byte(n))
+		}
+		return strings.ToValidUTF8(string(b), "\uFFFD")
+	case nil:
+		return ""
 	}
 	return fmt.Sprint(e.Message)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -349,5 +350,60 @@ func TestServersWithoutAnAgentBecomeUptimeChecks(t *testing.T) {
 	json.Unmarshal([]byte(db.Meta("remote.hosts")), &stored)
 	if len(stored) != 1 || stored[0].Token != token {
 		t.Fatalf("saved servers: %+v", stored)
+	}
+}
+
+// A drive that drops off the bus is how a failing disk often goes: its alert is not dropped with it.
+// It is announced as gone (critical when it was already failing), its health alert kept, and
+// resolved once it is back. An agent that has not read its drives yet since it started leaves the
+// drive alerts as they are.
+func TestADriveThatDisappearsIsAnnounced(t *testing.T) {
+	a := newAgent(t)
+	sent := &alerts{}
+	m := newMonitor(t, openDB(t), sent)
+	ctx := context.Background()
+	if _, err := m.Add(ctx, "nas", a.srv.URL, token); err != nil {
+		t.Fatal(err)
+	}
+	a.set(func(r *agent.Readings, _ *bool) {
+		r.Drives = []smart.Drive{{Device: "/dev/sda", Health: "failing", Problems: []string{"12 reallocated sectors"}}, {Device: "/dev/sdb", Health: "good"}}
+	})
+	m.PollAll(ctx)
+	if got := sent.after(1); len(got) != 1 || got[0] != "critical: nas: drive /dev/sda is failing" {
+		t.Fatalf("failing: %v", got)
+	}
+	// The agent restarted, and has not read its drives yet.
+	a.set(func(r *agent.Readings, _ *bool) { r.Drives, r.DrivesPending = []smart.Drive{}, true })
+	m.PollAll(ctx)
+	if l := m.List(60); len(sent.after(1)) != 1 || !strings.Contains(fmt.Sprint(l[0].Problems), "Drive /dev/sda is failing") {
+		t.Fatalf("drive alerts kept while the drives are not read yet: %v %v", sent.after(1), l[0].Problems)
+	}
+	// Both drop off.
+	a.set(func(r *agent.Readings, _ *bool) {
+		r.DrivesPending = false
+		r.Drives = []smart.Drive{{Device: "/dev/sda", Health: "failing", Missing: 2000}, {Device: "/dev/sdb", Health: "good", Missing: 2000}}
+	})
+	m.PollAll(ctx)
+	m.PollAll(ctx)
+	got := sent.after(3)
+	if len(got) != 3 || !slices.Contains(got, "critical: nas: drive /dev/sda disappeared") || !slices.Contains(got, "warning: nas: drive /dev/sdb disappeared") {
+		t.Fatalf("disappeared, once: %v", got)
+	}
+	if l := m.List(60); !strings.Contains(fmt.Sprint(l[0].Problems), "Drive /dev/sda is failing") {
+		t.Fatalf("the failing alert stays: %v", l[0].Problems)
+	}
+	// One comes back.
+	a.set(func(r *agent.Readings, _ *bool) {
+		r.Drives = []smart.Drive{{Device: "/dev/sda", Health: "failing", Missing: 2000}, {Device: "/dev/sdb", Health: "good"}}
+	})
+	m.PollAll(ctx)
+	if got := sent.after(4); len(got) != 4 || got[3] != "ok: nas: drive /dev/sdb is back" {
+		t.Fatalf("back: %v", got)
+	}
+	// Forgotten by the agent a week on: nothing left to say about it.
+	a.set(func(r *agent.Readings, _ *bool) { r.Drives = []smart.Drive{{Device: "/dev/sdb", Health: "good"}} })
+	m.PollAll(ctx)
+	if l := m.List(60); len(l[0].Problems) != 0 || len(sent.after(4)) != 4 {
+		t.Fatalf("forgotten: %v %v", l[0].Problems, sent.after(4))
 	}
 }

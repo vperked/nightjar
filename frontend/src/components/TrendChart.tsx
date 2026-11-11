@@ -59,17 +59,52 @@ function niceStep(v: number, ticks: number): number {
   return 10 * mag;
 }
 
-// timeTicks picks round local times (whole minutes, hours or days) across [t0, t1].
-function timeTicks(t0: number, t1: number, maxTicks: number): { ticks: number[]; step: number } {
+// A month, for tick spacing: a span too long for weekly ticks gets the first of every month or few.
+const MONTH = 30 * 86400;
+
+// timeTicks picks round local times (whole minutes, hours, days, or the first of a month) across [t0, t1].
+// Exported for tests.
+export function timeTicks(t0: number, t1: number, maxTicks: number): { ticks: number[]; step: number } {
+  if ((t1 - t0) / TIME_STEPS[TIME_STEPS.length - 1] > maxTicks) {
+    const every = [1, 2, 3, 6, 12].find((m) => (t1 - t0) / (m * MONTH) <= maxTicks) ?? 12;
+    const ticks: number[] = [];
+    const d = new Date(t0 * 1000);
+    for (let m = new Date(d.getFullYear(), d.getMonth() + 1, 1); m.getTime() / 1000 <= t1; m = new Date(m.getFullYear(), m.getMonth() + 1, 1)) {
+      if (m.getMonth() % every === 0) ticks.push(m.getTime() / 1000);
+    }
+    return { ticks, step: every * MONTH };
+  }
   const step = TIME_STEPS.find((s) => (t1 - t0) / s <= maxTicks) ?? TIME_STEPS[TIME_STEPS.length - 1];
-  const offset = new Date(t0 * 1000).getTimezoneOffset() * 60;
   const ticks: number[] = [];
-  for (let t = Math.ceil((t0 - offset) / step) * step + offset; t <= t1; t += step) ticks.push(t);
+  if (step < 3600) {
+    // Minutes: an offset change moves the clock by whole half hours, so fixed steps stay on the minute.
+    const offset = new Date(t0 * 1000).getTimezoneOffset() * 60;
+    for (let t = Math.ceil((t0 - offset) / step) * step + offset; t <= t1; t += step) ticks.push(t);
+    return { ticks, step };
+  }
+  // Hours and days walk the local calendar, so a clock change (a 23- or 25-hour day) does not push
+  // midnight ticks to 11pm the day before, or 6-hourly ones off 6am.
+  const hours = step / 3600;
+  const days = step / 86400;
+  const start = new Date(t0 * 1000);
+  for (let day = new Date(start.getFullYear(), start.getMonth(), start.getDate()); day.getTime() / 1000 <= t1; day = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1)) {
+    // Multi-day steps keep to every nth day since the epoch, as before, so they do not shift as the range slides.
+    if (days > 1 && Math.round(Date.UTC(day.getFullYear(), day.getMonth(), day.getDate()) / 86400000) % days !== 0) continue;
+    for (let h = 0; h < 24; h += Math.max(1, hours)) {
+      const at = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h);
+      // An hour the clocks skip comes back as the next one; that one gets its own tick.
+      if (at.getHours() !== h) continue;
+      const t = at.getTime() / 1000;
+      if (t >= t0 && t <= t1) ticks.push(t);
+    }
+  }
   return { ticks, step };
 }
 
 function formatTick(t: number, step: number): string {
   const d = new Date(t * 1000);
+  // Month ticks name the month, and the year at each January.
+  if (step >= MONTH) return d.toLocaleDateString([], d.getMonth() === 0 ? { month: 'short', year: 'numeric' } : { month: 'short' });
   if (step >= 86400 || (d.getHours() === 0 && d.getMinutes() === 0)) return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   return d.toLocaleTimeString([], step >= 3600 ? { hour: 'numeric' } : { hour: 'numeric', minute: '2-digit' });
 }

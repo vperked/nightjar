@@ -138,8 +138,9 @@ func (r *Recorder) Forget(host string) {
 	r.store.DeleteSamples(host)
 }
 
-// Prune drops minutes older than keep, at most once an hour.
-func (r *Recorder) Prune(keep time.Duration) {
+// Prune rolls finished hours up into hourly rows, then drops minutes older than keep and hourly rows
+// older than keepHourly, at most once an hour.
+func (r *Recorder) Prune(keep, keepHourly time.Duration) {
 	if r == nil {
 		return
 	}
@@ -151,7 +152,10 @@ func (r *Recorder) Prune(keep time.Duration) {
 	}
 	r.mu.Unlock()
 	if due {
+		// Roll up before pruning, so no minute is dropped before its hour is kept.
+		r.store.RollupSamples(float64(now.Unix()))
 		r.store.PruneSamples(float64(now.Add(-keep).Unix()))
+		r.store.PruneHourlySamples(float64(now.Add(-max(keep, keepHourly)).Unix()))
 	}
 }
 
@@ -165,12 +169,15 @@ type Range struct {
 	Label string        `json:"label"`
 }
 
-// Ranges are the spans on offer, each about 300 points.
+// Ranges are the spans on offer, each about 300 points. Steps of an hour or more read the hourly
+// rollups, so the longer ranges reach back past the minutes' retention.
 var Ranges = []Range{
 	{"1h", time.Hour, time.Minute, "1 hour"},
 	{"24h", 24 * time.Hour, 5 * time.Minute, "24 hours"},
 	{"7d", 7 * 24 * time.Hour, 30 * time.Minute, "7 days"},
 	{"30d", 30 * 24 * time.Hour, 2 * time.Hour, "30 days"},
+	{"90d", 90 * 24 * time.Hour, 6 * time.Hour, "90 days"},
+	{"1y", 365 * 24 * time.Hour, 24 * time.Hour, "1 year"},
 }
 
 // RangeNamed finds a range, defaulting to 24 hours.

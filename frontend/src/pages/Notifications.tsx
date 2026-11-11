@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import { useNotifications } from '../api/NotificationsContext';
 import type { AlertLevel, AlertRules, Notification, NotificationRules, QuietHours, Severity } from '../api/types';
 import { SeverityIcon } from '../components/Bell';
+import { Editable } from '../components/Editable';
 import { MuteButton } from '../components/MuteButton';
 import { AREA_SHORT, AREAS, delivery, linkFor, MUTE_FOR, plain, subjectLabel, timeLeft } from '../components/notifications';
 import { Select } from '../components/Select';
-import { TimePicker } from '../components/TimePicker';
+import { ServerTime, TimePicker } from '../components/TimePicker';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
 import { Seg, SubTabs } from '../components/ui';
@@ -95,10 +97,12 @@ function InboxRow({ n, now, open, arrived, onToggle, onRead }: { n: Notification
                 Open
               </Link>
             )}
-            <MuteButton subject={muteSubject} label={muteLabel} />
-            <button type="button" className="btn-quiet" onClick={() => onRead(!n.read)}>
-              Mark {n.read ? 'unread' : 'read'}
-            </button>
+            <Editable>
+              <MuteButton subject={muteSubject} label={muteLabel} />
+              <button type="button" className="btn-quiet" onClick={() => onRead(!n.read)}>
+                Mark {n.read ? 'unread' : 'read'}
+              </button>
+            </Editable>
           </div>
         </div>
       )}
@@ -117,11 +121,15 @@ function InboxView() {
   const [total, setTotal] = useState(0);
   const [kept, setKept] = useState(true);
   const [error, setError] = useState('');
+  // retry is bumped to load the newest page again after one failed.
+  const [retry, setRetry] = useState(0);
   const [openId, setOpenId] = useState<number>();
   const [loadingMore, setLoadingMore] = useState(false);
   const notify = useToast();
   const now = useNow(30000);
   const latest = summary?.counts.latest;
+  // Read state is shared with the admin, so a viewer reads without marking anything.
+  const canEdit = useCanEdit();
 
   // Typing settles for a moment before searching.
   useEffect(() => {
@@ -158,7 +166,13 @@ function InboxView() {
     return () => {
       live = false;
     };
-  }, [filters, latest]);
+  }, [filters, latest, retry]);
+  // A failed load is tried again every 10 s until one works, keeping what was already shown.
+  useEffect(() => {
+    if (!error) return;
+    const id = setTimeout(() => setRetry((n) => n + 1), 10000);
+    return () => clearTimeout(id);
+  }, [error, retry]);
   // A filter change starts from the top.
   useEffect(() => setItems(undefined), [filters]);
 
@@ -179,6 +193,7 @@ function InboxView() {
   };
 
   const mark = async (ids: number[] | undefined, read: boolean) => {
+    if (!canEdit) return;
     await api.markRead(ids, !read).catch(() => undefined);
     setItems((list) => list?.map((n) => (!ids || ids.includes(n.id) ? { ...n, read } : n)));
     refresh();
@@ -210,7 +225,7 @@ function InboxView() {
           <NotificationsTabs current="/notifications" />
         </div>
         <div className="toolbar">
-          {unreadCount > 0 && (
+          {unreadCount > 0 && canEdit && (
             <button className="btn-quiet" onClick={() => mark(undefined, true)}>
               Mark all {unreadCount} read
             </button>
@@ -226,9 +241,11 @@ function InboxView() {
           <span>
             <strong>Quiet hours are on.</strong> {summary.held ? `${plural(summary.held, 'alert')} held` : 'Alerts are held'} for one summary when they end.
           </span>
-          <Link className="btn-quiet" to="/notifications/rules">
-            Change
-          </Link>
+          <Editable>
+            <Link className="btn-quiet" to="/notifications/rules">
+              Change
+            </Link>
+          </Editable>
         </div>
       )}
 
@@ -257,10 +274,13 @@ function InboxView() {
         </label>
       </div>
 
-      {error ? (
-        <div className="alert">{error}</div>
-      ) : !items ? (
-        <Skeleton kind="list" />
+      {error && (
+        <div className="alert" role="status">
+          {items ? 'Could not refresh the list' : 'Could not load notifications'}: {error.replace(/\.$/, '')}. Trying again…
+        </div>
+      )}
+      {!items ? (
+        !error && <Skeleton kind="list" />
       ) : items.length === 0 ? (
         <div className="inbox-empty">
           <div className="inbox-empty-mark" aria-hidden="true">
@@ -329,6 +349,8 @@ function RulesView() {
   const notify = useToast();
   const navigate = useNavigate();
   const now = useNow(30000);
+  const canEdit = useCanEdit();
+  const readOnly = canEdit ? undefined : "Viewers can't change this";
 
   const load = useCallback(() => {
     api.notificationRules().then(
@@ -379,7 +401,7 @@ function RulesView() {
       <section className="panel">
         <div className="section-head">
           <span className="label">Where alerts go</span>
-          {anyChanged && (
+          {anyChanged && canEdit && (
             <button type="button" className="btn-quiet" onClick={() => setRules(data.defaults)}>
               Reset to defaults
             </button>
@@ -390,9 +412,11 @@ function RulesView() {
             <p>
               <strong>No alert channels yet.</strong> Alerts are still kept in the inbox. Add Discord, ntfy, Telegram, Slack, email or a webhook to have them sent.
             </p>
-            <button className="btn" onClick={() => navigate('/settings?find=WEBHOOK')}>
-              Set up a channel
-            </button>
+            <Editable>
+              <button className="btn" onClick={() => navigate('/settings?find=WEBHOOK')}>
+                Set up a channel
+              </button>
+            </Editable>
           </div>
         ) : (
           <>
@@ -416,7 +440,11 @@ function RulesView() {
                     return (
                       <span role="cell" key={c} className={`rules-cell ${level ?? 'none'} ${level && changed(a.id, c) ? 'changed' : ''}`}>
                         <span className="rules-cell-ch">{c}</span>
-                        {level ? (
+                        {level && !canEdit ? (
+                          <span className="ink-2 small" title={readOnly}>
+                            {LEVELS.find((l) => l.value === level)?.label ?? level}
+                          </span>
+                        ) : level ? (
                           <Select label={`${a.label} on ${c}`} value={level} onChange={(v) => setLevel(a.id, c, v as AlertLevel)} options={LEVELS} />
                         ) : (
                           <span className="ink-3 small" title={`${c} has no webhook for these. Set one in Settings.`}>
@@ -439,22 +467,25 @@ function RulesView() {
           {data.quiet_active && <span className="state warn">on now{data.held ? ` · ${data.held} held` : ''}</span>}
         </div>
         <p className="form-help">Alerts raised during quiet hours wait, then arrive as one summary when they end. Every alert still shows in the inbox straight away.</p>
-        <div className="quiet-form">
+        {/* A viewer sees the quiet hours, with every field turned off. */}
+        <div className="quiet-form" title={readOnly}>
           <label className="check">
-            <input type="checkbox" checked={quiet.enabled} onChange={(e) => setQuiet({ ...quiet, enabled: e.target.checked })} /> Keep quiet
+            <input type="checkbox" checked={quiet.enabled} disabled={!canEdit} onChange={(e) => setQuiet({ ...quiet, enabled: e.target.checked })} /> Keep quiet
           </label>
           <span className="quiet-time">
             from
-            <TimePicker value={quiet.start} disabled={!quiet.enabled} onChange={(v) => setQuiet({ ...quiet, start: v })} label="Quiet hours start" />
+            <TimePicker value={quiet.start} disabled={!quiet.enabled || !canEdit} onChange={(v) => setQuiet({ ...quiet, start: v })} label="Quiet hours start" />
           </span>
           <span className="quiet-time">
             until
-            <TimePicker value={quiet.end} disabled={!quiet.enabled} onChange={(v) => setQuiet({ ...quiet, end: v })} label="Quiet hours end" />
+            <TimePicker value={quiet.end} disabled={!quiet.enabled || !canEdit} onChange={(v) => setQuiet({ ...quiet, end: v })} label="Quiet hours end" />
           </span>
           <label className="check">
-            <input type="checkbox" checked={quiet.critical} disabled={!quiet.enabled} onChange={(e) => setQuiet({ ...quiet, critical: e.target.checked })} /> Send critical alerts anyway
+            <input type="checkbox" checked={quiet.critical} disabled={!quiet.enabled || !canEdit} onChange={(e) => setQuiet({ ...quiet, critical: e.target.checked })} /> Send critical alerts anyway
           </label>
         </div>
+        {/* Quiet hours follow the server's clock, which may not be this browser's. */}
+        <ServerTime from={quiet.start} to={quiet.end} />
       </section>
 
       <section className="panel">
@@ -472,23 +503,27 @@ function RulesView() {
                   <span className="sub">{m.subject.startsWith('area:') ? 'area' : m.subject.slice(0, m.subject.indexOf(':'))}</span>
                 </span>
                 <span className="num ink-3 small">{timeLeft(m.until, now)}</span>
-                <button type="button" className="btn-quiet" onClick={() => mute(m.subject, m.label, 0)}>
-                  Unmute
-                </button>
+                <Editable>
+                  <button type="button" className="btn-quiet" onClick={() => mute(m.subject, m.label, 0)}>
+                    Unmute
+                  </button>
+                </Editable>
               </li>
             ))}
           </ul>
         )}
-        <div className="mute-area">
-          <Select label="Area to mute" value={muteArea} onChange={setMuteArea} options={data.areas.map((a) => ({ value: a.id, label: a.label }))} />
-          <Select className="short" label="Mute for" value={muteFor} onChange={setMuteFor} options={MUTE_FOR.map((m) => ({ value: String(m.minutes), label: `for ${m.label}`, text: m.label }))} />
-          <button type="button" className="btn-quiet" onClick={() => mute(`area:${muteArea}`, AREAS[muteArea] ?? muteArea, Number(muteFor))}>
-            Mute
-          </button>
-        </div>
+        <Editable>
+          <div className="mute-area">
+            <Select label="Area to mute" value={muteArea} onChange={setMuteArea} options={data.areas.map((a) => ({ value: a.id, label: a.label }))} />
+            <Select className="short" label="Mute for" value={muteFor} onChange={setMuteFor} options={MUTE_FOR.map((m) => ({ value: String(m.minutes), label: `for ${m.label}`, text: m.label }))} />
+            <button type="button" className="btn-quiet" onClick={() => mute(`area:${muteArea}`, AREAS[muteArea] ?? muteArea, Number(muteFor))}>
+              Mute
+            </button>
+          </div>
+        </Editable>
       </section>
 
-      {dirty && (
+      {dirty && canEdit && (
         <div className="savebar" role="region" aria-label="Unsaved changes">
           <span>Unsaved changes to the notification rules</span>
           <span className="savebar-actions">

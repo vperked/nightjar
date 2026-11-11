@@ -1,7 +1,7 @@
 package apps
 
 import (
-	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"nightjar/internal/config"
@@ -96,7 +97,7 @@ func New(opt Options) *Manager {
 	if opt.Run == nil {
 		dir := opt.StateDir
 		opt.Run = func(ctx context.Context, name, script string, line func(string)) error {
-			return runScript(ctx, dir, name, script, line)
+			return RunScript(ctx, dir, name, script, line)
 		}
 	}
 	if opt.Systemctl == nil {
@@ -256,11 +257,11 @@ func (m *Manager) Install(id string, port int, user string, then func(a App, por
 	}
 	return m.start(a, "install", func(ctx context.Context, j *jobLog) error {
 		j.step("Finding the latest release")
-		url, version, err := m.resolve(ctx, a)
+		rel, err := m.resolve(ctx, a)
 		if err != nil {
 			return err
 		}
-		p := plan{app: a, url: url, version: version, port: port, user: user}
+		p := plan{app: a, url: rel.url, version: rel.version, sha256: rel.sha256, port: port, user: user}
 		if err := m.opt.Run(ctx, a.ID, p.installScript(), j.line); err != nil {
 			return err
 		}
@@ -369,8 +370,18 @@ func (m *Manager) Wait(timeout time.Duration) {
 
 var versionRE = regexp.MustCompile(`v?(\d+(?:\.\d+)+)`)
 
+// release is what an install downloads.
+type release struct {
+	url, version string
+	// sha256 is the download's checksum as GitHub lists it, checked before anything is replaced.
+	// The *arr update services give none.
+	sha256 string
+}
+
+var sha256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // resolve finds the download URL and version of an app's latest release for this machine.
-func (m *Manager) resolve(ctx context.Context, a App) (string, string, error) {
+func (m *Manager) resolve(ctx context.Context, a App) (release, error) {
 	if u := a.source.urls[m.opt.Arch]; u != "" {
 		// The update service answers with a redirect to the release; its file name has the version.
 		client := *m.opt.HTTP
@@ -378,17 +389,17 @@ func (m *Manager) resolve(ctx context.Context, a App) (string, string, error) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		resp, err := client.Do(req)
 		if err != nil {
-			return "", "", fmt.Errorf("finding the latest %s: %w", a.Name, err)
+			return release{}, fmt.Errorf("finding the latest %s: %w", a.Name, err)
 		}
 		resp.Body.Close()
 		loc := resp.Header.Get("Location")
 		if loc == "" {
-			return "", "", fmt.Errorf("finding the latest %s: HTTP %d", a.Name, resp.StatusCode)
+			return release{}, fmt.Errorf("finding the latest %s: HTTP %d", a.Name, resp.StatusCode)
 		}
 		if !safeURL(loc) {
-			return "", "", fmt.Errorf("finding the latest %s: unexpected download address %q", a.Name, loc)
+			return release{}, fmt.Errorf("finding the latest %s: unexpected download address %q", a.Name, loc)
 		}
-		return loc, safeVersion(versionRE.FindStringSubmatch(filepath.Base(loc))), nil
+		return release{url: loc, version: safeVersion(versionRE.FindStringSubmatch(filepath.Base(loc)))}, nil
 	}
 	pattern := a.source.assets[m.opt.Arch]
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, m.opt.GitHubAPI+"/repos/"+a.source.github+"/releases/latest", nil)
@@ -398,33 +409,39 @@ func (m *Manager) resolve(ctx context.Context, a App) (string, string, error) {
 	}
 	resp, err := m.opt.HTTP.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("finding the latest %s: %w", a.Name, err)
+		return release{}, fmt.Errorf("finding the latest %s: %w", a.Name, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
-		return "", "", fmt.Errorf("finding the latest %s: GitHub HTTP %d %s", a.Name, resp.StatusCode, strings.TrimSpace(string(body)))
+		return release{}, fmt.Errorf("finding the latest %s: GitHub HTTP %d %s", a.Name, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var rel struct {
 		Tag    string `json:"tag_name"`
 		Assets []struct {
-			Name string `json:"name"`
-			URL  string `json:"browser_download_url"`
+			Name   string `json:"name"`
+			URL    string `json:"browser_download_url"`
+			Digest string `json:"digest"` // "sha256:…", for releases since mid-2025
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return "", "", fmt.Errorf("reading %s's releases: %w", a.Name, err)
+		return release{}, fmt.Errorf("reading %s's releases: %w", a.Name, err)
 	}
 	re := regexp.MustCompile(pattern)
 	for _, as := range rel.Assets {
 		if re.MatchString(as.Name) {
 			if !safeURL(as.URL) {
-				return "", "", fmt.Errorf("%s's release has an unexpected download address %q", a.Name, as.URL)
+				return release{}, fmt.Errorf("%s's release has an unexpected download address %q", a.Name, as.URL)
 			}
-			return as.URL, safeVersion(versionRE.FindStringSubmatch(rel.Tag)), nil
+			// A download that cannot be checked is not run as root.
+			sum, ok := strings.CutPrefix(strings.ToLower(as.Digest), "sha256:")
+			if !ok || !sha256RE.MatchString(sum) {
+				return release{}, fmt.Errorf("GitHub lists no SHA-256 checksum for %s's download (%s), so it cannot be checked and is not installed", a.Name, as.Name)
+			}
+			return release{url: as.URL, version: safeVersion(versionRE.FindStringSubmatch(rel.Tag)), sha256: sum}, nil
 		}
 	}
-	return "", "", fmt.Errorf("%s's latest release (%s) has no build for %s", a.Name, rel.Tag, m.opt.Arch)
+	return release{}, fmt.Errorf("%s's latest release (%s) has no build for %s", a.Name, rel.Tag, m.opt.Arch)
 }
 
 // safeURL accepts only plain https addresses, so a download address can be quoted into the install
@@ -446,10 +463,14 @@ func safeVersion(match []string) string {
 
 // ---------- running scripts ----------
 
-// runScript runs a job's script as a transient systemd unit, so it runs with full privileges even
+// RunScript runs a job's script as a transient systemd unit, so it runs with full privileges even
 // when the monitor's own service is locked down, and outside the monitor's process tree. Without
 // systemd it runs bash directly.
-func runScript(ctx context.Context, dir, name, script string, line func(string)) error {
+//
+// The script writes to a log file that this tails, never to a pipe to Nightjar: Nightjar may
+// restart mid-install, and a script writing to a pipe nobody reads any more would fail (set -e)
+// halfway, after it had stopped or removed the app.
+func RunScript(ctx context.Context, dir, name, script string, line func(string)) error {
 	f, err := os.CreateTemp(dir, "nightjar-"+name+"-*.sh")
 	if err != nil {
 		return err
@@ -460,35 +481,116 @@ func runScript(ctx context.Context, dir, name, script string, line func(string))
 		return err
 	}
 	f.Close()
+	logFile, err := os.CreateTemp(dir, "nightjar-"+name+"-*.log")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(logFile.Name())
+	defer logFile.Close()
 
 	var cmd *exec.Cmd
-	if _, err := exec.LookPath("systemd-run"); err == nil && os.Getenv("NIGHTJAR_APPS_NO_SYSTEMD") == "" {
-		cmd = exec.CommandContext(ctx, "systemd-run", "--quiet", "--collect", "--wait", "--pipe",
-			"--unit=nightjar-app-"+name+"-"+strconv.FormatInt(time.Now().Unix(), 10),
-			"--description=Nightjar app store: "+name, "/bin/bash", f.Name())
+	var own bytes.Buffer // what systemd-run itself says, such as why it could not start the unit
+	if _, err := exec.LookPath("systemd-run"); err == nil && os.Getenv("NIGHTJAR_APPS_NO_SYSTEMD") == "" && !strings.ContainsAny(logFile.Name(), " \t\n\\'\"") {
+		unit := "nightjar-app-" + name + "-" + strconv.FormatInt(time.Now().Unix(), 10) + ".service"
+		cmd = exec.CommandContext(ctx, "systemd-run", "--quiet", "--collect", "--wait",
+			"--unit="+unit, "--description=Nightjar app store: "+name,
+			"--property=StandardOutput=append:"+logFile.Name(), "--property=StandardError=append:"+logFile.Name(),
+			"/bin/bash", f.Name())
+		// Out of time, the install itself stops, not only the systemd-run that waits for it.
+		cmd.Cancel = func() error {
+			stopCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			if out, err := exec.CommandContext(stopCtx, "systemctl", "stop", unit).CombinedOutput(); err != nil {
+				log.Warn("Could not stop the timed-out app script", "unit", unit, "err", strings.TrimSpace(string(out)))
+			}
+			return cmd.Process.Kill()
+		}
+		cmd.Stdout, cmd.Stderr = &own, &own
 	} else {
+		// Its own handle on the file, appending: one shared with the reader would move its place.
+		w, err := os.OpenFile(logFile.Name(), os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			return err
+		}
+		defer w.Close()
 		cmd = exec.CommandContext(ctx, "/bin/bash", f.Name())
+		cmd.Stdout, cmd.Stderr = w, w
+		// Out of time, it goes with everything it started.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	}
 	// Someone else's installer gets none of Nightjar's secrets (webhooks, tokens, passwords). A unit
 	// systemd-run starts takes systemd's environment, not this one, so this is for bash run directly.
 	cmd.Env = config.Environ()
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	cmd.Stderr = cmd.Stdout
+	cmd.WaitDelay = 10 * time.Second
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	sc := bufio.NewScanner(out)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line(sc.Text())
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	t := &tailer{f: logFile, line: line}
+	for {
+		select {
+		case err := <-done:
+			t.read(true)
+			for _, l := range strings.Split(strings.TrimSpace(own.String()), "\n") {
+				if l != "" {
+					line(l)
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("the %s script failed (%w); the log above says why", name, err)
+			}
+			return nil
+		case <-time.After(200 * time.Millisecond):
+			t.read(false)
+		}
 	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("the %s script failed (%w); the log above says why", name, err)
+}
+
+// maxLine is the longest log line kept whole; a longer one is passed on in pieces.
+const maxLine = 1 << 20
+
+// tailer passes on the lines written to a log file so far.
+type tailer struct {
+	f       *os.File
+	line    func(string)
+	partial []byte
+}
+
+// read passes on each whole line written since the last read; at the end, the last one too.
+func (t *tailer) read(end bool) {
+	chunk := make([]byte, 64*1024)
+	for {
+		n, err := t.f.Read(chunk)
+		t.partial = append(t.partial, chunk[:n]...)
+		for {
+			i := bytes.IndexByte(t.partial, '\n')
+			if i < 0 {
+				break
+			}
+			t.line(string(t.partial[:i]))
+			t.partial = t.partial[i+1:]
+		}
+		if len(t.partial) > maxLine {
+			t.line(string(t.partial))
+			t.partial = nil
+		}
+		if n == 0 || err != nil {
+			break
+		}
 	}
-	return nil
+	if end && len(t.partial) > 0 {
+		t.line(string(t.partial))
+		t.partial = nil
+	}
+}
+
+// Running reports whether an install or removal is under way. Nightjar holds a restart for it.
+func (m *Manager) Running() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.running
 }
 
 // RunAs is who store apps run as: swizzin's main user when there is one, so the apps can read and

@@ -90,6 +90,30 @@ func TestAFailedDeliveryIsTriedAgain(t *testing.T) {
 	}
 }
 
+// A webhook URL that redirects (and so would lose the POST's body) fails, saying where to.
+func TestARedirectedWebhookFails(t *testing.T) {
+	var gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets.Add(1)
+			return
+		}
+		w.Header().Set("Location", "https://discord.example.com/api/webhooks/1/TOKEN")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+	w, _ := newTestWebhook(t, srv.URL+"/api/webhooks/1/TOKEN")
+	if w.SendEmbed("Disk full", "", discord.Critical, nil, "Disk") {
+		t.Fatal("a redirected delivery is not sent")
+	}
+	if e := w.LastError(); !strings.Contains(e, "https://discord.example.com") || strings.Contains(e, "TOKEN") {
+		t.Fatalf("the error names the host only: %q", e)
+	}
+	if gets.Load() != 0 {
+		t.Fatal("the redirect was followed as a GET")
+	}
+}
+
 func TestSendEmbedDelivers(t *testing.T) {
 	d := newFakeDiscord(t)
 	w, logPath := newTestWebhook(t, d.URL)

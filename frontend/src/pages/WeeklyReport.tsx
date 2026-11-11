@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
+import { Editable } from '../components/Editable';
 import { PlexStatsBody } from '../components/PlexStats';
 import { Skeleton } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
@@ -47,9 +48,11 @@ export function WeeklyReportPage() {
           <Link className="btn-quiet" to="/settings?find=weekly">
             Settings
           </Link>
-          <button className="btn" onClick={send} disabled={sending || !r}>
-            {sending ? 'Sending…' : 'Send it now'}
-          </button>
+          <Editable>
+            <button className="btn" onClick={send} disabled={sending || !r}>
+              {sending ? 'Sending…' : 'Send it now'}
+            </button>
+          </Editable>
         </span>
       </div>
       {error && !data && <p className="alert">Could not load the report: {error.message}</p>}

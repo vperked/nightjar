@@ -35,6 +35,16 @@ func (m *Monitor) Specs() []Spec {
 	return out
 }
 
+// SpecOf is the named check's definition, and whether there is one.
+func (m *Monitor) SpecOf(name string) (Spec, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if st, ok := m.states[name]; ok {
+		return st.Spec, true
+	}
+	return Spec{}, false
+}
+
 // Save adds a check (oldName "") or replaces the one called oldName, renaming it if spec.Name
 // differs. It is stored first, so a check is never running without being saved.
 // A changed target or type starts the check's status over; it runs on the next cycle.

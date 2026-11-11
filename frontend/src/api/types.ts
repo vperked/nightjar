@@ -74,6 +74,7 @@ export interface Beat {
 export interface Service {
   name: string;
   type: string;
+  // target is what may be shown of it: empty for a heartbeat, whose token only the check itself has.
   target: string;
   status: ServiceStatus;
   latency_ms: number | null;
@@ -105,7 +106,9 @@ export interface ServicesResponse {
   services: Service[];
 }
 
-export type CheckType = 'http' | 'tcp' | 'ping' | 'tls' | 'plugin' | 'heartbeat' | 'docker';
+export type CheckType = 'http' | 'tcp' | 'ping' | 'tls' | 'dns' | 'postgres' | 'mysql' | 'redis' | 'plugin' | 'heartbeat' | 'docker';
+
+export type DNSRecordType = 'A' | 'AAAA' | 'CNAME' | 'MX' | 'TXT' | 'NS';
 
 // CheckSpec is one uptime check's definition, as stored and edited in the dashboard.
 export interface CheckSpec {
@@ -130,6 +133,15 @@ export interface CheckSpec {
   schedule?: string;
   grace?: number;
   max_runtime?: number;
+  // A dns check asks for record_type records (A by default), from dns_server (host[:port]) or the
+  // system's resolver; keyword, when set, must be in one of the answers.
+  record_type?: DNSRecordType;
+  dns_server?: string;
+  // A redis check's password goes one way: the server answers password_set, never the password.
+  // Sent empty, the saved one stays; clear_password removes it.
+  password?: string;
+  password_set?: boolean;
+  clear_password?: boolean;
   repair?: Repair;
   // server is the id of the watched server the checked thing runs on.
   server?: string;
@@ -477,7 +489,8 @@ export interface StatusDesignResponse {
 export interface AppConfig {
   auth_required: boolean;
   authorized: boolean; // signed in
-  account?: { configured: boolean; username?: string; service?: string; two_factor?: boolean; recovery_left?: number }; // the admin account; not configured on a fresh install
+  // The signed-in account (the admin, or a read-only viewer); not configured on a fresh install.
+  account?: { configured: boolean; username?: string; role?: 'admin' | 'viewer'; service?: string; two_factor?: boolean; recovery_left?: number };
   status_page_enabled: boolean;
   status_page_title: string;
   status_page_domain?: string; // its own domain, where it is the whole site
@@ -488,6 +501,9 @@ export interface AppConfig {
   hidden?: string[]; // dashboard sections turned off (DASHBOARD_HIDDEN)
   appearance?: Appearance; // how the dashboard looks; without a sign-in, no CSS
   version?: string;
+  // The server's time zone, which weekly maintenance and quiet hours follow: an IANA name (or
+  // "UTC+01:00" where it has none) and its offset from UTC now, in seconds east.
+  time_zone?: { name: string; offset: number };
 }
 
 // Appearance is the dashboard's look, chosen under Settings → Appearance.
@@ -1193,7 +1209,7 @@ export interface HostAnalytics {
   incidents: Outage[];
 }
 
-export type AnalyticsRangeName = '1h' | '24h' | '7d' | '30d';
+export type AnalyticsRangeName = '1h' | '24h' | '7d' | '30d' | '90d' | '1y';
 
 export interface AnalyticsResponse {
   range: { name: AnalyticsRangeName; label: string };
@@ -1430,12 +1446,17 @@ export interface FirewallStatus {
   drops_note?: string;
   native?: string;
   problem?: string;
+  // dashboard is, for a server's firewall, the address Nightjar reaches it from, as that server sees
+  // it (from AgentFirewall.dashboard): what a rule letting only Nightjar in names.
+  dashboard?: string;
 }
 
-// AgentFirewall is what an agent says of its firewall and defense.
+// AgentFirewall is what an agent says of its firewall and defense, and the address the dashboard
+// asked from (agents from before it was sent leave it out).
 export interface AgentFirewall {
   firewall: FirewallStatus;
   defense?: AttackDefense;
+  dashboard?: string;
 }
 
 // ---------- status page address ----------
@@ -1465,4 +1486,11 @@ export interface StatusProxyResult {
   ok: boolean;
   steps: StatusProxyStep[];
   state: StatusProxyState;
+}
+
+// Viewer is a read-only account the admin made; sessions is how many browsers it is signed in on.
+export interface Viewer {
+  username: string;
+  created: number;
+  sessions: number;
 }

@@ -143,9 +143,18 @@ func TestProgramKeepsWritingAfterTheRepair(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-	// Its output goes to a pipe Nightjar reads, not a file that would grow for as long as it runs.
-	if fd, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/fd/1"); err == nil && !strings.HasPrefix(fd, "pipe:") {
+	// Its output goes to a deleted file, not a pipe Nightjar reads: when Nightjar restarts, a
+	// pipe's reading end would go away and the program's next write would kill it.
+	if fd, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/fd/1"); err == nil && (strings.HasPrefix(fd, "pipe:") || !strings.HasSuffix(fd, "(deleted)")) {
 		t.Fatalf("the program writes to %s", fd)
+	}
+	// With systemd, it runs outside Nightjar's service, which systemd stops with all it holds.
+	if repair.ScopeCommand() != nil {
+		own, _ := os.ReadFile("/proc/self/cgroup")
+		its, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cgroup")
+		if err != nil || string(its) == string(own) || !strings.Contains(string(its), ".scope") {
+			t.Fatalf("the program is in %q, Nightjar in %q", its, own)
+		}
 	}
 	time.Sleep(3 * time.Second)
 	if err := syscall.Kill(pid, 0); err != nil {
@@ -172,5 +181,30 @@ func TestScriptsDoNotGetNightjarsSecrets(t *testing.T) {
 	rec := r.Run(context.Background(), spec("db", "env.sh"), "", 1, false)
 	if !rec.OK || !strings.Contains(rec.Output, "token= plex=http://127.0.0.1:32400 check=db") {
 		t.Fatalf("ran: %+v", rec)
+	}
+}
+
+// Without systemd, a script still runs on its own, and its output is kept.
+func TestScriptRunsWithoutSystemd(t *testing.T) {
+	defer func(old func() []string) { repair.ScopeCommand = old }(repair.ScopeCommand)
+	repair.ScopeCommand = func() []string { return nil }
+	r, dir, _ := runner(t)
+	script(t, dir, "plain.sh", "echo plain; exit 3", 0o755)
+	rec := r.Run(context.Background(), spec("x", "plain.sh"), "", 1, false)
+	if rec.OK || !strings.Contains(rec.Detail, "code 3") || rec.Output != "plain\n" {
+		t.Fatalf("ran: %+v", rec)
+	}
+}
+
+// A script that runs too long is stopped with what it started, and says so.
+func TestScriptTimeoutStillStops(t *testing.T) {
+	r, dir, _ := runner(t)
+	script(t, dir, "slow.sh", "echo begun; sleep 600", 0o755)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	rec := r.Run(ctx, spec("x", "slow.sh"), "", 1, false)
+	if rec.OK || time.Since(start) > 15*time.Second || !strings.Contains(rec.Output, "begun") {
+		t.Fatalf("ran: %+v in %s", rec, time.Since(start))
 	}
 }

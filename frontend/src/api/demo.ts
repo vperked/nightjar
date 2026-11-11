@@ -837,7 +837,8 @@ function summary(spec: CheckSpec): Service {
   return {
     name: spec.name,
     type: spec.type,
-    target: spec.target,
+    // As the backend has it: a heartbeat's token is left out of the list, which viewers read too.
+    target: spec.type === 'heartbeat' ? '' : spec.target,
     status,
     latency_ms: heartbeat && pings ? (pings.ok - pings.start) * 1000 : (last?.latency_ms ?? null),
     detail: heartbeat && status === 'up' ? demoHeartbeatDetail() : spec.type === 'docker' && status === 'up' ? 'container healthy, started 3d ago' : detail,
@@ -1058,8 +1059,11 @@ function plex(summaryView: boolean): PlexResponse {
     }),
   ];
   const streams = all.filter((s) => !demoStopped.has(s.id));
+  // Plex is checked every 15 seconds, each check one sample, and its libraries counted every 15
+  // minutes: the page polls the summary in between and asks for the whole state when those move on.
+  const checked = Math.floor(t / 15) * 15;
   const samples: PlexSample[] = Array.from({ length: 360 }, (_, i) => {
-    const ts = t - (359 - i) * 15;
+    const ts = checked - (359 - i) * 15;
     const evening = Math.max(0, Math.sin((ts / 5400) * Math.PI));
     const direct = Math.round(1 + evening * 2 + noise(Math.floor(ts / 600), 3));
     const transcode = noise(Math.floor(ts / 900), 4) > 0.55 ? 1 : 0;
@@ -1161,7 +1165,7 @@ function plex(summaryView: boolean): PlexResponse {
       status: 'up',
       detail: '',
       since: t - 5 * 86400,
-      checked_at: t - 3,
+      checked_at: checked,
       latency_ms: 4.2,
       server: { name: 'demo-server', version: '1.41.3.9314', platform: 'Linux', platform_version: '6.8.0', update_available: '1.41.4.9463' },
       streams,
@@ -1176,7 +1180,7 @@ function plex(summaryView: boolean): PlexResponse {
             { key: '2', title: 'TV Shows', type: 'show', count: 213, child_count: 9381, child_label: 'episodes', refreshing: true },
             { key: '3', title: 'Music', type: 'artist', count: 412, child_count: 18220, child_label: 'tracks', refreshing: false },
           ],
-      libraries_at: t - 600,
+      libraries_at: Math.floor(t / 900) * 900,
       samples: summaryView ? [] : samples,
       recent: summaryView ? [] : plays,
     },
@@ -1293,6 +1297,9 @@ function validate(values: Record<string, string>): Record<string, string> {
 // ---------- routing ----------
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+// publicCheck is a check as the monitor sends it: its password left out, and whether it has one.
+const publicCheck = ({ password, ...c }: CheckSpec): CheckSpec => ({ ...c, ...(password ? { password_set: true } : {}) });
+
 const error = (status: number, message: string, fields?: Record<string, string>) => json({ error: message, fields }, status);
 
 function normalise(spec: Partial<CheckSpec>): CheckSpec | string {
@@ -2079,6 +2086,8 @@ const RANGE_SPECS: Record<AnalyticsRangeName, [number, number, string]> = {
   '24h': [86400, 300, '24 hours'],
   '7d': [7 * 86400, 1800, '7 days'],
   '30d': [30 * 86400, 7200, '30 days'],
+  '90d': [90 * 86400, 6 * 3600, '90 days'],
+  '1y': [365 * 86400, 86400, '1 year'],
 };
 
 // Each demo server's character over time: a daily rhythm, a disk that fills or not, and outages.
@@ -2251,7 +2260,8 @@ function route(method: string, url: URL, body: unknown): Response {
     }
     const answer = () => {
       demoAllowed(fw);
-      return local ? json({ enabled: true, firewall: fw }) : json({ firewall: fw, defense: demoAttacks(host?.name === 'pi-dns').defense });
+      // dashboard is the address the agent sees Nightjar ask from, as a real agent reports it.
+      return local ? json({ enabled: true, firewall: fw }) : json({ firewall: fw, defense: demoAttacks(host?.name === 'pi-dns').defense, dashboard: '198.51.100.10' });
     };
     if (method === 'GET' && rest === '/firewall') return answer();
     // check refuses a rule the way the firewall does, else puts it in one form.
@@ -2287,8 +2297,12 @@ function route(method: string, url: URL, body: unknown): Response {
       const r = check(body as Partial<FirewallRule>);
       if (r instanceof Response) return r;
       r.id = `r${fw.rules.length}${Math.round(now())}`;
-      // A block or limit goes before the allows; an allow last.
-      const at = r.action === 'allow' ? -1 : fw.rules.findIndex((o) => o.action === 'allow' && (o.direction === 'out') === (r.direction === 'out'));
+      // A block or limit goes before the allows that would lift it, but after an allow that is an
+      // exception to it (from one address, to the same ports), as the firewall does; an allow last.
+      const portsOf = (x: FirewallRule) => (x.port ? x.port.split(',') : []);
+      const meets = (o: FirewallRule) => !o.port || !r.port || portsOf(o).some((p) => portsOf(r).includes(p));
+      const exception = (o: FirewallRule) => !!o.source && !r.source && !!o.port && o.port === r.port && (!r.proto || o.proto === r.proto);
+      const at = r.action === 'allow' ? -1 : fw.rules.findIndex((o) => o.action === 'allow' && (o.direction === 'out') === (r.direction === 'out') && meets(o) && !exception(o));
       if (at < 0) fw.rules.push(r);
       else fw.rules.splice(at, 0, r);
       return answer();
@@ -2430,7 +2444,9 @@ function route(method: string, url: URL, body: unknown): Response {
         return json({
           auth_required: true,
           authorized: !demoSignedOut,
-          account: { configured: true, username: 'demo', service: 'nightjar', two_factor: demoTwoFactor().on, recovery_left: demoTwoFactor().left },
+          account: demoViewer
+            ? { configured: true, username: demoViewer, role: 'viewer', service: 'nightjar', two_factor: false }
+            : { configured: true, username: 'demo', role: 'admin', service: 'nightjar', two_factor: demoTwoFactor().on, recovery_left: demoTwoFactor().left },
           hidden: (state.settings.DASHBOARD_HIDDEN ?? '').split(',').filter(Boolean),
           appearance: demoAppearance(),
           status_page_enabled: true,
@@ -2440,6 +2456,8 @@ function route(method: string, url: URL, body: unknown): Response {
           plex_enabled: true,
           qbittorrent_enabled: true,
           version: 'demo',
+          // The demo's weekly windows run on the browser's clock, so it is the "server's" too.
+          time_zone: { name: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', offset: -new Date().getTimezoneOffset() * 60 },
         } satisfies AppConfig);
       case '/api/stats':
         return json(stats());
@@ -2452,7 +2470,7 @@ function route(method: string, url: URL, body: unknown): Response {
         return json({ name: spec.name, hours, points: spec.paused ? [] : history(spec, hours) } satisfies HistoryResponse);
       }
       case '/api/checks':
-        return json({ checks: state.checks, types: ['http', 'tcp', 'ping', 'tls'] } satisfies ChecksResponse);
+        return json({ checks: state.checks.map(publicCheck), types: ['http', 'tcp', 'ping', 'tls', 'dns', 'postgres', 'mysql', 'redis'] } satisfies ChecksResponse);
       case '/api/settings':
         return json(settings());
       case '/api/plex':
@@ -2504,7 +2522,7 @@ function route(method: string, url: URL, body: unknown): Response {
           nightjar: 'demo',
           made: Date.now() / 1000,
           secrets: url.searchParams.get('secrets') === '1',
-          checks: state.checks,
+          checks: url.searchParams.get('secrets') === '1' ? state.checks : state.checks.map((c) => ({ ...c, password: undefined })),
           settings: state.settings,
           meta: { 'dashboard.appearance': demoAppearance(), 'statuspage.design': designOrDefault() },
         });
@@ -2572,7 +2590,17 @@ function route(method: string, url: URL, body: unknown): Response {
     const ms = 20 + Math.round(noise(spec.target.length, 7) * 180);
     if (spec.type === 'plugin') return json({ result: demoPluginCheck(spec.target) });
     if (spec.type === 'heartbeat') return json({ result: { up: false, latency_ms: null, detail: 'a heartbeat has nothing to try: save it, then ping its URL from the job' } });
-    const detail = { http: 'HTTP 200', tcp: 'connected', ping: 'reply', tls: 'certificate valid for 61 days', docker: 'container healthy, started 3d ago' }[spec.type];
+    const detail = {
+      http: 'HTTP 200',
+      tcp: 'connected',
+      ping: 'reply',
+      tls: 'certificate valid for 61 days',
+      docker: 'container healthy, started 3d ago',
+      dns: `${spec.record_type ?? 'A'} 93.184.215.14`,
+      postgres: 'accepting connections',
+      mysql: 'accepting connections (11.4.3-MariaDB)',
+      redis: 'PONG',
+    }[spec.type];
     return json({ result: offline ? { up: false, latency_ms: null, detail: spec.type === 'ping' ? 'no reply' : 'connection timed out' } : { up: true, latency_ms: ms, detail } });
   }
   if (method === 'POST' && path === '/api/checks') {
@@ -2581,7 +2609,7 @@ function route(method: string, url: URL, body: unknown): Response {
     if (findCheck(spec.name) >= 0) return error(409, 'a check with that name already exists');
     state.checks.push(spec);
     save();
-    return json({ check: spec }, 201);
+    return json({ check: publicCheck(spec) }, 201);
   }
   if (method === 'PUT' && checkName !== null) {
     const i = findCheck(checkName);
@@ -2589,9 +2617,14 @@ function route(method: string, url: URL, body: unknown): Response {
     const spec = normalise(body as Partial<CheckSpec>);
     if (typeof spec === 'string') return error(400, spec);
     if (spec.name !== checkName && findCheck(spec.name) >= 0) return error(409, 'a check with that name already exists');
+    // As the monitor does: a password left empty keeps the saved one, unless it is cleared.
+    const old = state.checks[i];
+    if (spec.type === 'redis' && !spec.password && !spec.clear_password && old.type === 'redis') spec.password = old.password;
+    if (spec.type !== 'redis') delete spec.password;
+    delete spec.clear_password;
     state.checks[i] = spec;
     save();
-    return json({ check: spec });
+    return json({ check: publicCheck(spec) });
   }
   if (method === 'DELETE' && checkName !== null) {
     const i = findCheck(checkName);
@@ -2791,6 +2824,52 @@ function route(method: string, url: URL, body: unknown): Response {
 // The demo's admin account: sign in as demo, password demo. The sign-in screen says so in the demo.
 export const DEMO_LOGIN = { username: 'demo', password: 'demo' };
 
+// The demo's viewers: read-only accounts, as the admin makes them under Settings. One comes with the
+// demo (viewer, password "viewer password"), so the read-only dashboard can be tried.
+const demoViewers: { username: string; password: string; created: number }[] = [{ username: 'viewer', password: 'viewer password', created: now() - 12 * 86400 }];
+const ROLE_KEY = 'nightjar.demo.viewer';
+let demoViewer = (() => {
+  try {
+    return sessionStorage.getItem(ROLE_KEY) ?? '';
+  } catch {
+    return '';
+  }
+})();
+function setDemoViewer(name: string) {
+  demoViewer = name;
+  try {
+    if (name) sessionStorage.setItem(ROLE_KEY, name);
+    else sessionStorage.removeItem(ROLE_KEY);
+  } catch {
+    /* storage unavailable: it lasts until a reload */
+  }
+}
+// What only the admin may see, as the monitor has it; every change is the admin's too.
+const ADMIN_ONLY = new Set(['/api/settings', '/api/backup', '/api/setup', '/api/ssh/keys', '/api/agent/download', '/api/statuspage/proxy', '/api/plugins', '/api/auth/viewers']);
+const viewerList = () => demoViewers.map((v) => ({ username: v.username, created: v.created, sessions: v.username === demoViewer ? 1 : 0 }));
+
+function demoViewerRoutes(method: string, path: string, body: Record<string, string> | undefined): Response | undefined {
+  if (path === '/api/auth/viewers' && method === 'GET') return json({ viewers: viewerList() });
+  if (path === '/api/auth/viewers' && method === 'POST') {
+    const name = (body?.username ?? '').trim();
+    if (!/^[A-Za-z0-9._@-]{1,64}$/.test(name)) return error(400, 'a username is up to 64 letters, digits and . _ @ -');
+    if ((body?.password ?? '').length < 10) return error(400, 'use a password of at least 10 characters');
+    if (name.toLowerCase() === DEMO_LOGIN.username || demoViewers.some((v) => v.username.toLowerCase() === name.toLowerCase())) return error(409, 'there is already an account with that name');
+    demoViewers.push({ username: name, password: body!.password, created: now() });
+    return json({ viewers: viewerList() });
+  }
+  const one = path.match(/^\/api\/auth\/viewers\/([^/]+)$/);
+  if (!one) return undefined;
+  const i = demoViewers.findIndex((v) => v.username === decodeURIComponent(one[1]));
+  if (i < 0) return error(404, 'no viewer with that name');
+  if (method === 'DELETE') demoViewers.splice(i, 1);
+  else if (method === 'PUT') {
+    if ((body?.password ?? '').length < 10) return error(400, 'use a password of at least 10 characters');
+    demoViewers[i].password = body!.password;
+  }
+  return json({ viewers: viewerList() });
+}
+
 // Signed in or out, as the demo has it: kept for the tab, so a reload stays the way it was. A
 // signed-out demo answers only what the real monitor answers without a session.
 const SIGNED_OUT_KEY = 'nightjar.demo.signedOut';
@@ -2815,14 +2894,21 @@ const PUBLIC = new Set(['/api/config', '/api/status', '/health']);
 // demoSignIn checks the demo account, and with two-factor sign-in on, asks for a code as the
 // monitor does (any six digits, or a recovery code, will do).
 function demoSignIn(body: Record<string, string> | undefined): Response {
+  const viewer = demoViewers.find((v) => v.username.toLowerCase() === (body?.username ?? '').trim().toLowerCase() && v.password === body?.password);
+  if (viewer) {
+    setDemoViewer(viewer.username);
+    setDemoSignedOut(false);
+    return json({ username: viewer.username, role: 'viewer' });
+  }
   if ((body?.username ?? '').trim() !== DEMO_LOGIN.username || body?.password !== DEMO_LOGIN.password) return error(401, 'wrong username or password');
   if (demoTwoFactor().on) {
     const code = (body?.code ?? '').trim();
     if (!code) return error(401, 'enter the code from your authenticator app', { code: 'needed' });
     if (!/^\d{6}$/.test(code) && code.length < 8) return error(401, 'that code is not right');
   }
+  setDemoViewer('');
   setDemoSignedOut(false);
-  return json({ username: DEMO_LOGIN.username });
+  return json({ username: DEMO_LOGIN.username, role: 'admin' });
 }
 
 // demoFetch answers API requests from the demo data, after a short, realistic delay.
@@ -2837,7 +2923,15 @@ export async function demoFetch(input: RequestInfo | URL, init: RequestInit = {}
     return new Response(null, { status: 204 });
   }
   if (demoSignedOut && !PUBLIC.has(url.pathname)) return error(401, 'sign in first');
-  return route(method, url, body);
+  if (demoViewer && method === 'POST' && url.pathname === '/api/auth/password') {
+    const v = demoViewers.find((x) => x.username === demoViewer);
+    if (!v || body?.current !== v.password) return error(403, 'the current password is not right');
+    if ((body?.new ?? '').length < 10) return error(400, 'use a password of at least 10 characters');
+    v.password = body.new;
+    return json({ changed: true });
+  }
+  if (demoViewer && (method !== 'GET' || ADMIN_ONLY.has(url.pathname))) return json({ error: 'You are signed in as a viewer: you can look, but not change anything', read_only: true }, 403);
+  return demoViewerRoutes(method, url.pathname, body) ?? route(method, url, body);
 }
 
 // The status page's domain in nginx, in the demo: set up or not, in this tab only.

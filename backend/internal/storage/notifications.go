@@ -3,6 +3,7 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
+	"slices"
 	"strings"
 )
 
@@ -156,19 +157,22 @@ func (s *Store) HeldNotifications() []Notification {
 	return scanNotifications(rows)
 }
 
-// NotificationsBetween returns the notifications from `from` to `to`, oldest first, at most limit.
+// NotificationsBetween returns the notifications from `from` to `to`, oldest first, at most limit:
+// the newest ones when there are more, since callers explain what happened just before `to`.
 func (s *Store) NotificationsBetween(from, to float64, limit int) []Notification {
 	db, unlock := s.lock()
 	defer unlock()
 	if db == nil {
 		return nil
 	}
-	rows, err := db.Query("SELECT "+notificationColumns+" FROM notifications WHERE ts >= ? AND ts <= ? ORDER BY ts, id LIMIT ?", from, to, limit)
+	rows, err := db.Query("SELECT "+notificationColumns+" FROM notifications WHERE ts >= ? AND ts <= ? ORDER BY ts DESC, id DESC LIMIT ?", from, to, limit)
 	if err != nil {
 		log.Warn("Notification range query failed", "err", err)
 		return nil
 	}
-	return scanNotifications(rows)
+	out := scanNotifications(rows)
+	slices.Reverse(out)
+	return out
 }
 
 func scanNotifications(rows *sql.Rows) []Notification {

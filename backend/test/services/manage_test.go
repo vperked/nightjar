@@ -112,7 +112,7 @@ func TestRenamingARunningCheck(t *testing.T) {
 	// Meanwhile a new check takes the old name; it has not run, so the result is not its.
 	m.Save("", parseSpec(t, `{"name":"api","type":"tcp","target":"127.0.0.1:2","interval":60}`))
 	// It says where the result went, for its alert to use the new name.
-	if name, _ := m.RecordAs("api", services.Result{Up: true}, 1005); name != "api-prod" {
+	if name, _, recorded := m.RecordAs("api", services.Result{Up: true}, 1005); name != "api-prod" || !recorded {
 		t.Fatalf("recorded as %q", name)
 	}
 	if got := m.State("api-prod"); got.LastCheck != 1005 || got.Status != services.StatusUp {

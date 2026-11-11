@@ -211,6 +211,39 @@ func TestALongOutageClosesWhenItRecovers(t *testing.T) {
 	}
 }
 
+// Alerts with no recovery to follow (a drive warning, a check deleted while down) must not leave
+// their incident ongoing for ever, nor pull in everything that happens afterwards.
+func TestAnIncidentNothingRecoversFromClosesOnceQuiet(t *testing.T) {
+	notes := []note{
+		n(0, "storage", "warning", "sda is wearing out", "", "drive:sda"),
+		n(600, "storage", "warning", "sda is wearing out", "", "drive:sda"),
+		n(3*3600, "system", "info", "Updates installed", "", ""),
+		n(incidents.Quiet+2*3600, "system", "info", "Nightjar restarted", "", ""),
+	}
+	list := incidents.Build(notes, nil, incidents.Quiet+3*3600, nil)
+	if len(list) != 1 || list[0].Ended == nil || *list[0].Ended != 600 {
+		t.Fatalf("one incident ending at its last warning, got %+v", list)
+	}
+	for _, e := range list[0].Events {
+		if e.TS > 600+incidents.Join {
+			t.Fatalf("a note long after it went quiet was taken in: %+v", list[0].Events)
+		}
+	}
+
+	// Still quiet for less than Quiet at now: it stays ongoing.
+	list = incidents.Build(notes[:2], nil, 600+incidents.Quiet-1, nil)
+	if len(list) != 1 || list[0].Ended != nil {
+		t.Fatalf("still within Quiet, want ongoing: %+v", list)
+	}
+
+	// A problem about it after a long silence starts a new incident instead of joining the old one.
+	notes = append(notes[:2], n(600+incidents.Quiet+60, "storage", "warning", "sda is wearing out", "", "drive:sda"))
+	list = incidents.Build(notes, nil, 600+incidents.Quiet+120, nil)
+	if len(list) != 2 || list[1].Ended == nil || *list[1].Ended != 600 || list[0].Ended != nil {
+		t.Fatalf("want the old incident closed and a new one ongoing, got %+v", list)
+	}
+}
+
 func TestSavingOneEntryNeverLosesTheOthers(t *testing.T) {
 	db := storage.Open(filepath.Join(t.TempDir(), "i.db"))
 	t.Cleanup(db.Close)

@@ -1,6 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type Ref } from 'react';
 import { createPortal } from 'react-dom';
+import { useCanEdit } from '../api/ConfigContext';
 import { useNotifications } from '../api/NotificationsContext';
+import { useMenu } from '../hooks/useMenu';
 import { useNow } from '../hooks/useNow';
 import { MUTE_FOR, timeLeft } from './notifications';
 
@@ -20,6 +22,15 @@ export function MuteButton({ subject, label, compact = false }: { subject: strin
   const menu = useRef<HTMLDivElement>(null);
   const [place, setPlace] = useState<CSSProperties>();
   const until = mutedUntil(subject);
+  const canEdit = useCanEdit();
+  const keys = useMenu(menu, button, open, setOpen);
+  // Muting swaps the button for the muted tag, and unmuting swaps it back. Once the server answers,
+  // focus follows to the new control, as long as it had not gone somewhere else in the meantime.
+  const swapped = useRef(false);
+  const takeFocus = swapped.current && (!document.activeElement || document.activeElement === document.body || !!root.current?.contains(document.activeElement));
+  useEffect(() => {
+    swapped.current = false;
+  }, [!!until]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!open) return;
@@ -48,7 +59,6 @@ export function MuteButton({ subject, label, compact = false }: { subject: strin
       setPlace({ left: Math.max(edge, Math.min(left, window.innerWidth - m.width - edge)), top: below ? b.bottom + gap : Math.max(edge, b.top - gap - m.height) });
     };
     position();
-    menu.current?.querySelector('button')?.focus({ preventScroll: true });
     window.addEventListener('resize', position);
     window.addEventListener('scroll', position, true);
     return () => {
@@ -59,12 +69,15 @@ export function MuteButton({ subject, label, compact = false }: { subject: strin
 
   if (!summary) return null;
 
-  if (until) return <MutedTag subject={subject} label={label} compact={compact} />;
+  if (until) return <MutedTag subject={subject} label={label} compact={compact} rootRef={root} autoFocus={takeFocus} onUnmute={() => (swapped.current = true)} />;
+  // A viewer sees what is muted, but muting is the admin's.
+  if (!canEdit) return null;
 
   return (
-    <span className={`mute ${open ? 'open' : ''}`} ref={root} onClick={stop}>
+    <span className={`mute ${open ? 'open' : ''}`} ref={root} onClick={stop} onBlur={keys.onBlur}>
       <button
         ref={button}
+        autoFocus={takeFocus}
         type="button"
         className={compact ? 'icon-btn mute-btn' : 'btn-quiet mute-btn'}
         aria-haspopup="menu"
@@ -78,28 +91,17 @@ export function MuteButton({ subject, label, compact = false }: { subject: strin
       </button>
       {open &&
         createPortal(
-          <div
-            ref={menu}
-            className="mute-menu"
-            style={place}
-            role="menu"
-            aria-label={`Mute ${label} for`}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') {
-                e.stopPropagation();
-                setOpen(false);
-                button.current?.focus();
-              }
-            }}
-          >
+          <div ref={menu} className="mute-menu" style={place} role="menu" aria-label={`Mute ${label} for`} onKeyDown={keys.onKeyDown}>
             <div className="mute-menu-head">Mute alerts for</div>
             {MUTE_FOR.map((m) => (
               <button
                 key={m.minutes}
                 type="button"
                 role="menuitem"
+                tabIndex={-1}
                 onClick={() => {
-                  setOpen(false);
+                  keys.done();
+                  swapped.current = true;
                   mute(subject, label, m.minutes);
                 }}
               >
@@ -117,17 +119,58 @@ export function MuteButton({ subject, label, compact = false }: { subject: strin
 const stop = (e: MouseEvent) => e.stopPropagation();
 
 // MutedTag shows how long a mute has left, and unmutes on a click. It shows nothing when the
-// subject is not muted, so lists can carry it on every row.
-export function MutedTag({ subject, label, compact = false }: { subject: string; label: string; compact?: boolean }) {
+// subject is not muted, so lists can carry it on every row. readOnly shows it without the unmute,
+// for a place that is itself a button (a row that opens), where a button inside would be invalid
+// and out of reach; the row then needs its unmute somewhere else.
+export function MutedTag({
+  subject,
+  label,
+  compact = false,
+  readOnly = false,
+  autoFocus = false,
+  onUnmute,
+  rootRef,
+}: {
+  subject: string;
+  label: string;
+  compact?: boolean;
+  readOnly?: boolean;
+  autoFocus?: boolean;
+  onUnmute?: () => void;
+  rootRef?: Ref<HTMLSpanElement>;
+}) {
   const { mutedUntil, mute } = useNotifications();
   const now = useNow(30000);
+  const canEdit = useCanEdit();
   const until = mutedUntil(subject);
   if (!until) return null;
+  const text = <span className="num">{compact ? timeLeft(until, now).replace(' left', '') : `muted · ${timeLeft(until, now)}`}</span>;
+  if (!canEdit || readOnly)
+    return (
+      <span className="mute">
+        <span className="mute-on" title={`Alerts for ${label} are muted.`}>
+          <BellOffIcon />
+          {/* The compact tag is only a time; a screen reader needs to hear what it is the time of. */}
+          {compact && <span className="sr-only">muted, </span>}
+          {text}
+        </span>
+      </span>
+    );
   return (
-    <span className="mute" onClick={stop}>
-      <button type="button" className="mute-on" onClick={() => mute(subject, label, 0)} title={`Alerts for ${label} are muted. Click to unmute.`} aria-label={`Unmute ${label}`}>
+    <span className="mute" onClick={stop} ref={rootRef}>
+      <button
+        type="button"
+        className="mute-on"
+        autoFocus={autoFocus}
+        onClick={() => {
+          onUnmute?.();
+          mute(subject, label, 0);
+        }}
+        title={`Alerts for ${label} are muted. Click to unmute.`}
+        aria-label={`Unmute ${label}`}
+      >
         <BellOffIcon />
-        <span className="num">{compact ? timeLeft(until, now).replace(' left', '') : `muted · ${timeLeft(until, now)}`}</span>
+        {text}
       </button>
     </span>
   );

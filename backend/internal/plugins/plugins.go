@@ -22,7 +22,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"nightjar/internal/logx"
 )
+
+var log = logx.Component("Plugins")
 
 // What a plugin can provide.
 const (
@@ -153,17 +157,39 @@ type Manager struct {
 	cards   map[string]CardData
 	last    map[string]LastRun
 	due     map[string]time.Time
-	// stateRead is set once the owner's choices are read; until then none are saved over them.
-	stateRead bool
+	// stateRead is set once the owner's choices are read; until then none are saved over them, and
+	// they are tried again at most every StateRetry.
+	stateRead  bool
+	stateTried time.Time
 }
+
+// StateRetry is how often choices that could not be read are tried again; tests shorten it.
+var StateRetry = 30 * time.Second
 
 // New is a manager for the plugins in dir. Call Scan to find them.
 func New(dir string, store Store) *Manager {
 	m := &Manager{dir: dir, store: store, now: time.Now, plugins: map[string]*Plugin{}, state: map[string]State{}, cards: map[string]CardData{}, last: map[string]LastRun{}, due: map[string]time.Time{}}
 	if store != nil {
-		_ = m.loadState()
+		m.stateTried = m.now()
+		if err := m.loadState(); err != nil {
+			// Every plugin counts as off until they can be read: say so, rather than look off.
+			log.Warn("Could not read the plugins' settings; plugins stay off until they can be read", "err", err)
+		}
 	}
 	return m
+}
+
+// readStateLocked reads the owner's choices if they could not be read before (under m.mu).
+func (m *Manager) readStateLocked() {
+	if m.store == nil || m.stateRead || m.now().Sub(m.stateTried) < StateRetry {
+		return
+	}
+	m.stateTried = m.now()
+	if err := m.loadState(); err != nil {
+		log.Debug("Still cannot read the plugins' settings", "err", err)
+		return
+	}
+	log.Info("Read the plugins' settings")
 }
 
 // loadState reads the owner's choices from the store.
@@ -179,7 +205,14 @@ func (m *Manager) loadState() error {
 		raw = m.store.Meta(stateKey)
 	}
 	state := map[string]State{}
-	_ = json.Unmarshal([]byte(raw), &state)
+	if raw != "" {
+		// Unreadable JSON will not get better by trying again: start afresh, so the owner can turn
+		// plugins back on, but say so.
+		if err := json.Unmarshal([]byte(raw), &state); err != nil {
+			log.Error("The plugins' saved settings are damaged; every plugin starts off", "err", err)
+			state = map[string]State{}
+		}
+	}
 	m.state, m.stateRead = state, true
 	return nil
 }
@@ -308,8 +341,8 @@ func (p *Plugin) problem() string {
 
 // runnable is the plugin's program, once nobody but root and the user Nightjar runs as could change
 // it or swap it for another: like sshd, a plugin others could change is not run, since it runs as
-// Nightjar. That takes the program and every folder it is reached through, from the plugins folder
-// down. It is asked again before every run, since what was safe when the folder was read may not be.
+// Nightjar. That takes the program, every folder it is reached through inside the plugin, and every
+// folder above the plugin's real folder up to /. It is asked again before every run, since what was safe when the folder was read may not be.
 func (p *Plugin) runnable() (string, error) {
 	prog, err := p.program()
 	if err != nil {
@@ -319,7 +352,18 @@ func (p *Plugin) runnable() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	paths := []string{filepath.Dir(dir), dir, prog}
+	paths := []string{dir, prog}
+	// Every folder above the real plugin folder, up to /, as sshd's StrictModes does: whoever can
+	// change any of them can swap the folder for their own. A root-owned sticky folder (/tmp) is
+	// the one exception, since nobody can rename or remove what others put in it.
+	for d := filepath.Dir(dir); ; d = filepath.Dir(d) {
+		if err := ownedAncestor(d); err != nil {
+			return "", err
+		}
+		if d == filepath.Dir(d) {
+			break
+		}
+	}
 	// The folders on the way, as written in "run" and as they really are.
 	for _, path := range []string{filepath.Join(dir, p.Run), prog} {
 		for d := filepath.Dir(path); ; d = filepath.Dir(d) {
@@ -335,6 +379,16 @@ func (p *Plugin) runnable() (string, error) {
 		}
 	}
 	return prog, nil
+}
+
+// ownedAncestor is owned for a folder above a plugin, letting through a root-owned sticky folder.
+func ownedAncestor(path string) error {
+	if info, err := os.Stat(path); err == nil && info.Mode()&os.ModeSticky != 0 {
+		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid == 0 {
+			return nil
+		}
+	}
+	return owned(path)
 }
 
 // owned says why path could be changed by someone other than root and the user Nightjar runs as.
@@ -384,6 +438,7 @@ type View struct {
 func (m *Manager) List() []View {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.readStateLocked()
 	out := []View{}
 	for _, p := range m.plugins {
 		st := m.state[p.ID]
@@ -435,6 +490,7 @@ func (m *Manager) Get(id string) (Plugin, bool) {
 func (m *Manager) Enabled(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.readStateLocked()
 	p, ok := m.plugins[id]
 	return ok && p.Problem == "" && m.state[id].Enabled
 }
@@ -561,6 +617,7 @@ func Trying(ctx context.Context) context.Context { return context.WithValue(ctx,
 // run runs a plugin's program in mode. It is killed, with everything it started, after its timeout.
 func (m *Manager) run(ctx context.Context, id, mode string, in input) ([]byte, error) {
 	m.mu.Lock()
+	m.readStateLocked()
 	p, ok := m.plugins[id]
 	st := m.state[id]
 	var plugin Plugin
@@ -771,6 +828,7 @@ func clip(s string, n int) string {
 func (m *Manager) Cards() []CardData {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.readStateLocked()
 	out := []CardData{}
 	for id, c := range m.cards {
 		if p, ok := m.plugins[id]; ok && m.state[id].Enabled && p.Problem == "" {

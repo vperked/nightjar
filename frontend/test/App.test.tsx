@@ -1,4 +1,4 @@
-import { fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { api, onUnauthorized, UnauthorizedError } from '../src/api/client';
@@ -8,7 +8,7 @@ import { ServicesProvider, useServices } from '../src/api/ServicesContext';
 import type { Notification, PlexStream, QBState, QBTorrent, Service, SettingField, SetupStatus, Unit, UpdateTarget, UpdatesResponse } from '../src/api/types';
 import { UpdatesProvider } from '../src/api/UpdatesContext';
 import { buildIn, useNewBuild } from '../src/freshness';
-import { AccountSection, CreateAdmin, SignIn } from '../src/components/Account';
+import { AccountSection, CreateAdmin, SignIn, ViewerAccountPage, ViewersSection } from '../src/components/Account';
 import { AccountMenu } from '../src/components/AccountMenu';
 import { SectionsPanel } from '../src/components/Sections';
 import { AppearancePanel } from '../src/components/AppearancePanel';
@@ -117,7 +117,7 @@ describe('State', () => {
 });
 
 describe('ServiceRow', () => {
-  it('renders names as text and missing uptime as --', () => {
+  it('renders names as text and missing uptime as a dash', () => {
     render(
       <MemoryRouter>
         <table>
@@ -128,7 +128,7 @@ describe('ServiceRow', () => {
       </MemoryRouter>,
     );
     expect(screen.getByText('<b>x</b>')).toBeInTheDocument();
-    expect(screen.getByText('--')).toBeInTheDocument();
+    expect(screen.getByText('—')).toBeInTheDocument();
     expect(screen.getByText('10s ago')).toBeInTheDocument();
   });
 });
@@ -174,6 +174,20 @@ describe('StatusPage', () => {
     const tip = screen.getByRole('tooltip');
     expect(tip).toHaveTextContent('97.2% up');
     expect(tip).toHaveTextContent('about 40m down');
+  });
+
+  it('sums uptime in the headline, and gives a phone the 30-day figure its 30 bars show', () => {
+    const days = Array.from({ length: 90 }, (_, i) => day(i, 100));
+    const svc = (name: string, u90: number, u30: number) => ({ name, status: 'up' as const, uptime_24h: 100, uptime_30d: u30, uptime_90d: u90, recent: [], days });
+    const { container } = render(<StatusView data={{ title: 'Acme', overall: 'operational', updated: Date.now() / 1000, services: [svc('web', 99.9, 99.5), svc('db', 99.7, 99.7)] }} />);
+    expect(screen.getByText('99.80%').parentElement).toHaveTextContent('99.80% uptime over 90 days');
+    const web = screen.getByText('99.90% uptime').parentElement!;
+    expect(web).toHaveClass('status-row-uptime');
+    expect(within(web).getByText('99.50% uptime')).toHaveClass('short');
+    // The same figure either way is written once.
+    expect(screen.getAllByText('99.70% uptime')).toHaveLength(1);
+    // One scale under the list, not one per row.
+    expect(container.querySelectorAll('.status-scale')).toHaveLength(1);
   });
 
   it('falls back to the 30-day figure from an older monitor without days', async () => {
@@ -410,6 +424,63 @@ describe('CheckForm', () => {
     expect(screen.queryByText('Not reachable')).not.toBeInTheDocument();
   });
 
+  it('keeps a saved Redis password unless it is changed or removed', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(
+        async (input) =>
+          new Response(JSON.stringify(String(input) === '/api/checks/test' ? { result: { up: true, latency_ms: 2, detail: 'PONG' } } : { check: { name: 'cache' } }), {
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      );
+    const initial = {
+      name: 'cache',
+      type: 'redis' as const,
+      target: 'cache.lan',
+      interval: 60,
+      timeout: 10,
+      retries: 2,
+      expected_status: null,
+      keyword: '',
+      verify_tls: true,
+      tls_warn_days: 14,
+      paused: false,
+      retry_interval: 20,
+      ping_count: 3,
+      ping_interval: 0.2,
+      password_set: true,
+    };
+    render(<CheckForm initial={initial} onSaved={() => {}} onCancel={() => {}} />);
+    const field = screen.getByLabelText('Redis password');
+    expect(field).toHaveAttribute('type', 'password');
+    expect(field).toHaveAttribute('placeholder', 'saved: leave empty to keep it');
+    fireEvent.click(screen.getByLabelText('Remove the saved password'));
+    expect(field).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save check' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u, i]) => String(u) === '/api/checks/cache' && i?.method === 'PUT')).toBe(true));
+    const put = fetchMock.mock.calls.find(([u, i]) => String(u) === '/api/checks/cache' && i?.method === 'PUT')!;
+    const sent = JSON.parse(put[1]?.body as string);
+    expect(sent.clear_password).toBe(true);
+    expect(sent.password).toBeUndefined();
+    // The test before saving names the saved check, so the server can use its password.
+    const test = fetchMock.mock.calls.find(([u]) => String(u) === '/api/checks/test')!;
+    expect(JSON.parse(test[1]?.body as string).original).toBe('cache');
+  });
+
+  it('offers a DNS check its record type, server and expected answer', () => {
+    render(<CheckForm onSaved={() => {}} onCancel={() => {}} />);
+    expect(screen.queryByLabelText('DNS server')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('combobox', { name: 'Check type' }));
+    fireEvent.mouseDown(screen.getByRole('option', { name: /^DNS/ }));
+    expect(screen.getByLabelText('DNS server')).toBeInTheDocument();
+    expect(screen.getByLabelText('Expected answer')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'MX' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('combobox', { name: 'Check type' }));
+    fireEvent.mouseDown(screen.getByRole('option', { name: /^PostgreSQL/ }));
+    expect(screen.queryByLabelText('DNS server')).not.toBeInTheDocument();
+    expect(screen.getByText(/needs no password/)).toBeInTheDocument();
+  });
+
   it('adds a heartbeat with its schedule and a repair, with nothing to test', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')
@@ -417,7 +488,8 @@ describe('CheckForm', () => {
     const onSaved = vi.fn();
     render(<CheckForm onSaved={onSaved} onCancel={() => {}} />);
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'backup' } });
-    fireEvent.click(screen.getByRole('button', { name: 'heartbeat' }));
+    fireEvent.click(screen.getByRole('combobox', { name: 'Check type' }));
+    fireEvent.mouseDown(screen.getByRole('option', { name: /^Heartbeat/ }));
     expect(screen.queryByLabelText('Target')).not.toBeInTheDocument();
     expect(screen.queryByText('Test')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'nightly at 3:00' }));
@@ -817,6 +889,37 @@ describe('qBittorrent', () => {
     expect(group('stalledup')).toBe('seeding');
     expect(group('stoppedup')).toBe('paused');
     expect(group('missingfiles')).toBe('error');
+  });
+
+  it('sorts by ratio from the column header, turns the order round, and remembers it', async () => {
+    localStorage.removeItem('nightjar.qbittorrent.sort');
+    // The saved order must not outlive this test, or the next one sees its list sorted by ratio.
+    onTestFinished(() => localStorage.removeItem('nightjar.qbittorrent.sort'));
+    const q = state({ torrents: [torrent({ hash: '1', name: 'mid.iso', ratio: 1.5 }), torrent({ hash: '2', name: 'low.iso', ratio: 0.2 }), torrent({ hash: '3', name: 'high.iso', ratio: 7.25 })] });
+    // A fresh reply each time: a Response's body can only be read once, and the page is opened twice.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ enabled: true, qbittorrent: q }), { headers: { 'Content-Type': 'application/json' } }));
+    const view = page();
+    await screen.findByText('mid.iso');
+    const names = () =>
+      screen
+        .getAllByRole('row')
+        .slice(1)
+        .map((r) => r.querySelector('.truncate')?.textContent);
+    const ratio = () => screen.getByRole('button', { name: /^Ratio/ });
+
+    fireEvent.click(ratio());
+    expect(names()).toEqual(['high.iso', 'mid.iso', 'low.iso']);
+    expect(ratio().closest('th')).toHaveAttribute('aria-sort', 'descending');
+
+    fireEvent.click(ratio());
+    expect(names()).toEqual(['low.iso', 'mid.iso', 'high.iso']);
+    expect(ratio().closest('th')).toHaveAttribute('aria-sort', 'ascending');
+
+    // Leaving and coming back keeps the order.
+    view.unmount();
+    page();
+    await screen.findByText('mid.iso');
+    expect(names()).toEqual(['low.iso', 'mid.iso', 'high.iso']);
   });
 
   it('puts stalled torrents first, says for how long, and filters', async () => {
@@ -1356,6 +1459,57 @@ describe('network', () => {
     expect(screen.getByText(/wg0/, { selector: '.page-sub span' })).toBeInTheDocument();
   });
 
+  it('asks for the half hour again now and then, since only a poll without since brings it', async () => {
+    const nic = {
+      name: 'eth0',
+      up: true,
+      default: true,
+      virtual: false,
+      rx_bps: 0,
+      tx_bps: 0,
+      rx_pps: 0,
+      tx_pps: 0,
+      rx_peak: 0,
+      tx_peak: 0,
+      rx_avg: 0,
+      tx_avg: 0,
+      rx_total: 0,
+      tx_total: 0,
+      errors: 0,
+      drops: 0,
+    };
+    let ts = 100;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const u = String(input);
+      if (!u.startsWith('/api/network')) return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+      ts++;
+      const body = {
+        enabled: true,
+        network: { interfaces: [nic], samples: { eth0: [{ ts, rx: 1, tx: 1 }] }, processes: [], hosts: [], connections: 0, since: 90 },
+        ...(u.includes('since') ? {} : { history: [] }),
+      };
+      return new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(
+        <MemoryRouter>
+          <NetworkPage />
+        </MemoryRouter>,
+      );
+      const full = () => fetchMock.mock.calls.map(([u]) => String(u)).filter((u) => u === '/api/network').length;
+      await waitFor(() => expect(full()).toBe(1));
+      for (let i = 0; i < 16; i++) {
+        await act(async () => {
+          vi.advanceTimersByTime(1000);
+        });
+      }
+      expect(full()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps program rows in place while the monitor re-sorts them every second', async () => {
     const nic = {
       name: 'eth0',
@@ -1884,6 +2038,70 @@ describe('admin account', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
+  it('lets the admin add and remove viewers, and shows viewers nothing', async () => {
+    let viewers = [{ username: 'sam', created: 1_700_000_000, sessions: 2 }];
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (init?.method === 'POST') viewers = [...viewers, { username: 'kim', created: 1_700_000_100, sessions: 0 }];
+      if (init?.method === 'DELETE') viewers = viewers.filter((v) => !(String(input).endsWith('/sam') && v.username === 'sam'));
+      return json({ viewers });
+    });
+    const { unmount } = render(
+      <ToastProvider>
+        <ConfigContext.Provider value={{ ...config({ configured: true, username: 'jay' }), authorized: true }}>
+          <ViewersSection />
+        </ConfigContext.Provider>
+      </ToastProvider>,
+    );
+    expect(await screen.findByText('sam')).toBeInTheDocument();
+    expect(screen.getByText(/signed in on 2 browsers/)).toBeInTheDocument();
+    const add = screen.getByRole('button', { name: 'Add viewer' });
+    fireEvent.change(screen.getByLabelText("Viewer's username"), { target: { value: 'kim' } });
+    fireEvent.change(screen.getByLabelText('Their password'), { target: { value: 'short' } });
+    expect(add).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Their password'), { target: { value: "kim's long password" } });
+    fireEvent.click(add);
+    expect(await screen.findByText('kim')).toBeInTheDocument();
+    const post = fetchMock.mock.calls.find(([, i]) => i?.method === 'POST')!;
+    expect(JSON.parse(post[1]?.body as string)).toEqual({ username: 'kim', password: "kim's long password" });
+    // Removing takes a second click.
+    const remove = screen.getAllByRole('button', { name: 'Remove' })[0];
+    fireEvent.click(remove);
+    expect(fetchMock.mock.calls.some(([, i]) => i?.method === 'DELETE')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove for good?' }));
+    await waitFor(() => expect(screen.queryByText('sam')).not.toBeInTheDocument());
+    unmount();
+
+    fetchMock.mockClear();
+    render(
+      <ToastProvider>
+        <ConfigContext.Provider value={{ ...config({ configured: true, username: 'sam' }), account: { configured: true, username: 'sam', role: 'viewer' }, authorized: true }}>
+          <ViewersSection />
+        </ConfigContext.Provider>
+      </ToastProvider>,
+    );
+    expect(screen.queryByRole('button', { name: 'Add viewer' })).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('gives a viewer its own password and nothing else', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ changed: true }));
+    render(
+      <ToastProvider>
+        <ConfigContext.Provider value={{ ...config({ configured: true }), account: { configured: true, username: 'sam', role: 'viewer' }, authorized: true }}>
+          <ViewerAccountPage />
+        </ConfigContext.Provider>
+      </ToastProvider>,
+    );
+    expect(screen.getByRole('heading', { name: 'Your account' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Set it up' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: "sam's long password" } });
+    fireEvent.change(screen.getByLabelText('New password'), { target: { value: "sam's newer password" } });
+    fireEvent.change(screen.getByLabelText('Confirm new password'), { target: { value: "sam's newer password" } });
+    fireEvent.click(screen.getByRole('button', { name: 'Change password' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/auth/password');
+  });
+
   it('changes the password from Settings', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ changed: true }));
     render(
@@ -2371,7 +2589,7 @@ describe('docs', () => {
           if (!DOCS.some((x) => x.slug === doc)) problems.push(`${d.slug}: links to a missing page ${href}`);
           else if (hash && !anchors(doc).has(hash)) problems.push(`${d.slug}: links to a missing section ${href}`);
         } else if (!routes.includes(path)) problems.push(`${d.slug}: links to an unknown page ${href}`);
-        else if (path === '/settings' && hash && !['sections', 'appearance'].includes(hash)) problems.push(`${d.slug}: links to an unknown part of settings ${href}`);
+        else if (path === '/settings' && hash && !['sections', 'appearance', 'viewers'].includes(hash)) problems.push(`${d.slug}: links to an unknown part of settings ${href}`);
       }
     }
     const files = Object.keys(import.meta.glob('../src/docs/*.md')).map((f) => f.replace(/^.*\/(.*)\.md$/, '$1'));
@@ -2545,10 +2763,11 @@ describe('teaching and telling', () => {
 
 describe('media cleanup', () => {
   it('lists what nobody watched, says when it leaves, and keeps one on request', async () => {
-    const view = { ...structuredClone(demoCleanup()), enabled: false };
+    let view = { ...structuredClone(demoCleanup()), enabled: false };
+    // The monitor keeps what it was told: a later read lists Cats as kept too.
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
-      const body = init?.method === 'PUT' ? { ...view, items: view.items.filter((i) => i.key !== 'k2'), kept: [...view.kept, { key: 'k2', title: 'Cats', at: 1 }] } : view;
-      return new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
+      if (init?.method === 'PUT') view = { ...view, items: view.items.filter((i) => i.key !== 'k2'), kept: [...view.kept, { key: 'k2', title: 'Cats', at: 1 }] };
+      return new Response(JSON.stringify(view), { headers: { 'Content-Type': 'application/json' } });
     });
     render(
       <MemoryRouter>
@@ -2565,6 +2784,46 @@ describe('media cleanup', () => {
     expect(await screen.findByText('Cats is kept')).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([u, i]) => String(u) === '/api/cleanup/k2/keep' && i?.method === 'PUT')).toBe(true);
     expect(screen.queryByText('Cats (2019)')).not.toBeInTheDocument();
+  });
+
+  it('does not let a poll sent before Keep bring the kept item back', async () => {
+    const before = { ...structuredClone(demoCleanup()), enabled: false };
+    const after = { ...before, items: before.items.filter((i) => i.key !== 'k2'), kept: [...before.kept, { key: 'k2', title: 'Cats', at: 1 }] };
+    const reply = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
+    // The first read answers at once; the second (the 60 s poll) hangs until released, with the
+    // list from before the Keep; reads after that see the change.
+    let gets = 0;
+    let release: () => void = () => {};
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      if (init?.method === 'PUT') return reply(after);
+      gets++;
+      if (gets === 1) return reply(before);
+      if (gets === 2) return new Promise<Response>((res) => (release = () => res(reply(before))));
+      return reply(after);
+    });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(
+        <MemoryRouter>
+          <ToastProvider>
+            <CleanupPage />
+          </ToastProvider>
+        </MemoryRouter>,
+      );
+      expect(await screen.findByText('Cats (2019)')).toBeInTheDocument();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(gets).toBe(2);
+      fireEvent.click(within(screen.getByText('Cats (2019)').closest('tr')!).getByRole('button', { name: 'Keep' }));
+      expect(await screen.findByText('Cats is kept')).toBeInTheDocument();
+      expect(screen.queryByText('Cats (2019)')).not.toBeInTheDocument();
+      await act(async () => release());
+      await waitFor(() => expect(gets).toBe(3));
+      expect(screen.queryByText('Cats (2019)')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -3298,6 +3557,9 @@ describe('attack watch', () => {
     expect(screen.getByText(/^\s*blocked$/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Unblock' }));
     await waitFor(() => expect(unblocked).toEqual(['185.220.101.4']));
+    // Mid-attack, turning the defense off asks first: it lifts the blocks.
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off…' }));
+    expect(toggled).toEqual([]);
     fireEvent.click(screen.getByRole('button', { name: 'Turn off' }));
     await waitFor(() => expect(toggled).toEqual([false]));
 
@@ -3452,7 +3714,11 @@ describe('firewall', () => {
     expect(await screen.findByText('at most 10 a minute each')).toBeInTheDocument();
     expect(fw.get().rules.find((r) => r.id === 'r0')?.rate).toBe('10/min');
 
-    fireEvent.click(within(screen.getByText('198.51.100.0/24').closest('li')!).getByRole('button', { name: 'Remove' }));
+    // Remove asks first, in the rule's row.
+    const doomed = screen.getByText('198.51.100.0/24').closest('li')!;
+    fireEvent.click(within(doomed).getByRole('button', { name: 'Remove…' }));
+    expect(within(doomed).getByText('Remove?')).toBeInTheDocument();
+    fireEvent.click(within(doomed).getByRole('button', { name: 'Remove' }));
     await waitFor(() => expect(screen.queryByText('198.51.100.0/24')).not.toBeInTheDocument());
 
     // Outgoing: its own rules, and no limits.
@@ -3515,7 +3781,7 @@ describe('firewall', () => {
     expect(screen.queryByRole('radio', { name: /Drop it/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument();
     expect(screen.queryByText('Dropped lately')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove…' })).toBeInTheDocument();
   });
 });
 

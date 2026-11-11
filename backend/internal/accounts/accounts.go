@@ -1,4 +1,4 @@
-// Package accounts keeps the dashboard's admin account and who is signed in. The dashboard does
+// Package accounts keeps the dashboard's admin account, its read-only viewers, and who is signed in. The dashboard does
 // nothing until the admin account exists, and creating it needs a one-time setup code from the
 // monitor's log, so whoever reaches a fresh install first cannot claim it.
 package accounts
@@ -32,6 +32,9 @@ const (
 	iterations = 600_000
 	// SessionLife is how long a browser stays signed in without being used.
 	SessionLife = 30 * 24 * time.Hour
+	// SessionMaxAge is how long a browser stays signed in at most, however often it is used, so a
+	// stolen cookie that is kept busy does not work for ever.
+	SessionMaxAge = 90 * 24 * time.Hour
 	// MinPassword is the shortest password accepted.
 	MinPassword = 10
 )
@@ -65,9 +68,11 @@ type Accounts struct {
 
 	mu        sync.Mutex
 	admin     *admin
+	viewers   []viewer
 	setupCode string
 	sessions  map[string]*storage.Session // by hash of the cookie value
 	pending   string                      // a TOTP secret offered, not yet confirmed
+	device    []byte                      // signs device cookies (see NewDevice), loaded when first needed
 }
 
 // New loads the admin account and sessions. Without an account it makes a setup code and logs it.
@@ -79,6 +84,7 @@ func New(store *storage.Store) *Accounts {
 			a.admin = &ad
 		}
 	}
+	a.loadViewers()
 	for _, s := range store.Sessions() {
 		a.sessions[s.Hash] = &s
 	}
@@ -170,7 +176,7 @@ func (a *Accounts) saveLocked(ad *admin) error {
 	return nil
 }
 
-// Verify checks a username and password.
+// Verify checks the admin's username and password.
 func (a *Accounts) Verify(username, password string) error {
 	a.mu.Lock()
 	ad := a.admin
@@ -215,37 +221,47 @@ func (a *Accounts) ChangePassword(current, next, keepToken string) error {
 		return err
 	}
 	a.admin = &updated
-	keep := tokenHash(keepToken)
-	var gone []string
-	for h := range a.sessions {
-		if h != keep {
-			gone = append(gone, h)
-			delete(a.sessions, h)
-		}
-	}
-	if len(gone) > 0 {
-		a.store.DeleteSessions(gone...)
-	}
+	a.endOthersLocked(keepToken)
 	return nil
 }
 
-// Reset deletes the admin account and every session, for a forgotten password.
+// Reset deletes the admin account and every session, for a forgotten password. Device cookies are
+// let go too, so a new account of the same name does not trust the old one's browsers.
 func Reset(store *storage.Store) error {
 	if err := store.SetMeta(adminKey, ""); err != nil {
+		return err
+	}
+	if err := store.SetMeta(deviceKey, ""); err != nil {
 		return err
 	}
 	return store.DeleteSessions()
 }
 
+// endOthersLocked signs out the admin's other browsers, keeping the one with keepToken. Viewers'
+// sessions are theirs, and stay.
+func (a *Accounts) endOthersLocked(keepToken string) {
+	keep := tokenHash(keepToken)
+	a.endSessionsLocked(func(h, user string) bool { return h != keep && user == "" })
+}
+
 // ---------- sessions ----------
 
-// NewSession signs a browser in and returns its cookie value.
+// NewSession signs a browser in as the admin and returns its cookie value.
 func (a *Accounts) NewSession(agent string) (string, error) {
+	return a.NewSessionFor(Who{Role: RoleAdmin}, agent)
+}
+
+// NewSessionFor signs a browser in as who and returns its cookie value.
+func (a *Accounts) NewSessionFor(who Who, agent string) (string, error) {
+	user := ""
+	if !who.Admin() {
+		user = who.Username
+	}
 	b := make([]byte, 32)
 	rand.Read(b)
 	token := base64.RawURLEncoding.EncodeToString(b)
 	now := float64(a.now().Unix())
-	s := &storage.Session{Hash: tokenHash(token), Created: now, Seen: now, Agent: truncate(agent, 200)}
+	s := &storage.Session{Hash: tokenHash(token), Created: now, Seen: now, Agent: truncate(agent, 200), User: user}
 	if err := a.store.SaveSession(*s); err != nil {
 		return "", fmt.Errorf("could not sign in: %w", err)
 	}
@@ -256,13 +272,19 @@ func (a *Accounts) NewSession(agent string) (string, error) {
 	return token, nil
 }
 
-// pruneLocked forgets the sessions unused for longer than SessionLife. Valid forgets one when its
-// cookie comes back; this catches the browsers that never come back.
+// expired reports whether a session has been unused for longer than SessionLife, or is older than
+// SessionMaxAge.
+func expired(s *storage.Session, now float64) bool {
+	return now-s.Seen > SessionLife.Seconds() || (s.Created > 0 && now-s.Created > SessionMaxAge.Seconds())
+}
+
+// pruneLocked forgets the sessions that have expired. Valid forgets one when its cookie comes back;
+// this catches the browsers that never come back.
 func (a *Accounts) pruneLocked() {
 	now := float64(a.now().Unix())
 	var gone []string
 	for h, s := range a.sessions {
-		if now-s.Seen > SessionLife.Seconds() {
+		if expired(s, now) {
 			gone = append(gone, h)
 			delete(a.sessions, h)
 		}
@@ -272,10 +294,16 @@ func (a *Accounts) pruneLocked() {
 	}
 }
 
-// Valid reports whether a cookie value is a live session, and keeps it alive.
+// Valid reports whether a cookie value is a live session, the admin's or a viewer's, and keeps it alive.
 func (a *Accounts) Valid(token string) bool {
+	_, ok := a.SessionWho(token)
+	return ok
+}
+
+// valid is the user of a live session ("" for the admin), keeping it alive.
+func (a *Accounts) valid(token string) (string, bool) {
 	if token == "" {
-		return false
+		return "", false
 	}
 	h := tokenHash(token)
 	now := float64(a.now().Unix())
@@ -283,13 +311,13 @@ func (a *Accounts) Valid(token string) bool {
 	s, ok := a.sessions[h]
 	if !ok || a.admin == nil {
 		a.mu.Unlock()
-		return false
+		return "", false
 	}
-	if now-s.Seen > SessionLife.Seconds() {
+	if expired(s, now) {
 		delete(a.sessions, h)
 		a.mu.Unlock()
 		a.store.DeleteSessions(h)
-		return false
+		return "", false
 	}
 	// Written back at most hourly, not on every request. The write is made holding the lock, so a
 	// sign-out or password change cannot delete the session in between and have it saved back.
@@ -297,8 +325,9 @@ func (a *Accounts) Valid(token string) bool {
 		s.Seen = now
 		a.store.SaveSession(*s)
 	}
+	user := s.User
 	a.mu.Unlock()
-	return true
+	return user, true
 }
 
 // EndSession signs a browser out.

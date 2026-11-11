@@ -27,3 +27,7 @@ coverage/
 
 # Kernel monitor state (KERNEL_TRACKING_FILE), written while the monitor runs.
 .nightjar_kernel_tracking.json
+
+# Screenshots taken while checking the UI by hand; not part of the app.
+/frontend/audit/
+/frontend/att-*.png

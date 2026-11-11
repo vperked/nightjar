@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { api } from '../api/client';
+import { useCanEdit } from '../api/ConfigContext';
 import { useServices } from '../api/ServicesContext';
 import type { CheckSpec, HistoryPoint } from '../api/types';
 import { HeartbeatPanel, RepairsPanel, runtime } from '../components/CheckExtras';
@@ -9,7 +10,7 @@ import { MuteButton } from '../components/MuteButton';
 import { useToast } from '../components/Toasts';
 import { TrendChart } from '../components/TrendChart';
 import { Pct, Section, Seg, State, Ticks } from '../components/ui';
-import { formatAgo, formatDuration } from '../format';
+import { formatAgo, formatDuration, plural } from '../format';
 import { useNow } from '../hooks/useNow';
 import { usePoll } from '../hooks/usePoll';
 import { CheckForm } from './CheckForm';
@@ -66,7 +67,10 @@ export function ServiceDetail() {
   const history = usePoll(fetchHistory, 30000);
   const now = useNow(5000);
 
-  const points = useMemo(() => history.data?.points ?? [], [history.data]);
+  // Until the new range (or check) answers, the points in hand are another range's: none rather
+  // than the old ones counted under the new label.
+  const loadingHistory = !history.data || history.stale;
+  const points = useMemo(() => (history.stale ? [] : (history.data?.points ?? [])), [history.data, history.stale]);
   const series = useMemo(() => [{ label: 'Response time', color: 'var(--series-1)', points: points.map((p) => ({ t: p.ts, v: p.latency_ms })) }], [points]);
   const latencies = points.filter((p) => p.latency_ms !== null).map((p) => p.latency_ms as number);
   const sorted = [...latencies].sort((a, b) => a - b);
@@ -80,6 +84,7 @@ export function ServiceDetail() {
   const [editing, setEditing] = useState<CheckSpec>();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const notify = useToast();
+  const canEdit = useCanEdit();
 
   // act runs a change to this check, then refreshes the shared services poll.
   const act = async (change: (spec: CheckSpec) => Promise<void>) => {
@@ -120,7 +125,7 @@ export function ServiceDetail() {
             </div>
           )}
         </div>
-        {svc && (
+        {svc && canEdit && (
           <div className="title-actions">
             <button className="btn-quiet" onClick={edit}>
               Edit
@@ -147,7 +152,7 @@ export function ServiceDetail() {
           </div>
         )}
       </div>
-      {editing && (
+      {canEdit && editing && (
         <CheckForm
           initial={editing}
           onCancel={() => setEditing(undefined)}
@@ -175,7 +180,9 @@ export function ServiceDetail() {
                 <div>
                   <span className="label">Response</span>
                   <div className="readout-value">{svc.latency_ms !== null ? ms(svc.latency_ms) : '—'}</div>
-                  <div className="readout-sub">{avg !== null ? `avg ${ms(avg)} · p95 ${ms(p95 ?? 0)}` : 'no data in range'}</div>
+                  <div className="readout-sub">
+                    {avg !== null ? `avg ${ms(avg)} · p95 ${ms(p95 ?? 0)}` : loadingHistory ? (history.error ? 'history unavailable' : 'loading…') : 'no data in range'}
+                  </div>
                 </div>
               )}
               <div>
@@ -184,7 +191,7 @@ export function ServiceDetail() {
                   <Pct value={svc.uptime_24h} />
                 </div>
                 <div className="readout-sub num">
-                  7d {svc.uptime_7d?.toFixed(2) ?? '—'} · 30d {svc.uptime_30d?.toFixed(2) ?? '—'}
+                  7d {svc.uptime_7d != null ? `${svc.uptime_7d.toFixed(2)}%` : '—'} · 30d {svc.uptime_30d != null ? `${svc.uptime_30d.toFixed(2)}%` : '—'}
                 </div>
               </div>
               <div>
@@ -211,7 +218,13 @@ export function ServiceDetail() {
           {svc && <RepairsPanel svc={svc} now={now} />}
           {svc?.type !== 'heartbeat' && (
             <Section label="Response time" aside={<Seg label="Time range" value={hours} onChange={setHours} options={RANGES} />}>
-              <TrendChart series={series} height={220} format={ms} markers={failures.map((f) => f.ts)} emptyText="no checks recorded in this range" />
+              <TrendChart
+                series={series}
+                height={220}
+                format={ms}
+                markers={failures.map((f) => f.ts)}
+                emptyText={loadingHistory ? (history.error ? history.error.message : 'Loading…') : 'no checks recorded in this range'}
+              />
             </Section>
           )}
           {failures.length > 0 && (
@@ -224,7 +237,7 @@ export function ServiceDetail() {
                     <li key={o.from}>
                       <span className="outage-when num">{span(o.from, o.to)}</span>
                       <span className="outage-why">{o.detail}</span>
-                      <span className="outage-count num">{o.fails === 1 ? '1 check' : `${o.fails} checks`}</span>
+                      <span className="outage-count num">{plural(o.fails, 'check')}</span>
                     </li>
                   ))}
               </ul>

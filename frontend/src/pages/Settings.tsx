@@ -2,7 +2,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { ApiError, api, waitForRestart } from '../api/client';
 import type { SettingField, SettingsResponse, TestTarget } from '../api/types';
-import { AccountSection } from '../components/Account';
+import { AccountSection, ViewersSection } from '../components/Account';
 import { SectionsPanel } from '../components/Sections';
 import { ActivityPanel } from '../components/ActivityPanel';
 import { AppearancePanel } from '../components/AppearancePanel';
@@ -30,6 +30,10 @@ const slug = (group: string) => group.toLowerCase().replace(/\W+/g, '-');
 
 function Control({ field, value, onChange }: { field: SettingField; value: string | undefined; onChange: (v: string) => void }) {
   const current = value ?? field.value;
+  // A reset (an empty draft) shows the default it goes back to, not a switch that reads Off
+  // whatever the default is; typed fields show it as their placeholder instead, so they can
+  // still be emptied to type afresh. (A value from .env, if set, wins over the default.)
+  const picked = value === '' ? field.default : current;
   const label = field.label;
   if (field.startup) {
     return <span className="set-fixed mono">{field.kind === 'secret' ? (field.set ? 'set' : 'not set') : current || '—'}</span>;
@@ -38,7 +42,7 @@ function Control({ field, value, onChange }: { field: SettingField; value: strin
     case 'bool':
       return (
         <label className="check set-switch">
-          <input type="checkbox" aria-label={label} checked={current === 'true'} onChange={(e) => onChange(String(e.target.checked))} /> {current === 'true' ? 'On' : 'Off'}
+          <input type="checkbox" aria-label={label} checked={picked === 'true'} onChange={(e) => onChange(String(e.target.checked))} /> {picked === 'true' ? 'On' : 'Off'}
         </label>
       );
     case 'secret':
@@ -65,6 +69,7 @@ function Control({ field, value, onChange }: { field: SettingField; value: strin
             step={field.kind === 'int' ? 1 : 'any'}
             min={field.min}
             max={field.max}
+            placeholder={field.default}
             value={current}
             onChange={(e) => onChange(e.target.value)}
           />
@@ -73,7 +78,7 @@ function Control({ field, value, onChange }: { field: SettingField; value: strin
       );
     default:
       if (field.options) {
-        return <Select className="set-select" label={label} value={current} onChange={onChange} options={field.options.map((o) => ({ value: o, label: o }))} />;
+        return <Select className="set-select" label={label} value={picked} onChange={onChange} options={field.options.map((o) => ({ value: o, label: o }))} />;
       }
       return <input className="field set-input" aria-label={label} value={current} placeholder={field.default} onChange={(e) => onChange(e.target.value)} />;
   }
@@ -274,8 +279,13 @@ export function SettingsPage() {
   const edit = (key: string, value: string) => setDraft((d) => ({ ...d, [key]: value }));
   // An emptied secret box means "no change"; "reset" is how a saved secret is removed. A value put
   // back to the saved one is no change either, so there is nothing to save.
-  const editField = (f: SettingField, value: string) =>
-    (f.kind === 'secret' && value === '') || (f.kind !== 'secret' && value === f.value) ? setDraft(({ [f.key]: _, ...rest }) => rest) : edit(f.key, value);
+  // Editing a field also clears the error a failed save left on it: it may be fixed now, and
+  // the next save says again if not.
+  const editField = (f: SettingField, value: string) => {
+    setErrors(({ [f.key]: _, ...rest }) => rest);
+    if ((f.kind === 'secret' && value === '') || (f.kind !== 'secret' && value === f.value)) setDraft(({ [f.key]: _, ...rest }) => rest);
+    else edit(f.key, value);
+  };
   const discard = () => {
     setDraft({});
     setErrors({});
@@ -347,7 +357,7 @@ export function SettingsPage() {
     );
   }
 
-  const navItems = [...(query ? [] : ['Account', 'Sections', 'Appearance', 'Activity', 'Backup']), ...groups.map((g) => g.name)];
+  const navItems = [...(query ? [] : ['Account', 'Viewers', 'Sections', 'Appearance', 'Activity', 'Backup']), ...groups.map((g) => g.name)];
   const changedIn = (group: string) => (data?.groups.find((g) => g.name === group)?.fields ?? []).filter((f) => f.key in draft).length;
 
   return (
@@ -380,6 +390,7 @@ export function SettingsPage() {
           <SettingsNav items={navItems} changedIn={changedIn} />
           <div className="settings-groups">
             {!query && <AccountSection />}
+            {!query && <ViewersSection />}
             {!query && <SectionsPanel />}
             {!query && <AppearancePanel />}
             {!query && <ActivityPanel />}
@@ -421,7 +432,10 @@ export function SettingsPage() {
                     value={draft[f.key]}
                     error={errors[f.key]}
                     onChange={(v) => editField(f, v)}
-                    onReset={() => edit(f.key, '')}
+                    onReset={() => {
+                      edit(f.key, '');
+                      setErrors(({ [f.key]: _, ...rest }) => rest);
+                    }}
                     onUndo={() => {
                       setDraft(({ [f.key]: _, ...rest }) => rest);
                       setErrors(({ [f.key]: _, ...rest }) => rest);
