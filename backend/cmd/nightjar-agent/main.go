@@ -56,7 +56,11 @@ func main() {
 	var err error
 	switch cmd {
 	case "install":
-		err = agent.Install(*listen, *token, !*useTLS, agent.Options{Firewall: *firewall, Smart: *smartTools}, os.Stdout)
+		// -tls=true given outright, not left at its default: asking for HTTPS on an agent serving plain
+		// HTTP needs a new token, since the old one crossed the network in the clear.
+		askedTLS := false
+		fs.Visit(func(f *flag.Flag) { askedTLS = askedTLS || (f.Name == "tls" && *useTLS) })
+		err = agent.Install(*listen, *token, !*useTLS, agent.Options{Firewall: *firewall, Smart: *smartTools, AskedTLS: askedTLS}, os.Stdout)
 	case "uninstall":
 		err = agent.Uninstall(os.Stdout)
 	case "version":

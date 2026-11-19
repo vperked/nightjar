@@ -321,13 +321,16 @@ func cleanTemp(dirs []string, maxAgeDays float64) Stats {
 	return st
 }
 
-// cleanLogs trims every log over threshold, or empties all of them when aggressive.
+// cleanLogs is a cleanup's log step, run only when the disk is filling. Rotated archives go first,
+// all of them but the protected ones: they are what the rotation already set aside. Live logs over
+// the size threshold are then trimmed to their newest part or, when aggressive, emptied, and only
+// then are the log daemons restarted, so they write to the files afresh.
 func (c *Cleaner) cleanLogs(aggressive, includeMonitored bool) Stats {
 	if c.Logs == nil {
 		return Stats{}
 	}
 	st := Stats{}
-	rotated := c.Logs.CleanupRotated(aggressive)
+	rotated := c.Logs.CleanupRotated(true)
 	st.LogsCleaned += rotated.FilesRemoved
 	st.BytesCleared += rotated.BytesCleared
 	st.Errors = append(st.Errors, rotated.Errors...)
@@ -354,6 +357,7 @@ func (c *Cleaner) cleanLogs(aggressive, includeMonitored bool) Stats {
 		logs = over
 	}
 	sort.Slice(logs, func(i, j int) bool { return logs[i].Size > logs[j].Size })
+	live := 0
 	for _, l := range logs {
 		current, ok := c.Logs.Size(l.Path)
 		if l.Path == c.Logs.JournalPath {
@@ -365,12 +369,19 @@ func (c *Cleaner) cleanLogs(aggressive, includeMonitored bool) Stats {
 		if !c.Logs.Clean(current, aggressive) {
 			continue
 		}
-		st.LogsCleaned++
 		after, _ := c.Logs.Size(l.Path)
+		if l.Path == c.Logs.JournalPath {
+			after, _ = c.Logs.JournalSize()
+		}
+		if after.Size == current.Size {
+			continue // nothing came off it: a protected archive kept whole, say
+		}
+		st.LogsCleaned++
+		live++
 		st.BytesCleared += max(0, current.Size-after.Size)
 		diskLog.Info(fmt.Sprintf("    Cleaned log: %s (%s -> %s)", l.Path, format.Bytes(float64(current.Size)), format.Bytes(float64(after.Size))))
 	}
-	if st.LogsCleaned > 0 {
+	if live > 0 {
 		c.RestartLogServices()
 		c.SetupNginxLogs()
 	}
@@ -581,10 +592,19 @@ func (c *Cleaner) EmergencyClean(mount string) Stats {
 	return st
 }
 
-// CleanLogsAndRestart empties every log (except protected ones) and restarts the log daemons.
-func (c *Cleaner) CleanLogsAndRestart() Stats {
+// CleanLogs is the log step for a filling log partition. Routinely it only removes rotated
+// archives, which the rotation has already set aside; the live logs are left whole, for whoever
+// has to find out what happened, and for the crash checks that read kern.log. Only when aggressive
+// (at DISK_AGGRESSIVE_CLEANUP_THRESHOLD) is every log but the protected ones emptied, and the log
+// daemons restarted to write to them afresh.
+func (c *Cleaner) CleanLogs(aggressive bool) Stats {
 	if c.Logs == nil {
 		return Stats{Errors: []string{"no log monitor"}}
+	}
+	if !aggressive {
+		st := c.Logs.CleanupRotated(true)
+		st.LogsCleaned, st.FilesRemoved = st.FilesRemoved, 0 // counted as logs, as cleanLogs counts them
+		return st
 	}
 	return c.cleanLogs(true, false)
 }

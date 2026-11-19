@@ -57,9 +57,11 @@ import type {
   Unit,
   UnitAction,
   UnitsResponse,
+  UpdateSettings,
   UpdateSpec,
   UpdateTarget,
   UpdatesResponse,
+  HostUpdatesSummary,
   Appearance,
   IncidentsResponse,
   RepairAttempt,
@@ -193,6 +195,16 @@ export async function waitForRestart(): Promise<void> {
 
 const checkPath = (name: string) => `/api/checks/${encodeURIComponent(name)}`;
 const updatePath = (id: string) => `/api/updates/${encodeURIComponent(id)}`;
+// hostUpdatePath is an agent server's updates, or one target of them, through the main Nightjar.
+const hostUpdatePath = (host: string, id?: string) => `/api/hosts/${encodeURIComponent(host)}/updates${id ? `/${encodeURIComponent(id)}` : ''}`;
+
+// SSHD_WAIT is how long the browser waits on a change to SSH logins: a little over the minute the
+// server gives sshd to check and reload its config, here or on a server.
+const SSHD_WAIT = 65000;
+
+// DETECT_WAIT is how long the browser waits for apps to be looked for: the agent's two minutes, the
+// dashboard's margin on top, and a little more.
+const DETECT_WAIT = 170000;
 
 export const api = {
   config: () => request<AppConfig>('/api/config'),
@@ -293,6 +305,12 @@ export const api = {
   orderFirewall: (ids: string[]) => request<{ enabled: boolean; firewall?: FirewallStatus }>('/api/firewall/order', { method: 'PUT', body: { ids } }),
   setFirewallDefault: (def: '' | 'drop') => request<{ enabled: boolean; firewall?: FirewallStatus }>('/api/firewall/default', { method: 'PUT', body: { default: def } }),
   keepFirewallDefault: (keep: boolean) => request<{ enabled: boolean; firewall?: FirewallStatus }>('/api/firewall/default/keep', { method: 'POST', body: { keep } }),
+  lockPort: (port: number, proto: string) => request<{ enabled: boolean; firewall?: FirewallStatus }>('/api/firewall/locks', { method: 'POST', body: { port, proto } }),
+  relockPort: (lock: string) => request<{ enabled: boolean; firewall?: FirewallStatus }>(`/api/firewall/locks/${encodeURIComponent(lock)}`, { method: 'PUT' }),
+  unlockPort: (lock: string) => request<{ enabled: boolean; firewall?: FirewallStatus }>(`/api/firewall/locks/${encodeURIComponent(lock)}`, { method: 'DELETE' }),
+  lockHostPort: (id: string, port: number, proto: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/locks`, { method: 'POST', body: { port, proto } }, 40000),
+  relockHostPort: (id: string, lock: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/locks/${encodeURIComponent(lock)}`, { method: 'PUT' }, 40000),
+  unlockHostPort: (id: string, lock: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/locks/${encodeURIComponent(lock)}`, { method: 'DELETE' }, 40000),
   hostFirewall: (id: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall`, undefined, 40000),
   addHostRule: (id: string, rule: Partial<FirewallRule>) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/rules`, { method: 'POST', body: rule }, 40000),
   removeHostRule: (id: string, rule: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/firewall/rules/${encodeURIComponent(rule)}`, { method: 'DELETE' }, 40000),
@@ -305,14 +323,15 @@ export const api = {
   unblockHost: (id: string, address: string) => request<AgentFirewall>(`/api/hosts/${encodeURIComponent(id)}/blocked/${encodeURIComponent(address)}`, { method: 'DELETE' }, 40000),
   // How this machine's SSH server lets people in, and each agent server's through it: add a key to an
   // account, turn passwords off (they come back by themselves unless kept) or on again.
-  sshd: () => request<SSHAccess>('/api/sshd'),
-  addSSHDKey: (user: string, key: string) => request<SSHAccess>('/api/sshd/keys', { method: 'POST', body: { user, key } }),
-  setKeysOnly: (on: boolean, user?: string) => request<SSHAccess>('/api/sshd/keys-only', { method: 'PUT', body: { on, user } }),
-  keepKeysOnly: (keep: boolean) => request<SSHAccess>('/api/sshd/keys-only/keep', { method: 'POST', body: { keep } }),
-  hostSSHD: (id: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd`, undefined, 40000),
-  addHostSSHDKey: (id: string, user: string, key: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys`, { method: 'POST', body: { user, key } }, 40000),
-  setHostKeysOnly: (id: string, on: boolean, user?: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys-only`, { method: 'PUT', body: { on, user } }, 40000),
-  keepHostKeysOnly: (id: string, keep: boolean) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys-only/keep`, { method: 'POST', body: { keep } }, 40000),
+  // SSH logins: checking and reloading sshd can take the server up to a minute (sshdBudget).
+  sshd: () => request<SSHAccess>('/api/sshd', undefined, SSHD_WAIT),
+  addSSHDKey: (user: string, key: string) => request<SSHAccess>('/api/sshd/keys', { method: 'POST', body: { user, key } }, SSHD_WAIT),
+  setKeysOnly: (on: boolean, user?: string) => request<SSHAccess>('/api/sshd/keys-only', { method: 'PUT', body: { on, user } }, SSHD_WAIT),
+  keepKeysOnly: (keep: boolean) => request<SSHAccess>('/api/sshd/keys-only/keep', { method: 'POST', body: { keep } }, SSHD_WAIT),
+  hostSSHD: (id: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd`, undefined, SSHD_WAIT),
+  addHostSSHDKey: (id: string, user: string, key: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys`, { method: 'POST', body: { user, key } }, SSHD_WAIT),
+  setHostKeysOnly: (id: string, on: boolean, user?: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys-only`, { method: 'PUT', body: { on, user } }, SSHD_WAIT),
+  keepHostKeysOnly: (id: string, keep: boolean) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys-only/keep`, { method: 'POST', body: { keep } }, SSHD_WAIT),
   network: (since?: number) => request<NetworkResponse>(since === undefined ? '/api/network' : `/api/network?since=${since}`, {}, 5000),
   // logs is the monitor's own recent log; with `after` only newer entries, for following it.
   logs: (q: { after?: number; level?: string; component?: string; q?: string; limit?: number }) => {
@@ -381,7 +400,18 @@ export const api = {
   // checkUpdates queues a check of every target, or of one.
   checkUpdates: (id?: string) => request<{ queued: boolean }>(id ? `${updatePath(id)}/check` : '/api/updates/check', { method: 'POST', body: {} }),
   applyUpdate: (id: string) => request<{ queued: boolean }>(`${updatePath(id)}/update`, { method: 'POST', body: {} }),
-  detectUpdates: () => request<{ added: UpdateTarget[] | null }>('/api/updates/detect', { method: 'POST', body: {} }),
+  // Looking for apps can take the machine up to two minutes (the agent's DetectWait).
+  detectUpdates: () => request<{ added: UpdateTarget[] | null }>('/api/updates/detect', { method: 'POST', body: {} }, DETECT_WAIT),
+  // The same for an agent server, through the main Nightjar; it waits on the agent, so longer.
+  hostUpdatesSummary: () => request<{ hosts: HostUpdatesSummary[] }>('/api/hosts/updates'),
+  hostUpdates: (host: string) => request<UpdatesResponse>(hostUpdatePath(host), undefined, 40000),
+  saveHostUpdate: (host: string, spec: UpdateSpec, isNew: boolean) =>
+    request<{ target: UpdateTarget }>(isNew ? hostUpdatePath(host) : hostUpdatePath(host, spec.id), { method: isNew ? 'POST' : 'PUT', body: spec }, 40000),
+  deleteHostUpdate: (host: string, id: string) => request<void>(hostUpdatePath(host, id), { method: 'DELETE' }, 40000),
+  checkHostUpdates: (host: string, id?: string) => request<{ queued: boolean }>(`${hostUpdatePath(host, id)}/check`, { method: 'POST', body: {} }, 40000),
+  applyHostUpdate: (host: string, id: string) => request<{ queued: boolean }>(`${hostUpdatePath(host, id)}/update`, { method: 'POST', body: {} }, 40000),
+  detectHostUpdates: (host: string) => request<{ added: UpdateTarget[] | null }>(`${hostUpdatePath(host)}/detect`, { method: 'POST', body: {} }, DETECT_WAIT),
+  saveHostUpdateSettings: (host: string, s: UpdateSettings) => request<UpdatesResponse>(`${hostUpdatePath(host)}/settings`, { method: 'PUT', body: s }, 40000),
   // The summary view omits charts, libraries and recent plays (used by the overview).
   cleanup: () => request<CleanupView>('/api/cleanup'),
   // cleanupScan checks every library now; the server gives that up to 5 minutes.

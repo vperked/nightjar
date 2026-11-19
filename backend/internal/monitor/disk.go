@@ -137,13 +137,24 @@ func (h *diskCleanup) check(s *Snapshot) {
 	}
 }
 
+// cleanLogs is the log step for a filling log partition: at DISK_CLEANUP_THRESHOLD it removes
+// rotated archives only, and only at DISK_AGGRESSIVE_CLEANUP_THRESHOLD does it empty the logs
+// themselves, as the settings say.
 func (h *diskCleanup) cleanLogs(s *Snapshot, percent float64) {
 	ctx := h.ctx
-	h.log.Warn(fmt.Sprintf("[CLEANUP] Disk at %.1f%% - starting log cleanup...", percent))
-	st := withTimeout(h.ctx, 5*time.Minute, cleanup.Stats{}, "log cleanup operation", ctx.Cleaner.CleanLogsAndRestart)
+	aggressive := percent >= ctx.Cfg.DiskAggressiveCleanupThreshold
+	what := "removing rotated logs"
+	if aggressive {
+		what = "emptying logs"
+	}
+	h.log.Warn(fmt.Sprintf("[CLEANUP] Log disk at %.1f%% - %s...", percent, what))
+	st, ran := cleanupStep(h.handler, 5*time.Minute, cleanup.Stats{}, "log cleanup operation", func() cleanup.Stats { return ctx.Cleaner.CleanLogs(aggressive) })
 	ctx.Heartbeat()
+	if !ran {
+		return
+	}
 	if st.LogsCleaned > 0 {
-		h.log.Warn(fmt.Sprintf("[CLEANUP] Cleared %d log file(s), freed %s", st.LogsCleaned, format.Bytes(float64(st.BytesCleared))))
+		h.log.Warn(fmt.Sprintf("[CLEANUP] Cleaned %d log file(s), freed %s", st.LogsCleaned, format.Bytes(float64(st.BytesCleared))))
 		if u, err := collect.DiskUsage("/"); err == nil {
 			h.log.Info(fmt.Sprintf("[CLEANUP] Disk usage after log cleanup: %.1f%%", u.Percent))
 		}
@@ -164,8 +175,11 @@ func (h *diskCleanup) emergency(s *Snapshot, percent float64) {
 	cfg, ctx := h.ctx.Cfg, h.ctx
 	threshold := cfg.DiskEmergencyThreshold
 	h.log.Error(fmt.Sprintf("[EMERGENCY] Disk usage at %.1f%% (emergency threshold: %.1f%%) - CRITICAL! Starting emergency cleanup...", percent, threshold))
-	st := withTimeout(h.ctx, 10*time.Minute, cleanup.Stats{}, "emergency disk cleanup", func() cleanup.Stats { return ctx.Cleaner.EmergencyClean("/") })
+	st, ran := cleanupStep(h.handler, 10*time.Minute, cleanup.Stats{}, "emergency disk cleanup", func() cleanup.Stats { return ctx.Cleaner.EmergencyClean("/") })
 	ctx.Heartbeat()
+	if !ran {
+		return
+	}
 	h.lastCleanup = s.Now
 	const key = "cleanup-emergency:/"
 	if st.BytesCleared == 0 {
@@ -196,7 +210,10 @@ func (h *diskCleanup) emergency(s *Snapshot, percent float64) {
 func (h *diskCleanup) routine(s *Snapshot, percent float64) {
 	cfg, ctx := h.ctx.Cfg, h.ctx
 	h.log.Warn(fmt.Sprintf("[CLEANUP] Disk usage at %.1f%% (cleanup threshold: %.1f%%), starting automatic cleanup...", percent, cfg.DiskCleanupThreshold))
-	st := withTimeout(h.ctx, 5*time.Minute, cleanup.Stats{}, "disk cleanup operation", func() cleanup.Stats { return ctx.Cleaner.CleanDiskSpace("/", targetFreePercent) })
+	st, ran := cleanupStep(h.handler, 5*time.Minute, cleanup.Stats{}, "disk cleanup operation", func() cleanup.Stats { return ctx.Cleaner.CleanDiskSpace("/", targetFreePercent) })
+	if !ran {
+		return
+	}
 	h.lastCleanup = s.Now
 	if st.BytesCleared == 0 {
 		h.log.Info("[CLEANUP] No files were cleaned (disk may need manual intervention)")
@@ -315,17 +332,21 @@ func (h *partitionMaintenance) maintain(p collect.Partition, now float64) {
 	}
 }
 
-func (h *partitionMaintenance) run(name string, fn func() cleanup.Stats) cleanup.Stats {
+// run runs one partition's cleanup; ran is false when it was skipped for one still going.
+func (h *partitionMaintenance) run(name string, fn func() cleanup.Stats) (st cleanup.Stats, ran bool) {
 	h.ctx.Heartbeat()
-	st := withTimeout(h.ctx, 5*time.Minute, cleanup.Stats{Errors: []string{"cleanup timed out"}}, name, fn)
+	st, ran = cleanupStep(h.handler, 5*time.Minute, cleanup.Stats{Errors: []string{"cleanup timed out"}}, name, fn)
 	h.ctx.Heartbeat()
-	return st
+	return st, ran
 }
 
 func (h *partitionMaintenance) emergency(p collect.Partition, now float64) {
 	cfg, ctx, key := h.ctx.Cfg, h.ctx, p.Mountpoint
 	h.log.Error(fmt.Sprintf("[EMERGENCY] Partition %s: %.1f%% (emergency threshold: %.1f%%) - CRITICAL! Starting emergency cleanup...", key, p.Percent, cfg.DiskEmergencyThreshold))
-	st := h.run("emergency cleanup for "+key, func() cleanup.Stats { return ctx.Cleaner.EmergencyClean(p.Mountpoint) })
+	st, ran := h.run("emergency cleanup for "+key, func() cleanup.Stats { return ctx.Cleaner.EmergencyClean(p.Mountpoint) })
+	if !ran {
+		return
+	}
 	h.lastCleanup[key] = now
 	if st.BytesCleared == 0 {
 		h.log.Error(fmt.Sprintf("[EMERGENCY] Partition %s: No space could be freed!", key))
@@ -343,7 +364,10 @@ func (h *partitionMaintenance) emergency(p collect.Partition, now float64) {
 func (h *partitionMaintenance) routine(p collect.Partition, now float64) {
 	cfg, ctx, key := h.ctx.Cfg, h.ctx, p.Mountpoint
 	h.log.Warn(fmt.Sprintf("[CLEANUP] Partition %s: %.1f%% (cleanup threshold: %.1f%%), starting automatic cleanup...", key, p.Percent, cfg.DiskCleanupThreshold))
-	st := h.run("disk cleanup for "+key, func() cleanup.Stats { return ctx.Cleaner.CleanDiskSpace(p.Mountpoint, targetFreePercent) })
+	st, ran := h.run("disk cleanup for "+key, func() cleanup.Stats { return ctx.Cleaner.CleanDiskSpace(p.Mountpoint, targetFreePercent) })
+	if !ran {
+		return
+	}
 	h.lastCleanup[key] = now
 	if st.BytesCleared == 0 {
 		h.log.Info(fmt.Sprintf("[CLEANUP] Partition %s: No files were cleaned", key))

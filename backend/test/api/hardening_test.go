@@ -88,6 +88,10 @@ func TestThrottleCannotBeDodgedWithMadeUpProxyHeaders(t *testing.T) {
 	}
 }
 
+// proxyEvidence is how many requests through the proxy the dashboard waits for before it believes
+// which header the proxy leaves out.
+const proxyEvidence = 16
+
 // Once the proxy's own requests show which header it leaves out, a client that fills that header with
 // the owner's address counts its failures only against itself: the owner still signs in.
 func TestMadeUpProxyHeaderCannotLockOutSomeoneElse(t *testing.T) {
@@ -109,8 +113,10 @@ func TestMadeUpProxyHeaderCannotLockOutSomeoneElse(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, cookie := signedIn(t)
-			if rec := serve(s, "GET", "/api/config", "", "127.0.0.1:5000", tc.plain, cookie); rec.Code != http.StatusOK {
-				t.Fatalf("status: %d", rec.Code)
+			for range proxyEvidence {
+				if rec := serve(s, "GET", "/api/config", "", "127.0.0.1:5000", tc.plain, cookie); rec.Code != http.StatusOK {
+					t.Fatalf("status: %d", rec.Code)
+				}
 			}
 			for i := range 10 {
 				if rec := serve(s, "POST", "/api/auth/login", `{"username":"jay","password":"a wrong guess"}`, "127.0.0.1:5000", tc.bad, nil); rec.Code != http.StatusUnauthorized {
@@ -141,7 +147,10 @@ func TestLearnedProxyHeadersOutliveARestart(t *testing.T) {
 		ctx := &monitor.Context{Processes: collect.NewProcessScanner(), Sensors: collect.NewSensors(), GPU: &collect.GPUReader{}, Bandwidth: &collect.BandwidthMeter{}}
 		return api.New(api.Config{Host: "127.0.0.1", Port: "0", Accounts: accounts.New(db), Store: db, FrontendDir: t.TempDir()}, ctx)
 	}
-	serve(start(), "GET", "/api/config", "", "127.0.0.1:5000", map[string]string{"X-Real-IP": owner}, nil)
+	first := start()
+	for range proxyEvidence {
+		serve(first, "GET", "/api/config", "", "127.0.0.1:5000", map[string]string{"X-Real-IP": owner}, nil)
+	}
 	for deadline := time.Now().Add(5 * time.Second); db.Meta("proxy.unset_headers") == ""; {
 		if time.Now().After(deadline) {
 			t.Fatal("what the proxy leaves out was not saved")
@@ -295,5 +304,43 @@ func TestStatsLeaveTheProcessCacheAlone(t *testing.T) {
 	}
 	if top[0].RSS == 0 {
 		t.Fatalf("the stats cleared the cached processes' memory: %+v", top[0])
+	}
+}
+
+// A program on this machine can send the dashboard a request with whichever header it likes, as if
+// through the proxy. One such request cannot teach the dashboard to trust a header the real proxy
+// passes on untouched, before the proxy's own traffic has shown its habits or after.
+func TestOneLocalRequestCannotTeachTheProxysHabits(t *testing.T) {
+	const owner, attacker = "198.51.100.4", "203.0.113.66"
+	// The real proxy sets X-Forwarded-For and passes X-Real-IP on as the client sent it.
+	plain := map[string]string{"X-Forwarded-For": owner}
+	poison := map[string]string{"X-Real-IP": "127.0.0.9"}
+	bad := map[string]string{"X-Real-IP": owner, "X-Forwarded-For": owner + ", " + attacker}
+	for _, tc := range []struct {
+		name   string
+		before int // the proxy's requests before the poisoned one
+		after  int // and after it
+	}{
+		{"poisoned first", 0, proxyEvidence},
+		{"poisoned once the proxy is known", proxyEvidence, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, cookie := signedIn(t)
+			for range tc.before {
+				serve(s, "GET", "/api/config", "", "127.0.0.1:5000", plain, cookie)
+			}
+			serve(s, "GET", "/api/config", "", "127.0.0.1:5000", poison, nil)
+			for range tc.after {
+				serve(s, "GET", "/api/config", "", "127.0.0.1:5000", plain, cookie)
+			}
+			for i := range 10 {
+				if rec := serve(s, "POST", "/api/auth/login", `{"username":"jay","password":"a wrong guess"}`, "127.0.0.1:5000", bad, nil); rec.Code != http.StatusUnauthorized {
+					t.Fatalf("guess %d: %d", i, rec.Code)
+				}
+			}
+			if rec := serve(s, "POST", "/api/auth/login", `{"username":"jay","password":"correct horse battery"}`, "127.0.0.1:5000", plain, nil); rec.Code != http.StatusOK {
+				t.Fatalf("the owner is locked out by someone else's guesses: %d", rec.Code)
+			}
+		})
 	}
 }

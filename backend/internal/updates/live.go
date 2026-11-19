@@ -15,6 +15,9 @@ import (
 type Live struct {
 	Started float64  `json:"started"`
 	Lines   []string `json:"lines"`
+	// Now is this machine's clock as it answered, which Started is on: a browser on another clock
+	// counts how long it has run from the two.
+	Now float64 `json:"now"`
 }
 
 // liveLines is how many lines an update keeps while it runs; a run keeps the last keptLines.
@@ -94,7 +97,7 @@ func (l *liveLog) view() *Live {
 	if lines == nil {
 		lines = []string{}
 	}
-	return &Live{Started: float64(l.started.Unix()), Lines: lines}
+	return &Live{Started: float64(l.started.Unix()), Lines: lines, Now: float64(time.Now().Unix())}
 }
 
 // tail is the last lines, to keep with the run.

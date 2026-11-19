@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router';
-import { ApiError, api } from '../api/client';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { Link, useSearchParams } from 'react-router';
+import { ApiError } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
-import type { UpdateTarget, UpdatesResponse } from '../api/types';
-import { useUpdates } from '../api/UpdatesContext';
+import type { HostUpdatesSummary, UpdateSettings, UpdateTarget, UpdatesResponse } from '../api/types';
+import { useHostUpdates, useUpdates } from '../api/UpdatesContext';
+import { hostUpdates, localUpdates, useUpdatesOf, type UpdatesSource } from '../api/updatesSource';
 import { Editable } from '../components/Editable';
+import { Select } from '../components/Select';
 import { Skeleton } from '../components/Skeleton';
+import { ServerTime, TimePicker } from '../components/TimePicker';
 import { useToast } from '../components/Toasts';
 import { AppsTabs, Seg } from '../components/ui';
 import { formatAgo, plural } from '../format';
@@ -43,7 +46,8 @@ function change(t: UpdateTarget): string {
   return version(t, t.installed);
 }
 
-function source(t: UpdateTarget): string {
+// origin says where a target's updates come from.
+function origin(t: UpdateTarget): string {
   switch (t.kind) {
     case 'apt':
       return `apt · ${t.package}`;
@@ -67,8 +71,13 @@ function Switch({ on, label, title = label, disabled, onChange }: { on: boolean;
   );
 }
 
-function Details({ t, data, onEdit, now }: { t: UpdateTarget; data: UpdatesResponse; onEdit: () => void; now: number }) {
-  const { refresh } = useUpdates();
+// Each part of the page acts through source, on the machine the page shows, then refreshes it.
+interface On {
+  source: UpdatesSource;
+  refresh: () => void;
+}
+
+function Details({ t, data, onEdit, now, source, refresh }: On & { t: UpdateTarget; data: UpdatesResponse; onEdit: () => void; now: number }) {
   const notify = useToast();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const act = async (what: () => Promise<unknown>, failed: string) => {
@@ -88,7 +97,7 @@ function Details({ t, data, onEdit, now }: { t: UpdateTarget; data: UpdatesRespo
           <dt>Checked</dt>
           <dd>{formatAgo(t.checked ?? null, now)}</dd>
           <dt>Source</dt>
-          <dd title={source(t)}>{source(t)}</dd>
+          <dd title={origin(t)}>{origin(t)}</dd>
           {t.unit && (
             <>
               <dt>Service</dt>
@@ -144,7 +153,7 @@ function Details({ t, data, onEdit, now }: { t: UpdateTarget; data: UpdatesRespo
       )}
       <Editable>
         <div className="upd-actions">
-          <button className="btn-quiet" disabled={!!t.busy} onClick={() => act(() => api.checkUpdates(t.id), 'Could not check')}>
+          <button className="btn-quiet" disabled={!!t.busy} onClick={() => act(() => source.check(t.id), 'Could not check')}>
             Check now
           </button>
           <button className="btn-quiet" onClick={onEdit}>
@@ -153,7 +162,7 @@ function Details({ t, data, onEdit, now }: { t: UpdateTarget; data: UpdatesRespo
           {confirmDelete ? (
             <span className="confirm">
               stop tracking {t.name}?{' '}
-              <button className="btn-quiet danger" onClick={() => act(() => api.deleteUpdate(t.id), 'Could not remove it')}>
+              <button className="btn-quiet danger" onClick={() => act(() => source.remove(t.id), 'Could not remove it')}>
                 Remove
               </button>{' '}
               <button className="btn-quiet" onClick={() => setConfirmDelete(false)}>
@@ -198,6 +207,7 @@ export const isMajor = (t: UpdateTarget) => t.kind !== 'git' && !!majorOf(t.inst
 
 // A Batch is one Update all: what it was asked to update, and when. It is kept in this browser, so
 // the page still follows it after a reload; the updates themselves run on the server either way.
+// Each machine keeps its own, so an Update all on a server and one here never mix.
 // before is each target's newest run when the batch began, by the server's clock: a later run is
 // this batch's. started is this browser's clock and only stands in for a batch saved without it.
 interface Batch {
@@ -205,18 +215,19 @@ interface Batch {
   ids: string[];
   before?: Record<string, number>;
 }
-const BATCH_KEY = 'nightjar.updateAll';
-const loadBatch = (): Batch | null => {
+// batchKey is where a machine's batch is kept; this machine's has the name it always had.
+export const batchKey = (machine: string) => (machine === 'local' ? 'nightjar.updateAll' : `nightjar.updateAll.${machine}`);
+const loadBatch = (key: string): Batch | null => {
   try {
-    return JSON.parse(localStorage.getItem(BATCH_KEY) ?? 'null');
+    return JSON.parse(localStorage.getItem(key) ?? 'null');
   } catch {
     return null;
   }
 };
-const saveBatch = (b: Batch | null) => {
+const saveBatch = (key: string, b: Batch | null) => {
   try {
-    if (b) localStorage.setItem(BATCH_KEY, JSON.stringify(b));
-    else localStorage.removeItem(BATCH_KEY);
+    if (b) localStorage.setItem(key, JSON.stringify(b));
+    else localStorage.removeItem(key);
   } catch {
     // Only following it after a reload is lost.
   }
@@ -364,7 +375,11 @@ function UpdateAllRun({ batch, targets, onDismiss }: { batch: Batch; targets: Up
 function LiveUpdate({ t }: { t: UpdateTarget }) {
   const now = useNow(1000);
   const live = t.live!;
-  const secs = Math.max(0, Math.round(now - live.started));
+  // How long it has run, on the machine's clock: what it said as it answered, and the time since this
+  // page heard it. Without its clock (an older agent), the browser's has to do.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- noted once per answer, as it arrives
+  const heard = useMemo(() => Date.now() / 1000, [live.now]);
+  const secs = Math.max(0, Math.round(live.now ? live.now - live.started + (now - heard) : now - live.started));
   return (
     <div className="upd-live" role="status" aria-live="polite">
       <div className="upd-live-head">
@@ -376,8 +391,7 @@ function LiveUpdate({ t }: { t: UpdateTarget }) {
   );
 }
 
-function TargetRow({ t, data, now, onEdit, followed }: { t: UpdateTarget; data: UpdatesResponse; now: number; onEdit: () => void; followed?: boolean }) {
-  const { refresh } = useUpdates();
+function TargetRow({ t, data, now, onEdit, followed, source, refresh }: On & { t: UpdateTarget; data: UpdatesResponse; now: number; onEdit: () => void; followed?: boolean }) {
   const notify = useToast();
   const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
@@ -385,7 +399,7 @@ function TargetRow({ t, data, now, onEdit, followed }: { t: UpdateTarget; data: 
 
   const toggleAuto = async (auto: boolean) => {
     try {
-      await api.saveUpdate({ ...specOf(t), auto }, false);
+      await source.save({ ...specOf(t), auto }, false);
       notify({ tone: 'ok', title: auto ? `${t.name} updates automatically` : `${t.name} waits for you`, body: auto ? `Installs ${data.window.label}.` : undefined });
       refresh();
     } catch (err) {
@@ -394,7 +408,7 @@ function TargetRow({ t, data, now, onEdit, followed }: { t: UpdateTarget; data: 
   };
   const update = async () => {
     try {
-      await api.applyUpdate(t.id);
+      await source.apply(t.id);
       notify({ tone: 'info', title: `Updating ${t.name}`, body: t.self ? 'The monitor restarts when it is done.' : 'You can leave this page.' });
       refresh();
     } catch (err) {
@@ -409,7 +423,7 @@ function TargetRow({ t, data, now, onEdit, followed }: { t: UpdateTarget; data: 
           <span className={`state ${tone}`}>{word}</span>
           <span className="upd-name min0">
             <strong className="truncate">{t.name}</strong>
-            <span className="svc-target truncate">{source(t)}</span>
+            <span className="svc-target truncate">{origin(t)}</span>
           </span>
           {change(t) && <span className="upd-change num truncate">{change(t)}</span>}
           <svg className="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
@@ -430,13 +444,199 @@ function TargetRow({ t, data, now, onEdit, followed }: { t: UpdateTarget; data: 
       </div>
       {/* During Update all, its panel shows the log. */}
       {t.busy === 'updating' && t.live && !followed && <LiveUpdate t={t} />}
-      {open && <Details t={t} data={data} now={now} onEdit={onEdit} />}
+      {open && <Details t={t} data={data} now={now} onEdit={onEdit} source={source} refresh={refresh} />}
     </li>
   );
 }
 
+// tooOld is a server's answer that its agent predates updates on agents (the dashboard updates it
+// by itself, so this passes).
+const tooOld = (err: unknown) => err instanceof Error && /too old/i.test(err.message);
+
+const pad = (n: number) => String(n).padStart(2, '0');
+// An agent server's window is in minutes after its midnight; the time fields speak "HH:MM".
+const hhmm = (minutes: number) => `${pad(Math.floor(minutes / 60) % 24)}:${pad(minutes % 60)}`;
+const toMinutes = (v: string) => {
+  const [h, m] = v.split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+};
+const settingsOf = (d: UpdatesResponse): UpdateSettings => ({ enabled: d.enabled, interval: d.interval, window: { start: d.window.start, end: d.window.end }, notify: d.notify ?? true });
+
+// HostSettings is an agent server's own update settings, which the Settings page (this machine's)
+// does not cover: whether it checks and how often, when it may update by itself (on its clock),
+// and whether its updates are announced.
+function HostSettings({ source, data, refresh }: On & { data: UpdatesResponse }) {
+  const canEdit = useCanEdit();
+  const notify = useToast();
+  const current = settingsOf(data);
+  const currentKey = JSON.stringify(current);
+  const [draft, setDraft] = useState(current);
+  // from is the server's settings the draft began from: when a poll brings others (changed from
+  // another browser), an untouched draft takes them, and one being edited is left alone.
+  const [from, setFrom] = useState(currentKey);
+  if (from !== currentKey) {
+    setFrom(currentKey);
+    if (JSON.stringify(draft) === from) setDraft(current);
+  }
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const dirty = JSON.stringify(draft) !== currentKey;
+  const set = (patch: Partial<UpdateSettings>) => setDraft((d) => ({ ...d, ...patch }));
+  const readOnly = canEdit ? undefined : "Viewers can't change this";
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!(draft.interval >= 3600)) {
+      setError('Check at least an hour apart.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      await source.saveSettings!(draft);
+      notify({ tone: 'ok', title: `Saved for ${source.name}` });
+      refresh();
+    } catch (err) {
+      // An agent too old for updates is the likely refusal here, so it is said plainly.
+      setError(tooOld(err) ? `${source.name}'s agent is too old for these settings. It updates itself shortly; try again then.` : err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const start = hhmm(draft.window.start);
+  const end = hhmm(draft.window.end);
+  return (
+    <form className="panel upd-host-settings" onSubmit={submit} aria-label={`Update settings on ${source.name}`}>
+      <div className="section-head">
+        <span className="label">Settings on {source.name}</span>
+      </div>
+      <div className="upd-settings" title={readOnly}>
+        <label className="check">
+          <input type="checkbox" checked={draft.enabled} disabled={!canEdit} onChange={(e) => set({ enabled: e.target.checked })} /> Check for updates
+        </label>
+        <label className="upd-settings-field">
+          every
+          <input
+            className="field short"
+            type="number"
+            min={1}
+            max={168}
+            aria-label="Hours between checks"
+            disabled={!draft.enabled || !canEdit}
+            value={Math.round((draft.interval / 3600) * 10) / 10}
+            onChange={(e) => set({ interval: Math.round(Number(e.target.value) * 3600) })}
+          />
+          hours
+        </label>
+        <span className="upd-settings-field">
+          auto-update from
+          <TimePicker value={start} disabled={!draft.enabled || !canEdit} onChange={(v) => set({ window: { ...draft.window, start: toMinutes(v) } })} label="Auto-update from" />
+          to
+          <TimePicker value={end} disabled={!draft.enabled || !canEdit} onChange={(v) => set({ window: { ...draft.window, end: toMinutes(v) } })} label="Auto-update until" />
+        </span>
+        <label className="check">
+          <input type="checkbox" checked={draft.notify} disabled={!canEdit} onChange={(e) => set({ notify: e.target.checked })} /> Notify me
+        </label>
+      </div>
+      {/* The window is on the server's own clock, which may be neither this Nightjar's nor this browser's. */}
+      <ServerTime from={start} to={end} tz={data.time_zone} />
+      {canEdit && (dirty || error) && (
+        <div className="form-actions">
+          {error && (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          )}
+          {dirty && (
+            <>
+              <button type="button" className="btn-quiet" onClick={() => (setDraft(current), setError(''))}>
+                Undo
+              </button>
+              <button type="submit" className="btn" disabled={saving}>
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </form>
+  );
+}
+
+// waiting is how many updates wait to be installed: the nav badge's count.
+const waiting = (d: UpdatesResponse | undefined) => d?.targets.filter((t) => t.available && !t.paused).length ?? 0;
+const withCount = (name: string, n: number) => (n > 0 ? `${name} · ${n}` : name);
+
+// MachinePicker chooses whose updates the page shows: this machine, or a server with an agent,
+// each with how many updates wait there. The machine shown counts from what the page just loaded,
+// the others from the main Nightjar's last look at them.
+function MachinePicker({ value, hosts, shown, onPick }: { value: string; hosts: HostUpdatesSummary[]; shown?: UpdatesResponse; onPick: (v: string) => void }) {
+  const { data: localData } = useUpdates();
+  const count = (id: string, summary: number) => (id === value && shown ? waiting(shown) : summary);
+  return (
+    <Select
+      label="Machine"
+      className="short"
+      value={value}
+      onChange={onPick}
+      options={[
+        { value: 'local', label: withCount('This machine', waiting(localData)), text: 'This machine' },
+        ...hosts.map((h) => ({ value: h.id, label: withCount(h.name, count(h.id, h.available)), text: h.name, hint: h.error || (h.applying ? `Updating ${h.applying}` : undefined) })),
+      ]}
+    />
+  );
+}
+
+// UpdatesPage lists what is kept updated on this machine, or on a server through its agent
+// (?host=<id>, so a link or a reload stays on it), and installs, checks and tunes it there.
 export function UpdatesPage() {
-  const { data, loading, refresh } = useUpdates();
+  const [params, setParams] = useSearchParams();
+  const picked = params.get('host') || 'local';
+  const { hosts, loaded } = useHostUpdates();
+  const hostName = hosts.find((h) => h.id === picked)?.name;
+  // One source per machine, kept while its name stays, since its load is what the page polls.
+  const source = useMemo(() => (picked === 'local' ? localUpdates : hostName !== undefined ? hostUpdates({ id: picked, name: hostName }) : undefined), [picked, hostName]);
+  const pick = (v: string) => setParams(v === 'local' ? {} : { host: v }, { replace: true });
+  if (source) return <UpdatesView key={source.key} source={source} hosts={hosts} onPick={pick} />;
+  return (
+    <main>
+      <div className="page-title">
+        <div>
+          <h1>Updates</h1>
+          <AppsTabs current="/updates" />
+        </div>
+        {hosts.length > 0 && (
+          <div className="toolbar">
+            <MachinePicker value={picked} hosts={hosts} onPick={pick} />
+          </div>
+        )}
+      </div>
+      {loaded ? (
+        <p className="note">
+          No server with an agent by that name. Pick one above, or see <Link to="/updates">this machine's updates</Link>.
+        </p>
+      ) : (
+        <Skeleton kind="list" rows={8} />
+      )}
+    </main>
+  );
+}
+
+function UpdatesView({ source, hosts, onPick }: { source: UpdatesSource; hosts: HostUpdatesSummary[]; onPick: (v: string) => void }) {
+  const { data, loading, error, refresh: reload } = useUpdatesOf(source);
+  const { refresh: reloadHosts } = useHostUpdates();
+  // A change on a server also moves its count in the picker and the nav badge.
+  const refresh = () => {
+    reload();
+    if (source.host) reloadHosts();
+  };
+  const remote = !!source.host;
+  // When the server's own count moves (an update finished), the badge's summary is asked again.
+  const count = data ? waiting(data) : undefined;
+  useEffect(() => {
+    if (remote && count !== undefined) reloadHosts();
+  }, [remote, count, reloadHosts]);
   const notify = useToast();
   const now = useNow(10000);
   const [filter, setFilter] = useState<Filter>('all');
@@ -448,17 +648,18 @@ export function UpdatesPage() {
   // Everything with an update that can install from here; the monitor itself goes last, since it restarts.
   const ready = list.filter((t) => t.available && t.can_update && !t.busy && !t.paused).sort((a, b) => Number(!!a.self) - Number(!!b.self));
   const [choosing, setChoosing] = useState(false);
-  const [batch, setBatch] = useState<Batch | null>(loadBatch);
+  const key = batchKey(source.key);
+  const [batch, setBatch] = useState<Batch | null>(() => loadBatch(key));
   const updateAll = async (ids: string[]) => {
     setChoosing(false);
     const before = Object.fromEntries(ids.map((id) => [id, list.find((t) => t.id === id)?.runs?.[0]?.at ?? 0]));
     const b = { started: Date.now() / 1000, ids, before };
     setBatch(b);
-    saveBatch(b);
+    saveBatch(key, b);
     const failed: { id: string; why: string }[] = [];
     for (const id of ids) {
       try {
-        await api.applyUpdate(id);
+        await source.apply(id);
       } catch (err) {
         failed.push({ id, why: err instanceof ApiError ? err.message : String(err) });
       }
@@ -470,7 +671,7 @@ export function UpdatesPage() {
       // Unless it was dismissed or replaced meanwhile (saving twice is harmless).
       setBatch((cur) => {
         if (cur !== b) return cur;
-        saveBatch(next);
+        saveBatch(key, next);
         return next;
       });
       const names = failed.map((f) => list.find((t) => t.id === f.id)?.name ?? f.id);
@@ -484,12 +685,12 @@ export function UpdatesPage() {
   };
   const dismissBatch = () => {
     setBatch(null);
-    saveBatch(null);
+    saveBatch(key, null);
   };
 
   const checkAll = async () => {
     try {
-      await api.checkUpdates();
+      await source.check();
       refresh();
     } catch (err) {
       notify({ tone: 'error', title: 'Could not start the check', body: (err as Error).message });
@@ -497,7 +698,7 @@ export function UpdatesPage() {
   };
   const detect = async () => {
     try {
-      const { added } = await api.detectUpdates();
+      const { added } = await source.detect();
       notify({ tone: 'ok', title: added?.length ? `Found ${plural(added.length, 'new target')}` : 'Nothing new found', body: added?.map((a) => a.name).join(', ') });
       refresh();
     } catch (err) {
@@ -506,6 +707,20 @@ export function UpdatesPage() {
   };
 
   const sub = data ? [data.checking ? 'checking now…' : `checked ${formatAgo(data.last_check || null, now)}`, `auto-updates ${data.window.label}`].join(' · ') : '';
+  // A server that cannot be asked (offline, or an agent too old for updates) says why, in place of
+  // its list; one that answered before keeps its last list under the reason.
+  const unreachable = remote && error && (
+    <p className="notice crit-notice" role="alert">
+      {tooOld(error) ? (
+        <>
+          <strong>{source.name}'s agent is too old for updates.</strong> It updates itself shortly; if it does not, reinstall it from{' '}
+          <Link to={`/servers/${encodeURIComponent(source.host!)}`}>its server page</Link>.
+        </>
+      ) : (
+        `Could not reach ${source.name}: ${error.message}`
+      )}
+    </p>
+  );
   return (
     <main>
       <div className="page-title">
@@ -515,52 +730,67 @@ export function UpdatesPage() {
           <AppsTabs current="/updates" />
         </div>
         <div className="toolbar">
-          <Seg<Filter>
-            label="Filter"
-            value={filter}
-            onChange={setFilter}
-            options={(['all', 'available', 'auto'] as Filter[]).map((f) => ({
-              value: f,
-              label: (
-                <>
-                  {f[0].toUpperCase() + f.slice(1)}
-                  <span className="n">{counts[f]}</span>
-                </>
-              ),
-            }))}
-          />
-          <Editable>
-            <button className="btn-quiet" onClick={detect}>
-              Detect apps
-            </button>
-            <button className="btn-quiet" onClick={() => setEditing('new')}>
-              Add
-            </button>
-            {ready.length > 1 && (
-              <button className="btn-quiet" onClick={() => setChoosing(true)}>
-                Update all ({ready.length})
+          {/* Only when there is another machine to pick. */}
+          {hosts.length > 0 && <MachinePicker value={source.key} hosts={hosts} shown={data} onPick={onPick} />}
+          {data && (
+            <Seg<Filter>
+              label="Filter"
+              value={filter}
+              onChange={setFilter}
+              options={(['all', 'available', 'auto'] as Filter[]).map((f) => ({
+                value: f,
+                label: (
+                  <>
+                    {f[0].toUpperCase() + f.slice(1)}
+                    <span className="n">{counts[f]}</span>
+                  </>
+                ),
+              }))}
+            />
+          )}
+          {(data || !remote) && (
+            <Editable>
+              <button className="btn-quiet" onClick={detect}>
+                Detect apps
               </button>
-            )}
-            <button className="btn" onClick={checkAll} disabled={!data || data.checking}>
-              {data?.checking ? 'Checking…' : 'Check now'}
-            </button>
-          </Editable>
+              <button className="btn-quiet" onClick={() => setEditing('new')}>
+                Add
+              </button>
+              {ready.length > 1 && (
+                <button className="btn-quiet" onClick={() => setChoosing(true)}>
+                  Update all ({ready.length})
+                </button>
+              )}
+              <button className="btn" onClick={checkAll} disabled={!data || data.checking}>
+                {data?.checking ? 'Checking…' : 'Check now'}
+              </button>
+            </Editable>
+          )}
         </div>
       </div>
+      {unreachable}
       {choosing && <UpdateAllSheet ready={ready} onClose={() => setChoosing(false)} onStart={updateAll} />}
       {batch && data && <UpdateAllRun batch={batch} targets={list} onDismiss={dismissBatch} />}
-      {data && !data.enabled && (
-        <p className="notice">
-          Scheduled checks are off, so nothing updates automatically. Turn on <strong>Check for updates</strong> in <Link to="/settings#updates">Settings → Updates</Link>. Check now and Update still
-          work.
-        </p>
-      )}
+      {data &&
+        !data.enabled &&
+        (remote ? (
+          <p className="notice">
+            Scheduled checks are off on {source.name}, so nothing there updates automatically. Turn on <strong>Check for updates</strong> under Settings on {source.name}, below. Check now and Update
+            still work.
+          </p>
+        ) : (
+          <p className="notice">
+            Scheduled checks are off, so nothing updates automatically. Turn on <strong>Check for updates</strong> in <Link to="/settings#updates">Settings → Updates</Link>. Check now and Update still
+            work.
+          </p>
+        ))}
       {editing && data && (
         <UpdateForm
           key={editing === 'new' ? 'new' : editing.id}
           initial={editing === 'new' ? undefined : editing}
           apiKeySet={editing !== 'new' && editing.api_key_set}
           commandsEditable={data.commands_editable}
+          save={source.save}
           onCancel={() => setEditing(undefined)}
           onSaved={() => {
             setEditing(undefined);
@@ -568,12 +798,14 @@ export function UpdatesPage() {
           }}
         />
       )}
-      {loading && !data ? (
+      {!data && (remote ? !error : loading) ? (
         <Skeleton kind="list" rows={8} />
-      ) : list.length === 0 ? (
+      ) : !data && remote ? null : list.length === 0 ? (
         <div className="empty">
           <strong>Nothing to keep updated yet</strong>
-          Detect finds OS packages, snaps, this monitor and apps such as Sonarr, Radarr, Plex and AdGuard Home.
+          {remote
+            ? `Detect finds OS packages, snaps and apps such as Sonarr, Radarr, Plex and AdGuard Home on ${source.name}.`
+            : 'Detect finds OS packages, snaps, this monitor and apps such as Sonarr, Radarr, Plex and AdGuard Home.'}
           <Editable>
             <div>
               <button className="btn" onClick={detect}>
@@ -587,10 +819,11 @@ export function UpdatesPage() {
       ) : (
         <ul className="upd-list">
           {shown.map((t) => (
-            <TargetRow key={t.id} t={t} data={data!} now={now} onEdit={() => setEditing(t)} followed={!!batch?.ids.includes(t.id)} />
+            <TargetRow key={t.id} t={t} data={data!} now={now} onEdit={() => setEditing(t)} followed={!!batch?.ids.includes(t.id)} source={source} refresh={refresh} />
           ))}
         </ul>
       )}
+      {remote && data && source.saveSettings && <HostSettings source={source} data={data} refresh={refresh} />}
     </main>
   );
 }

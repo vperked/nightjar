@@ -62,6 +62,14 @@ func (m *Manager) run(ctx context.Context, c Command, okCodes ...int) (Output, e
 		c.Output = l
 	}
 	out, err := m.opt.Run(ctx, c)
+	// Another apt holding the lock, or an install left half-done, is cleared and the command run again.
+	if err == nil && out.Code != 0 && isAptCommand(c.Argv) {
+		if retry, rerr := m.recoverApt(ctx, out); rerr != nil {
+			log.Warn("Could not clear what stopped apt", "err", rerr)
+		} else if retry {
+			out, err = m.opt.Run(ctx, c)
+		}
+	}
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		return out, fmt.Errorf("%s timed out after %s", c.Argv[0], c.Timeout)
@@ -74,6 +82,10 @@ func (m *Manager) run(ctx context.Context, c Command, okCodes ...int) (Output, e
 		name := strings.Join(c.Argv[:min(2, len(c.Argv))], " ")
 		if len(c.Argv) > 1 && c.Argv[0] == "sh" && c.Argv[1] == "-c" {
 			name = "the command"
+		}
+		if why := explain(c.Argv, out); why != "" {
+			log.Warn("Command failed", "command", name, "exit", out.Code, "output", out.Tail(600))
+			return out, fmt.Errorf("%s failed: %s", name, why)
 		}
 		if tail := out.Tail(600); tail != "" {
 			return out, fmt.Errorf("%s failed (exit %d): %s", name, out.Code, tail)

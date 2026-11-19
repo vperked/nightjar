@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"nightjar/internal/analytics"
@@ -65,21 +66,49 @@ func NewLoop(ctx *Context) *Loop {
 	}
 }
 
-// Wait blocks until background work started by earlier cycles has finished; call it before closing
-// what that work writes to. That is the uptime checks, and update jobs: none starts after this, a
-// check under way gets a minute, and an update under way is waited for until it ends (up to
+// stopBudget is the most Wait gives the uptime checks, repairs and service and drive reads still
+// under way. Stopping must fit in systemd's TimeoutStopSec (90s), with the web server, the other
+// background work and the database still to close after it; past that, systemd kills Nightjar
+// before it has saved anything or said it stopped.
+var stopBudget = 30 * time.Second
+
+// Wait blocks until background work started by earlier cycles has finished, or a while has passed;
+// call it before closing what that work writes to. That is the uptime checks and their repairs
+// (a service or container restart is cut short as the loop stops; a script, in its own scope, is
+// left to finish), the systemd and drive reads, and update jobs: none starts after this, and they
+// are waited for side by side. The checks and reads get stopBudget at most, a check
+// round for updates a minute, and an update under way is waited for until it ends (up to
 // SYSTEM_UPDATE_TIMEOUT and some), since apt or dpkg cut off halfway breaks the machine's packages.
-func (l *Loop) Wait() {
-	l.services.wait()
-	l.units.wg.Wait()
-	l.drives.wg.Wait()
+// It reports whether everything had finished.
+func (l *Loop) Wait() bool {
+	var updates sync.WaitGroup
 	if l.ctx.Updates != nil {
-		l.ctx.Updates.Wait(time.Minute)
+		updates.Go(func() { l.ctx.Updates.Wait(time.Minute) })
 	}
+	done := make(chan struct{})
+	go func() {
+		l.services.wait()
+		l.units.wg.Wait()
+		l.drives.wg.Wait()
+		close(done)
+	}()
+	finished := true
+	select {
+	case <-done:
+	case <-time.After(stopBudget):
+		log.Warn(fmt.Sprintf("Uptime checks or repairs were still running after %s; stopping without them", stopBudget))
+		finished = false
+	}
+	updates.Wait()
+	return finished
 }
 
 // Run executes cycles until ctx is cancelled. A failing cycle is logged and reported, never fatal.
 func (l *Loop) Run(stop context.Context) {
+	// The loop keeps one OS thread to itself, so LoopWaiting can tell its alerts from others'.
+	release := l.ctx.claimThread()
+	defer release()
+	l.services.stop = stop
 	for {
 		l.safeCycle()
 		select {

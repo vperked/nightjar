@@ -209,9 +209,11 @@ type Hub struct {
 	// Maintenance, when set, says whether planned downtime holds back an alert about subject:
 	// such alerts are kept, marked maintenance, and sent nowhere.
 	Maintenance func(subject string, now time.Time) bool
-	// Waiting, when set, is called every few seconds while an alert waits on slow channels. The
-	// monitoring loop sends alerts itself, so this tells its watchdog the loop is busy, not stuck: a
-	// plugin or webhook that takes its full time must not look like a hung monitor.
+	// Waiting, when set, is called every few seconds while an alert waits on slow channels, always
+	// on the goroutine that sent the alert, so it can tell whose alert it is. The monitoring loop
+	// sends alerts itself, so this tells its watchdog the loop is busy, not stuck: a plugin or
+	// webhook that takes its full time must not look like a hung monitor. Alerts sent from anywhere
+	// else must not beat for the loop (see monitor.Context.LoopWaiting).
 	Waiting func()
 
 	mu     sync.Mutex

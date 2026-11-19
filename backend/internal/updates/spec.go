@@ -98,8 +98,18 @@ func Slug(name string) string {
 	if len(s) > 40 {
 		s = strings.TrimRight(s[:40], "-")
 	}
+	if reservedIDs[s] {
+		s += "-target"
+	}
 	return s
 }
+
+// reservedIDs name routes beside the targets' own (PUT …/updates/settings is the schedule), so a
+// target cannot take them: its changes would go to the route instead and be lost.
+var reservedIDs = map[string]bool{"settings": true}
+
+// ErrReservedID is a new target given an id kept for a route.
+var ErrReservedID = errors.New(`the id "settings" is kept for the update settings; give the target another`)
 
 // ParseSpec reads and validates a target from JSON.
 func ParseSpec(data []byte) (Spec, error) {
@@ -165,4 +175,32 @@ func (s Spec) CanUpdate() bool { return s.Kind != KindRelease || s.UpdateCommand
 // Commands lists the fields that make the monitor run something or read files of the user's choosing.
 func (s Spec) Commands() [4]string {
 	return [4]string{s.VersionCommand, s.UpdateCommand, s.Dir, s.ConfigFile}
+}
+
+// Locked is what a dashboard without sign-in may not change, since any program on its machine could
+// then reach its API: the commands and paths, and everything else that decides what runs as root or
+// where a stored secret goes. What a release installs (Repo, Asset, AssetRepo), which service is
+// restarted (Unit, Restart), where an *arr app's stored API key is sent (URL), and the monitor's own
+// restart (Self).
+type Locked struct {
+	Commands         [4]string
+	Repo, TagPrefix  string
+	Asset, AssetRepo string
+	Unit             string
+	Restart, Self    bool
+	URL              string
+}
+
+// KeepUnsent is s with what a save from the dashboard leaves out filled in from the stored old, as
+// Save fills it: the download a release's recipe checks, while its command stays the same.
+func (s Spec) KeepUnsent(old Spec) Spec {
+	if s.Asset == "" && s.UpdateCommand == old.UpdateCommand {
+		s.Asset, s.AssetRepo = old.Asset, old.AssetRepo
+	}
+	return s
+}
+
+// Locked is the spec's part that sign-in guards.
+func (s Spec) Locked() Locked {
+	return Locked{Commands: s.Commands(), Repo: s.Repo, TagPrefix: s.TagPrefix, Asset: s.Asset, AssetRepo: s.AssetRepo, Unit: s.Unit, Restart: s.Restart, Self: s.Self, URL: s.URL}
 }

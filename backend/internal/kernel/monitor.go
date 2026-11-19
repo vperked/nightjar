@@ -132,17 +132,52 @@ type Reboot struct {
 	Clean, Known bool
 }
 
-// shutdownMarkers are what systemd logs as it shuts a machine down on purpose.
-var shutdownMarkers = []string{
+// managerMarkers are what the system manager (systemd as PID 1) logs, and only then, as it takes
+// the machine down on purpose. The same words from anywhere else prove nothing: a user's own
+// systemd reaches its "shutdown" target whenever their last session ends, and many daemons say
+// "shutting down." whenever they restart.
+var managerMarkers = []string{
 	"reached target system reboot", "reached target system power off", "reached target system shutdown",
-	"reached target reboot", "reached target power-off", "reached target shutdown",
-	"system is rebooting", "system is powering down", "system is powering off", "shutting down.",
+	"reached target system halt", "reached target reboot", "reached target power-off", "reached target poweroff",
+	"reached target shutdown", "reached target halt", "reached target kexec", "shutting down.",
 }
 
-// CleanShutdown says whether the end of a boot's journal shows it shutting down on purpose.
-func CleanShutdown(tail string) bool {
-	lower := strings.ToLower(tail)
-	for _, m := range shutdownMarkers {
+// logindMarkers are what systemd-logind logs when it is asked to reboot or power off the machine.
+var logindMarkers = []string{"system is rebooting", "system is powering down", "system is powering off", "system is halting"}
+
+// shutdownEntry is one journal entry, in journalctl's JSON, with the fields that say who logged it.
+// The ones starting with an underscore are set by the journal itself, so a program cannot forge them.
+type shutdownEntry struct {
+	Message  any `json:"MESSAGE"`
+	PID      any `json:"_PID"`
+	UID      any `json:"_UID"`
+	Comm     any `json:"_COMM"`
+	UserUnit any `json:"_SYSTEMD_USER_UNIT"`
+}
+
+// journalField is a journal field's text; a field journalctl wrote as anything but a string counts as unset.
+func journalField(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+// marksShutdown says whether one entry is the system itself shutting down on purpose: the system
+// manager, or logind, as root and outside any user's own systemd, saying so in its own words.
+func (e shutdownEntry) marksShutdown() bool {
+	if journalField(e.UID) != "0" || journalField(e.UserUnit) != "" {
+		return false
+	}
+	var markers []string
+	switch {
+	case journalField(e.PID) == "1":
+		markers = managerMarkers
+	case journalField(e.Comm) == "systemd-logind":
+		markers = logindMarkers
+	default:
+		return false
+	}
+	lower := strings.ToLower(journalEntry{Message: e.Message}.message())
+	for _, m := range markers {
 		if strings.Contains(lower, m) {
 			return true
 		}
@@ -150,15 +185,33 @@ func CleanShutdown(tail string) bool {
 	return false
 }
 
-// previousShutdown reads the end of the previous boot's journal for a clean shutdown.
+// CleanShutdown says whether the end of a boot's journal, as journalctl's JSON (one entry a line),
+// shows the system shutting down on purpose. Lines that are not entries are passed over.
+func CleanShutdown(journal []byte) bool {
+	for line := range bytes.SplitSeq(journal, []byte("\n")) {
+		var e shutdownEntry
+		if json.Unmarshal(line, &e) == nil && e.marksShutdown() {
+			return true
+		}
+	}
+	return false
+}
+
+// shutdownEntries is how many of the previous boot's last entries from the system manager and logind
+// are read: a large machine stops hundreds of units after logind's word and before the manager's.
+const shutdownEntries = 500
+
+// previousShutdown reads the end of the previous boot's journal for a clean shutdown. Only the
+// system manager's entries and logind's are asked for, and few of them, so the read stays short.
 func previousShutdown() (clean, known bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "journalctl", "-b", "-1", "-n", "300", "--no-pager", "-o", "cat").Output()
-	if err != nil || len(out) == 0 {
+	out, err := exec.CommandContext(ctx, "journalctl", "-b", "-1", "-n", strconv.Itoa(shutdownEntries), "--no-pager", "-o", "json",
+		"_PID=1", "+", "_COMM=systemd-logind").Output()
+	if err != nil || len(bytes.TrimSpace(out)) == 0 {
 		return false, false
 	}
-	return CleanShutdown(string(out)), true
+	return CleanShutdown(out), true
 }
 
 // CrashReport is one crash-check pass.
@@ -197,7 +250,10 @@ const maxDetected = 10000
 const maxJournalEntries = 2000
 
 // Monitor keeps per-boot state in a JSON file so device error counts and reboots survive restarts.
+// Its checks are safe to call from several goroutines: a crash check that its caller stopped
+// waiting for goes on, and must not touch the state while the next check reads it.
 type Monitor struct {
+	mu             sync.Mutex
 	linux          bool
 	persistence    string
 	ignoredDevices map[string]bool
@@ -631,6 +687,8 @@ func (m *Monitor) CheckStability() Stability {
 	if !m.linux {
 		return s
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if current := bootTime(); current != 0 && m.bootTime != 0 && abs(current-m.bootTime) >= 10 {
 		m.resetTracking()
 		m.bootTime = current
@@ -879,6 +937,12 @@ func (m *Monitor) newCrashes(crashes []Event, sinceMinutes int, now time.Time) [
 
 // CheckReboot reports a boot-time change since the last call or the last run, once.
 func (m *Monitor) CheckReboot() *Reboot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.checkReboot()
+}
+
+func (m *Monitor) checkReboot() *Reboot {
 	if m.pendingReboot != nil {
 		r := m.pendingReboot
 		m.pendingReboot = nil
@@ -909,7 +973,9 @@ func (m *Monitor) CheckCrashes(sinceMinutes int) CrashReport {
 	if !m.linux {
 		return r
 	}
-	r.Reboot = m.CheckReboot()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r.Reboot = m.checkReboot()
 	r.Flood = flooding()
 	// Each check reads the journal only since the last one (the window is the most it reads); what
 	// overlaps is already seen.

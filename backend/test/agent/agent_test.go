@@ -99,6 +99,44 @@ func TestInstallChecksItsInputFirst(t *testing.T) {
 	}
 }
 
+// A plain-HTTP agent's token has crossed the network, and over HTTPS the token is the agent's key:
+// moving it to HTTPS takes a new token, and asking for HTTPS without one says so instead of quietly
+// staying on plain HTTP.
+func TestMovingToHTTPSNeedsANewToken(t *testing.T) {
+	const old, fresh = "the-old-plain-token-0123456789", "a-fresh-token-for-https-0123456789"
+	plainAgent := agent.Settings{Listen: ":9101", Token: old, Plain: true}
+	for _, c := range []struct {
+		name      string
+		saved     agent.Settings
+		installed bool
+		token     string
+		plain     bool
+		asked     bool
+		refused   bool
+	}{
+		{"HTTPS asked for, no token", plainAgent, true, "", false, true, true},
+		{"HTTPS on the old token", plainAgent, true, old, false, false, true},
+		{"HTTPS on a new token", plainAgent, true, fresh, false, true, false},
+		{"a bare reinstall stays plain", plainAgent, true, "", false, false, false},
+		{"plain on the old token", plainAgent, true, old, true, false, false},
+		{"already HTTPS", agent.Settings{Listen: ":9101", Token: old}, true, "", false, true, false},
+		{"a first install", agent.Settings{}, false, fresh, false, true, false},
+	} {
+		err := agent.CheckMoveToHTTPS(c.saved, c.installed, c.token, c.plain, agent.Options{AskedTLS: c.asked})
+		if refused := errors.Is(err, agent.ErrPlainToken); refused != c.refused {
+			t.Errorf("%s: %v, refused %v", c.name, err, c.refused)
+		}
+	}
+}
+
+// Connections that idle or crawl are let go, so a pile of them cannot fill the agent's memory.
+func TestTheAgentsServerLetsIdleConnectionsGo(t *testing.T) {
+	srv := agent.NewHTTPServer(http.NotFoundHandler())
+	if srv.IdleTimeout <= 0 || srv.ReadTimeout <= 0 || srv.ReadHeaderTimeout <= 0 || srv.WriteTimeout <= 0 {
+		t.Fatalf("every timeout should be set: %+v", srv)
+	}
+}
+
 func TestTheAgentServesHTTPSWithTheKeyItsTokenGives(t *testing.T) {
 	const token = "a-token-that-is-long-enough-1234"
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")

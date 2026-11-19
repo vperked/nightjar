@@ -41,7 +41,7 @@ frontend/                     React + TypeScript (Vite); builds into backend/int
 
 ## Quick start
 
-You need Go 1.26+ and Node 20.19+. (`go.mod` pins the patched Go 1.27.3 toolchain; with the default `GOTOOLCHAIN=auto` Go downloads it on first build.)
+You need Go 1.26+ and Node 20.19+. (`go.mod` pins the patched Go 1.27.4 toolchain; with the default `GOTOOLCHAIN=auto` Go downloads it on first build.)
 
 ```bash
 cp env.recommended .env        # set WEBHOOK, thresholds, etc.

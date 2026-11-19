@@ -88,6 +88,39 @@ func (s *Server) unblockHost(w http.ResponseWriter, r *http.Request) {
 	answerAgent(w, v, err)
 }
 
+// lockHostPort pins a port on a server to the service listening on it: {"port": 5432, "proto": "tcp"}.
+func (s *Server) lockHostPort(w http.ResponseWriter, r *http.Request) {
+	port, proto, ok := readLock(w, r)
+	if !ok {
+		return
+	}
+	v, err := s.ctx.Remote.LockPort(r.Context(), r.PathValue("id"), port, proto)
+	answerAgent(w, v, err)
+}
+
+func (s *Server) relockHostPort(w http.ResponseWriter, r *http.Request) {
+	v, err := s.ctx.Remote.RelockPort(r.Context(), r.PathValue("id"), r.PathValue("lock"))
+	answerAgent(w, v, err)
+}
+
+func (s *Server) unlockHostPort(w http.ResponseWriter, r *http.Request) {
+	v, err := s.ctx.Remote.UnlockPort(r.Context(), r.PathValue("id"), r.PathValue("lock"))
+	answerAgent(w, v, err)
+}
+
+// readLock reads {"port": 5432, "proto": "tcp"}.
+func readLock(w http.ResponseWriter, r *http.Request) (uint16, string, bool) {
+	var body struct {
+		Port  uint16 `json:"port"`
+		Proto string `json:"proto"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil || body.Port == 0 {
+		writeJSON(w, http.StatusBadRequest, errBody(`Expected {"port": 5432, "proto": "tcp"}`))
+		return 0, "", false
+	}
+	return body.Port, body.Proto, true
+}
+
 // answerAgent passes on what the agent said, or why it could not be asked. Refusals go out as 422,
 // since a proxy such as Cloudflare hides the body of a 5xx.
 func answerAgent[T any](w http.ResponseWriter, v T, err error) {
@@ -245,6 +278,30 @@ func (s *Server) keepLocalDefault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.localChange(w, r, func() error { return s.ctx.Firewall.Keep(r.Context(), keep) })
+}
+
+// lockLocalPort pins a port on this machine to the service listening on it.
+func (s *Server) lockLocalPort(w http.ResponseWriter, r *http.Request) {
+	port, proto, ok := readLock(w, r)
+	if !ok {
+		return
+	}
+	s.localChange(w, r, func() error {
+		_, err := s.ctx.Firewall.Lock(r.Context(), port, proto)
+		return err
+	})
+}
+
+// relockLocalPort pins a locked port to the service holding it now.
+func (s *Server) relockLocalPort(w http.ResponseWriter, r *http.Request) {
+	s.localChange(w, r, func() error {
+		_, err := s.ctx.Firewall.Relock(r.Context(), r.PathValue("lock"))
+		return err
+	})
+}
+
+func (s *Server) unlockLocalPort(w http.ResponseWriter, r *http.Request) {
+	s.localChange(w, r, func() error { return s.ctx.Firewall.Unlock(r.Context(), r.PathValue("lock")) })
 }
 
 func (s *Server) removeLocalRule(w http.ResponseWriter, r *http.Request) {

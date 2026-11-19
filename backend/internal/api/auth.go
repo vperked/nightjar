@@ -75,7 +75,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, who accoun
 		who.Username = s.cfg.Accounts.Username()
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name: deviceCookieName, Value: s.cfg.Accounts.NewDevice(who.Username), Path: "/api/auth/", MaxAge: int(deviceCookieLife.Seconds()),
+		Name: deviceCookieName, Value: s.cfg.Accounts.NewDevice(who), Path: "/api/auth/", MaxAge: int(deviceCookieLife.Seconds()),
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"username": who.Username, "role": who.Role})
@@ -116,7 +116,7 @@ func (s *Server) createAdmin(w http.ResponseWriter, r *http.Request) {
 	err := s.cfg.Accounts.Create(c.Username, c.Password, c.SetupCode)
 	finish(guessed(err, accounts.ErrSetupCode))
 	switch {
-	case errors.Is(err, accounts.ErrExists):
+	case errors.Is(err, accounts.ErrExists), errors.Is(err, accounts.ErrViewerExists):
 		writeJSON(w, http.StatusConflict, errBody(err.Error()))
 	case errors.Is(err, accounts.ErrSetupCode):
 		log.Warn("Wrong setup code", "ip", s.clientNames(r))

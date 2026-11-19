@@ -1,33 +1,54 @@
-nightjar.log
-*.log
-*.log.*
+# Secrets and this machine's settings. .env holds tokens and passwords (env.recommended is the
+# template to copy). frontend/.env.demo only turns on demo mode for `npm run dev`, so it is shared.
 .env
 .env.*
+!frontend/.env.demo
+
+# What Nightjar writes while it runs: logs, the database, kernel monitor state (KERNEL_TRACKING_FILE),
+# plugins installed on this machine (the examples live in examples/plugins), and the SSH keys it makes
+# to log in to other servers, private halves included.
+*.log
+*.log.*
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+.nightjar_kernel_tracking.json
+/plugins/
+/ssh/
+
 # Build output, made by make, build.sh and deploy-ui.sh; never committed. The two embed folders keep
 # only their .gitkeep, so a plain go build still compiles.
 bin/
-dist/
+/dist/
 /web/
 backend/internal/web/dist/*
 !backend/internal/web/dist/.gitkeep
 backend/internal/agentbin/dist/*
 !backend/internal/agentbin/dist/.gitkeep
 *.tsbuildinfo
+
+# Frontend tooling.
 node_modules/
 .vite/
 coverage/
 
-# Plugins installed on this machine; the examples live in examples/plugins.
-/plugins/
-# SSH keys Nightjar makes to log in to other servers, private halves included.
-/ssh/
+# Go test binaries, coverage and profiles.
+*.test
+*.out
+*.prof
+*.pprof
 
-# Kernel monitor state (KERNEL_TRACKING_FILE), written while the monitor runs.
-.nightjar_kernel_tracking.json
-
-# Screenshots taken while checking the UI by hand; not part of the app.
+# Screenshots taken while checking the UI by hand; app icons live in frontend/src/assets.
 /frontend/audit/
-/frontend/att-*.png
+/frontend/*.png
+
+# Editors, OS and local tool settings.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+*.orig
+*.rej
+.claude/settings.local.json

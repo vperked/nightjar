@@ -123,6 +123,25 @@ type Options struct {
 	// LeavePort is a reinstall that cannot tell whether the first install opened the port (see
 	// Settings.FirewallSet): iptables is still set up for the defense, but no port is opened.
 	LeavePort bool
+	// AskedTLS says -tls=true was given on the command line, not merely left at its default.
+	AskedTLS bool
+}
+
+// ErrPlainToken turns away a move to HTTPS that keeps the token a plain-HTTP agent had. Over plain
+// HTTP the token crosses the network with every poll, and over HTTPS it is also the agent's key, so
+// whoever caught it once could pose as the agent despite the dashboard's pin.
+var ErrPlainToken = errors.New("this agent served plain HTTP, so its token has crossed the network unencrypted; over HTTPS the token is also its key. Make a new token in the dashboard (the server's Connection settings) and run install again with -token")
+
+// CheckMoveToHTTPS refuses to move an agent from plain HTTP to HTTPS on the token it already has:
+// asked for HTTPS with no token (the old one would be reused), or given the old token again.
+func CheckMoveToHTTPS(saved Settings, installed bool, token string, plain bool, opt Options) error {
+	if !installed || !saved.Plain || plain {
+		return nil
+	}
+	if (token == "" && opt.AskedTLS) || (token != "" && token == saved.Token) {
+		return ErrPlainToken
+	}
+	return nil
 }
 
 // ListenAddress checks a -listen value: a port, or host:port.
@@ -143,10 +162,17 @@ func ListenAddress(listen string) (string, error) {
 // HTTP instead of HTTPS.
 func Install(listen, token string, plain bool, opt Options, out io.Writer) error {
 	saved, installed := savedSettings()
+	if err := CheckMoveToHTTPS(saved, installed, token, plain, opt); err != nil {
+		return err
+	}
 	// With no token, it is a reinstall: the agent's settings on this machine say how it was set up.
 	if token == "" {
 		if !installed {
 			return errors.New("give the token from the dashboard's Add a server (-token); there is no agent on this machine to reinstall from")
+		}
+		if saved.Plain && !plain {
+			// HTTPS on the old token would be no safer than plain HTTP, so it stays as it was.
+			fmt.Fprintln(out, "This agent serves plain HTTP and stays on it: to move it to HTTPS, run install again with a new token from the dashboard (-token).")
 		}
 		listen, token, plain = saved.Listen, saved.Token, saved.Plain
 		opt = saved.Reinstall(opt)

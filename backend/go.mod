@@ -2,7 +2,7 @@ module nightjar
 
 go 1.26.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/shirou/gopsutil/v4 v4.26.10

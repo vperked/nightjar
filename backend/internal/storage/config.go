@@ -2,12 +2,13 @@ package storage
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
+
+	"nightjar/internal/storage/record"
 )
 
 // ErrUnavailable is returned by writes when the database could not be opened.
-var ErrUnavailable = errors.New("database unavailable")
+var ErrUnavailable = record.ErrUnavailable
 
 // Settings returns the settings saved from the dashboard, by environment key.
 func (s *Store) Settings() map[string]string {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
-import type { AgentFirewall, FirewallDrop, FirewallPort, FirewallRule, FirewallStatus, SSHAccess } from '../api/types';
+import type { AgentFirewall, FirewallDrop, FirewallLock, FirewallPort, FirewallRule, FirewallStatus, SSHAccess } from '../api/types';
 import { BlockSSH, SSHPending, SSHState, useSSHAccess } from './BlockSSH';
 import { formatAgo, formatBytes, plural } from '../format';
 import { useNow } from '../hooks/useNow';
@@ -52,6 +52,27 @@ const portWords = (r: Pick<FirewallRule, 'port' | 'proto'>) => {
 // sourceWords names who a rule is for: "Nightjar" for the address Nightjar reaches a server from.
 const sourceWords = (source: string, dashboard?: string) => (source && source === dashboard ? 'Nightjar' : source || 'anyone');
 
+// serviceName names what holds a port in a word: its systemd service ("postgresql"), else its program.
+export const serviceName = (s: { program?: string; exe?: string; unit?: string }) => (s.unit ? s.unit.replace(/\.service$/, '') : s.program || s.exe?.split('/').pop() || 'another program');
+
+// serviceTitle is all that is known of what holds a port, for a tooltip.
+const serviceTitle = (s: { program?: string; exe?: string; unit?: string }) => [s.program, s.exe, s.unit].filter(Boolean).join(' · ');
+
+// holderName names the program holding a locked port instead of its service: the program as it runs,
+// since in the service's own unit it is still not the service.
+const holderName = (h: NonNullable<FirewallLock['holder']>) => h.program || h.exe?.split('/').pop() || 'another program';
+
+// lockFor is the lock on a port, if there is one.
+const lockFor = (st: FirewallStatus, p: Pick<FirewallPort, 'port' | 'proto'>) => st.locks?.find((l) => l.port === p.port && l.proto === p.proto);
+
+// LockIcon marks a port locked to its service.
+const LockIcon = () => (
+  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="5" y="11" width="14" height="10" rx="2" />
+    <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+  </svg>
+);
+
 // describeRule puts a rule in words: "Block 203.0.113.7 on every port", "Limit anyone on tcp port 22
 // to 6 a minute each", "Block outgoing connections on port 25", "Allow outgoing to 192.0.2.25 on every port".
 export function describeRule(r: Pick<FirewallRule, 'action' | 'source' | 'port' | 'proto' | 'rate' | 'direction'>): string {
@@ -87,6 +108,11 @@ export interface FirewallTarget {
   order: (ids: string[]) => Promise<FirewallStatus | undefined>;
   setDefault: (def: '' | 'drop') => Promise<FirewallStatus | undefined>;
   keep: (keep: boolean) => Promise<FirewallStatus | undefined>;
+  // Locks pin a port to the service on it now (lock), trust the program holding it now (relock), or
+  // let it go (unlock). A target without them (as in tests) offers no locking.
+  lock?: (port: number, proto: string) => Promise<FirewallStatus | undefined>;
+  relock?: (id: string) => Promise<FirewallStatus | undefined>;
+  unlock?: (id: string) => Promise<FirewallStatus | undefined>;
   // ssh is how the same machine lets people log in over SSH, for Block SSH's key path. A target
   // without it (as in tests) offers only the address path.
   ssh?: SSHTarget;
@@ -111,6 +137,9 @@ export const localFirewall: FirewallTarget = {
   order: (ids) => api.orderFirewall(ids).then((r) => r.firewall),
   setDefault: (def) => api.setFirewallDefault(def).then((r) => r.firewall),
   keep: (keep) => api.keepFirewallDefault(keep).then((r) => r.firewall),
+  lock: (port, proto) => api.lockPort(port, proto).then((r) => r.firewall),
+  relock: (id) => api.relockPort(id).then((r) => r.firewall),
+  unlock: (id) => api.unlockPort(id).then((r) => r.firewall),
   ssh: { load: api.sshd, addKey: api.addSSHDKey, keysOnly: api.setKeysOnly, keep: api.keepKeysOnly },
 };
 
@@ -128,6 +157,9 @@ export const hostFirewall = (h: { id: string; name: string }): FirewallTarget =>
   order: (ids) => api.orderHostRules(h.id, ids).then(withDashboard),
   setDefault: (def) => api.setHostDefault(h.id, def).then(withDashboard),
   keep: (keep) => api.keepHostDefault(h.id, keep).then(withDashboard),
+  lock: (port, proto) => api.lockHostPort(h.id, port, proto).then(withDashboard),
+  relock: (id) => api.relockHostPort(h.id, id).then(withDashboard),
+  unlock: (id) => api.unlockHostPort(h.id, id).then(withDashboard),
   ssh: {
     load: () => api.hostSSHD(h.id),
     addKey: (user, key) => api.addHostSSHDKey(h.id, user, key),
@@ -240,7 +272,11 @@ function hitWords(r: FirewallRule, hits: FirewallStatus['hits']): string {
 
 // withLists fills in the open ports when an answer has none: an agent from before they were read, or
 // one that could read nothing from /proc/net, sends null.
-const withLists = (s: FirewallStatus | undefined): FirewallStatus | undefined => s && { ...s, listening: s.listening ?? [] };
+// It also notes how far the machine's clock is from the browser's, for countdowns and times on it.
+const withLists = (s: FirewallStatus | undefined): FirewallStatus | undefined => s && { ...s, listening: s.listening ?? [], skew: s.now ? s.now - Date.now() / 1000 : 0 };
+
+// browserTime is a time on the machine's clock on the browser's, for counting down and saying how long ago.
+const browserTime = (st: Pick<FirewallStatus, 'skew'>, t: number) => t - (st.skew ?? 0);
 
 // FirewallManager is a machine's whole firewall. It refreshes itself every 15 seconds while shown,
 // for what the rules caught.
@@ -263,7 +299,8 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
   const [blocking, setBlocking] = useState(false);
   // securing is which Secure preset's box is open (email, web); like Block SSH, it takes the form's place.
   const [securing, setSecuring] = useState<SecureKind>();
-  const ssh = useSSHAccess(target.ssh, target.name);
+  // SSH logins are the admin's to see: a viewer is not asked for them, which the server would refuse.
+  const ssh = useSSHAccess(canEdit ? target.ssh : undefined, target.name);
   // removing is the rule whose Remove is waiting on a yes: one click should not drop a rule.
   const [removing, setRemoving] = useState('');
   const busyRef = useRef('');
@@ -516,7 +553,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
                   ]}
                 />
               )}
-              {full && st.since ? <span className="small ink-3">counted since {formatAgo(st.since)}</span> : null}
+              {full && st.since ? <span className="small ink-3">counted since {formatAgo(browserTime(st, st.since))}</span> : null}
               {(dir === 'in' && ssh.access) || (canChange && !adding && !blocking) ? (
                 <span className="fw-new">
                   {dir === 'in' && ssh.access && <SSHState ssh={ssh} name={target.name} />}
@@ -658,7 +695,24 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
           )}
           <Pager paged={rulePages} label="Pages of rules" noun="rules" />
 
-          {dir === 'in' && st.listening.length > 0 && <OpenPorts st={st} canChange={canChange} ruleFor={(p) => ruleFor({ port: String(p.port), proto: p.proto })} />}
+          {dir === 'in' && st.listening.length > 0 && (
+            <OpenPorts
+              st={st}
+              canChange={canChange}
+              busy={!!busy}
+              ruleFor={(p) => ruleFor({ port: String(p.port), proto: p.proto })}
+              lock={
+                full && target.lock && Array.isArray(st.locks)
+                  ? (p) =>
+                      run(`lock:${p.proto}${p.port}`, () => target.lock!(p.port, p.proto), {
+                        title: `Port locked · ${target.name}`,
+                        body: `${p.port}/${p.proto} is locked to ${serviceName(p)}. Should anything else take it, Nightjar drops what comes to it and tells you.`,
+                      })
+                  : undefined
+              }
+            />
+          )}
+          {dir === 'in' && !!st.locks?.length && <PortLocks st={st} target={target} canChange={canChange} busy={busy} run={run} />}
         </div>
       </Section>
 
@@ -1087,7 +1141,7 @@ function Glance({ st, rules, tool }: { st: FirewallStatus; rules: FirewallRule[]
         <div className="readout-value">{dropped.toLocaleString()}</div>
         <div className="readout-sub">
           {formatBytes(droppedBytes)}
-          {st.since ? ` since ${formatAgo(st.since)}` : ''}
+          {st.since ? ` since ${formatAgo(browserTime(st, st.since))}` : ''}
         </div>
       </div>
       <div className={reachable.length ? '' : 'fw-glance-good'}>
@@ -1156,7 +1210,7 @@ function DefaultChoice({
     await run('default', () => target.setDefault(next));
   };
 
-  const left = st.pending ? Math.max(0, Math.round(st.pending.until - now)) : 0;
+  const left = st.pending ? Math.max(0, Math.round(browserTime(st, st.pending.until) - now)) : 0;
   // A viewer still sees which way it is set: the choices stay, greyed out.
   const viewerTitle = canEdit ? undefined : "Viewers can't change this";
   return (
@@ -1252,9 +1306,9 @@ function DefaultChoice({
   );
 }
 
-// OpenPorts lists the ports something listens on, whether the network can reach each, and a shortcut
-// to a rule for it.
-function OpenPorts({ st, canChange, ruleFor }: { st: FirewallStatus; canChange: boolean; ruleFor: (p: FirewallPort) => void }) {
+// OpenPorts lists the ports something listens on and the service on each, whether the network can
+// reach each, and shortcuts to a rule for it or to lock it to its service.
+function OpenPorts({ st, canChange, busy, ruleFor, lock }: { st: FirewallStatus; canChange: boolean; busy: boolean; ruleFor: (p: FirewallPort) => void; lock?: (p: FirewallPort) => void }) {
   const dropping = st.default === 'drop';
   const paged = usePaged(st.listening, 12);
   return (
@@ -1274,26 +1328,128 @@ function OpenPorts({ st, canChange, ruleFor }: { st: FirewallStatus; canChange: 
             closed: p.blocked ? 'closed by a rule' : 'closed by the default',
             tool: `up to ${TOOL[st.tool]}`,
           }[state];
+          const locked = lockFor(st, p);
+          const name = p.unit || p.program || p.exe ? serviceName(p) : '';
           return (
             <li key={`${p.proto}${p.port}`} className={`fw-port ${state}`}>
               <span className="fw-port-num mono num">
                 {p.port}
                 <span className="fw-port-proto">/{p.proto}</span>
               </span>
-              <span className="fw-port-prog truncate" title={p.program}>
-                {p.program || '—'}
+              <span className="fw-port-prog truncate" title={serviceTitle(p) || undefined}>
+                {name || '—'}
+                {p.unit && p.program && name !== p.program && <span className="ink-3"> · {p.program}</span>}
               </span>
               {(st.full || p.local) && <span className="fw-port-state">{words}</span>}
-              {canChange && !p.local && (
-                <button type="button" className="btn-quiet fw-port-rule" onClick={() => ruleFor(p)} aria-label={`Add a rule for ${p.port}/${p.proto}`}>
-                  + Rule
-                </button>
+              {locked && (
+                <span className={`fw-port-lock ${locked.state}`} title={locked.state === 'taken' ? 'Another program holds it' : `Locked to ${serviceName(locked)}`}>
+                  <LockIcon />
+                  {locked.state === 'taken' ? (locked.watch_only ? 'taken · watched' : 'taken · dropping') : 'locked'}
+                </span>
+              )}
+              {canChange && (
+                <span className="fw-port-acts">
+                  {lock && !locked && name && (
+                    <button type="button" className="btn-quiet" disabled={busy} onClick={() => lock(p)} aria-label={`Lock ${p.port}/${p.proto} to ${name}`} title={`Lock to ${name}`}>
+                      <LockIcon />
+                    </button>
+                  )}
+                  {!p.local && (
+                    <button type="button" className="btn-quiet" onClick={() => ruleFor(p)} aria-label={`Add a rule for ${p.port}/${p.proto}`}>
+                      + Rule
+                    </button>
+                  )}
+                </span>
               )}
             </li>
           );
         })}
       </ul>
       <Pager paged={paged} label="Pages of open ports" noun="ports" />
+    </div>
+  );
+}
+
+// PortLocks lists the ports locked to a service and how each stands: held by it, nothing listening,
+// or taken by another program, whose traffic is dropped until the service has it back. The program
+// there can be trusted instead (locked to it), or the lock let go.
+function PortLocks({
+  st,
+  target,
+  canChange,
+  busy,
+  run,
+}: {
+  st: FirewallStatus;
+  target: FirewallTarget;
+  canChange: boolean;
+  busy: string;
+  run: (key: string, change: () => Promise<FirewallStatus | undefined>, ok?: { title: string; body?: string }) => Promise<boolean>;
+}) {
+  const now = useNow(30000);
+  const locks = st.locks ?? [];
+  return (
+    <div className="fw-locks">
+      <span className="label">Locked ports</span>
+      <p className="small ink-3">Each port is locked to the service that held it. Should another program take it, Nightjar drops what comes to that port, ahead of every rule, and alerts you.</p>
+      <ul>
+        {locks.map((l) => {
+          const words =
+            l.state === 'taken'
+              ? `${l.holder ? holderName(l.holder) : 'another program'} holds it${l.since ? ` since ${formatAgo(browserTime(st, l.since), now)}` : ''}${l.watch_only ? ': the port is kept open, so it is only watched' : ': dropping what comes to it'}`
+              : l.state === 'idle'
+                ? 'nothing listens on it now'
+                : 'held by its service';
+          return (
+            <li key={l.id} className={`fw-lock ${l.state}`}>
+              <span className="fw-lock-port mono num">
+                <LockIcon /> {l.port}
+                <span className="fw-port-proto">/{l.proto}</span>
+              </span>
+              <span className="fw-lock-what min0">
+                <span className="truncate" title={serviceTitle(l)}>
+                  {serviceName(l)}
+                  {l.exe && <span className="mono ink-3 small"> {l.exe}</span>}
+                </span>
+                <span className="fw-lock-state small" title={l.holder ? serviceTitle(l.holder) : undefined}>
+                  {words}
+                </span>
+              </span>
+              {canChange && (
+                <span className="fw-rule-acts">
+                  {l.state === 'taken' && target.relock && (
+                    <button
+                      type="button"
+                      className="btn-quiet"
+                      disabled={!!busy}
+                      onClick={() =>
+                        run(`relock:${l.id}`, () => target.relock!(l.id), {
+                          title: `Port locked to the program on it · ${target.name}`,
+                          body: `${l.port}/${l.proto} is locked to ${l.holder ? holderName(l.holder) : 'the program on it'} now.`,
+                        })
+                      }
+                    >
+                      Trust it
+                    </button>
+                  )}
+                  {target.unlock && (
+                    <button
+                      type="button"
+                      className="btn-quiet"
+                      disabled={!!busy}
+                      onClick={() =>
+                        run(`unlock:${l.id}`, () => target.unlock!(l.id), { title: `Port unlocked · ${target.name}`, body: `${l.port}/${l.proto} is no longer locked to ${serviceName(l)}.` })
+                      }
+                    >
+                      Unlock
+                    </button>
+                  )}
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
@@ -1316,6 +1472,8 @@ function Dropped({ st, rules, canChange, block }: { st: FirewallStatus; rules: F
   const blocked = (source: string) => rules.some((r) => r.action === 'block' && !r.paused && r.direction !== 'out' && !r.port && !!r.source && within(source, r.source));
   const why = (d: FirewallDrop) => {
     if (d.rule === 'default') return 'no rule allowed it';
+    const l = st.locks?.find((l) => l.id === d.rule);
+    if (l) return `port ${l.port} is locked to ${serviceName(l)}, and another program held it`;
     const r = byId.get(d.rule);
     return r ? describeRule(r) : 'a rule since removed';
   };
@@ -1326,7 +1484,7 @@ function Dropped({ st, rules, canChange, block }: { st: FirewallStatus; rules: F
         {st.drops_note && <p className="note">{st.drops_note}</p>}
         {defaultHits > 0 && (
           <p className="small ink-2 fw-default-hits">
-            The default dropped {defaultHits.toLocaleString()} packets ({formatBytes(st.hits!.default.bytes)}){st.since ? ` since ${formatAgo(st.since, now)}` : ''}.
+            The default dropped {defaultHits.toLocaleString()} packets ({formatBytes(st.hits!.default.bytes)}){st.since ? ` since ${formatAgo(browserTime(st, st.since), now)}` : ''}.
           </p>
         )}
         {drops.length === 0 ? (
@@ -1359,8 +1517,11 @@ function Dropped({ st, rules, canChange, block }: { st: FirewallStatus; rules: F
             <ul className="fw-drops">
               {paged.items.map((d, i) => (
                 <li key={`${d.at}-${paged.offset + i}`}>
-                  <span className="small ink-3 num fw-drop-at">{formatAgo(d.at, now)}</span>
-                  <span className={`fw-drop-dot ${d.rule === 'default' ? 'default' : (byId.get(d.rule)?.action ?? 'default')}`} aria-hidden="true" />
+                  <span className="small ink-3 num fw-drop-at">{formatAgo(browserTime(st, d.at), now)}</span>
+                  <span
+                    className={`fw-drop-dot ${d.rule === 'default' ? 'default' : (byId.get(d.rule)?.action ?? (st.locks?.some((l) => l.id === d.rule) ? 'block' : 'default'))}`}
+                    aria-hidden="true"
+                  />
                   <span className="fw-drop-what min0">
                     <span className="mono">{d.direction === 'out' ? `→ ${d.dest}` : d.source}</span>
                     {(d.proto || d.port) && (

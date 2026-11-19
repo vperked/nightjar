@@ -22,7 +22,11 @@ export const browserZone = () => {
 // useServerZone is the server's time zone (weekly maintenance and quiet hours follow its clock),
 // with shift, the minutes to add to a server time to get the browser's: 0 when they agree.
 export function useServerZone() {
-  const tz = useContext(ConfigContext)?.time_zone;
+  return zoneOf(useContext(ConfigContext)?.time_zone);
+}
+
+// zoneOf is the same for any machine's reported zone, such as an agent server's.
+export function zoneOf(tz: { name: string; offset: number } | undefined) {
   if (!tz) return undefined;
   const here = -new Date().getTimezoneOffset() * 60;
   return { name: tz.name, shift: Math.round((here - tz.offset) / 60) };

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -95,7 +96,7 @@ func Exec(ctx context.Context, c Command) (Output, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = c.Dir
 	cmd.Env = append(env, c.Env...)
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr OutputBuffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if c.Output != nil {
 		cmd.Stdout, cmd.Stderr = io.MultiWriter(&stdout, c.Output), io.MultiWriter(&stderr, c.Output)
@@ -126,6 +127,69 @@ func Exec(ctx context.Context, c Command) (Output, error) {
 func isCurrentUser(name string) bool {
 	u, err := user.Current()
 	return err == nil && u.Username == name
+}
+
+// MaxOutput is the most of each stream an Output keeps: half from its start, half from its end. A
+// build that prints without end would otherwise fill the agent's 128 MB in the middle of an update.
+const MaxOutput = 4 << 20
+
+// OutputBuffer keeps what a command prints, up to MaxOutput: its start, where a parser looks, and
+// its end, where a failing command says why. What comes between is left out, and String says how
+// much. The zero value is ready to use; like bytes.Buffer, one writer at a time.
+type OutputBuffer struct {
+	head []byte
+	// tail is a ring of the last bytes once head is full: written at end, wrapped once full.
+	tail      []byte
+	end       int
+	tailBytes int64 // written to tail in all
+}
+
+const outputHalf = MaxOutput / 2
+
+func (b *OutputBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if room := outputHalf - len(b.head); room > 0 {
+		take := min(room, len(p))
+		b.head = append(b.head, p[:take]...)
+		p = p[take:]
+	}
+	if len(p) == 0 {
+		return n, nil
+	}
+	b.tailBytes += int64(len(p))
+	if len(p) > outputHalf {
+		p = p[len(p)-outputHalf:]
+	}
+	if len(b.tail) < outputHalf {
+		// Still filling: grows as it goes, so a short output takes little.
+		room := outputHalf - len(b.tail)
+		take := min(room, len(p))
+		b.tail = append(b.tail, p[:take]...)
+		p = p[take:]
+		b.end = len(b.tail) % outputHalf
+	}
+	for len(p) > 0 {
+		c := copy(b.tail[b.end:], p)
+		p = p[c:]
+		b.end = (b.end + c) % outputHalf
+	}
+	return n, nil
+}
+
+// Len is how much it keeps.
+func (b *OutputBuffer) Len() int { return len(b.head) + len(b.tail) }
+
+func (b *OutputBuffer) String() string {
+	var tail []byte
+	if len(b.tail) < outputHalf {
+		tail = b.tail
+	} else {
+		tail = append(append(make([]byte, 0, outputHalf), b.tail[b.end:]...), b.tail[:b.end]...)
+	}
+	if left := b.tailBytes - int64(len(tail)); left > 0 {
+		return fmt.Sprintf("%s\n… %d bytes of output left out …\n%s", b.head, left, tail)
+	}
+	return string(b.head) + string(tail)
 }
 
 // shell runs a command line with sh.

@@ -3,6 +3,8 @@
 // for the browser tab. Production builds never include this file.
 import type {
   Finding,
+  HostUpdatesSummary,
+  UpdateSettings,
   AlertRules,
   AppConfig,
   AppJob,
@@ -106,6 +108,7 @@ interface DemoState {
   checks: CheckSpec[];
   settings: Record<string, string>;
   updates?: UpdateTarget[];
+  hostUpdates?: Record<string, DemoHostUpdates>;
   statusDesign?: StatusDesign;
   appearance?: Appearance;
 }
@@ -660,10 +663,18 @@ function updates(): UpdatesResponse {
   };
 }
 
+// A DemoMachine is whose targets an update or check works on (this machine's, or an agent
+// server's), each with its own queue, as each machine's updates run one at a time.
+interface DemoMachine {
+  list: () => UpdateTarget[];
+  queue: string[];
+}
+const localMachine: DemoMachine = { list: updatesList, queue: [] };
+
 // later changes a target after a delay, like the backend's worker would.
-function later(id: string, ms: number, change: (t: UpdateTarget) => void) {
+function later(id: string, ms: number, change: (t: UpdateTarget) => void, m: DemoMachine = localMachine) {
   setTimeout(() => {
-    const t = updatesList().find((u) => u.id === id);
+    const t = m.list().find((u) => u.id === id);
     if (t) {
       change(t);
       save();
@@ -714,59 +725,72 @@ function demoUpdateLog(t: UpdateTarget): string[] {
 }
 
 // The demo updates one at a time, as the server does: the rest wait in a queue.
-const demoQueue: string[] = [];
-
-function applyDemoUpdate(t: UpdateTarget) {
-  if (updatesList().some((u) => u.busy === 'updating')) {
+function applyDemoUpdate(t: UpdateTarget, m: DemoMachine = localMachine) {
+  if (m.list().some((u) => u.busy === 'updating')) {
     t.busy = 'queued';
-    demoQueue.push(t.id);
+    m.queue.push(t.id);
     return;
   }
-  runDemoUpdate(t);
+  runDemoUpdate(t, m);
 }
 
-function nextDemoUpdate() {
-  const id = demoQueue.shift();
-  const t = id ? updatesList().find((u) => u.id === id) : undefined;
-  if (t) runDemoUpdate(t);
-  else if (id) nextDemoUpdate();
+function nextDemoUpdate(m: DemoMachine) {
+  const id = m.queue.shift();
+  const t = id ? m.list().find((u) => u.id === id) : undefined;
+  if (t) runDemoUpdate(t, m);
+  else if (id) nextDemoUpdate(m);
 }
 
-function runDemoUpdate(t: UpdateTarget) {
+function runDemoUpdate(t: UpdateTarget, m: DemoMachine) {
   const lines = demoUpdateLog(t);
   const step = 600;
   t.busy = 'updating';
   t.live = { started: now(), lines: [] };
   // The log fills a line at a time, as a real update's does.
   lines.forEach((_, i) =>
-    later(t.id, step * (i + 1), (u) => {
-      if (u.live) u.live = { ...u.live, lines: lines.slice(0, i + 1) };
-    }),
+    later(
+      t.id,
+      step * (i + 1),
+      (u) => {
+        if (u.live) u.live = { ...u.live, lines: lines.slice(0, i + 1) };
+      },
+      m,
+    ),
   );
-  later(t.id, step * (lines.length + 1), (u) => {
-    const from = u.installed;
-    u.runs = [
-      { at: now(), from, to: u.latest ?? from, ok: true, auto: false, detail: u.kind === 'system' ? `${u.pending?.length ?? 0} package(s) upgraded with apt` : undefined, log: lines },
-      ...(u.runs ?? []),
-    ].slice(0, 5);
-    if (u.kind === 'release') u.installed = u.latest?.replace(/^v/, '');
-    else u.installed = u.latest;
-    u.available = false;
-    u.pending = null;
-    u.busy = undefined;
-    u.live = undefined;
-    u.checked = now();
-    setTimeout(nextDemoUpdate, 0);
-  });
+  later(
+    t.id,
+    step * (lines.length + 1),
+    (u) => {
+      const from = u.installed;
+      u.runs = [
+        { at: now(), from, to: u.latest ?? from, ok: true, auto: false, detail: u.kind === 'system' ? `${u.pending?.length ?? 0} package(s) upgraded with apt` : undefined, log: lines },
+        ...(u.runs ?? []),
+      ].slice(0, 5);
+      if (u.kind === 'release') u.installed = u.latest?.replace(/^v/, '');
+      else u.installed = u.latest;
+      u.available = false;
+      u.pending = null;
+      u.busy = undefined;
+      u.live = undefined;
+      u.checked = now();
+      setTimeout(() => nextDemoUpdate(m), 0);
+    },
+    m,
+  );
 }
 
-function checkDemo(t: UpdateTarget) {
+function checkDemo(t: UpdateTarget, m: DemoMachine = localMachine) {
   if (t.paused) return;
   t.busy = 'checking';
-  later(t.id, 1200, (u) => {
-    u.busy = undefined;
-    u.checked = now();
-  });
+  later(
+    t.id,
+    1200,
+    (u) => {
+      u.busy = undefined;
+      u.checked = now();
+    },
+    m,
+  );
 }
 
 function saveDemoTarget(spec: UpdateSpec, existing?: UpdateTarget): UpdateTarget | string {
@@ -783,6 +807,177 @@ function saveDemoTarget(spec: UpdateSpec, existing?: UpdateTarget): UpdateTarget
   const merged: UpdateTarget = { ...(existing ?? target({ id, name, kind: spec.kind })), ...rest, id, name, api_key_set: !!api_key || existing?.api_key_set };
   merged.can_update = merged.kind !== 'release' || !!merged.update_command;
   return merged;
+}
+
+// demoUpdatesRoute answers the updates routes after /api/updates (or /api/hosts/{id}/updates) for one machine.
+function demoUpdatesRoute(method: string, parts: string[], body: unknown, m: DemoMachine): Response | undefined {
+  const list = m.list();
+  const found = parts[0] ? list.find((t) => t.id === parts[0]) : undefined;
+  if (method === 'POST' && parts[0] === 'check') {
+    list.forEach((t) => checkDemo(t, m));
+    return json({ queued: true }, 202);
+  }
+  if (method === 'POST' && parts[0] === 'detect') return json({ added: [] });
+  if (method === 'POST' && parts.length === 0) {
+    const t = saveDemoTarget(body as UpdateSpec);
+    if (typeof t === 'string') return error(400, t);
+    if (list.some((u) => u.id === t.id)) return error(409, 'an update target with that id already exists');
+    list.push(t);
+    checkDemo(t, m);
+    save();
+    return json({ target: t }, 201);
+  }
+  if (!found) return error(404, 'no update target with that id');
+  if (method === 'PUT') {
+    const t = saveDemoTarget(body as UpdateSpec, found);
+    if (typeof t === 'string') return error(400, t);
+    Object.assign(found, t);
+    save();
+    return json({ target: found });
+  }
+  if (method === 'DELETE') {
+    list.splice(list.indexOf(found), 1);
+    save();
+    return new Response(null, { status: 204 });
+  }
+  if (method === 'POST' && parts[1] === 'check') {
+    checkDemo(found, m);
+    return json({ queued: true }, 202);
+  }
+  if (method === 'POST' && parts[1] === 'update') {
+    if (!found.can_update) return error(400, 'this target has no update command; it is only checked');
+    applyDemoUpdate(found, m);
+    save();
+    return json({ queued: true }, 202);
+  }
+  return undefined;
+}
+
+// ---------- updates on agent servers ----------
+
+// DemoHostUpdates is what an agent server keeps for its updates: its targets and its own settings,
+// its window on its own clock (minutes after its midnight).
+interface DemoHostUpdates {
+  targets: UpdateTarget[];
+  settings: UpdateSettings;
+  time_zone: { name: string; offset: number };
+}
+
+// The NAS has OS packages and Plex waiting; the Pi is up to date. The backup box is offline, so it
+// is never asked.
+const INITIAL_HOST_UPDATES: Record<string, DemoHostUpdates> = {
+  a1b2c3d4e5f6: {
+    settings: { enabled: true, interval: 21600, window: { start: 240, end: 360 }, notify: true },
+    time_zone: { name: 'Europe/Berlin', offset: 3600 },
+    targets: [
+      target({
+        id: 'os',
+        name: 'OS packages (apt)',
+        kind: 'system',
+        available: true,
+        pending: ['base-files 12.4+deb12u8 → 12.4+deb12u9', 'libc6 2.36-9+deb12u9 → 2.36-9+deb12u10', 'openssh-server 1:9.2p1-2+deb12u3 → 1:9.2p1-2+deb12u4'],
+        runs: [{ at: hoursAgo(24 * 6), ok: true, auto: true, detail: '11 package(s) upgraded with apt' }],
+      }),
+      target({
+        id: 'plex',
+        name: 'Plex Media Server',
+        kind: 'apt',
+        package: 'plexmediaserver',
+        unit: 'plexmediaserver',
+        installed: '1.41.3.9314-a0bfb8370',
+        latest: '1.41.4.9463-630c9f557',
+        available: true,
+      }),
+      target({ id: 'snaps', name: 'Snaps', kind: 'snap', auto: true }),
+    ],
+  },
+  b2c3d4e5f6a1: {
+    settings: { enabled: true, interval: 43200, window: { start: 180, end: 300 }, notify: false },
+    time_zone: { name: 'UTC', offset: 0 },
+    targets: [
+      target({ id: 'os', name: 'OS packages (apt)', kind: 'system', auto: true, runs: [{ at: hoursAgo(20), ok: true, auto: true, detail: '4 package(s) upgraded with apt' }] }),
+      target({
+        id: 'adguard-home',
+        name: 'AdGuard Home',
+        kind: 'release',
+        repo: 'AdguardTeam/AdGuardHome',
+        unit: 'AdGuardHome',
+        version_command: '/opt/AdGuardHome/AdGuardHome --version',
+        update_command: '/opt/AdGuardHome/AdGuardHome --update',
+        installed: '0.107.80',
+        latest: 'v0.107.80',
+        auto: true,
+      }),
+    ],
+  },
+};
+
+state.hostUpdates ??= structuredClone(INITIAL_HOST_UPDATES);
+// An update under way when the tab reloaded lost its timers with it; it would never finish.
+for (const h of Object.values(state.hostUpdates))
+  for (const t of h.targets) {
+    t.busy = undefined;
+    t.live = undefined;
+  }
+const hostMachines: Record<string, DemoMachine> = {};
+const hostMachine = (id: string) => (hostMachines[id] ??= { list: () => state.hostUpdates![id].targets, queue: [] });
+
+const windowLabel = (w: { start: number; end: number }) => {
+  const at = (v: number) => `${String(Math.floor(v / 60) % 24).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`;
+  return w.start === w.end ? 'any time' : `${at(w.start)}–${at(w.end)}`;
+};
+
+// hostUpdatesBody is an agent server's answer, the shape of /api/updates plus notify and its zone.
+function hostUpdatesBody(id: string): UpdatesResponse {
+  const h = state.hostUpdates![id];
+  return {
+    enabled: h.settings.enabled,
+    interval: h.settings.interval,
+    window: { ...h.settings.window, label: windowLabel(h.settings.window) },
+    commands_editable: true,
+    kinds: ['system', 'snap', 'apt', 'arr', 'git', 'release'],
+    checking: h.targets.some((t) => t.busy === 'checking'),
+    last_check: Math.max(0, ...h.targets.map((t) => t.checked ?? 0)),
+    targets: h.targets,
+    notify: h.settings.notify,
+    time_zone: h.time_zone,
+  };
+}
+
+// hostUpdatesSummary is the main Nightjar's last look at each agent server's updates.
+function hostUpdatesSummary(): HostUpdatesSummary[] {
+  return demoHosts.map((d) => {
+    const h = state.hostUpdates![d.id];
+    if (d.offlineSince || !h) return { id: d.id, name: d.name, available: 0, applying: '', checked: d.offlineSince ?? 0, error: 'no answer: timed out' };
+    return {
+      id: d.id,
+      name: d.name,
+      available: h.targets.filter((t) => t.available && !t.paused).length,
+      applying: h.targets.find((t) => t.busy === 'updating')?.name ?? '',
+      checked: Math.max(0, ...h.targets.map((t) => t.checked ?? 0)),
+      error: '',
+    };
+  });
+}
+
+// demoHostUpdatesRoute answers /api/hosts/{id}/updates…, as the main Nightjar does through the agent.
+function demoHostUpdatesRoute(method: string, id: string, rest: string, body: unknown): Response {
+  const d = demoHosts.find((h) => h.id === id);
+  if (!d) return error(404, 'no such server');
+  if (d.offlineSince) return error(422, 'no answer: timed out');
+  const h = state.hostUpdates![id];
+  if (!h) return error(404, "this server's agent is too old for updates; it updates itself shortly, or reinstall it");
+  const parts = rest.split('/').filter(Boolean).map(decodeURIComponent);
+  if (method === 'GET' && parts.length === 0) return json(hostUpdatesBody(id));
+  if (method === 'PUT' && parts[0] === 'settings' && parts.length === 1) {
+    const b = body as UpdateSettings;
+    if (!(b.interval >= 3600)) return error(400, 'check at least an hour apart');
+    if (!(b.window?.start >= 0 && b.window.start < 1440 && b.window.end >= 0 && b.window.end < 1440)) return error(400, 'the window must be within a day');
+    h.settings = { enabled: !!b.enabled, interval: b.interval, window: { start: b.window.start, end: b.window.end }, notify: !!b.notify };
+    save();
+    return json(hostUpdatesBody(id));
+  }
+  return demoUpdatesRoute(method, parts, body, hostMachine(id)) ?? error(404, 'not found');
 }
 
 // ---------- services ----------
@@ -1852,9 +2047,9 @@ function demoHost(i: number, points: number): RemoteHost {
 const demoFirewalls: Record<string, FirewallStatus> = {};
 function demoFirewall(id: string): FirewallStatus {
   const ports: FirewallPort[] = [
-    { port: 22, proto: 'tcp', program: 'sshd' },
-    { port: 53, proto: 'udp', program: 'systemd-resolve', local: true },
-    { port: 9101, proto: 'tcp', program: 'nightjar-agent' },
+    { port: 22, proto: 'tcp', program: 'sshd', exe: '/usr/sbin/sshd', unit: 'ssh.service' },
+    { port: 53, proto: 'udp', program: 'systemd-resolve', exe: '/usr/lib/systemd/systemd-resolved', unit: 'systemd-resolved.service', local: true },
+    { port: 9101, proto: 'tcp', program: 'nightjar-agent', exe: '/usr/local/bin/nightjar-agent', unit: 'nightjar-agent.service' },
   ];
   const ssh = { port: 22, what: 'SSH' };
   if (id === 'local')
@@ -1871,12 +2066,29 @@ function demoFirewall(id: string): FirewallStatus {
         { id: 'r4', action: 'block', direction: 'out', port: '25', proto: 'tcp', note: 'no mail from here', added: now() - 3 * 86400 },
       ],
       listening: [
-        { port: 22, proto: 'tcp', program: 'sshd' },
-        { port: 80, proto: 'tcp', program: 'nginx' },
-        { port: 443, proto: 'tcp', program: 'nginx' },
-        { port: 8080, proto: 'tcp', program: 'nightjar', local: true },
-        { port: 32400, proto: 'tcp', program: 'Plex Media Server' },
-        { port: 51413, proto: 'udp', program: 'qbittorrent-nox' },
+        { port: 22, proto: 'tcp', program: 'sshd', exe: '/usr/sbin/sshd', unit: 'ssh.service' },
+        { port: 80, proto: 'tcp', program: 'nginx', exe: '/usr/sbin/nginx', unit: 'nginx.service' },
+        { port: 443, proto: 'tcp', program: 'nginx', exe: '/usr/sbin/nginx', unit: 'nginx.service' },
+        { port: 5432, proto: 'tcp', program: 'python3', exe: '/usr/bin/python3.12' },
+        { port: 8080, proto: 'tcp', program: 'nightjar', exe: '/usr/local/bin/nightjar', unit: 'nightjar.service', local: true },
+        { port: 32400, proto: 'tcp', program: 'Plex Media Server', exe: '/usr/lib/plexmediaserver/Plex Media Server', unit: 'plexmediaserver.service' },
+        { port: 51413, proto: 'udp', program: 'qbittorrent-nox', exe: '/usr/bin/qbittorrent-nox', unit: 'qbittorrent-nox@media.service' },
+      ],
+      // nginx is locked to its ports; postgres's port was taken by a script while postgres was down.
+      locks: [
+        { id: 'l1', port: 443, proto: 'tcp', program: 'nginx', exe: '/usr/sbin/nginx', unit: 'nginx.service', added: now() - 5 * 86400, state: 'held' },
+        {
+          id: 'l2',
+          port: 5432,
+          proto: 'tcp',
+          program: 'postgres',
+          exe: '/usr/lib/postgresql/16/bin/postgres',
+          unit: 'postgresql@16-main.service',
+          added: now() - 9 * 86400,
+          state: 'taken',
+          holder: { program: 'python3', exe: '/usr/bin/python3.12' },
+          since: now() - 1500,
+        },
       ],
       hits: { r1: { packets: 1204, bytes: 72240 }, r2: { packets: 38, bytes: 2280 }, r3: { packets: 91822, bytes: 7_340_000 }, r4: { packets: 3, bytes: 180 } },
       since: now() - 6 * 3600,
@@ -1885,6 +2097,7 @@ function demoFirewall(id: string): FirewallStatus {
         ...Array.from({ length: 34 }, (_, i) => ({ at: now() - 60 - i * 340, rule: 'r1', source: `45.142.120.${[11, 37, 11, 52, 37, 11, 90][i % 7]}`, dest: '192.168.1.10', proto: 'tcp', port: 22 })),
         { at: now() - 900, rule: 'r4', direction: 'out' as const, source: '192.168.1.10', dest: '192.0.2.25', proto: 'tcp', port: 25 },
         { at: now() - 1300, rule: 'r2', source: '203.0.113.50', dest: '192.168.1.10', proto: 'tcp', port: 22 },
+        { at: now() - 700, rule: 'l2', source: '198.51.100.77', dest: '192.168.1.10', proto: 'tcp', port: 5432 },
       ].sort((a, b) => b.at - a.at),
       native: `Status: active
 Logging: on (low)
@@ -1905,6 +2118,7 @@ To                         Action      From
     default: '',
     open: [ssh, { port: 9101, what: 'this agent' }],
     rules: [],
+    locks: [],
     hits: {},
     drops: [],
     native: '-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT',
@@ -2363,6 +2577,10 @@ function route(method: string, url: URL, body: unknown): Response {
     }
     return error(404, 'not found');
   }
+  // Updates on each agent server, through its agent.
+  if (method === 'GET' && path === '/api/hosts/updates') return json({ hosts: hostUpdatesSummary() });
+  const hostUpd = path.match(/^\/api\/hosts\/([0-9a-f]+)\/updates(\/.*)?$/);
+  if (hostUpd) return demoHostUpdatesRoute(method, hostUpd[1], hostUpd[2] ?? '', body);
   // Firewalls: this machine's, and each agent server's through its agent.
   const fwMatch =
     path === '/api/firewall' || path.startsWith('/api/firewall/') ? ['', 'local', path.slice('/api'.length)] : path.match(/^\/api\/hosts\/([0-9a-f]+)(\/(?:firewall.*|defense|blocked\/.+))$/);
@@ -2479,6 +2697,30 @@ function route(method: string, url: URL, body: unknown): Response {
       if (!fw.pending) return error(422, 'there is no change waiting; it may have gone back already');
       if (!(body as { keep?: boolean }).keep) fw.default = fw.default === 'drop' ? '' : 'drop';
       fw.pending = undefined;
+      return answer();
+    }
+    // Locks pin a port to the service on it, as the firewall does.
+    if (method === 'POST' && rest === '/firewall/locks') {
+      const b = body as { port?: number; proto?: 'tcp' | 'udp' };
+      const proto = b.proto ?? 'tcp';
+      const p = fw.listening.find((l) => l.port === b.port && l.proto === proto);
+      if (!p) return error(422, `nothing listens on port ${b.port}/${proto} to lock it to`);
+      fw.locks ??= [];
+      if (fw.locks.some((l) => l.port === p.port && l.proto === proto)) return error(422, `port ${p.port}/${proto} is locked already`);
+      fw.locks.push({ id: `l${Date.now().toString(36)}`, port: p.port, proto, program: p.program, exe: p.exe, unit: p.unit, added: now(), state: 'held' });
+      return answer();
+    }
+    const lockMatch = rest.match(/^\/firewall\/locks\/(.+)$/);
+    if (lockMatch && (method === 'PUT' || method === 'DELETE')) {
+      const i = (fw.locks ?? []).findIndex((l) => l.id === decodeURIComponent(lockMatch[1]));
+      if (i < 0) return error(404, 'no such rule');
+      const l = fw.locks![i];
+      if (method === 'DELETE') fw.locks!.splice(i, 1);
+      else {
+        const p = fw.listening.find((x) => x.port === l.port && x.proto === l.proto);
+        if (!p) return error(422, `nothing listens on port ${l.port}/${l.proto} to lock it to`);
+        fw.locks![i] = { ...l, program: p.program, exe: p.exe, unit: p.unit, state: 'held', holder: undefined, since: undefined };
+      }
       return answer();
     }
     if (method === 'PUT' && rest === '/defense') return answer();
@@ -2870,46 +3112,8 @@ function route(method: string, url: URL, body: unknown): Response {
     return json({ added: lines.length }, 201);
   }
   if (path.startsWith('/api/updates')) {
-    const parts = path.split('/').slice(3).map(decodeURIComponent); // after /api/updates
-    const list = updatesList();
-    const found = parts[0] ? list.find((t) => t.id === parts[0]) : undefined;
-    if (method === 'POST' && parts[0] === 'check') {
-      list.forEach(checkDemo);
-      return json({ queued: true }, 202);
-    }
-    if (method === 'POST' && parts[0] === 'detect') return json({ added: [] });
-    if (method === 'POST' && parts.length === 0) {
-      const t = saveDemoTarget(body as UpdateSpec);
-      if (typeof t === 'string') return error(400, t);
-      if (list.some((u) => u.id === t.id)) return error(409, 'an update target with that id already exists');
-      list.push(t);
-      checkDemo(t);
-      save();
-      return json({ target: t }, 201);
-    }
-    if (!found) return error(404, 'no update target with that id');
-    if (method === 'PUT') {
-      const t = saveDemoTarget(body as UpdateSpec, found);
-      if (typeof t === 'string') return error(400, t);
-      Object.assign(found, t);
-      save();
-      return json({ target: found });
-    }
-    if (method === 'DELETE') {
-      list.splice(list.indexOf(found), 1);
-      save();
-      return new Response(null, { status: 204 });
-    }
-    if (method === 'POST' && parts[1] === 'check') {
-      checkDemo(found);
-      return json({ queued: true }, 202);
-    }
-    if (method === 'POST' && parts[1] === 'update') {
-      if (!found.can_update) return error(400, 'this target has no update command; it is only checked');
-      applyDemoUpdate(found);
-      save();
-      return json({ queued: true }, 202);
-    }
+    const answer = demoUpdatesRoute(method, path.split('/').slice(3).map(decodeURIComponent), body, localMachine); // after /api/updates
+    if (answer) return answer;
   }
   const appAction = path.match(/^\/api\/apps\/([a-z]+)\/(install|remove)$/);
   if (method === 'POST' && appAction) {
@@ -2986,6 +3190,8 @@ function setDemoViewer(name: string) {
 }
 // What only the admin may see, as the monitor has it; every change is the admin's too.
 const ADMIN_ONLY = new Set(['/api/settings', '/api/backup', '/api/setup', '/api/ssh/keys', '/api/agent/download', '/api/statuspage/proxy', '/api/plugins', '/api/auth/viewers']);
+// ADMIN_ONLY_PATH are the admin-only routes with an id in them, and SSH logins: as the real API.
+const ADMIN_ONLY_PATH = /^\/api\/(sshd|hosts\/[^/]+\/sshd|units\/[^/]+\/logs)(\/|$)/;
 const viewerList = () => demoViewers.map((v) => ({ username: v.username, created: v.created, sessions: v.username === demoViewer ? 1 : 0 }));
 
 function demoViewerRoutes(method: string, path: string, body: Record<string, string> | undefined): Response | undefined {
@@ -3070,7 +3276,8 @@ export async function demoFetch(input: RequestInfo | URL, init: RequestInit = {}
     v.password = body.new;
     return json({ changed: true });
   }
-  if (demoViewer && (method !== 'GET' || ADMIN_ONLY.has(url.pathname))) return json({ error: 'You are signed in as a viewer: you can look, but not change anything', read_only: true }, 403);
+  if (demoViewer && (method !== 'GET' || ADMIN_ONLY.has(url.pathname) || ADMIN_ONLY_PATH.test(url.pathname)))
+    return json({ error: 'You are signed in as a viewer: you can look, but not change anything', read_only: true }, 403);
   return demoViewerRoutes(method, url.pathname, body) ?? route(method, url, body);
 }
 

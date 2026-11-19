@@ -665,7 +665,8 @@ export interface UpdateTarget extends UpdateSpec {
   can_update: boolean;
   busy?: 'checking' | 'updating' | 'queued';
   // live is what the update under way has done so far: each command, what it prints, and the steps.
-  live?: { started: number; lines: string[] };
+  // live.now is the machine's clock as it answered, which started is on.
+  live?: { started: number; lines: string[]; now?: number };
 }
 
 export interface UpdatesResponse {
@@ -677,6 +678,31 @@ export interface UpdatesResponse {
   checking: boolean;
   last_check: number;
   targets: UpdateTarget[];
+  // An agent server's answer also says whether it announces updates, and its own clock, since its
+  // window is on that clock (the main endpoint may leave both out).
+  notify?: boolean;
+  time_zone?: { name: string; offset: number };
+}
+
+// UpdateSettings is what an agent server keeps for itself, there being no Settings page for it:
+// whether it checks, how often (seconds), its window in minutes after its own midnight, and
+// whether its updates are announced.
+export interface UpdateSettings {
+  enabled: boolean;
+  interval: number;
+  window: { start: number; end: number };
+  notify: boolean;
+}
+
+// HostUpdatesSummary is one agent server's updates as the main Nightjar last polled them: how many
+// wait, what is updating now, and why the last poll failed (an old agent, say).
+export interface HostUpdatesSummary {
+  id: string;
+  name: string;
+  available: number;
+  applying: string;
+  checked: number;
+  error: string;
 }
 
 // qBittorrent, as the monitoring loop last saw it (backend/internal/qbittorrent.View).
@@ -1408,13 +1434,35 @@ export interface FirewallRule {
 export interface FirewallPort {
   port: number;
   proto: 'tcp' | 'udp';
+  // The service holding the port: the program's name, the executable it runs, and the systemd
+  // service it runs in (none outside one).
   program?: string;
+  exe?: string;
+  unit?: string;
   local?: boolean;
   allowed?: boolean;
   // blocked: a rule shuts the port for everyone, ahead of anything keeping it open; only are the
   // addresses rules before that block still let in.
   blocked?: boolean;
   only?: string[];
+}
+
+// FirewallLock pins a port to the service that held it when locked (its executable and systemd service).
+// state: 'held' by that service; 'idle', nothing listens; 'taken', another program (holder) holds it
+// since `since`, and what comes to the port is dropped ahead of every rule, unless watch_only (SSH's
+// port, only watched). A dropped packet's rule is the lock's id.
+export interface FirewallLock {
+  id: string;
+  port: number;
+  proto: 'tcp' | 'udp';
+  program?: string;
+  exe?: string;
+  unit?: string;
+  added: number;
+  state: 'held' | 'idle' | 'taken';
+  holder?: { program?: string; exe?: string; unit?: string };
+  since?: number;
+  watch_only?: boolean;
 }
 
 // FirewallDrop is one packet the firewall dropped, from the kernel log: rule is the rule's id, or
@@ -1444,12 +1492,18 @@ export interface FirewallStatus {
   open?: { port: number; what: string }[];
   rules: FirewallRule[];
   listening: FirewallPort[];
+  // locks are the ports pinned to a service; an agent from before them leaves them out.
+  locks?: FirewallLock[] | null;
   hits?: Record<string, { packets: number; bytes: number }>;
   since?: number;
   drops?: FirewallDrop[];
   drops_note?: string;
   native?: string;
   problem?: string;
+  // now is the machine's clock as it answered (until, since and drops are on it). skew is how far
+  // ahead of the browser's clock that was, worked out on the page as the answer came in.
+  now?: number;
+  skew?: number;
   // dashboard is, for a server's firewall, the address Nightjar reaches it from, as that server sees
   // it (from AgentFirewall.dashboard): what a rule letting only Nightjar in names.
   dashboard?: string;
@@ -1466,6 +1520,10 @@ export interface AgentFirewall {
 // SSHAccess is how a machine's SSH server lets people log in (GET /api/sshd, or a server's through its
 // agent), and the accounts that can. Every change answers with it again.
 export interface SSHAccess {
+  // now is the machine's clock as it answered (pending.until is on it); skew is how far ahead of the
+  // browser's clock that was, worked out on the page as the answer came in.
+  now?: number;
+  skew?: number;
   ports: number[];
   // password_login is whether sshd takes passwords now, however that came to be.
   password_login: boolean;

@@ -63,6 +63,9 @@ type Readings struct {
 	DrivesPending bool `json:"drives_pending,omitempty"`
 	// Attacks is the agent's own watch for denial-of-service attacks on this machine.
 	Attacks *ddos.View `json:"attacks,omitempty"`
+	// Locks are the locked ports another program holds now (see firewall.Lock), for the dashboard to
+	// alert on.
+	Locks []firewall.LockState `json:"locks,omitempty"`
 }
 
 type CPU struct {
@@ -95,6 +98,8 @@ type Sampler struct {
 	port     uint16
 	// sshd manages who may log in over SSH; nil when not running.
 	sshd *sshd.Manager
+	// updates keeps the machine's software up to date; nil when not running.
+	updates *Updates
 
 	// dashboards are the addresses that asked for readings with the token, and when they last did:
 	// never blocked while defending.
@@ -226,6 +231,9 @@ func (s *Sampler) Sample(ctx context.Context) {
 		v.History = v.History[:min(5, len(v.History))]
 		r.Attacks = &v
 	}
+	if s.firewall != nil {
+		r.Locks = s.firewall.Taken()
+	}
 	if r.Drives == nil {
 		r.Drives = []smart.Drive{}
 	}
@@ -258,9 +266,10 @@ func Handler(s *Sampler, token string, self *Self, secure bool) http.Handler {
 		got, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		return token != "" && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(got)), []byte(token)) == 1
 	}
-	mux.HandleFunc("POST "+UpdatePath, updateHandler(self, authorized, secure))
+	mux.HandleFunc("POST "+UpdatePath, updateHandler(self, func() string { return s.updates.Busy() }, authorized, secure))
 	firewallRoutes(mux, s, authorized, secure)
 	sshdRoutes(mux, s, authorized, secure)
+	updatesRoutes(mux, s, authorized, secure)
 	mux.HandleFunc("GET "+Path, func(w http.ResponseWriter, r *http.Request) {
 		if !authorized(r) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
@@ -293,6 +302,14 @@ func Handler(s *Sampler, token string, self *Self, secure bool) http.Handler {
 const MinToken = 24
 
 var ErrShortToken = errors.New("the token must be at least 24 characters; the dashboard's Add server makes one")
+
+// NewHTTPServer wraps the agent's handler in a server where every connection has an end in sight:
+// one that sends nothing, sends its body slowly, or idles between requests is let go, so a few
+// thousand of them cannot fill the agent's small memory allowance. A self-update gives its own long
+// body read more time.
+func NewHTTPServer(h http.Handler) *http.Server {
+	return &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+}
 
 // Serve runs the agent on listen until ctx ends, over HTTPS with the token's key unless plain is set.
 func Serve(ctx context.Context, listen, token, build string, plain bool) error {
@@ -328,6 +345,13 @@ func Serve(ctx context.Context, listen, token, build string, plain bool) error {
 		defer close(sshdDone)
 		s.sshd.Run(ctx)
 	}()
+	// What to keep up to date on this machine, kept and scheduled by the agent itself.
+	s.updates = startUpdates()
+	updatesDone := make(chan struct{})
+	go func() {
+		defer close(updatesDone)
+		s.updates.Run(ctx)
+	}()
 	go s.Run(ctx)
 	self, err := FindSelf()
 	if err != nil {
@@ -340,7 +364,7 @@ func Serve(ctx context.Context, listen, token, build string, plain bool) error {
 	if tlsConfig != nil {
 		ln = tls.NewListener(ln, tlsConfig)
 	}
-	srv := &http.Server{Handler: Handler(s, token, self, !plain), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second}
+	srv := NewHTTPServer(Handler(s, token, self, !plain))
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -350,6 +374,10 @@ func Serve(ctx context.Context, listen, token, build string, plain bool) error {
 	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	// An update under way is waited for (as long as systemd lets the agent take to stop): its
+	// command runs on in a unit of its own regardless, but its outcome is only kept if this waits.
+	<-updatesDone
+	s.updates.Manager.Wait(30 * time.Second)
 	// The defence takes its chains and blocks out as its watch stops: nothing would lift them later.
 	// Keys-only SSH still waiting to be kept goes back as the agent stops, too.
 	wait, cancel := context.WithTimeout(context.Background(), 30*time.Second)

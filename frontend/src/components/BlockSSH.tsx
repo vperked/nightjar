@@ -28,7 +28,8 @@ export interface SSHAccessState {
 }
 
 // tidy fills in the lists an answer may leave out (Go sends null for an empty one).
-const tidy = (a: SSHAccess): SSHAccess => ({ ...a, ports: a.ports ?? [], users: a.users ?? [] });
+// It also notes how far the machine's clock is from the browser's, for the countdown.
+const tidy = (a: SSHAccess): SSHAccess => ({ ...a, ports: a.ports ?? [], users: a.users ?? [], skew: a.now ? a.now - Date.now() / 1000 : 0 });
 
 export function useSSHAccess(target: SSHTarget | undefined, name: string): SSHAccessState {
   const notify = useToast();
@@ -61,7 +62,7 @@ export function useSSHAccess(target: SSHTarget | undefined, name: string): SSHAc
   // Keys only not kept in time goes back on the machine by itself: read it again once it has.
   useEffect(() => {
     if (!access?.pending) return;
-    const t = window.setTimeout(reload, Math.max(0, access.pending.until * 1000 - Date.now()) + 1500);
+    const t = window.setTimeout(reload, Math.max(0, (access.pending.until - (access.skew ?? 0)) * 1000 - Date.now()) + 1500);
     return () => window.clearTimeout(t);
   }, [access, reload]);
 
@@ -138,7 +139,7 @@ export function SSHState({ ssh, name }: { ssh: SSHAccessState; name: string }) {
 export function SSHPending({ ssh, name }: { ssh: SSHAccessState; name: string }) {
   const canEdit = useCanEdit();
   const now = useNow(1000);
-  const until = ssh.access?.pending?.until ?? 0;
+  const until = (ssh.access?.pending?.until ?? 0) - (ssh.access?.skew ?? 0);
   const left = Math.max(0, Math.round(until - now));
   return (
     <div className="fw-pending" role="alert">

@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
-import { ApiError, api } from '../api/client';
-import type { UpdateKind, UpdateSpec } from '../api/types';
+import { ApiError } from '../api/client';
+import type { UpdateKind, UpdateSpec, UpdateTarget } from '../api/types';
 import { useToast } from '../components/Toasts';
 import { Seg } from '../components/ui';
 
@@ -56,18 +56,21 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
   );
 }
 
-// UpdateForm adds an update target, or edits `initial`. Commands and paths are read-only unless the
-// dashboard has an access token, since they run as root.
+// UpdateForm adds an update target, or edits `initial`, saving it with save (to whichever machine
+// the page shows). Commands and paths are read-only unless the dashboard has an access token,
+// since they run as root.
 export function UpdateForm({
   initial,
   apiKeySet,
   commandsEditable,
+  save,
   onSaved,
   onCancel,
 }: {
   initial?: UpdateSpec;
   apiKeySet?: boolean;
   commandsEditable: boolean;
+  save: (spec: UpdateSpec, isNew: boolean) => Promise<{ target: UpdateTarget }>;
   onSaved: () => void;
   onCancel: () => void;
 }) {
@@ -76,14 +79,18 @@ export function UpdateForm({
   const [saving, setSaving] = useState(false);
   const notify = useToast();
   const set = <K extends keyof UpdateSpec>(key: K, value: UpdateSpec[K]) => setDraft((d) => ({ ...d, [key]: value }));
-  const text = (key: keyof UpdateSpec, label: string, placeholder = '', command = false) => (
+  // A locked field is one the server lets change only with an access token: commands and paths, and
+  // what decides what runs as root (where releases come from, the service restarted, the app's address).
+  const locked = !commandsEditable;
+  const lockedTitle = locked ? 'Set WEB_AUTH_TOKEN to edit this here' : undefined;
+  const text = (key: keyof UpdateSpec, label: string, placeholder = '', command = false, guarded = command) => (
     <input
       className={`field ${command ? 'mono' : ''}`}
       aria-label={label}
       value={(draft[key] as string | undefined) ?? ''}
       placeholder={placeholder}
-      disabled={command && !commandsEditable}
-      title={command && !commandsEditable ? 'Set WEB_AUTH_TOKEN to edit commands and paths here' : undefined}
+      disabled={guarded && locked}
+      title={guarded ? lockedTitle : undefined}
       onChange={(e) => set(key, e.target.value as never)}
     />
   );
@@ -93,7 +100,7 @@ export function UpdateForm({
     setSaving(true);
     setError('');
     try {
-      const { target } = await api.saveUpdate(draft, !initial);
+      const { target } = await save(draft, !initial);
       notify({ tone: 'ok', title: initial ? 'Saved' : `${target.name} added`, body: initial ? undefined : 'Checking it now.' });
       onSaved();
     } catch (err) {
@@ -125,7 +132,7 @@ export function UpdateForm({
           <Row label="config.xml" hint="The URL and API key are read from it when left empty">
             {text('config_file', 'config.xml', '/home/me/.config/Sonarr/config.xml', true)}
           </Row>
-          <Row label="URL">{text('url', 'URL', 'http://127.0.0.1:8989')}</Row>
+          <Row label="URL">{text('url', 'URL', 'http://127.0.0.1:8989', false, true)}</Row>
           <Row label="API key" hint="Settings → General → Security">
             <input
               className="field"
@@ -151,9 +158,9 @@ export function UpdateForm({
       )}
       {kind === 'release' && (
         <>
-          <Row label="GitHub repository">{text('repo', 'GitHub repository', 'owner/name')}</Row>
+          <Row label="GitHub repository">{text('repo', 'GitHub repository', 'owner/name', false, true)}</Row>
           <Row label="Tag prefix" hint="For projects that publish tags, not releases">
-            {text('tag_prefix', 'Tag prefix', 'release-')}
+            {text('tag_prefix', 'Tag prefix', 'release-', false, true)}
           </Row>
           <Row label="Installed version" hint="A command that prints it">
             {text('version_command', 'Version command', 'app --version', true)}
@@ -166,10 +173,10 @@ export function UpdateForm({
       {kind !== 'system' && kind !== 'snap' && !draft.self && (
         <Row label="Service" hint="systemd unit that must be running after an update">
           <span className="inline-fields">
-            {text('unit', 'systemd unit', 'app.service')}
+            {text('unit', 'systemd unit', 'app.service', false, true)}
             {(kind === 'git' || kind === 'release') && (
               <label className="check">
-                <input type="checkbox" checked={!!draft.restart} onChange={(e) => set('restart', e.target.checked)} /> Restart it after updating
+                <input type="checkbox" checked={!!draft.restart} disabled={locked} title={lockedTitle} onChange={(e) => set('restart', e.target.checked)} /> Restart it after updating
               </label>
             )}
           </span>
@@ -185,9 +192,9 @@ export function UpdateForm({
           <input type="checkbox" checked={draft.paused} onChange={(e) => set('paused', e.target.checked)} /> Paused
         </label>
       </Row>
-      {!commandsEditable && (kind === 'git' || kind === 'release' || kind === 'arr') && (
+      {locked && kind !== 'system' && kind !== 'snap' && (
         <p className="form-help" style={{ margin: '4px 0 0' }}>
-          Commands and paths run as root, so they can be changed here only when the dashboard has an access token (WEB_AUTH_TOKEN).
+          Commands, paths, release downloads, services and app addresses decide what runs as root, so they can be changed here only when the dashboard has an access token (WEB_AUTH_TOKEN).
         </p>
       )}
       <div className="form-actions">

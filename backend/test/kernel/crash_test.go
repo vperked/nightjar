@@ -1,6 +1,7 @@
 package kernel_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"nightjar/internal/kernel"
@@ -40,18 +41,46 @@ func TestOnlyTheKernelsOwnCrashesCount(t *testing.T) {
 	}
 }
 
+// entry is one journal entry as journalctl -o json writes it.
+func entry(pid, uid, comm, userUnit, msg string) string {
+	e := map[string]string{"_PID": pid, "_UID": uid, "_COMM": comm, "MESSAGE": msg, "SYSLOG_IDENTIFIER": comm}
+	if userUnit != "" {
+		e["_SYSTEMD_USER_UNIT"] = userUnit
+	}
+	b, _ := json.Marshal(e)
+	return string(b) + "\n"
+}
+
 func TestACleanShutdownIsToldFromACrash(t *testing.T) {
-	for tail, want := range map[string]bool{
-		"Stopping user-1000.slice...\nReached target System Reboot.\nShutting down.\n": true,
-		"systemd-logind[812]: System is rebooting.\nStopped target Network.\n":         true,
-		"Reached target reboot.target - System Reboot.\n":                              true,
-		"systemd-logind[812]: System is powering down.\n":                              true,
+	for name, c := range map[string]struct {
+		journal string
+		want    bool
+	}{
+		"the manager reaches its reboot target": {entry("1", "0", "systemd", "", "Stopping user-1000.slice...") + entry("1", "0", "systemd", "", "Reached target System Reboot.") + entry("1", "0", "systemd", "", "Shutting down."), true},
+		"newer systemd names the unit":          {entry("1", "0", "systemd", "", "Reached target reboot.target - System Reboot."), true},
+		"the manager reaches shutdown":          {entry("1", "0", "systemd", "", "Reached target shutdown.target - System Shutdown."), true},
+		"logind is told to reboot":              {entry("812", "0", "systemd-logind", "", "System is rebooting."), true},
+		"logind is told to power off":           {entry("812", "0", "systemd-logind", "", "System is powering down."), true},
+		// A user's own systemd reaches its shutdown target whenever their last session ends.
+		"a user logs out": {entry("1", "0", "systemd", "", "Stopped user@1000.service - User Manager for UID 1000.") +
+			entry("4242", "1000", "systemd", "init.scope", "Reached target shutdown.target - Shutdown."), false},
+		// root's own user manager runs as root, outside PID 1.
+		"root logs out": {entry("4243", "0", "systemd", "init.scope", "Reached target shutdown.target - Shutdown."), false},
+		// Daemons say it when they restart.
+		"a daemon restarts": {entry("900", "0", "nginx", "", "shutting down."), false},
+		// Anyone can tag a line "systemd" or name a process "systemd-logind".
+		"a forged tag": {entry("5000", "1000", "systemd-logind", "", "System is rebooting.") + entry("5001", "1000", "logger", "", "Reached target System Reboot."), false},
 		// A boot that ended mid-sentence, as a crash or a power cut leaves it.
-		"kernel: nouveau 0000:01:00.0: timer: stalled at ffffffffffffffff\n":                        false,
-		"kernel: Out of memory: Killed process 4242 (java)\nsystemd-journald[300]: Journal stopped": false,
+		"a crash": {entry("1", "0", "systemd", "", "Started session-4.scope - Session 4 of User admin.") + "-- No entries --\n" + "{not json\n", false},
+		"nothing": {"", false},
 	} {
-		if got := kernel.CleanShutdown(tail); got != want {
-			t.Errorf("%q: %v, want %v", tail, got, want)
+		if got := kernel.CleanShutdown([]byte(c.journal)); got != c.want {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
 		}
+	}
+	// A message journalctl writes as bytes (it held a control character) still counts.
+	raw := `{"_PID":"1","_UID":"0","_COMM":"systemd","MESSAGE":[83,104,117,116,116,105,110,103,32,100,111,119,110,46,7]}`
+	if !kernel.CleanShutdown([]byte(raw)) {
+		t.Error("a byte-array message is read")
 	}
 }

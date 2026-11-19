@@ -7,6 +7,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,14 @@ import (
 
 // updateEvery is how often an agent that is behind is offered the dashboard's build.
 const updateEvery = time.Hour
+
+// busyRetry is how soon an agent busy updating its server is offered the build again.
+const busyRetry = 5 * time.Minute
+
+// agentBusyError is an agent turning its update down while it updates something on its server.
+type agentBusyError struct{ what string }
+
+func (e *agentBusyError) Error() string { return "busy updating " + e.what }
 
 // AgentUpdate is what the dashboard knows about keeping one agent on its build, for its page.
 type AgentUpdate struct {
@@ -89,7 +98,16 @@ func (m *Monitor) pushUpdate(e *entry, h Host, arch string) {
 	defer m.mu.Unlock()
 	e.updating = false
 	now := float64(m.opt.Now().Unix())
-	if err != nil {
+	var busy *agentBusyError
+	switch {
+	case errors.As(err, &busy):
+		// It is updating its server's software, which a restart would cut off: tried again in a few
+		// minutes rather than the hour a failure waits.
+		e.update = AgentUpdate{State: "updating", Detail: "Waiting for it to finish " + busy.what + " first.", At: now}
+		e.updateTried = m.opt.Now().Add(busyRetry - updateEvery)
+		log.Info("Agent busy updating; its own update waits", "name", h.Name, "updating", busy.what)
+		return
+	case err != nil:
 		e.update = AgentUpdate{State: "failed", Detail: err.Error(), At: now}
 		log.Warn("Agent update failed", "name", h.Name, "err", err)
 		return
@@ -121,6 +139,10 @@ func (m *Monitor) sendBuild(h Host, arch string) error {
 	}
 	defer resp.Body.Close()
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if what, ok := strings.CutPrefix(strings.TrimSpace(string(msg)), "busy updating "); ok && resp.StatusCode == http.StatusConflict {
+		what, _, _ = strings.Cut(what, ";")
+		return &agentBusyError{what}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("the agent turned the update down: %s", strings.TrimSpace(string(msg)))
 	}

@@ -75,9 +75,14 @@ type Server struct {
 	held     map[string]*heldBack   // by account, or by a browser known to it (see limitKey)
 	hashing  chan struct{}          // a slot for each password check running
 
-	// noRealIP and noForwarded are set once a request through a proxy on this machine came without
-	// that header: the proxy does not set it, so whatever it holds is the client's own (see learnProxy).
+	// noRealIP and noForwarded are set once requests through a proxy on this machine show that it
+	// does not set that header, so whatever it holds is the client's own (see learnProxy).
 	noRealIP, noForwarded atomic.Bool
+	// proxyMu guards proxySeen, the last requests from this machine that carried just one of the
+	// two headers (true for X-Real-IP), and proxyNext, where the next one goes.
+	proxyMu   sync.Mutex
+	proxySeen []bool
+	proxyNext int
 
 	statsMu  sync.Mutex
 	stats    *Stats
@@ -204,8 +209,21 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("PUT /api/hosts/{id}/firewall/order", s.writable(slow(hostFirewallBudget, s.needRemote(s.orderHostRules))))
 	mux.Handle("PUT /api/hosts/{id}/firewall/default", s.writable(slow(hostFirewallBudget, s.needRemote(s.setHostDefault))))
 	mux.Handle("POST /api/hosts/{id}/firewall/default/keep", s.writable(slow(hostFirewallBudget, s.needRemote(s.keepHostDefault))))
+	mux.Handle("POST /api/hosts/{id}/firewall/locks", s.writable(slow(hostFirewallBudget, s.needRemote(s.lockHostPort))))
+	mux.Handle("PUT /api/hosts/{id}/firewall/locks/{lock}", s.writable(slow(hostFirewallBudget, s.needRemote(s.relockHostPort))))
+	mux.Handle("DELETE /api/hosts/{id}/firewall/locks/{lock}", s.writable(slow(hostFirewallBudget, s.needRemote(s.unlockHostPort))))
 	mux.Handle("PUT /api/hosts/{id}/defense", s.writable(slow(hostFirewallBudget, s.needRemote(s.setHostDefense))))
 	mux.Handle("DELETE /api/hosts/{id}/blocked/{address}", s.writable(slow(hostFirewallBudget, s.needRemote(s.unblockHost))))
+	mux.Handle("GET /api/hosts/updates", s.auth(s.needRemote(s.hostUpdatesSummary)))
+	mux.Handle("GET /api/hosts/{id}/updates", s.auth(slow(hostUpdatesBudget, s.needRemote(s.hostUpdates))))
+	mux.Handle("POST /api/hosts/{id}/updates", s.writable(slow(hostUpdatesBudget, s.needRemote(s.saveHostUpdate))))
+	mux.Handle("PUT /api/hosts/{id}/updates/settings", s.writable(slow(hostUpdatesBudget, s.needRemote(s.setHostUpdateSettings))))
+	mux.Handle("PUT /api/hosts/{id}/updates/{target}", s.writable(slow(hostUpdatesBudget, s.needRemote(s.saveHostUpdate))))
+	mux.Handle("DELETE /api/hosts/{id}/updates/{target}", s.writable(slow(hostUpdatesBudget, s.needRemote(s.deleteHostUpdate))))
+	mux.Handle("POST /api/hosts/{id}/updates/check", s.writable(slow(hostUpdatesBudget, s.needRemote(s.checkHostUpdates))))
+	mux.Handle("POST /api/hosts/{id}/updates/detect", s.writable(slow(hostUpdatesBudget, s.needRemote(s.detectHostUpdates))))
+	mux.Handle("POST /api/hosts/{id}/updates/{target}/check", s.writable(slow(hostUpdatesBudget, s.needRemote(s.checkHostUpdates))))
+	mux.Handle("POST /api/hosts/{id}/updates/{target}/update", s.writable(slow(hostUpdatesBudget, s.needRemote(s.applyHostUpdate))))
 	mux.Handle("GET /api/hosts/{id}/sshd", s.admin(slow(hostFirewallBudget, s.needRemote(s.hostSSHD))))
 	mux.Handle("POST /api/hosts/{id}/sshd/keys", s.writable(slow(hostSSHDBudget, s.needRemote(s.addHostSSHKey))))
 	mux.Handle("PUT /api/hosts/{id}/sshd/keys-only", s.writable(slow(hostSSHDBudget, s.needRemote(s.setHostKeysOnly))))
@@ -261,6 +279,9 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("PUT /api/firewall/order", s.writable(s.orderLocalRules))
 	mux.Handle("PUT /api/firewall/default", s.writable(s.setLocalDefault))
 	mux.Handle("POST /api/firewall/default/keep", s.writable(s.keepLocalDefault))
+	mux.Handle("POST /api/firewall/locks", s.writable(s.lockLocalPort))
+	mux.Handle("PUT /api/firewall/locks/{lock}", s.writable(s.relockLocalPort))
+	mux.Handle("DELETE /api/firewall/locks/{lock}", s.writable(s.unlockLocalPort))
 	// Account names and key fingerprints are for admins, like the dashboard's own SSH keys.
 	mux.Handle("GET /api/sshd", s.admin(s.localSSHD))
 	mux.Handle("POST /api/sshd/keys", s.writable(s.addLocalSSHKey))
@@ -269,7 +290,8 @@ func New(cfg Config, ctx *monitor.Context) *Server {
 	mux.Handle("GET /api/updates", s.auth(s.updates))
 	mux.Handle("POST /api/updates", s.writable(s.needUpdates(s.saveUpdateTarget)))
 	mux.Handle("POST /api/updates/check", s.writable(s.needUpdates(s.checkUpdates)))
-	mux.Handle("POST /api/updates/detect", s.writable(s.needUpdates(s.detectUpdates)))
+	// Looking for apps can take a couple of minutes, as on an agent.
+	mux.Handle("POST /api/updates/detect", s.writable(slow(detectBudget, s.needUpdates(s.detectUpdates))))
 	mux.Handle("PUT /api/updates/{id}", s.writable(s.needUpdates(s.saveUpdateTarget)))
 	mux.Handle("DELETE /api/updates/{id}", s.writable(s.needUpdates(s.deleteUpdateTarget)))
 	mux.Handle("POST /api/updates/{id}/check", s.writable(s.needUpdates(s.checkUpdates)))
@@ -469,22 +491,54 @@ func (s *Server) clientIPs(r *http.Request) []string {
 	return out
 }
 
+// proxyWindow is how many of the latest telling requests learnProxy weighs, and proxyEvidence how
+// many it waits for before it believes any.
+const (
+	proxyWindow   = 64
+	proxyEvidence = 16
+)
+
 // learnProxy notes which of X-Real-IP and X-Forwarded-For the proxy on this machine does not set. A
-// browser sends neither, so a proxied request with one and not the other shows that the proxy leaves
-// the other out. A client can add a header but not take away one the proxy sets, so this cannot be
-// faked from outside; a request with neither came from this machine itself, not through the proxy.
+// browser sends neither, so a proxied request with one and not the other suggests that the proxy
+// leaves the other out. A client can add a header but not take away one the proxy sets, so this
+// cannot be faked from outside.
+//
+// It can from this machine, though: any program here may send a request straight to the dashboard
+// with whichever header it likes, and the dashboard cannot tell it from the proxy. One such request
+// must not be enough to trust a header the real proxy passes on untouched. So no single request
+// decides: of the latest requests that carried just one of the two, the header most of them had is
+// the proxy's, once there are enough of them. The proxy's own traffic, a few requests for every page
+// and poll, soon outweighs a stray request, and puts right whatever one taught it.
 func (s *Server) learnProxy(r *http.Request) {
 	if _, local := peer(r); !local {
 		return
 	}
 	realIP, forwarded := r.Header.Get("X-Real-IP") != "", len(r.Header.Values("X-Forwarded-For")) > 0
-	learned := false
-	switch {
-	case realIP && !forwarded:
-		learned = s.noForwarded.CompareAndSwap(false, true)
-	case forwarded && !realIP:
-		learned = s.noRealIP.CompareAndSwap(false, true)
+	if realIP == forwarded {
+		return // neither (this machine asking for itself) or both: nothing to learn
 	}
+	s.proxyMu.Lock()
+	if len(s.proxySeen) < proxyWindow {
+		s.proxySeen = append(s.proxySeen, realIP)
+	} else {
+		s.proxySeen[s.proxyNext] = realIP
+	}
+	s.proxyNext = (s.proxyNext + 1) % proxyWindow
+	reals := 0
+	for _, v := range s.proxySeen {
+		if v {
+			reals++
+		}
+	}
+	others := len(s.proxySeen) - reals
+	learned := false
+	if len(s.proxySeen) >= proxyEvidence && reals != others {
+		// The proxy sets the header most requests had, and leaves the other to the client.
+		noForwarded := reals > others
+		learned = s.noForwarded.Swap(noForwarded) != noForwarded
+		learned = s.noRealIP.Swap(!noForwarded) != !noForwarded || learned
+	}
+	s.proxyMu.Unlock()
 	if learned && s.cfg.Store != nil {
 		// Kept, so a restart does not reopen the window in which a made-up header counts failures
 		// against someone else's address until the proxy shows itself again.
@@ -1003,32 +1057,8 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// serverZone is the server's time zone as an IANA name where it can be found, else as its offset
-// from UTC, and that offset now in seconds east of UTC.
-func serverZone(now time.Time) (string, int) {
-	_, offset := now.Zone()
-	name := time.Local.String()
-	if name == "Local" {
-		// Go calls the zone it read from /etc/localtime "Local"; that file is usually a link
-		// into the zoneinfo tree, whose path names the zone.
-		if p, err := os.Readlink("/etc/localtime"); err == nil {
-			if _, zone, ok := strings.Cut(p, "zoneinfo/"); ok && zone != "" {
-				name = zone
-			}
-		}
-	}
-	if name == "Local" || name == "" {
-		name = "UTC"
-		if offset != 0 {
-			sign, o := '+', offset
-			if o < 0 {
-				sign, o = '-', -o
-			}
-			name = fmt.Sprintf("UTC%c%02d:%02d", sign, o/3600, o%3600/60)
-		}
-	}
-	return name, offset
-}
+// serverZone is the server's time zone and its offset now (see collect.TimeZone).
+func serverZone(now time.Time) (string, int) { return collect.TimeZone(now) }
 
 type check struct {
 	Status         string   `json:"status"`

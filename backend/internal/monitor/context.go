@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"nightjar/internal/alerts"
 	"nightjar/internal/analytics"
@@ -105,6 +109,12 @@ type Context struct {
 	// never sees them change mid-cycle. cfgMu guards Cfg for readers outside the loop.
 	cfgMu   sync.RWMutex
 	pending *config.Settings
+
+	// cleaning is set while a disk or log cleanup runs, a timed-out one included (see cleanupStep).
+	cleaning atomic.Bool
+	// loopThread is the OS thread the loop's goroutine is locked to while Run runs, 0 otherwise:
+	// it is how LoopWaiting knows the loop from any other goroutine.
+	loopThread atomic.Int64
 }
 
 // Config is a copy of the settings in force, for code outside the monitoring loop.
@@ -175,6 +185,27 @@ func (c *Context) Heartbeat() {
 	}
 	if c.Freeze != nil {
 		c.Freeze.Heartbeat()
+	}
+}
+
+// LoopWaiting is Heartbeat for hooks that any goroutine may call, such as the notification hub's
+// Waiting, called while an alert waits on a slow channel: it beats only when called on the loop's
+// own goroutine. The loop waiting on its own alert is busy, not stuck; an uptime check or the API
+// waiting on theirs says nothing about the loop, and must not hide it hanging.
+func (c *Context) LoopWaiting() {
+	if t := c.loopThread.Load(); t != 0 && int64(unix.Gettid()) == t {
+		c.Heartbeat()
+	}
+}
+
+// claimThread locks the calling goroutine to its OS thread and marks it the loop's, until release
+// is called. A locked thread runs no other goroutine, so its id names the loop's goroutine alone.
+func (c *Context) claimThread() (release func()) {
+	runtime.LockOSThread()
+	c.loopThread.Store(int64(unix.Gettid()))
+	return func() {
+		c.loopThread.Store(0)
+		runtime.UnlockOSThread()
 	}
 }
 
@@ -338,6 +369,21 @@ func withTimeout[T any](c *Context, timeout time.Duration, def T, name string, f
 			return def
 		}
 	}
+}
+
+// cleanupStep runs one disk or log cleanup like withTimeout, but never two at once. A cleanup that
+// times out goes on in the background, and another started beside it would trim, empty or delete
+// the same files under it; so while one is still going, the next is skipped (ran is false) and
+// tried again on a later cycle.
+func cleanupStep[T any](h handler, timeout time.Duration, def T, name string, fn func() T) (v T, ran bool) {
+	if !h.ctx.cleaning.CompareAndSwap(false, true) {
+		h.log.Debug(fmt.Sprintf("Skipping %s: an earlier cleanup is still running", name))
+		return def, false
+	}
+	return withTimeout(h.ctx, timeout, def, name, func() T {
+		defer h.ctx.cleaning.Store(false)
+		return fn()
+	}), true
 }
 
 func field(name, value string, inline bool) discord.Field {

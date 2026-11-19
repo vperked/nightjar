@@ -49,4 +49,6 @@ If an update or a check says Nightjar **lost the right to switch users (CAP_SETU
 
 ## Adding your own
 
-**Add** a target with a version command, an update command and, optionally, the systemd service to watch afterwards. Commands run as root, so only the signed-in admin can change them.
+**Add** a target with a version command, an update command and, optionally, the systemd service to watch afterwards. Commands run as root, so only the signed-in admin can change them. The same goes for what decides what runs: the paths, where a release is downloaded from, the service restarted afterwards and an app's address. On a dashboard without sign-in, those can be changed only with `WEB_AUTH_TOKEN` set.
+
+When another program is using the package manager (unattended-upgrades, say, or an `apt` someone left at a prompt), Nightjar waits up to 10 minutes for it to finish rather than stopping it, then tries once more. If it is still busy, the update fails and says which program has it.

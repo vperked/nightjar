@@ -40,7 +40,7 @@ func (h *logCleanup) check(s *Snapshot) {
 
 func (h *logCleanup) checkLogs(s *Snapshot, aggressive bool) {
 	logs := h.ctx.Logs
-	rotated := withTimeout(h.ctx, 60*time.Second, cleanup.Stats{}, "rotated log cleanup", func() cleanup.Stats { return logs.CleanupRotated(aggressive) })
+	rotated, _ := cleanupStep(h.handler, 60*time.Second, cleanup.Stats{}, "rotated log cleanup", func() cleanup.Stats { return logs.CleanupRotated(aggressive) })
 	if rotated.FilesRemoved > 0 {
 		h.log.Warn(fmt.Sprintf("[CLEANUP] Removed %d rotated log archive(s), freed %s", rotated.FilesRemoved, format.Bytes(float64(rotated.BytesCleared))))
 	}
@@ -102,7 +102,10 @@ func (h *logCleanup) cleanOne(path string, s *Snapshot, aggressive bool) (discor
 	} else {
 		h.log.Info(fmt.Sprintf("    Cleaning %s: %s > %s", path, size, logs.ThresholdFormatted()))
 	}
-	ok = withTimeout(h.ctx, 30*time.Second, false, "cleanup log "+path, func() bool { return logs.Clean(current, aggressive) })
+	ok, ran := cleanupStep(h.handler, 30*time.Second, false, "cleanup log "+path, func() bool { return logs.Clean(current, aggressive) })
+	if !ran {
+		return discord.CleanedLog{}, false
+	}
 	h.lastAlert[path] = s.Now
 	if !ok {
 		h.log.Error(fmt.Sprintf("    Log cleanup failed for %s - check permissions (may need root/sudo)", path))

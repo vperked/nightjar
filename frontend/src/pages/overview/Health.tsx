@@ -2,7 +2,7 @@ import { Link } from 'react-router';
 import { useCanEdit } from '../../api/ConfigContext';
 import { useServices } from '../../api/ServicesContext';
 import type { DrivesResponse, Unit, UnitsResponse } from '../../api/types';
-import { useUpdates } from '../../api/UpdatesContext';
+import { useWaitingUpdates } from '../../api/UpdatesContext';
 import { isProblem, verdict as unitVerdict } from '../../components/unitState';
 import { formatAgo, noun, plural } from '../../format';
 
@@ -12,7 +12,8 @@ import { formatAgo, noun, plural } from '../../format';
 // HealthSummary is the overview's one-line verdict, with a chip for each part that links to it.
 export function HealthSummary({ units, drives }: { units: UnitsResponse | undefined; drives: DrivesResponse | undefined }) {
   const { data: checks } = useServices();
-  const { data: updates } = useUpdates();
+  // The same count as the Apps tab: every machine's, and the chip leads to where they wait.
+  const updates = useWaitingUpdates();
   const list = checks?.services ?? [];
   const watched = list.filter((c) => c.status !== 'paused');
   const checksDown = watched.filter((c) => c.status === 'down').length;
@@ -20,7 +21,7 @@ export function HealthSummary({ units, drives }: { units: UnitsResponse | undefi
   const driveList = drives?.enabled ? drives.drives : [];
   const failing = driveList.filter((d) => d.health === 'failing').length;
   const warning = driveList.filter((d) => d.health === 'warning').length;
-  const available = (updates?.targets ?? []).filter((t) => t.available && !t.paused).length;
+  const available = updates.total;
   const problems = checksDown + unitProblems + failing;
   const tone = problems ? 'crit' : warning ? 'warn' : 'good';
   const verdict = problems ? plural(problems, 'problem') : warning ? 'Running, with a warning' : 'All systems normal';
@@ -57,7 +58,7 @@ export function HealthSummary({ units, drives }: { units: UnitsResponse | undefi
         </a>
       )}
       {available > 0 && (
-        <Link className="health-chip" to="/updates">
+        <Link className="health-chip" to={updates.at}>
           <span className="num">{available}</span> {noun(available, 'update')}
         </Link>
       )}

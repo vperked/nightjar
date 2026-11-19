@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"nightjar/internal/discord"
@@ -28,6 +29,9 @@ type kernelChecks struct {
 	lastHardwareAlert map[string]float64
 	// lastFloodAlert is when a kernel flooding its log was last reported.
 	lastFloodAlert float64
+	// crashCheckRunning is set while a crash check runs, one that timed out included: until it
+	// ends, no other kernel check starts, so none waits on it or runs beside it.
+	crashCheckRunning atomic.Bool
 }
 
 // floodEvery is how often a kernel that keeps flooding its log is reported again.
@@ -73,6 +77,9 @@ func (h *kernelChecks) checkStability(s *Snapshot) {
 	h.stabilityCounter++
 	if !cfg.KernelMonitorEnabled || h.ctx.Kernel == nil || h.stabilityCounter < cfg.KernelStabilityCheckInterval {
 		return
+	}
+	if h.crashCheckRunning.Load() {
+		return // it would wait on the crash check still running; tried again next cycle
 	}
 	h.stabilityCounter = 0
 	st := h.ctx.Kernel.CheckStability()
@@ -134,10 +141,16 @@ func (h *kernelChecks) checkCrashes(s *Snapshot) {
 	if !cfg.KernelMonitorEnabled || h.ctx.Kernel == nil || h.crashCounter < cfg.KernelCheckInterval {
 		return
 	}
+	// One that timed out may still be running; another beside it would only queue behind it.
+	if !h.crashCheckRunning.CompareAndSwap(false, true) {
+		h.log.Debug("Skipping the kernel crash check: the last one is still running")
+		return
+	}
 	h.crashCounter = 0
 	now := s.Now
 	// journalctl and dmesg can take up to 40s between them: the watchdog hears from the loop meanwhile.
 	r := withTimeout(h.ctx, 2*time.Minute, kernel.CrashReport{}, "kernel crash check", func() kernel.CrashReport {
+		defer h.crashCheckRunning.Store(false)
 		return h.ctx.Kernel.CheckCrashes(cfg.KernelCheckSinceMinutes)
 	})
 

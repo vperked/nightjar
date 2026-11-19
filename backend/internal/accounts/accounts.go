@@ -159,6 +159,11 @@ func (a *Accounts) Create(username, password, code string) error {
 	if subtle.ConstantTimeCompare([]byte(given), []byte(a.setupCode)) != 1 {
 		return ErrSetupCode
 	}
+	// Viewers outlive a reset. A new admin taking one's name would share its sign-in limits, and
+	// the viewer could guess at the admin's password from its own browser.
+	if a.viewerIndexLocked(username) >= 0 {
+		return ErrViewerExists
+	}
 	ad := &admin{Username: username, Hash: hash, Created: float64(a.now().Unix())}
 	if err := a.saveLocked(ad); err != nil {
 		return err

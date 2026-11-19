@@ -3,6 +3,7 @@ package accounts_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -93,7 +94,10 @@ func TestDeviceCookies(t *testing.T) {
 	db := storage.Open(path)
 	t.Cleanup(db.Close)
 	a := accounts.New(db)
-	tok := a.NewDevice("Jay")
+	if err := a.Create("Jay", "correct horse battery", a.SetupCode()); err != nil {
+		t.Fatal(err)
+	}
+	tok := a.NewDevice(accounts.Who{Username: "Jay", Role: accounts.RoleAdmin})
 	id, ok := a.Device(tok, " jay ")
 	if !ok || id == "" {
 		t.Fatal("a device cookie is not good for its own account")
@@ -114,5 +118,45 @@ func TestDeviceCookies(t *testing.T) {
 	}
 	if _, ok := accounts.New(db).Device(tok, "jay"); ok {
 		t.Fatal("a device cookie outlived a reset of the account")
+	}
+}
+
+// After a reset, a new admin cannot take a viewer's name, and a viewer's device cookie is never good
+// for the admin's account: the viewer's browser gets no limits of its own to guess the admin's
+// password with.
+func TestDeviceCookiesBelongToTheAccountNotTheName(t *testing.T) {
+	db := storage.Open(filepath.Join(t.TempDir(), "a.db"))
+	t.Cleanup(db.Close)
+	a := accounts.New(db)
+	if err := a.Create("jay", "correct horse battery", a.SetupCode()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddViewer("sam", "sam's long password"); err != nil {
+		t.Fatal(err)
+	}
+	sams := a.NewDevice(accounts.Who{Username: "sam", Role: accounts.RoleViewer})
+	if _, ok := a.Device(sams, "SAM"); !ok {
+		t.Fatal("a viewer's device cookie is not good for the viewer")
+	}
+	if _, ok := a.Device(sams, "jay"); ok {
+		t.Fatal("a viewer's device cookie is good for the admin")
+	}
+	// A cookie for a role the name does not have is no good either.
+	if _, ok := a.Device(a.NewDevice(accounts.Who{Username: "sam", Role: accounts.RoleAdmin}), "sam"); ok {
+		t.Fatal("a cookie made for an admin named like the viewer is good for the viewer")
+	}
+
+	if err := accounts.Reset(db); err != nil {
+		t.Fatal(err)
+	}
+	b := accounts.New(db)
+	if err := b.Create(" Sam ", "a new admin password", b.SetupCode()); !errors.Is(err, accounts.ErrViewerExists) {
+		t.Fatalf("a new admin took a viewer's name: %v", err)
+	}
+	if b.Configured() {
+		t.Fatal("the refused admin was made anyway")
+	}
+	if err := b.Create("robin", "a new admin password", b.SetupCode()); err != nil {
+		t.Fatal(err)
 	}
 }

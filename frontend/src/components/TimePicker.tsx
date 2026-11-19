@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FocusEvent, type KeyboardEvent } from 'react';
-import { browserZone, useServerZone } from '../api/ConfigContext';
+import { browserZone, useServerZone, zoneOf } from '../api/ConfigContext';
 
 // TimePicker is the dashboard's time field: a button showing the time and a small panel of hour and
 // minute columns, in place of the browser's own picker. The value is "HH:MM" on a 24-hour clock;
@@ -196,9 +196,11 @@ export function inYourTime(from: string, to: string, shift: number, days?: numbe
 }
 
 // ServerTime labels times that run on the server's clock (weekly maintenance and quiet hours) and,
-// where the browser's clock differs, says what they come to in the browser's time.
-export function ServerTime({ from, to, days }: { from?: string; to?: string; days?: number[] }) {
-  const zone = useServerZone();
+// where the browser's clock differs, says what they come to in the browser's time. tz is another
+// machine's zone (an agent server's update window), in place of this Nightjar's.
+export function ServerTime({ from, to, days, tz }: { from?: string; to?: string; days?: number[]; tz?: { name: string; offset: number } }) {
+  const own = useServerZone();
+  const zone = tz ? zoneOf(tz) : own;
   if (!zone) return null;
   return (
     <span className="form-help server-time">

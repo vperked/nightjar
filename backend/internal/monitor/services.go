@@ -23,6 +23,9 @@ type serviceChecks struct {
 	lastPrune float64
 	running   sync.WaitGroup
 	slots     chan struct{} // at most maxParallelChecks run at once
+	// stop ends with the loop, and cuts short a service or container restart under way for a
+	// repair. Nil until the loop runs.
+	stop context.Context
 }
 
 const (
@@ -36,29 +39,25 @@ func (h *serviceChecks) check(s *Snapshot) {
 		return
 	}
 	now := s.Now
-	for _, spec := range m.Claim(now) {
+	for _, run := range m.ClaimRuns(now) {
 		h.running.Add(1)
 		go func() {
 			defer h.running.Done()
 			h.slots <- struct{}{}
 			var r services.Result
-			if spec.Type == "heartbeat" {
-				r = m.Heartbeat(spec, now)
+			if run.Spec.Type == "heartbeat" {
+				r = m.Heartbeat(run.Spec, now)
 			} else {
-				r = services.Run(spec)
+				r = services.Run(run.Spec)
 			}
 			<-h.slots
-			// A check renamed while it ran is reported under its new name. A result dropped (the
-			// check was paused, deleted or changed while it ran) neither alerts nor repairs: the
-			// spec it ran with may restart a service the owner has just taken over.
-			name, change, recorded := m.RecordAs(spec.Name, r, now)
+			// The result goes to the check this run was claimed from, under the name it has now:
+			// renamed while it ran, its old name may already belong to another check. A result
+			// dropped (the check was paused, deleted or changed while it ran) neither alerts nor
+			// repairs: the spec it ran with may restart a service the owner has just taken over.
+			spec, change, recorded := m.Report(run, r, now)
 			if !recorded {
 				return
-			}
-			if name != spec.Name {
-				if st := m.State(name); st.Spec.Name == name {
-					spec = st.Spec
-				}
 			}
 			h.report(spec, r, change, now)
 		}()
@@ -114,7 +113,20 @@ func (h *serviceChecks) report(spec services.Spec, r services.Result, change str
 func (h *serviceChecks) repair(spec services.Spec, r services.Result, now float64) {
 	attempt := h.ctx.Repairs.Attempts(spec.Name)
 	h.log.Info(fmt.Sprintf("%s: down, repairing (attempt %d of %d)", spec.Name, attempt, spec.Repair.Max))
-	rec := h.ctx.Repairs.Run(context.Background(), spec, r.Detail, now, true)
+	// A restart asked of systemd or Docker is cut short when Nightjar stops (they carry on with it
+	// themselves). A script is not: it runs in a scope of its own so that what it starts outlives
+	// Nightjar, and killing it now would take that down with it. Stopping just stops waiting for it.
+	stop := h.stop
+	if stop == nil || spec.Repair == nil || spec.Repair.Action == "script" {
+		stop = context.Background()
+	}
+	rec := h.ctx.Repairs.Run(stop, spec, r.Detail, now, true)
+	if stop.Err() != nil {
+		// Cut short because Nightjar is stopping: the attempt is kept, but the outage carries on
+		// after the restart, which tries again.
+		h.log.Info(fmt.Sprintf("%s: repair stopped as Nightjar stops (%s)", spec.Name, rec.Detail))
+		return
+	}
 	what := map[string]string{"restart": "restart " + rec.Target, "container": "restart the " + rec.Target + " container", "script": "run " + rec.Target}[rec.Action]
 	fields := []discord.Field{field("Attempt", fmt.Sprintf("%d of %d", attempt, spec.Repair.Max), true)}
 	if line := strings.TrimSpace(rec.Output); line != "" {

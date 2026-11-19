@@ -9,6 +9,7 @@ import { State } from '../components/ui';
 import { Select } from '../components/Select';
 import { AttackWatch } from '../components/Attacks';
 import { FirewallSummary } from '../components/FirewallSummary';
+import { UpdatesSummary } from '../components/UpdatesSummary';
 import { MuteButton } from '../components/MuteButton';
 import { HOST_STATUS as STATUS, HostStatus as StatusTag } from '../components/RemoteSummary';
 import { Skeleton } from '../components/Skeleton';
@@ -588,6 +589,24 @@ function EditServer({ h, onSaved, onRemoved }: { h: RemoteHost; onSaved: () => v
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [error, setError] = useState('');
+  // move is the command that reinstalls a plain-HTTP agent for HTTPS, on a token made for the move.
+  const [move, setMove] = useState('');
+  const plain = h.kind === 'agent' && h.address.startsWith('http://');
+  // A plain agent's token has crossed the network, and over HTTPS the token is also its key, so the
+  // move to HTTPS takes a new one; the dashboard refuses the old.
+  const toHTTPS = async () => {
+    setError('');
+    try {
+      const r = await api.hostToken();
+      const where = hostPart(h.address);
+      const listen = where.port && Number(where.port) !== r.port ? ` -listen :${where.port}` : '';
+      setToken(r.token);
+      setAddress(h.address.replace(/^http:\/\//, 'https://'));
+      setMove(`sudo nightjar-agent install -token ${r.token} -tls=true${listen}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  };
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -596,6 +615,7 @@ function EditServer({ h, onSaved, onRemoved }: { h: RemoteHost; onSaved: () => v
       await api.updateHost(h.id, h.kind === 'ssh' ? { kind: 'ssh', name } : { kind: 'agent', name, address, token });
       notify({ tone: 'ok', title: 'Saved' });
       setToken('');
+      setMove('');
       onSaved();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
@@ -642,6 +662,12 @@ function EditServer({ h, onSaved, onRemoved }: { h: RemoteHost; onSaved: () => v
             </label>
           </>
         )}
+        {move && (
+          <div className="install-field">
+            <span>On the server, reinstall it for HTTPS with its new token, then Save here</span>
+            <Command text={move} />
+          </div>
+        )}
         {error && <p className="form-error">{error}</p>}
         <div className="host-edit-actions">
           <button className="btn" type="submit" disabled={busy}>
@@ -667,7 +693,18 @@ function EditServer({ h, onSaved, onRemoved }: { h: RemoteHost; onSaved: () => v
           <p className="form-help">Its address and login are under SSH. Install the agent and add it again for its readings.</p>
         ) : (
           <p className="form-help">
-            {h.address.startsWith('http://') ? 'Plain HTTP: reinstall the agent without -tls=false and use https:// to encrypt it. ' : 'Encrypted with HTTPS, pinned to the key its token gives. '}
+            {plain ? (
+              <>
+                Plain HTTP: its token has crossed the network unencrypted, and over HTTPS the token is also its key, so encrypting it takes a new token.{' '}
+                {!move && (
+                  <button type="button" className="btn-quiet" onClick={toHTTPS} disabled={busy}>
+                    Move to HTTPS…
+                  </button>
+                )}{' '}
+              </>
+            ) : (
+              'Encrypted with HTTPS, pinned to the key its token gives. '
+            )}
             To uninstall the agent itself, run <span className="mono">sudo nightjar-agent uninstall</span> on the server.
           </p>
         )}
@@ -1571,6 +1608,7 @@ function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
           <ServicesOn h={h} />
           {r?.attacks && <AttackWatch view={r.attacks} now={now} onToggle={toggleDefense} onUnblock={unblock} />}
           {h.kind === 'agent' && <FirewallSummary h={h} />}
+          {h.kind === 'agent' && <UpdatesSummary h={h} />}
         </div>
       </div>
 

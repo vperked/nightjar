@@ -200,7 +200,7 @@ var Catalog = []App{
 		ID: "filebrowser", Name: "File Browser", Category: "Files and sync", Color: "#40c4ff", Port: 8090,
 		Summary:  "Browse, upload, download and share the server's files from any browser.",
 		Homepage: "https://filebrowser.org",
-		SignIn:   "Username admin. A generated password is printed at the end of the install log; change it under Settings.",
+		SignIn:   "Username admin. Nightjar hides passwords in its own logs, so read the generated one from the service's: sudo journalctl -u filebrowser | grep -i password. Change it under Settings.",
 		source: source{github: "filebrowser/filebrowser",
 			assets: map[string]string{"amd64": `^linux-amd64-filebrowser\.tar\.gz$`, "arm64": `^linux-arm64-filebrowser\.tar\.gz$`}},
 		binary: "filebrowser",

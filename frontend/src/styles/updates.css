@@ -365,3 +365,31 @@
     transition: none;
   }
 }
+
+/* An agent server's own update settings, under its list: one wrapping line of fields. */
+.upd-settings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  margin-top: 12px;
+}
+.upd-settings-field {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+.upd-settings-field .field.short {
+  width: 68px;
+}
+/* Whose clock the window is on, under the fields. */
+.upd-settings + .server-time {
+  display: block;
+  margin-top: 10px;
+}
+.upd-host-settings {
+  margin-top: 24px;
+}

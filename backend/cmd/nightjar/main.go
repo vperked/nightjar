@@ -343,15 +343,17 @@ func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 		return on
 	}
 	wh.hub.Maintenance = ctx.Maintenance.Holds
-	// The loop sends alerts itself: while one waits on a slow channel, the loop is busy, not stuck.
-	wh.hub.Waiting = ctx.Heartbeat
+	// The loop sends alerts itself: while one of its own waits on a slow channel, the loop is busy,
+	// not stuck. Alerts from the uptime checks, the API and the rest beat nothing, or a slow channel
+	// would hide a hung loop from the watchdog.
+	wh.hub.Waiting = ctx.LoopWaiting
 	ctx.Activity = func(who, kind, target, detail string) {
 		db.AddActivity(storage.Activity{TS: float64(time.Now().Unix()), Who: who, Kind: kind, Action: detail, Target: target})
 	}
 	ctx.MediaCleanup.Record = func(action, target string) { ctx.Activity("Nightjar", "cleanup", target, action) }
 	monitor.ConnectBot(ctx)
 	ctx.Analytics = analytics.NewRecorder(db)
-	ctx.Remote = remote.New(remote.Options{Store: db, Alerts: wh.hub.Route("servers"), Analytics: ctx.Analytics, SSHDir: cfg.SSHDir, AutoUpdate: func() bool { return ctx.Config().AgentAutoUpdate }, Limits: func() remote.Limits {
+	ctx.Remote = remote.New(remote.Options{Store: db, Alerts: wh.hub.Route("servers"), Analytics: ctx.Analytics, SSHDir: cfg.SSHDir, AutoUpdate: func() bool { return ctx.Config().AgentAutoUpdate }, UpdatesNotify: func() bool { return ctx.Config().UpdatesNotify }, Limits: func() remote.Limits {
 		c := ctx.Config()
 		return remote.Limits{Temp: c.TempThreshold, Memory: c.MemoryThreshold, Disk: c.DiskThreshold}
 	}})
@@ -364,7 +366,7 @@ func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 		log.Warn("Firewall rules unreadable; leaving the firewall as it is until Nightjar restarts with its database", "err", err)
 	} else {
 		ctx.Firewall = &firewall.Manager{Load: func() []byte { return []byte(rules) }, Save: func(b []byte) error { return db.SetMeta(firewallKey, string(b)) },
-			Open: dashboardOpen(cfg.WebPort)}
+			Open: dashboardOpen(cfg.WebPort), OnLock: lockAlerts(wh.hub.Route("attacks"))}
 	}
 	ctx.SSHD = &sshd.Manager{}
 	// A monitor restarting itself to apply settings already announced services that were failed.
@@ -849,6 +851,27 @@ func attackWatcher(ctx *monitor.Context, db *storage.Store, alerts discord.Sende
 			(time.Duration(a.End-a.Start)*time.Second).String(), format.BytesPerSecond(a.PeakRx/8)), discord.OK, attackFields(a))
 	}
 	return w
+}
+
+// lockAlerts says when a locked port on this machine is taken by another program, and when it is its
+// service's again.
+func lockAlerts(alerts discord.Sender) func(firewall.LockState) {
+	return func(s firewall.LockState) {
+		if alerts == nil {
+			return
+		}
+		about := discord.About(alerts, "lock:local:"+s.ID)
+		words := strings.ToUpper(s.Words()[:1]) + s.Words()[1:] + "."
+		if s.State != firewall.LockTaken {
+			about.SendEmbed("Locked port back: "+strconv.Itoa(int(s.Port))+"/"+s.Proto, words+" Nightjar no longer drops what comes to it.", discord.OK, nil, "Attacks")
+			return
+		}
+		desc := words + " Nightjar drops what comes to that port until " + s.Name() + " has it back. If the new program is the right one, relock the port on the Firewall page."
+		if s.WatchOnly {
+			desc = words + " The port is kept open for SSH or the dashboard, so Nightjar only watches it and drops nothing."
+		}
+		about.SendEmbed("Locked port taken: "+strconv.Itoa(int(s.Port))+"/"+s.Proto, desc, discord.Critical, nil, "Attacks")
+	}
 }
 
 // defending reads whether the defender is switched on. While that cannot be read it keeps the last

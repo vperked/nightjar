@@ -250,8 +250,12 @@ func TestUpdatesArriveOneAtATimeAsAWholeBuild(t *testing.T) {
 	if st, _ := os.Stat(path); st.Mode().Perm() != 0o755 {
 		t.Fatalf("the program's mode: %v", st.Mode())
 	}
-	if left, _ := os.ReadDir(dir); len(left) != 1 {
+	// Beside it, only the build it replaced, to go back to by hand.
+	if left, _ := os.ReadDir(dir); len(left) != 2 {
 		t.Fatalf("files left beside the program: %v", left)
+	}
+	if prev, _ := os.ReadFile(self.Previous()); string(prev) != "old build" {
+		t.Fatalf("the build replaced is kept: %q", prev)
 	}
 }
 

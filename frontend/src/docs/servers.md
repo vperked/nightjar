@@ -42,6 +42,8 @@ Agents serve HTTPS by default. Their key comes from their token, so the dashboar
 
 On a network you trust you can turn **encrypt with HTTPS** off in the sheet, which adds `-tls=false` to the install command. The address then starts with `http://`, and readings and the token cross the network unencrypted.
 
+To move such an agent to HTTPS later, use **Move to HTTPS…** in the server's settings. Its token has crossed the network in the clear, and the HTTPS key comes from the token, so the move needs a new one: the sheet makes it, fills in the `https://` address, and shows the `sudo nightjar-agent install -token … -tls=true` command to run on the server. Both the dashboard and the agent refuse HTTPS on the old token.
+
 ### Reaching the agent
 
 Only this machine needs to reach the agent's port. Over a LAN that usually just works; across the internet, use a VPN such as Tailscale, or firewall the port to this machine's address. To use another port, give the address with it (`192.168.0.20:9200`) and the sheet adds `-listen :9200` to the install command.

@@ -117,6 +117,9 @@ type Defender struct {
 	Exec func(ctx context.Context, stdin []byte, name string, args ...string) (string, error)
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
+	// NginxDir is nginx's settings folder, read for the proxies nginx takes visitors' addresses from
+	// (set_real_ip_from), which are never blocked. Empty is /etc/nginx; "-" reads none.
+	NginxDir string
 
 	mu       sync.Mutex
 	started  bool
@@ -129,9 +132,12 @@ type Defender struct {
 	cannot   []string
 	blocked  map[string]Block
 	pardoned map[string]time.Time // unblocked by hand: left alone until then
-	lastErr  string
-	v6Err    string // why IPv6 last could not take the rules
-	web      string // the deny file as last written
+	// proxies are the networks nginx takes visitors' addresses from, as read at proxiesRead.
+	proxies     []string
+	proxiesRead time.Time
+	lastErr     string
+	v6Err       string // why IPv6 last could not take the rules
+	web         string // the deny file as last written
 	// webStale is a deny file left by an earlier run, whose content is not web's.
 	webStale bool
 	last     Situation
@@ -892,8 +898,9 @@ func (t *trustList) add(s string) {
 	}
 }
 
-// trust is everyone never to block now: the local networks, the name servers and gateways, Cloudflare,
-// those logged in over SSH, addresses unblocked by hand, and the ones the defender is told to trust.
+// trust is everyone never to block now: the local networks, the name servers and gateways, Cloudflare
+// and the other proxies nginx takes visitors' addresses from, those logged in over SSH, addresses
+// unblocked by hand, and the ones the defender is told to trust.
 func (d *Defender) trust(s Situation) trustList {
 	var t trustList
 	for _, c := range alwaysTrusted {
@@ -904,6 +911,9 @@ func (d *Defender) trust(s Situation) trustList {
 	}
 	for _, n := range cloudflare {
 		t.add(n.String())
+	}
+	for _, p := range d.proxiesLocked() {
+		t.add(p)
 	}
 	for _, src := range s.Sources {
 		if src.SSH {

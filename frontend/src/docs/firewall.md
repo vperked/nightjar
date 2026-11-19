@@ -4,7 +4,8 @@ Nightjar manages the whole firewall of this machine, and of each server with the
 
 - **Incoming traffic no rule decides**: left to the machine's own firewall, or dropped. See [The default](/docs/firewall#the-default).
 - **Rules**, incoming and outgoing, in order, with what each caught.
-- **Open ports**: each port something listens on, the program holding it, and whether anyone may reach it.
+- **Open ports**: each port something listens on, the service holding it, and whether anyone may reach it.
+- **Locked ports**: ports pinned to the service on them. See [Locked ports](/docs/firewall#locked-ports).
 - **Dropped lately**: the latest packets the rules and the default dropped, and who was dropped most.
 - **The machine's own rules**, as ufw, firewalld or iptables lists them, read only.
 
@@ -55,6 +56,24 @@ Before dropping, Nightjar lists the open ports no rule lets anyone reach, which 
 The change is made at once and **goes back by itself after a minute** unless you press **Keep it**. If it cut the dashboard off, the page can't answer, nothing keeps it, and the machine is back as it was a minute later. **Undo** puts it back at once. A restart before it is kept comes back with the old default too.
 
 Docker's published ports go through the forwarding chain, not this one, so the default doesn't close them; block them with rules on the machine itself if needed.
+
+## Locked ports
+
+**Open ports** names the service on each port: its systemd service (**postgresql**, **nginx**) where it runs in one, else the program; hover for the executable. The lock beside a port **locks it to that service**: its systemd service when it runs in one, else the executable it runs.
+
+Whatever runs in that systemd service may hold the port, so an upgrade that moves its executable (a snap refresh, a new Java) or the helpers it hands the port to (Postfix's smtpd, Dovecot's imap-login) are still the service. Outside systemd, the processes the service starts count as the service too. A program listening on loopback alone (an `ssh -L` or `kubectl port-forward` beside the service) takes nothing, since the network can't reach it.
+
+Nightjar then checks every few seconds who holds the port:
+
+- **Held by its service**: nothing changes.
+- **Nothing listens**: nothing changes either, so the service can restart. The machine refuses what comes to a closed port anyway.
+- **Taken** by another program (the service stopped and something else took the port, or a program listens beside it): Nightjar **drops what comes to that port from the network**, ahead of every rule, so an allow for the port doesn't let anyone reach the wrong program. It alerts you under **Attacks**, and again when the service has the port back, when the drop is lifted.
+
+Under **Locked ports**, **Trust it** locks a taken port to the program on it now, for when it is the right one: a service moved to another systemd service, or replaced by another program. **Unlock** lets the port go, and lifts its drop.
+
+The ports kept open whatever the rules, **SSH's, the dashboard's (80, 443 and its own) and the agent's**, can be locked but are **only watched**: a taken one is said, not dropped, since a mistake there would cut everyone off, the dashboard included. A port systemd holds for a service it starts on demand can be locked while that service runs. Drops on a locked port show under **Dropped lately**, named after the lock.
+
+The firewall can't tell which program a packet will reach, so a taken port is found by watching, within a few seconds, not at once.
 
 ## What was dropped
 

@@ -15,7 +15,7 @@ import (
 
 	"nightjar/internal/discord"
 	"nightjar/internal/logx"
-	"nightjar/internal/storage"
+	"nightjar/internal/storage/record"
 )
 
 var log = logx.Component("Updates")
@@ -31,9 +31,26 @@ const (
 	probeTimeout = 15 * time.Minute
 )
 
+// Store keeps the targets and a few values of the manager's own. The monitor's database is one
+// (*storage.Store); the agent, which has no database, keeps a file instead (FileStore).
+type Store interface {
+	// UpdateTargets returns the stored targets in display order.
+	UpdateTargets() []record.UpdateTarget
+	// SaveUpdateTarget inserts or replaces a target's definition, keeping its place and state.
+	SaveUpdateTarget(id string, spec []byte) error
+	// SaveUpdateState stores a target's last known state.
+	SaveUpdateState(id string, state []byte) error
+	DeleteUpdateTarget(id string) error
+	// Meta is a value kept for the manager, "" when unset.
+	Meta(key string) string
+	SetMeta(key, value string) error
+	// Available says whether changes can be kept at all.
+	Available() bool
+}
+
 // Options configure a Manager. Zero values get working defaults.
 type Options struct {
-	Store       *storage.Store
+	Store       Store
 	Run         Runner
 	HTTP        *http.Client
 	GitHubAPI   string
@@ -48,6 +65,9 @@ type Options struct {
 	NotifyAvailable bool
 	// Restart restarts the monitor after it updated itself.
 	Restart func()
+	// Settle, when set, runs before the first job, for as long as an update may take: the agent
+	// waits in it for update steps that it left running when it restarted, which run on outside it.
+	Settle func(context.Context)
 }
 
 // State is a target's last known state, kept across restarts.
@@ -60,6 +80,9 @@ type State struct {
 	Notified  string `json:"notified,omitempty"`
 	Attempted string `json:"attempted,omitempty"`
 	Runs      []Run  `json:"runs,omitempty"` // newest first
+	// Running is the update under way, kept from its start: one that a restart cut off is still
+	// known afterwards, and counted as a run whose end nobody saw.
+	Running *Run `json:"running,omitempty"`
 }
 
 // Run is one update attempt.
@@ -113,6 +136,11 @@ type Manager struct {
 	checking  bool
 	applying  string // the target being updated now, if any
 	stopping  bool   // Wait was called: no job starts after it
+	// windowHeld is when an open window found a check round in the way of its automatic updates;
+	// they are queued when the round ends, even if the window has closed by then.
+	windowHeld time.Time
+	// interrupted are the targets whose update a restart cut off, for the worker to account for.
+	interrupted []string
 }
 
 // New loads the stored targets. On the first start it stores what detect finds; legacyAuto turns on
@@ -138,6 +166,11 @@ func New(opt Options, detect func() []Spec, legacyAuto bool) *Manager {
 		json.Unmarshal(t.State, &tg.state)
 		m.order = append(m.order, spec.ID)
 		m.targets[spec.ID] = tg
+		if tg.state.Running != nil {
+			// Shown as updating until the worker has waited for what may still be running.
+			tg.busy = "updating"
+			m.interrupted = append(m.interrupted, spec.ID)
+		}
 	}
 	m.lastCheck, _ = strconv.ParseFloat(opt.Store.Meta(lastCheckKey), 64)
 	if opt.Store.Available() && opt.Store.Meta(seededKey) == "" && detect != nil {
@@ -215,7 +248,7 @@ func (m *Manager) Save(oldID string, spec Spec) (Status, error) {
 		return Status{}, err
 	}
 	if !m.opt.Store.Available() {
-		return Status{}, storage.ErrUnavailable
+		return Status{}, record.ErrUnavailable
 	}
 	if oldID == "" {
 		if err := m.add(spec); err != nil {
@@ -241,9 +274,7 @@ func (m *Manager) Save(oldID string, spec Spec) (Status, error) {
 	}
 	// The dashboard does not send the release download a recipe checks; with the same command, it
 	// stays (without it, the command refuses to install an unchecked download).
-	if spec.Asset == "" && spec.UpdateCommand == t.spec.UpdateCommand {
-		spec.Asset, spec.AssetRepo = t.spec.Asset, t.spec.AssetRepo
-	}
+	spec = spec.KeepUnsent(t.spec)
 	data, _ := json.Marshal(spec)
 	if err := m.opt.Store.SaveUpdateTarget(spec.ID, data); err != nil {
 		return Status{}, err
@@ -266,6 +297,9 @@ func (m *Manager) add(spec Spec) error {
 	defer m.mu.Unlock()
 	if _, taken := m.targets[spec.ID]; taken {
 		return ErrExists
+	}
+	if reservedIDs[spec.ID] {
+		return ErrReservedID
 	}
 	// The monitor has one checkout: one kept under an older name (servermonitor) is the same one.
 	if spec.Self && slices.ContainsFunc(m.order, func(id string) bool { return m.targets[id].spec.Self }) {
@@ -397,7 +431,17 @@ func (m *Manager) Tick(now time.Time, interval time.Duration, window Window) {
 	if !m.checking && (now.Sub(last) >= interval || (open && hasAuto && !window.Always() && last.Before(window.Opened(now)))) {
 		m.enqueueLocked(job{key: "check"})
 	}
-	if !open || m.checking || m.queued["check"] {
+	if m.checking || m.queued["check"] {
+		if open {
+			m.windowHeld = now
+		}
+		return
+	}
+	// A short window (04:00–04:05) can close while its opening check round still runs: what that
+	// round finds is installed when it ends, once.
+	held := !m.windowHeld.IsZero() && now.Sub(m.windowHeld) < 12*time.Hour
+	m.windowHeld = time.Time{}
+	if !open && !held {
 		return
 	}
 	var self *target
@@ -460,6 +504,7 @@ func (m *Manager) Wait(timeout time.Duration) {
 }
 
 func (m *Manager) work() {
+	m.recover()
 	for j := range m.jobs {
 		m.mu.Lock()
 		delete(m.queued, j.key)
@@ -503,6 +548,39 @@ func (m *Manager) work() {
 				m.apply(j.id, j.auto)
 			}
 		}()
+	}
+}
+
+// recover accounts for the updates a restart cut off: it waits for what they left running (see
+// Options.Settle), then records each as a run whose end is not known and checks it again, so the
+// page shows what is installed now. Their Attempted was kept when they started, so an automatic
+// update is not tried again on top of one that may still be going.
+func (m *Manager) recover() {
+	m.mu.Lock()
+	ids := m.interrupted
+	m.interrupted = nil
+	m.mu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+	if m.opt.Settle != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), m.opt.Timeout+probeTimeout+5*time.Minute)
+		m.opt.Settle(ctx)
+		cancel()
+	}
+	for _, id := range ids {
+		m.finish(id, func(s *State) {
+			if s.Running == nil {
+				return
+			}
+			run := *s.Running
+			run.At, run.To, run.OK = float64(time.Now().Unix()), "", false
+			run.Detail = "Nightjar restarted while this update ran, so how it ended is not known. The check after it shows the version now installed."
+			s.Runs = append([]Run{run}, s.Runs...)[:min(maxRuns, len(s.Runs)+1)]
+			s.Running = nil
+		})
+		log.Warn("An update was cut off by a restart; checking it again", "target", id)
+		m.Check(id)
 	}
 }
 
@@ -612,11 +690,19 @@ func (m *Manager) apply(id string, auto bool) {
 		log.Info("Nothing to update", "target", spec.Name)
 		return
 	}
+	// Attempted and the run under way are kept before it starts: a restart in the middle (the
+	// agent's memory cap, a stop that outlasts systemd's patience) must not have the next tick
+	// start the same update again on top of the one still running.
 	m.mu.Lock()
 	live := newLiveLog()
 	if t := m.targets[id]; t != nil {
 		t.state.Attempted = before.key()
+		t.state.Running = &Run{At: float64(time.Now().Unix()), From: before.Installed, To: before.Latest, Auto: auto}
 		t.live = live
+		data, _ := json.Marshal(t.state)
+		if err := m.opt.Store.SaveUpdateState(id, data); err != nil {
+			log.Warn("Could not store update state", "id", id, "err", err)
+		}
 	}
 	m.mu.Unlock()
 
@@ -648,6 +734,7 @@ func (m *Manager) apply(id string, auto bool) {
 	m.mu.Unlock()
 	m.finish(id, func(s *State) {
 		s.Runs = append([]Run{run}, s.Runs...)[:min(maxRuns, len(s.Runs)+1)]
+		s.Running = nil
 		s.Checked = run.At
 		if probeErr == nil {
 			s.Result, s.Error = after, ""
@@ -661,7 +748,9 @@ func (m *Manager) apply(id string, auto bool) {
 
 // ---------- alerts ----------
 
-// change describes an update in a few words: "4.0.14 → 4.0.15", "12 packages" or "3 commits".
+// Change describes an update in a few words: "4.0.14 → 4.0.15", "12 packages" or "3 commits".
+func Change(s Spec, r Result) string { return change(s, r) }
+
 func change(s Spec, r Result) string {
 	switch {
 	case s.Kind == KindSystem:

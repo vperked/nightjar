@@ -212,6 +212,46 @@ func firewallRoutes(mux *http.ServeMux, s *Sampler, authorized func(*http.Reques
 		}
 		view(w, r)
 	})
+	// Locks pin a port to the service listening on it: {"port": 5432, "proto": "tcp"}.
+	mux.HandleFunc("POST "+FirewallPath+"/locks", func(w http.ResponseWriter, r *http.Request) {
+		if !guard(w, r, true) {
+			return
+		}
+		var body struct {
+			Port  uint16 `json:"port"`
+			Proto string `json:"proto"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil {
+			http.Error(w, `expected {"port": 5432, "proto": "tcp"}`, http.StatusBadRequest)
+			return
+		}
+		if _, err := s.firewall.Lock(r.Context(), body.Port, body.Proto); err != nil {
+			refuse(w, err)
+			return
+		}
+		view(w, r)
+	})
+	// Relocking pins a locked port to the service holding it now.
+	mux.HandleFunc("PUT "+FirewallPath+"/locks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !guard(w, r, true) {
+			return
+		}
+		if _, err := s.firewall.Relock(r.Context(), r.PathValue("id")); err != nil {
+			refuse(w, err)
+			return
+		}
+		view(w, r)
+	})
+	mux.HandleFunc("DELETE "+FirewallPath+"/locks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !guard(w, r, true) {
+			return
+		}
+		if err := s.firewall.Unlock(r.Context(), r.PathValue("id")); err != nil {
+			refuse(w, err)
+			return
+		}
+		view(w, r)
+	})
 	mux.HandleFunc("PUT "+DefensePath, func(w http.ResponseWriter, r *http.Request) {
 		if !guard(w, r, true) {
 			return

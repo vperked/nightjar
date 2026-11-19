@@ -64,11 +64,11 @@ type Rule struct {
 // Out says whether a rule is for outgoing traffic.
 func (r Rule) Out() bool { return r.Direction == "out" }
 
-// Port is a port something listens on.
+// Port is a port something listens on, and the service holding it.
 type Port struct {
-	Port    uint16 `json:"port"`
-	Proto   string `json:"proto"`
-	Program string `json:"program,omitempty"`
+	Port  uint16 `json:"port"`
+	Proto string `json:"proto"`
+	Service
 	// Local is a port open on loopback only, which the network cannot reach anyway.
 	Local bool `json:"local,omitempty"`
 	// Allowed is a port anyone may reach whatever the default: a rule allows everyone to it, or it is
@@ -127,6 +127,8 @@ type Status struct {
 	Open      []Open `json:"open"`
 	Rules     []Rule `json:"rules"`
 	Listening []Port `json:"listening"`
+	// Locks are the ports pinned to a service (see Lock), and how each stands.
+	Locks []LockState `json:"locks"`
 	// Hits is what each rule caught, by ID, and "default" for what the default dropped, counted
 	// from Since, when the rules were last put in place.
 	Hits  map[string]Hits `json:"hits"`
@@ -139,6 +141,9 @@ type Status struct {
 	Native string `json:"native,omitempty"`
 	// Problem says why rules cannot be set here.
 	Problem string `json:"problem,omitempty"`
+	// Now is this machine's clock as it answered: Pending.Until and Since are on it, and a browser
+	// on another clock counts down against it.
+	Now float64 `json:"now"`
 }
 
 // Reach is an address that must keep reaching a port here: the dashboard, an SSH login.
@@ -166,6 +171,11 @@ type Manager struct {
 	// CheckEvery is how often the rules in place are checked, and put back if a tool that reloads
 	// the whole firewall took them out, or the ports to keep open changed; zero is a minute.
 	CheckEvery time.Duration
+	// LockEvery is how often the locked ports are checked; zero is every 5 seconds.
+	LockEvery time.Duration
+	// OnLock hears of a locked port another program took, and of it given back (or let go), as
+	// the checks find it. It is called with nothing held.
+	OnLock func(LockState)
 
 	mu      sync.Mutex
 	started bool
@@ -177,6 +187,9 @@ type Manager struct {
 	applied time.Time
 	built   string // what was last put in place, for each family
 	v6Err   string // why IPv6 last turned the rules down
+	locks   []Lock
+	states  map[string]LockState // how each lock stood at the last check, by ID
+	watch   lockWatch
 }
 
 type pendingChange struct {
@@ -225,6 +238,7 @@ type saved struct {
 	Version int    `json:"version"`
 	Rules   []Rule `json:"rules"`
 	Default string `json:"default,omitempty"`
+	Locks   []Lock `json:"locks,omitempty"`
 }
 
 // Start loads the saved rules and puts them in place, then keeps them there until ctx ends.
@@ -233,6 +247,7 @@ func (m *Manager) Start(ctx context.Context) {
 	defer m.mu.Unlock()
 	m.startLocked(ctx)
 	go m.keepInPlace(ctx)
+	go m.watchLocks(ctx)
 }
 
 // keepInPlace checks the rules every CheckEvery until ctx ends.
@@ -310,10 +325,13 @@ func (m *Manager) Uninstall(ctx context.Context) {
 
 func (m *Manager) startLocked(ctx context.Context) {
 	m.started = true
+	if m.states == nil {
+		m.states = map[string]LockState{}
+	}
 	if m.Load != nil {
 		var s saved
 		if b := m.Load(); len(b) > 0 && json.Unmarshal(b, &s) == nil {
-			m.rules, m.def = s.Rules, s.Default
+			m.rules, m.def, m.locks = s.Rules, s.Default, s.Locks
 			if s.Version < 2 {
 				slices.SortStableFunc(m.rules, func(a, b Rule) int { return cmp.Compare(rank(a.Action), rank(b.Action)) })
 			}
@@ -364,13 +382,15 @@ func (m *Manager) Status(ctx context.Context) Status {
 	if !m.started {
 		m.startLocked(ctx)
 	}
-	st := Status{Full: true, Rules: slices.Clone(m.rules), Default: m.def, Problem: m.problem, Open: m.openLocked()}
+	st := Status{Full: true, Rules: slices.Clone(m.rules), Default: m.def, Problem: m.problem, Open: m.openLocked(), Now: float64(m.now().Unix())}
 	if m.pending != nil {
 		st.Pending = &Pending{Default: m.def, Until: float64(m.pending.until.Unix())}
 	}
 	if !m.applied.IsZero() {
 		st.Since = float64(m.applied.Unix())
 	}
+	st.Locks = m.lockStatesLocked()
+	locks := m.locks
 	ipv6 := m.ipv6
 	m.mu.Unlock()
 	if st.Rules == nil {
@@ -408,7 +428,12 @@ func (m *Manager) Status(ctx context.Context) Status {
 				countHits(out, st.Hits)
 			}
 		}
-		st.Drops, st.DropsNote = m.drops(ctx, st.Rules)
+		// A locked port's drops name its lock.
+		named := slices.Clone(st.Rules)
+		for _, l := range locks {
+			named = append(named, Rule{ID: l.ID})
+		}
+		st.Drops, st.DropsNote = m.drops(ctx, named)
 	}
 	if st.Drops == nil {
 		st.Drops = []Drop{}
@@ -726,7 +751,7 @@ func (m *Manager) saveLocked() {
 	if m.pending != nil {
 		def = m.pending.prev
 	}
-	b, _ := json.Marshal(saved{Version: 2, Rules: m.rules, Default: def})
+	b, _ := json.Marshal(saved{Version: 2, Rules: m.rules, Default: def, Locks: m.locks})
 	if err := m.Save(b); err != nil {
 		log.Warn("Could not keep the firewall rules", "err", err)
 	}
@@ -747,11 +772,12 @@ func (m *Manager) wantLocked() (needIn, needOut bool, rules []string) {
 	for _, o := range m.openLocked() {
 		open = append(open, o.Port)
 	}
-	needIn = m.def == "drop" || slices.ContainsFunc(m.rules, func(r Rule) bool { return !r.Paused && !r.Out() })
+	taken := m.takenLocked()
+	needIn = m.def == "drop" || len(taken) > 0 || slices.ContainsFunc(m.rules, func(r Rule) bool { return !r.Paused && !r.Out() })
 	needOut = slices.ContainsFunc(m.rules, func(r Rule) bool { return !r.Paused && r.Out() })
 	if needIn || needOut {
 		for _, cmd := range m.familiesLocked() {
-			rules = append(rules, Build(m.rules, m.def, open, cmd == "ip6tables"))
+			rules = append(rules, Build(m.rules, m.def, open, cmd == "ip6tables", taken...))
 		}
 	}
 	return needIn, needOut, rules

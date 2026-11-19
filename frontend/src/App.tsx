@@ -6,7 +6,7 @@ import { ConfigContext } from './api/ConfigContext';
 import { NotificationsProvider } from './api/NotificationsContext';
 import { ServicesProvider, useServices } from './api/ServicesContext';
 import type { AppConfig } from './api/types';
-import { UpdatesProvider, useUpdates } from './api/UpdatesContext';
+import { UpdatesProvider, useWaitingUpdates } from './api/UpdatesContext';
 import { CreateAdmin, SignIn, ViewerAccountPage } from './components/Account';
 import { AccountMenu } from './components/AccountMenu';
 import { Bell } from './components/Bell';
@@ -230,12 +230,6 @@ function Brand({ enabled }: { enabled: boolean }) {
   );
 }
 
-// useWaitingUpdates counts the updates waiting to be installed, for the Apps tab's badge.
-function useWaitingUpdates(): number {
-  const { data } = useUpdates();
-  return data?.targets.filter((t) => t.available && !t.paused).length ?? 0;
-}
-
 type Tab = (typeof TABS)[number];
 
 // tabActive says whether a path is a tab's page, or one of the pages it gathers (`also`).
@@ -249,7 +243,8 @@ const onSettings = (path: string) => SETTINGS_PAGES.some((p) => path === p || pa
 // replaces the badge for a screen reader, and it is the current page wherever it shows as current
 // (a page it gathers included), not only on its own address.
 function NavTab({ t, path }: { t: Tab; path: string }) {
-  const waiting = useWaitingUpdates();
+  // Every machine's, agent servers' included: the Updates page lists them all.
+  const waiting = useWaitingUpdates().total;
   const active = tabActive(t, path);
   const n = t.badge ? waiting : 0;
   return (

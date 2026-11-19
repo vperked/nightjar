@@ -24,13 +24,24 @@ func (s *Server) needApps(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) listApps(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"apps": s.ctx.Apps.Statuses(), "job": s.ctx.Apps.Job(0), "user": apps.RunAs()})
+	writeJSON(w, http.StatusOK, map[string]any{"apps": s.ctx.Apps.Statuses(), "job": jobFor(r, s.ctx.Apps.Job(0)), "user": apps.RunAs()})
 }
 
 // appJob follows the running install: ?after=<n> skips the log lines already shown.
 func (s *Server) appJob(w http.ResponseWriter, r *http.Request) {
 	after, _ := strconv.Atoi(r.URL.Query().Get("after"))
-	writeJSON(w, http.StatusOK, map[string]any{"job": s.ctx.Apps.Job(after)})
+	writeJSON(w, http.StatusOK, map[string]any{"job": jobFor(r, s.ctx.Apps.Job(after))})
+}
+
+// jobFor hides a job's log from a viewer. Some recipes fish the app's first-time admin password
+// out of its journal, and it lands in the log; a viewer may see that an install is running and
+// how far it has got, but not read the password it prints, any more than a unit's logs.
+func jobFor(r *http.Request, j *apps.Job) *apps.Job {
+	if j == nil || whoFrom(r).Admin() {
+		return j
+	}
+	j.Lines = []string{}
+	return j
 }
 
 func (s *Server) installApp(w http.ResponseWriter, r *http.Request) {

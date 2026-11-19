@@ -37,6 +37,19 @@ func (f *fake) exec(_ context.Context, stdin []byte, name string, args ...string
 		return "", os.ErrPermission
 	}
 	switch {
+	case (name == "iptables" || name == "ip6tables") && len(args) == 3 && args[1] == "-F":
+		// Flushing a chain takes its rules out of what is in place.
+		in := &f.v4
+		if name == "ip6tables" {
+			in = &f.v6
+		}
+		var kept []string
+		for line := range strings.Lines(*in) {
+			if !strings.Contains(line, " "+args[2]+" ") && !strings.HasPrefix(line, ":"+args[2]+" ") {
+				kept = append(kept, line)
+			}
+		}
+		*in = strings.Join(kept, "")
 	case name == "iptables-restore":
 		f.v4 = string(stdin)
 	case name == "ip6tables-restore":

@@ -9,6 +9,8 @@ package agent
 
 import (
 	"bytes"
+	"cmp"
+	"context"
 	"crypto/sha256"
 	"debug/elf"
 	"encoding/hex"
@@ -18,8 +20,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -41,6 +45,9 @@ type Self struct {
 	// Restart is called once a new build is in place; the default exits so systemd starts it, or
 	// runs the new build in this process's place when nothing would start it again.
 	Restart func()
+	// Starts, when set, runs a new build before it takes the program's place, and says why it will
+	// not start. FindSelf sets it to run "nightjar-agent version".
+	Starts func(path string) error
 
 	// mu keeps one update at a time, and Hash with the file it names.
 	mu sync.Mutex
@@ -66,8 +73,25 @@ func FindSelf() (*Self, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Self{Path: p, Hash: h}, nil
+	return &Self{Path: p, Hash: h, Starts: startsCheck}, nil
 }
+
+// startsCheck runs a build's "version" command: a build that cannot run on this machine (one built
+// against a newer kernel or libc, or that crashes as it starts) is turned down while the agent that
+// can take another is still running.
+func startsCheck(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "version").CombinedOutput()
+	if err != nil || !bytes.HasPrefix(out, []byte("nightjar-agent ")) {
+		return fmt.Errorf("the new build does not start on this machine: %s", strings.TrimSpace(cmp.Or(string(out), fmt.Sprint(err))))
+	}
+	return nil
+}
+
+// Previous is where the build an update replaced is kept, to go back to by hand: stop the agent,
+// move it over the program, start it again.
+func (s *Self) Previous() string { return s.Path + ".previous" }
 
 func hashFile(p string) (string, error) {
 	f, err := os.Open(p)
@@ -141,10 +165,23 @@ func (s *Self) Apply(build []byte, hash string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	if s.Starts != nil {
+		if err := s.Starts(tmp.Name()); err != nil {
+			return err
+		}
+	}
+	// The build it replaces stays beside it, a hard link where the disk allows (it costs nothing).
+	os.Remove(s.Previous())
+	if err := os.Link(s.Path, s.Previous()); err != nil {
+		if err := copyFile(s.Path, s.Previous()); err != nil {
+			slog.Warn("could not keep the build being replaced", "path", s.Previous(), "err", err)
+		}
+	}
 	if err := os.Rename(tmp.Name(), s.Path); err != nil {
 		return err
 	}
 	s.Hash = hash
+	slog.Info("new build in place; the one it replaced is kept", "previous", s.Previous())
 	return nil
 }
 
@@ -167,8 +204,9 @@ func (s *Self) restart() {
 }
 
 // updateHandler takes a new build from the dashboard. Only over HTTPS: over plain HTTP anyone on the
-// way could swap in a program of their own.
-func updateHandler(self *Self, authorized func(*http.Request) bool, secure bool) http.HandlerFunc {
+// way could swap in a program of their own. Not while busy names an update under way (see
+// Updates.Busy): restarting would leave it unrecorded, and the dashboard tries again later.
+func updateHandler(self *Self, busy func() string, authorized func(*http.Request) bool, secure bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !authorized(r) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
@@ -183,12 +221,21 @@ func updateHandler(self *Self, authorized func(*http.Request) bool, secure bool)
 			http.Error(w, "this agent cannot replace itself; reinstall it once (sudo nightjar-agent install) to have it update itself", http.StatusConflict)
 			return
 		}
+		if name := busy(); name != "" {
+			http.Error(w, "busy updating "+name+"; try again when it is done", http.StatusConflict)
+			return
+		}
 		// An 8 MB build over a slow link takes longer than readings do.
 		http.NewResponseController(w).SetReadDeadline(time.Now().Add(5 * time.Minute))
 		http.NewResponseController(w).SetWriteDeadline(time.Now().Add(5 * time.Minute))
 		build, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBuild))
 		if err != nil {
 			http.Error(w, "could not read the build: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Reading it may have taken minutes, long enough for an update to have begun.
+		if name := busy(); name != "" {
+			http.Error(w, "busy updating "+name+"; try again when it is done", http.StatusConflict)
 			return
 		}
 		if err := self.Apply(build, r.Header.Get(BuildHeader)); err != nil {
@@ -203,6 +250,19 @@ func updateHandler(self *Self, authorized func(*http.Request) bool, secure bool)
 		if restart == nil {
 			restart = self.restart
 		}
-		time.AfterFunc(500*time.Millisecond, restart)
+		// One last look before the restart: an update that began in between is waited for (the new
+		// build is in place, so it starts when the update is done).
+		time.AfterFunc(500*time.Millisecond, func() {
+			for said := false; busy() != ""; said = true {
+				if !said {
+					slog.Info("the new build starts when the update under way is done", "updating", busy())
+				}
+				time.Sleep(restartPoll)
+			}
+			restart()
+		})
 	}
 }
+
+// restartPoll is how often a restart waiting on an update looks again.
+const restartPoll = 2 * time.Second

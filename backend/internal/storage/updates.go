@@ -3,13 +3,12 @@ package storage
 import (
 	"database/sql"
 	"errors"
+
+	"nightjar/internal/storage/record"
 )
 
 // UpdateTarget is one stored update target: its definition and its last known state (both JSON).
-type UpdateTarget struct {
-	ID          string
-	Spec, State []byte
-}
+type UpdateTarget = record.UpdateTarget
 
 // UpdateTargets returns the stored update targets in display order.
 func (s *Store) UpdateTargets() []UpdateTarget {

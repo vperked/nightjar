@@ -875,7 +875,7 @@
   --dot: var(--ink-3);
 }
 .fw-port-num {
-  padding-right: 54px;
+  padding-right: 84px;
   font-size: 17px;
   font-weight: 500;
   letter-spacing: -0.02em;
@@ -913,12 +913,96 @@
 .fw-port.closed .fw-port-state {
   color: var(--crit);
 }
-.fw-port-rule {
+.fw-port-acts {
   position: absolute;
   top: 8px;
   right: 8px;
+  display: flex;
+  gap: 2px;
+}
+.fw-port-acts .btn-quiet {
+  display: inline-flex;
+  align-items: center;
   padding: 2px 7px;
   font-size: 12px;
+}
+/* A port locked to its service: a quiet mark while its service holds it, red once another program
+   took it. */
+.fw-port-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  justify-self: start;
+  margin-top: 2px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.fw-port-lock.taken {
+  color: var(--crit);
+  font-weight: 500;
+}
+/* The locked ports, one row each: the port, the service it is locked to and how it stands, and what
+   can be done about it. */
+.fw-locks {
+  display: grid;
+  gap: 6px;
+  margin-top: 18px;
+}
+.fw-locks > p {
+  margin: 0;
+}
+.fw-locks ul {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.fw-lock {
+  --tone: var(--good);
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--tone);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+  font-size: 13px;
+}
+.fw-lock.idle {
+  --tone: var(--ink-3);
+}
+.fw-lock.taken {
+  --tone: var(--crit);
+  background: color-mix(in srgb, var(--crit) 7%, var(--bg-sunk));
+}
+.fw-lock-port {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 15px;
+  font-weight: 500;
+}
+.fw-lock-what {
+  display: grid;
+  gap: 2px;
+}
+.fw-lock-state {
+  color: var(--ink-3);
+}
+.fw-lock.taken .fw-lock-state {
+  color: var(--crit);
+}
+@media (max-width: 560px) {
+  .fw-lock {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .fw-lock-what {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
 }
 /* The default for traffic no rule decides: two choices, what stays open, and the change waiting. */
 .fw-default {

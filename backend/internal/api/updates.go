@@ -14,7 +14,7 @@ import (
 
 // commandsLocked keeps a token-less dashboard from choosing what the monitor runs as root:
 // without a token, any local process could reach the API.
-const commandsLocked = "Commands and paths can be edited here only when WEB_AUTH_TOKEN is set. Without a token, any program on this machine could use the API to run commands as root."
+const commandsLocked = "Commands, paths, release downloads, services and app addresses can be edited here only when WEB_AUTH_TOKEN is set. Without a token, any program on this machine could use the API to run commands as root."
 
 // needUpdates answers 503 when the monitor runs without an update manager.
 func (s *Server) needUpdates(next http.HandlerFunc) http.HandlerFunc {
@@ -61,11 +61,13 @@ func (s *Server) saveUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if !s.signInRequired() {
-		var before [4]string
+		// Not the commands alone: what a release downloads, which service restarts and where an
+		// app's stored key is sent decide what runs as root just as much.
+		var before updates.Spec
 		if old, ok := s.ctx.Updates.Get(id); ok {
-			before = old.Commands()
+			before = old.Spec
 		}
-		if spec.Commands() != before {
+		if spec.KeepUnsent(before).Locked() != before.Locked() {
 			writeJSON(w, http.StatusForbidden, errBody(commandsLocked))
 			return
 		}

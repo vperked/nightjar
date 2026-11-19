@@ -51,6 +51,9 @@ type Access struct {
 	Users   []User   `json:"users"`
 	// Problem says why logins cannot be managed here.
 	Problem string `json:"problem,omitempty"`
+	// Now is this machine's clock as it answered, unix seconds: Pending.Until is on it, and a
+	// browser on another clock counts down against it.
+	Now int64 `json:"now"`
 }
 
 // Pending is keys only waiting to be kept.
@@ -184,7 +187,7 @@ func (m *Manager) State(ctx context.Context) Access {
 }
 
 func (m *Manager) stateLocked(ctx context.Context) Access {
-	a := Access{Ports: m.ports(), Users: m.users(), KeysOnly: m.keysOnlyLocked()}
+	a := Access{Ports: m.ports(), Users: m.users(), KeysOnly: m.keysOnlyLocked(), Now: m.now().Unix()}
 	if until := m.pendingLocked(); !until.IsZero() {
 		a.Pending = &Pending{Until: until.Unix()}
 	}

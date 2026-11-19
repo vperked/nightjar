@@ -130,17 +130,34 @@ func (st *State) due(now float64) bool {
 	return st.runNow || now-st.LastCheck >= wait
 }
 
+// Claimed is one claimed run of a check. Its result goes back with Report, to the check it was claimed
+// from, whatever that check is called by then: a name can pass to another check while it runs.
+type Claimed struct {
+	Spec Spec
+	st   *State
+}
+
 // Claim returns the active checks that are due and not already running, and marks them running
 // until their result is recorded, so a slow check is never started twice.
 func (m *Monitor) Claim(now float64) []Spec {
+	runs := m.ClaimRuns(now)
+	due := make([]Spec, len(runs))
+	for i, r := range runs {
+		due[i] = r.Spec
+	}
+	return due
+}
+
+// ClaimRuns is Claim, for results reported with Report rather than by name.
+func (m *Monitor) ClaimRuns(now float64) []Claimed {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var due []Spec
+	var due []Claimed
 	for _, name := range m.order {
 		st := m.states[name]
 		if !st.Spec.Paused && !st.running && st.due(now) && (m.Resting == nil || !m.Resting(name, now)) {
 			st.running = true
-			due = append(due, st.Spec)
+			due = append(due, Claimed{Spec: st.Spec, st: st})
 		}
 	}
 	return due
@@ -158,7 +175,8 @@ func (m *Monitor) Record(name string, r Result, now float64) string {
 
 // RecordAs is Record, also saying the name the result went to (the new one, for a check renamed
 // while it ran) and whether it was recorded at all: a dropped result must not alert or repair, since
-// the check it was for has been paused, deleted or changed since.
+// the check it was for has been paused, deleted or changed since. A name can pass to another check
+// while one runs, so a result can only be told apart by name so far; the loop uses Report.
 func (m *Monitor) RecordAs(name string, r Result, now float64) (to, change string, recorded bool) {
 	m.mu.Lock()
 	st, ok := m.states[name]
@@ -169,13 +187,52 @@ func (m *Monitor) RecordAs(name string, r Result, now float64) (to, change strin
 		name = to
 		st, ok = m.states[name]
 	}
-	stale := false
-	if ok {
-		st.running, stale, st.stale = false, st.stale, false
-	}
-	if !ok || st.Spec.Paused || stale {
+	if !ok {
 		m.mu.Unlock()
 		return name, "", false
+	}
+	change, recorded = m.foldLocked(st, r, now)
+	m.mu.Unlock()
+	if recorded && m.store != nil {
+		m.store.Record(name, now, r.Up, r.LatencyMS, r.Detail)
+	}
+	return name, change, recorded
+}
+
+// Report records a claimed run's result on the check it was claimed from, under that check's name
+// now. It returns the check as it now is, for the alert, and whether the result was recorded at
+// all: one for a check deleted, paused or retargeted while it ran is dropped, and must neither
+// alert nor repair.
+func (m *Monitor) Report(run Claimed, r Result, now float64) (spec Spec, change string, recorded bool) {
+	m.mu.Lock()
+	st := run.st
+	if st == nil || m.states[st.Spec.Name] != st {
+		m.mu.Unlock()
+		return run.Spec, "", false // deleted while it ran (a new check may have its name)
+	}
+	name := st.Spec.Name
+	// The result has come home: nothing still waits for it under a name it had before.
+	for from, to := range m.renamed {
+		if to == name {
+			delete(m.renamed, from)
+		}
+	}
+	change, recorded = m.foldLocked(st, r, now)
+	spec = st.Spec
+	m.mu.Unlock()
+	if recorded && m.store != nil {
+		m.store.Record(name, now, r.Up, r.LatencyMS, r.Detail)
+	}
+	return spec, change, recorded
+}
+
+// foldLocked ends st's run and folds its result into st, unless the check was paused or changed
+// while it ran. m.mu is held.
+func (m *Monitor) foldLocked(st *State, r Result, now float64) (change string, recorded bool) {
+	stale := st.stale
+	st.running, st.stale = false, false
+	if st.Spec.Paused || stale {
+		return "", false
 	}
 	st.LastCheck, st.runNow = now, false
 	st.LastResult = &r
@@ -202,12 +259,7 @@ func (m *Monitor) RecordAs(name string, r Result, now float64) (to, change strin
 			change = StatusUp
 		}
 	}
-	m.mu.Unlock()
-
-	if m.store != nil {
-		m.store.Record(name, now, r.Up, r.LatencyMS, r.Detail)
-	}
-	return name, change, true
+	return change, true
 }
 
 // Uptime is the percent up since `since` (at 5-minute resolution, up to 30 days back).

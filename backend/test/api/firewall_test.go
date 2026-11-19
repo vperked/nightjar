@@ -91,4 +91,20 @@ func TestThisMachinesWholeFirewallIsManagedFromTheDashboard(t *testing.T) {
 	if code, v = call("DELETE", "/api/firewall/rules/"+block.ID, ""); code != http.StatusOK || len(v.Firewall.Rules) != 1 {
 		t.Fatalf("remove: %d %+v", code, v)
 	}
+	// Locks pin a port to the service on it; with nothing listening there is nothing to lock it to.
+	if code, _ := call("POST", "/api/firewall/locks", `{}`); code != http.StatusBadRequest {
+		t.Fatalf("no port: %d", code)
+	}
+	if code, v := call("POST", "/api/firewall/locks", `{"port":5432,"proto":"tcp"}`); code != 422 || !strings.Contains(v.Error, "nothing listens") {
+		t.Fatalf("nothing to lock to: %d %+v", code, v)
+	}
+	if code, _ := call("PUT", "/api/firewall/locks/nope", ""); code != http.StatusNotFound {
+		t.Fatalf("relock a missing lock: %d", code)
+	}
+	if code, _ := call("DELETE", "/api/firewall/locks/nope", ""); code != http.StatusNotFound {
+		t.Fatalf("unlock a missing lock: %d", code)
+	}
+	if v.Firewall.Locks == nil {
+		t.Fatalf("locks are listed, none or not: %+v", v.Firewall)
+	}
 }

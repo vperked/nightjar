@@ -15,13 +15,14 @@ const logEvery = "--limit 10/min --limit-burst 5"
 
 // Build is the iptables-restore input for the rules of one family, IPv6 when six: each chain in use,
 // its rules in order, the first match deciding. A rule for one address goes only to its family, and
-// paused rules are left out.
+// paused rules are left out. taken are the locked ports another program holds (see Lock): what comes
+// to them is dropped first, ahead of every rule.
 //
 // Incoming, a rule that blocks writes a sample of what it drops to the kernel log first. With the
 // default "drop", what no rule decided is dropped and logged too, except replies, ping, DHCP and the
 // open ports, which go on to the machine's own firewall. Outgoing, rules only look at new
 // connections, so the replies to whoever reached this machine always go out.
-func Build(rules []Rule, def string, open []uint16, six bool) string {
+func Build(rules []Rule, def string, open []uint16, six bool, taken ...Lock) string {
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
 	var in, out []Rule
@@ -35,7 +36,7 @@ func Build(rules []Rule, def string, open []uint16, six bool) string {
 			in = append(in, r)
 		}
 	}
-	needIn := def == "drop"
+	needIn := def == "drop" || len(taken) > 0
 	needOut := false
 	for _, r := range rules {
 		if !r.Paused {
@@ -52,6 +53,9 @@ func Build(rules []Rule, def string, open []uint16, six bool) string {
 	}
 	if needIn {
 		w("-A %s -i lo -j RETURN", Chain)
+		for _, l := range taken {
+			lines(w, Chain, Rule{ID: l.ID, Action: "block", Port: strconv.Itoa(int(l.Port)), Proto: l.Proto}, six)
+		}
 		for _, r := range in {
 			lines(w, Chain, r, six)
 		}

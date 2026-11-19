@@ -59,6 +59,9 @@ type Host struct {
 	Added    float64   `json:"added"`
 	// Alerts are the problems already announced, so a restart does not announce them again.
 	Alerts []string `json:"alerts,omitempty"`
+	// Updates is what was announced about each of its update targets, by target; nil until its
+	// updates were first polled.
+	Updates map[string]UpdateMark `json:"updates,omitzero"`
 }
 
 // Check is how a server without an agent was watched, before those became uptime checks.
@@ -131,6 +134,9 @@ type Options struct {
 	Exec func(ctx context.Context, stdin []byte, env []string, name string, args ...string) (stdout, stderr string, err error)
 	// AskPass is the program ssh asks for a password (the nightjar program, by default).
 	AskPass string
+	// UpdatesNotify says whether updates waiting on a server are announced (UPDATES_NOTIFY); nil
+	// means they are.
+	UpdatesNotify func() bool
 }
 
 // Monitor polls every host. Its methods are safe for concurrent use.
@@ -147,6 +153,10 @@ type Monitor struct {
 	// clients are the HTTPS clients pinned to each token's key, kept for their connections.
 	clientsMu sync.Mutex
 	clients   map[string]*http.Client
+
+	// unsaved says an alert was raised or cleared while a poll was taken in; the poll saves once at
+	// its end, however many there were, rather than once for each.
+	unsaved bool
 }
 
 type entry struct {
@@ -166,6 +176,12 @@ type entry struct {
 	over map[string]int
 	// problems are the alerts in force: key → words.
 	problems map[string]string
+	// updates is the agent's updates as last polled, updatesErr why the last poll failed, updatesAt
+	// when it was, and updatesPolling whether one is out now.
+	updates        *agent.UpdatesView
+	updatesErr     string
+	updatesAt      time.Time
+	updatesPolling bool
 }
 
 // History is how many points each host keeps: an hour at the default interval.
@@ -179,6 +195,10 @@ func New(opt Options) *Monitor {
 	if opt.HTTP == nil {
 		opt.HTTP = &http.Client{Timeout: 5 * time.Second}
 	}
+	// A copy, so the caller's client is left as it was.
+	plain := *opt.HTTP
+	plain.CheckRedirect = noRedirects
+	opt.HTTP = &plain
 	if opt.Now == nil {
 		opt.Now = time.Now
 	}
@@ -328,6 +348,10 @@ func (m *Monitor) find(id string) *entry {
 var (
 	ErrNotFound = errors.New("no such server")
 	ErrExists   = errors.New("that server is already added")
+	// ErrPlainToken turns away a move from plain HTTP to HTTPS that keeps the old token. That token
+	// has crossed the network in the clear with every poll, and over HTTPS it is also the agent's
+	// key, so anyone who caught it once could pose as the agent despite the pin.
+	ErrPlainToken = errors.New("this agent's token has crossed the network unencrypted, and over HTTPS the token is also its key: reinstall the agent with a new token and give that token here")
 )
 
 // Add checks that the agent answers with token, then saves the host and returns it.
@@ -401,6 +425,10 @@ func (m *Monitor) Update(ctx context.Context, id, name, address, token string) (
 		}
 	}
 	token = cmp.Or(token, e.host.Token)
+	if strings.HasPrefix(e.host.Address, "http://") && strings.HasPrefix(address, "https://") && token == e.host.Token {
+		m.mu.Unlock()
+		return State{}, ErrPlainToken
+	}
 	moved := address != e.host.Address || token != e.host.Token
 	m.mu.Unlock()
 	var r *agent.Readings
@@ -449,6 +477,7 @@ func (m *Monitor) Remove(id string) error {
 }
 
 func (m *Monitor) saveLocked() error {
+	m.unsaved = false
 	hosts := make([]Host, 0, len(m.hosts))
 	for _, e := range m.hosts {
 		h := e.host
@@ -509,8 +538,14 @@ func NormalizeAddress(s string) (string, error) {
 
 // ---------- polling ----------
 
-// Run polls every host each interval until ctx ends.
+// Run polls every host each interval, and its updates every few minutes, until ctx ends.
 func (m *Monitor) Run(ctx context.Context) {
+	updatesDone := make(chan struct{})
+	go func() {
+		defer close(updatesDone)
+		m.updatesLoop(ctx)
+	}()
+	defer func() { <-updatesDone }()
 	t := time.NewTicker(m.opt.Interval)
 	defer t.Stop()
 	m.PollAll(ctx)
@@ -582,11 +617,20 @@ func (m *Monitor) fetch(ctx context.Context, address, token string) (*agent.Read
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&r); err != nil {
 		return nil, fmt.Errorf("%s did not answer like an agent: %v", address, err)
 	}
+	r.Disks, r.Drives, r.Locks = firstFew(r.Disks), firstFew(r.Drives), firstFew(r.Locks)
 	if r.Version > agent.Version {
 		return nil, fmt.Errorf("the agent (%s) is newer than this dashboard; update the dashboard", r.Agent)
 	}
 	return &r, nil
 }
+
+// maxListed is the most disks, drives and taken port locks taken from one agent's readings. A real
+// server has far fewer. Each can become an alert, and an agent that has been taken over could
+// otherwise report thousands, each an alert to keep, save and show, while every other server's
+// poll waits on the same lock.
+const maxListed = 256
+
+func firstFew[T any](l []T) []T { return l[:min(len(l), maxListed)] }
 
 // client is how to reach an agent: plain HTTP as configured, or HTTPS that accepts only the key
 // the token gives the real agent.
@@ -599,10 +643,16 @@ func (m *Monitor) client(address, token string) *http.Client {
 	if c := m.clients[token]; c != nil {
 		return c
 	}
-	c := &http.Client{Timeout: m.opt.HTTP.Timeout, Transport: &http.Transport{TLSClientConfig: agent.ClientTLS(token), MaxIdleConnsPerHost: 1, IdleConnTimeout: time.Minute}}
+	c := &http.Client{Timeout: m.opt.HTTP.Timeout, CheckRedirect: noRedirects, Transport: &http.Transport{TLSClientConfig: agent.ClientTLS(token), MaxIdleConnsPerHost: 1, IdleConnTimeout: time.Minute}}
 	m.clients[token] = c
 	return c
 }
+
+// noRedirects keeps every request to an agent at the agent. A real agent never redirects, and one
+// that has been taken over could otherwise send the dashboard's polls and changes, token and all,
+// to a service on the dashboard's own machine or to a cloud provider's metadata address. The
+// redirect itself comes back as the answer, which reads as an agent answering wrongly.
+func noRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 func (m *Monitor) forgetClient(token string) {
 	m.clientsMu.Lock()
@@ -651,11 +701,16 @@ func (m *Monitor) record(e *entry, r *agent.Readings, err error) {
 	m.recordLocked(e, r, err)
 }
 
-// recordLocked takes in one poll's outcome and raises or clears alerts.
+// recordLocked takes in one poll's outcome and raises or clears alerts, saving them once at the end.
 func (m *Monitor) recordLocked(e *entry, r *agent.Readings, err error) {
 	if !slices.Contains(m.hosts, e) {
 		return // removed while its poll was out
 	}
+	defer func() {
+		if m.unsaved {
+			m.saveLocked()
+		}
+	}()
 	now := m.opt.Now()
 	m.opt.Analytics.Add(e.host.ID, agentReading(r, err))
 	if err != nil {
@@ -676,6 +731,7 @@ func (m *Monitor) recordLocked(e *entry, r *agent.Readings, err error) {
 	m.clear(e, "offline", "Server back online: "+e.host.Name, e.host.Name+" is answering again.")
 	m.considerUpdateLocked(e, r)
 	m.attackLocked(e, r.Attacks)
+	m.locksLocked(e, r.Locks)
 	e.addPoint(Point{T: r.Time, CPU: &r.CPU.Percent, Mem: &r.Memory.Percent, Temp: r.Temperature})
 
 	lim := m.opt.Limits()
@@ -751,7 +807,13 @@ func (m *Monitor) recordLocked(e *entry, r *agent.Readings, err error) {
 		drive := strings.HasPrefix(k, "drive:") || strings.HasPrefix(k, "drive-gone:")
 		if (strings.HasPrefix(k, "disk:") || (drive && !r.DrivesPending)) && !seen[k] {
 			delete(e.problems, k)
-			m.saveLocked()
+			m.unsaved = true
+		}
+	}
+	// Nor does the count of polls over the limit of a disk that is gone.
+	for k := range e.over {
+		if strings.HasPrefix(k, "disk:") && !seen[k] {
+			delete(e.over, k)
 		}
 	}
 }
@@ -801,7 +863,7 @@ func (m *Monitor) raise(e *entry, key string, sev discord.Severity, title, desc,
 	if known {
 		return
 	}
-	m.saveLocked()
+	m.unsaved = true
 	log.Warn(title, "server", e.host.Name)
 	m.send(e, title, desc, sev)
 }
@@ -812,7 +874,7 @@ func (m *Monitor) clear(e *entry, key, title, desc string) {
 	}
 	delete(e.problems, key)
 	e.over[key] = 0
-	m.saveLocked()
+	m.unsaved = true
 	log.Info(title, "server", e.host.Name)
 	m.send(e, title, cmp.Or(desc, title+"."), discord.OK)
 }
@@ -824,11 +886,17 @@ func (m *Monitor) send(e *entry, title, desc string, sev discord.Severity) {
 
 // sendAs is send with the alert's category, which picks its area in the notification rules.
 func (m *Monitor) sendAs(e *entry, title, desc string, sev discord.Severity, category string) {
+	m.sendFields(e, title, desc, sev, category, nil)
+}
+
+// sendFields is sendAs with more fields after the server's own. Alerts about the server, so its
+// mute and maintenance hold them.
+func (m *Monitor) sendFields(e *entry, title, desc string, sev discord.Severity, category string, more []discord.Field) {
 	if m.opt.Alerts == nil {
 		return
 	}
 	s := discord.About(m.opt.Alerts, "host:"+e.host.ID)
-	fields := []discord.Field{{Name: "Server", Value: e.host.Name, Inline: true}, {Name: "Address", Value: e.host.Address, Inline: true}}
+	fields := append([]discord.Field{{Name: "Server", Value: e.host.Name, Inline: true}, {Name: "Address", Value: e.host.Address, Inline: true}}, more...)
 	select {
 	case m.outbox <- func() { s.SendEmbed(title, desc, sev, fields, category) }:
 	default:
