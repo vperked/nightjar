@@ -275,7 +275,7 @@ function Outages({ hosts, label }: { hosts: HostAnalytics[]; label: string }) {
 export function AnalyticsPage() {
   const [range, setRange] = useState<AnalyticsRangeName>('24h');
   const fetch = useCallback(() => api.analytics(range), [range]);
-  const { data, error } = usePoll(fetch, 60000);
+  const { data, error } = usePoll(fetch, 60000, true, `analytics:${range}`);
   const label = RANGES.find((r) => r.value === range)!.label;
   // A server's points come back null when the database could not be read; as none, so the
   // page still says why instead of failing on them.

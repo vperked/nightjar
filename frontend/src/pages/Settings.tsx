@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { ApiError, api, waitForRestart } from '../api/client';
+import { ApiError, api, waitForRestart, errorText } from '../api/client';
 import type { SettingField, SettingsResponse, TestTarget } from '../api/types';
 import { AccountSection, ViewersSection } from '../components/Account';
 import { SectionsPanel } from '../components/Sections';
@@ -311,7 +311,7 @@ export function SettingsPage() {
       }
     } catch (err) {
       if (err instanceof ApiError && Object.keys(err.fields).length) setErrors(err.fields);
-      notify({ tone: 'error', title: 'Could not run the test', body: (err as Error).message });
+      notify({ tone: 'error', title: 'Could not run the test', body: errorText(err) });
     } finally {
       setTesting(undefined);
     }
@@ -345,7 +345,7 @@ export function SettingsPage() {
       } else {
         setSaveError('Could not save the settings.');
       }
-      notify({ tone: 'error', title: 'Settings not saved', body: err instanceof ApiError && Object.keys(err.fields).length ? 'Fix the highlighted fields.' : (err as Error).message });
+      notify({ tone: 'error', title: 'Settings not saved', body: err instanceof ApiError && Object.keys(err.fields).length ? 'Fix the highlighted fields.' : errorText(err) });
     }
   };
 

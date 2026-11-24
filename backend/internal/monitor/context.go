@@ -40,6 +40,7 @@ import (
 	"nightjar/internal/smart"
 	"nightjar/internal/sshd"
 	"nightjar/internal/storage"
+	"nightjar/internal/tailscale"
 	"nightjar/internal/units"
 	"nightjar/internal/updates"
 )
@@ -79,6 +80,8 @@ type Context struct {
 	Attacks  *ddos.Watcher     // denial-of-service attacks on this machine
 	Firewall *firewall.Manager // firewall rules set from the dashboard
 	SSHD     *sshd.Manager     // who may log in over SSH: keys, and passwords on or off
+	// Tailscale is this machine's Tailscale: connecting, logging in, exit node, routes.
+	Tailscale *tailscale.Manager
 	// Analytics records every server's minutes for the analytics page; nil records nothing.
 	Analytics *analytics.Recorder
 	Freeze    *FreezeMonitor

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { Editable } from '../components/Editable';
 import { PlexStatsBody } from '../components/PlexStats';
 import { Skeleton } from '../components/Skeleton';
@@ -24,7 +24,7 @@ export function WeeklyReportPage() {
       await api.sendReport();
       notify({ tone: 'ok', title: 'Report sent', body: 'It is in Discord, and wherever system alerts go.' });
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not send the report', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not send the report', body: errorText(e) });
     } finally {
       setSending(false);
     }

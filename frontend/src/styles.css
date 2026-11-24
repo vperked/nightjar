@@ -27,6 +27,7 @@
 @import './styles/finder.css';
 @import './styles/loading.css';
 @import './styles/network.css';
+@import './styles/tailscale.css';
 @import './styles/status-designer.css';
 @import './styles/notifications.css';
 @import './styles/auth.css';

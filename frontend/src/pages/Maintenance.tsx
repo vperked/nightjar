@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { browserZone, useCanEdit, useServerZone } from '../api/ConfigContext';
 import { useServices } from '../api/ServicesContext';
 import type { MaintenanceWindow } from '../api/types';
@@ -65,7 +65,7 @@ function WindowForm({ initial, onDone }: { initial: MaintenanceWindow; onDone: (
       notify({ tone: 'ok', title: initial.id ? 'Window saved' : 'Window added' });
       onDone(true);
     } catch (err) {
-      setError((err as Error).message);
+      setError(errorText(err));
     } finally {
       busy.current = false;
       setSaving(false);
@@ -202,7 +202,7 @@ export function MaintenancePage() {
       notify({ tone: 'ok', title: `${w.title} removed` });
       refresh();
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not remove it', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not remove it', body: errorText(e) });
     }
   };
   const next = new Map((data?.upcoming ?? []).map((o) => [o.window.id, o]));

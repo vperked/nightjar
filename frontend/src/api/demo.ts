@@ -56,6 +56,9 @@ import type {
   HostSSH,
   SSHCheck,
   SSHKey,
+  TailscaleNode,
+  TailscaleSettings,
+  TailscaleState,
   Appearance,
   MaintenanceWindow,
 } from './types';
@@ -2267,6 +2270,47 @@ const demoKeys: SSHKey[] = [
     own: false,
   },
 ];
+// demoTailscales are each machine's Tailscale, made on first look: logged in to a small tailnet with
+// a phone, a laptop, a VPS offering to be an exit node and a machine long gone.
+type DemoTailscale = Omit<TailscaleState, 'pending'> & { pending?: { until: number; what: string; back: Partial<TailscaleSettings> } };
+const demoTailscales: Record<string, DemoTailscale> = {};
+function demoTailscale(name: string, n: number): DemoTailscale {
+  const peer = (id: string, host: string, os: string, ip: number, extra: Partial<TailscaleNode> = {}): TailscaleNode => ({
+    id,
+    name: host,
+    dns_name: `${host}.tail4f2a.ts.net`,
+    os,
+    ips: [`100.101.${ip}.${ip * 3}`, `fd7a:115c:a1e0::${ip}`],
+    user: 'owner@example.com',
+    online: true,
+    active: false,
+    rx: 0,
+    tx: 0,
+    exit_node: false,
+    exit_node_option: false,
+    ...extra,
+  });
+  const peers = [
+    peer('nLaptop', 'laptop', 'macOS', 2, { direct: '192.168.1.20:41641', active: true, rx: 18_400_000, tx: 2_100_000 }),
+    peer('nPhone', 'pixel', 'android', 3, { relay: 'fra', rx: 820_000, tx: 96_000 }),
+    peer('nVps', 'vps', 'linux', 4, { user: undefined, tags: ['tag:server'], exit_node_option: true, direct: '203.0.113.7:41641', routes: ['10.10.0.0/24'], rx: 3_200_000, tx: 5_900_000 }),
+    peer('nOld', 'old-desktop', 'windows', 5, { online: false, last_seen: now() - 9 * 86400 }),
+  ].filter((p) => p.name !== name);
+  return {
+    installed: true,
+    running: true,
+    backend: 'Running',
+    logged_in: true,
+    version: '1.104.7',
+    tailnet: 'owner@example.com',
+    magic_dns: 'tail4f2a.ts.net',
+    self: peer('nSelf' + n, name, 'linux', 1 + n * 10, { key_expiry: now() + 160 * 86400 }),
+    peers,
+    health: [],
+    settings: { accept_routes: false, accept_dns: true, ssh: false, shields_up: false, advertise_exit_node: false, advertise_routes: [], exit_node: '', exit_node_allow_lan: false, hostname: '' },
+  };
+}
+
 // demoSSHDs are each machine's SSH logins, made on first look: root with a key, and one everyday
 // account. Keys only waits two minutes to be kept, then passwords come back, as the agent does.
 interface DemoSSHD {
@@ -2573,6 +2617,74 @@ function route(method: string, url: URL, body: unknown): Response {
         d.passwords = true;
       }
       d.until = undefined;
+      return answer();
+    }
+    return error(404, 'not found');
+  }
+  // Tailscale: this machine's, and each agent server's through its agent.
+  const tsMatch = path.match(/^\/api\/(?:hosts\/([0-9a-f]+)\/)?tailscale(\/.*)?$/);
+  if (tsMatch) {
+    const [, hostId, rest = ''] = tsMatch;
+    const id = hostId ?? 'local';
+    const host = demoHosts.find((h) => h.id === id);
+    if (hostId && !host) return error(404, 'no such server');
+    if (host?.offlineSince) return error(422, `no answer from ${host.name}: timed out`);
+    const d = (demoTailscales[id] ??= demoTailscale(host?.name ?? 'home-server', id === 'local' ? 1 : demoHosts.indexOf(host!) + 10));
+    if (d.pending && d.pending.until < now()) {
+      d.settings = { ...d.settings, ...d.pending.back };
+      d.pending = undefined;
+    }
+    const answer = () => {
+      const { pending, ...rest } = d;
+      return json({
+        ...rest,
+        now: now(),
+        pending: pending ? { until: pending.until, what: pending.what } : undefined,
+        peers: d.peers.map((p) => ({ ...p, exit_node: p.id === d.settings.exit_node })),
+      });
+    };
+    const b = (body ?? {}) as Partial<TailscaleSettings> & { auth_key?: string; keep?: boolean };
+    if (method === 'GET' && rest === '') return answer();
+    if (method === 'POST' && rest === '/login') {
+      if (d.logged_in) return error(422, 'already logged in; log out first to use another account');
+      if (b.auth_key) {
+        if (!b.auth_key.startsWith('tskey-')) return error(422, 'that is not an auth key; they start with tskey-');
+        Object.assign(d, demoTailscale(d.self?.name ?? 'home-server', 1));
+        return answer();
+      }
+      d.auth_url = 'https://login.tailscale.com/a/demo1234';
+      return answer();
+    }
+    if (method === 'POST' && (rest === '/up' || rest === '/down' || rest === '/logout')) {
+      if (!d.logged_in) return error(422, 'log in to a tailnet first');
+      if (rest === '/up') d.backend = 'Running';
+      if (rest === '/down') d.backend = 'Stopped';
+      if (rest === '/logout') Object.assign(d, { backend: 'NeedsLogin', logged_in: false, peers: [], tailnet: undefined, self: undefined, pending: undefined });
+      d.peers = d.peers.map((p) => ({ ...p, online: d.backend === 'Running' && p.id !== 'nOld' }));
+      return answer();
+    }
+    if (method === 'PUT' && rest === '/settings') {
+      if (!d.logged_in) return error(422, 'log in to a tailnet first');
+      if (b.advertise_routes?.some((r) => !/^\d+\.\d+\.\d+\.\d+\/\d+$/.test(r))) return error(422, 'write each subnet like 192.168.1.0/24');
+      const back: Partial<TailscaleSettings> = {};
+      const what: string[] = [];
+      if (b.exit_node) {
+        back.exit_node = d.settings.exit_node;
+        back.exit_node_allow_lan = d.settings.exit_node_allow_lan;
+        what.push('the exit node');
+      }
+      if (b.shields_up && !d.settings.shields_up) {
+        back.shields_up = false;
+        what.push('shields up');
+      }
+      d.settings = { ...d.settings, ...(Object.fromEntries(Object.entries(b).filter(([, v]) => v !== undefined)) as Partial<TailscaleSettings>) };
+      if (what.length) d.pending = { until: now() + 120, what: what.join(' and '), back: { ...back, ...d.pending?.back } };
+      return answer();
+    }
+    if (method === 'POST' && rest === '/keep') {
+      if (!d.pending) return error(422, 'nothing is waiting to be kept');
+      if (!b.keep) d.settings = { ...d.settings, ...d.pending.back };
+      d.pending = undefined;
       return answer();
     }
     return error(404, 'not found');
@@ -3191,7 +3303,7 @@ function setDemoViewer(name: string) {
 // What only the admin may see, as the monitor has it; every change is the admin's too.
 const ADMIN_ONLY = new Set(['/api/settings', '/api/backup', '/api/setup', '/api/ssh/keys', '/api/agent/download', '/api/statuspage/proxy', '/api/plugins', '/api/auth/viewers']);
 // ADMIN_ONLY_PATH are the admin-only routes with an id in them, and SSH logins: as the real API.
-const ADMIN_ONLY_PATH = /^\/api\/(sshd|hosts\/[^/]+\/sshd|units\/[^/]+\/logs)(\/|$)/;
+const ADMIN_ONLY_PATH = /^\/api\/(sshd|tailscale|hosts\/[^/]+\/(sshd|tailscale)|units\/[^/]+\/logs)(\/|$)/;
 const viewerList = () => demoViewers.map((v) => ({ username: v.username, created: v.created, sessions: v.username === demoViewer ? 1 : 0 }));
 
 function demoViewerRoutes(method: string, path: string, body: Record<string, string> | undefined): Response | undefined {

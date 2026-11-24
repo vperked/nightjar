@@ -264,6 +264,19 @@ func (s *Store) Counts(service string, width float64, slots int) []Count {
 	return out
 }
 
+// LastCheckTime is when the latest check result of any service was stored, or 0 for none: about
+// when Nightjar was last running.
+func (s *Store) LastCheckTime() float64 {
+	db, unlock := s.lock()
+	defer unlock()
+	if db == nil {
+		return 0
+	}
+	var ts sql.NullFloat64
+	s.db.QueryRow("SELECT MAX(ts) FROM checks").Scan(&ts)
+	return ts.Float64
+}
+
 // LastStatus reports whether the most recent stored check was up; ok is false when there is none.
 func (s *Store) LastStatus(service string) (isUp, ok bool) {
 	db, unlock := s.lock()

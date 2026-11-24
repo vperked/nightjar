@@ -1544,6 +1544,70 @@ export interface SSHUser {
   fingerprints?: string[];
 }
 
+// ---------- Tailscale ----------
+
+// TailscaleState is a machine's Tailscale (GET /api/tailscale, or a server's through its agent):
+// whether it is connected and as whom, the other machines on the tailnet, and its settings. Every
+// change answers with it again.
+export interface TailscaleState {
+  installed: boolean;
+  running: boolean;
+  // backend is tailscaled's state: NeedsLogin, NeedsMachineAuth, Stopped, Starting or Running.
+  backend: string;
+  logged_in: boolean;
+  // auth_url is where to log in, while tailscaled waits for someone to.
+  auth_url?: string;
+  version?: string;
+  tailnet?: string;
+  magic_dns?: string;
+  self?: TailscaleNode;
+  peers: TailscaleNode[];
+  health: string[];
+  settings: TailscaleSettings;
+  // pending is there while using an exit node or shields up waits to be kept: it goes back by itself
+  // at until (unix seconds, on the machine's clock) otherwise.
+  pending?: { until: number; what: string };
+  problem?: string;
+  now?: number;
+  // skew is how far ahead of the browser's clock the machine's was, worked out as the answer came in.
+  skew?: number;
+}
+
+export interface TailscaleNode {
+  id: string;
+  name: string;
+  dns_name?: string;
+  os?: string;
+  ips: string[];
+  user?: string;
+  tags?: string[];
+  online: boolean;
+  active: boolean;
+  last_seen?: number;
+  direct?: string;
+  relay?: string;
+  rx: number;
+  tx: number;
+  exit_node: boolean;
+  exit_node_option: boolean;
+  routes?: string[];
+  key_expiry?: number;
+  expired?: boolean;
+}
+
+export interface TailscaleSettings {
+  accept_routes: boolean;
+  accept_dns: boolean;
+  ssh: boolean;
+  shields_up: boolean;
+  advertise_exit_node: boolean;
+  advertise_routes: string[];
+  // exit_node is the ID of the machine carrying this one's internet traffic; '' is none.
+  exit_node: string;
+  exit_node_allow_lan: boolean;
+  hostname: string;
+}
+
 // ---------- status page address ----------
 
 export interface StatusProxyStep {

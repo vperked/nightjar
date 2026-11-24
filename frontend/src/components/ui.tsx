@@ -201,8 +201,19 @@ export function ServersTabs({ current }: { current: '/servers' | '/servers/analy
   );
 }
 
-// NetworkTabs switches between the live network meter and the firewall.
-export function NetworkTabs({ current }: { current: '/network' | '/network/firewall' }) {
+// Switch is an on/off switch, with a word beside it: On or Off, or text instead (Auto, say).
+export function Switch({ on, label, title = label, disabled, text, onChange }: { on: boolean; label: string; title?: string; disabled?: boolean; text?: ReactNode; onChange: (on: boolean) => void }) {
+  return (
+    <label className={`switch ${disabled ? 'disabled' : ''}`} title={title}>
+      <input type="checkbox" role="switch" aria-label={label} checked={on} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span className="switch-track" aria-hidden="true" />
+      <span className="switch-text">{text ?? (on ? 'On' : 'Off')}</span>
+    </label>
+  );
+}
+
+// NetworkTabs switches between the live network meter, the firewall and Tailscale.
+export function NetworkTabs({ current }: { current: '/network' | '/network/firewall' | '/network/tailscale' }) {
   return (
     <SubTabs
       label="Network"
@@ -210,6 +221,7 @@ export function NetworkTabs({ current }: { current: '/network' | '/network/firew
       items={[
         { to: '/network', label: 'Live' },
         { to: '/network/firewall', label: 'Firewall' },
+        { to: '/network/tailscale', label: 'Tailscale' },
       ]}
     />
   );

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { CleanupItem, CleanupView } from '../api/types';
 import { Editable } from '../components/Editable';
@@ -55,7 +55,7 @@ export function CleanupPage() {
       refresh();
       notify({ tone: 'ok', title: 'Libraries checked' });
     } catch (e) {
-      notify({ tone: 'error', title: 'The check failed', body: (e as Error).message });
+      notify({ tone: 'error', title: 'The check failed', body: errorText(e) });
       refresh();
     } finally {
       setScanning(false);
@@ -67,7 +67,7 @@ export function CleanupPage() {
       refresh();
       notify({ tone: 'ok', title: on ? `${title} is kept` : `${title} can be listed again` });
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not change it', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not change it', body: errorText(e) });
     }
   };
   const listed = v?.items.filter((i) => i.status !== 'removed') ?? [];

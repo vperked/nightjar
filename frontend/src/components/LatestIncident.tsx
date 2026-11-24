@@ -8,7 +8,7 @@ import { usePoll } from '../hooks/usePoll';
 // LatestIncident is the overview's line about the newest incident of the last three days.
 export function LatestIncident() {
   const fetch = useCallback(() => api.incidents(3), []);
-  const { data } = usePoll(fetch, 60000);
+  const { data } = usePoll(fetch, 60000, true, 'incidents:3');
   const now = useNow(30000);
   const inc = data?.incidents[0];
   if (!inc) return null;

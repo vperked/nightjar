@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { ApiError, api, UnauthorizedError, waitForRestart } from '../api/client';
+import { ApiError, api, UnauthorizedError, waitForRestart, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import { useNotifications } from '../api/NotificationsContext';
 import type { Finding, Unit, UnitAction, UnitsResponse } from '../api/types';
@@ -124,7 +124,7 @@ function UnitRow({ u, self, open, focus, onToggle, onChanged, now }: { u: Unit; 
       });
       onChanged();
     } catch (err) {
-      notify({ tone: 'error', title: `Could not ${action} ${short(u.name)}`, body: err instanceof ApiError ? err.message : String(err) });
+      notify({ tone: 'error', title: `Could not ${action} ${short(u.name)}`, body: errorText(err) });
     } finally {
       setBusy(undefined);
     }

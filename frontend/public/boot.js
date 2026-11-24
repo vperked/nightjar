@@ -15,4 +15,17 @@
     /* storage unavailable */
   }
   d.dataset.theme = theme;
+  // The dashboard's first question is its config, which the app could only ask once its script had
+  // downloaded and run. Asked here instead, it is on its way alongside the script, a round trip
+  // sooner; the app takes this answer for its first look (earlyConfig in src/api/client.ts). The
+  // status page needs no config.
+  if (!status && window.fetch) {
+    try {
+      var early = fetch('/api/config', { cache: 'no-store', credentials: 'same-origin' });
+      early['catch'](function () {});
+      window.__nightjarConfig = early;
+    } catch (e) {
+      /* no fetch: the app asks itself */
+    }
+  }
 })();

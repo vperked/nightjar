@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { Service } from '../api/types';
 import { formatAgo, formatDuration } from '../format';
@@ -95,7 +95,7 @@ const WHAT: Record<string, string> = { restart: 'Restart', container: 'Restart c
 
 export function RepairsPanel({ svc, now }: { svc: Service; now: number }) {
   const fetch = useCallback(() => api.repairs(svc.name), [svc.name]);
-  const { data, refresh } = usePoll(fetch, 30000);
+  const { data, refresh } = usePoll(fetch, 30000, true, `repairs:${svc.name}`);
   const [running, setRunning] = useState(false);
   const notify = useToast();
   const canEdit = useCanEdit();
@@ -109,7 +109,7 @@ export function RepairsPanel({ svc, now }: { svc: Service; now: number }) {
       notify({ tone: repair.ok ? 'ok' : 'error', title: repair.ok ? 'Repair ran' : 'Repair failed', body: repair.detail });
       refresh();
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not run the repair', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not run the repair', body: errorText(e) });
     } finally {
       setRunning(false);
     }

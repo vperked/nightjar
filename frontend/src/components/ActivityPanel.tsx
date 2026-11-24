@@ -16,7 +16,7 @@ const merge = (...lists: ActivityEntry[][]) => [...new Map(lists.flat().map((a) 
 
 export function ActivityPanel() {
   const fetch = useCallback(() => api.activity(), []);
-  const { data } = usePoll(fetch, 30000);
+  const { data } = usePoll(fetch, 30000, true, 'activity');
   // kept is everything shown since older pages were loaded. The newest page keeps being polled, and
   // what slides off its end as new entries arrive stays here instead of falling into a gap before
   // the older pages.

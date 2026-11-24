@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useConfig } from '../api/ConfigContext';
 import { SettingsGroup } from './SettingsGroup';
 import { useToast } from './Toasts';
@@ -45,7 +45,7 @@ function useSetHidden() {
       notify({ tone: 'ok', title: message });
       return true;
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not change the sections', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not change the sections', body: errorText(e) });
       return false;
     }
   };

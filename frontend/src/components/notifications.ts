@@ -1,4 +1,4 @@
-import type { Notification, Severity } from '../api/types';
+import type { Notification } from '../api/types';
 import { plural } from '../format';
 
 // Shared wording and links for the bell, the notification center and the mute buttons.
@@ -40,13 +40,6 @@ export const AREA_SHORT: Record<string, string> = {
   torrents: 'qBittorrent',
   media: 'Plex',
 };
-
-export const SEVERITIES: { value: Severity; label: string }[] = [
-  { value: 'critical', label: 'Critical' },
-  { value: 'warning', label: 'Warning' },
-  { value: 'ok', label: 'Recovered' },
-  { value: 'info', label: 'Info' },
-];
 
 // subjectLabel is what a subject is called on a mute button: "check:Plex" is "Plex".
 export const subjectLabel = (subject: string) => subject.slice(subject.indexOf(':') + 1).replace(/\.service$/, '');

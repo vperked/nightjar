@@ -47,7 +47,7 @@ Some jobs never answer a request: a nightly backup, a cron job, a sync. A **hear
 - `/ping/<token>/start` when it begins. Nightjar then times each run, and with **May run for** set, alerts when a run hangs.
 - `/ping/<token>/fail`, or `/ping/<token>/<exit code>`, when it went wrong. Anything posted with a ping, such as the job's last lines of output, is kept and shown on the check's page and in the alert.
 
-The schedule is a cron line (`0 3 * * *` runs at 3:00 every night), a shortcut (`@hourly`, `@daily`, `@weekly`), or `every 6h`, in the server's own time zone. The check is down when a run is missed by more than the **grace** (10 minutes unless you change it), when the job reports a failure, or when it runs too long. It is judged against the schedule, so a nightly backup counts as late at ten past three, not a day after its last ping.
+The schedule is a cron line (`0 3 * * *` runs at 3:00 every night), a shortcut (`@hourly`, `@daily`, `@weekly`), or `every 6h`, in the server's own time zone. The check is down when a run is missed by more than the **grace** (10 minutes unless you change it), when the job reports a failure, or when it runs too long. It is judged against the schedule, so a nightly backup counts as late at ten past three, not a day after its last ping. A run due while Nightjar was off is not counted as missed: its ping had nowhere to go.
 
 The ping URL needs no sign-in: its token is the credential, so keep it like a password. Anyone who has it can report runs for that check, and nothing else.
 
@@ -74,6 +74,8 @@ Scripts run as Nightjar, often as root, so Nightjar only runs a script that belo
 ## What you see
 
 Each check shows its status, its last checks as small bars, response time and uptime over 24 hours, 7 days and 30 days. Open one for its response-time chart over the last hour, 24 hours, 7 days or 30 days. Pause a check to stop it without losing its history.
+
+Nightjar's own downtime is not counted against your checks. Nothing is checked while it is off, so that time is simply missing from the history rather than down. While the machine Nightjar runs on is starting up (and for 5 minutes after it boots) or shutting down, a failing check is not counted either: it is most likely failing because of that, not because the service is down. It is checked again soon, and counts as usual once the machine has settled.
 
 ## Alerts
 

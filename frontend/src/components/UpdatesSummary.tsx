@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { RemoteHost, UpdatesResponse } from '../api/types';
 import { formatAgo, plural } from '../format';
@@ -15,7 +15,7 @@ export function UpdatesSummary({ h }: { h: Pick<RemoteHost, 'id' | 'name'> }) {
   useEffect(() => {
     api.hostUpdates(h.id).then(
       (v) => setData(v),
-      (e) => setError((e as Error).message),
+      (e) => setError(errorText(e)),
     );
   }, [h.id]);
   const to = `/updates?host=${encodeURIComponent(h.id)}`;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ApiError, api, waitForRestart } from '../api/client';
+import { api, waitForRestart, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { AppJob, AppsResponse, StoreApp } from '../api/types';
 import { Editable } from '../components/Editable';
@@ -140,7 +140,7 @@ function NtfyHookup({ a }: { a: StoreApp }) {
       notify({ tone: 'ok', title: 'Alerts now go to your ntfy server', body: r.restarting ? 'The monitor is restarting to connect it.' : undefined });
       if (r.restarting) await waitForRestart();
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not set ntfy up', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not set ntfy up', body: errorText(e) });
     } finally {
       setBusy(false);
     }
@@ -192,7 +192,7 @@ function InstallSheet({ a, job, user, onClose, onStarted }: { a: StoreApp; job: 
       setFollowed(job.id);
       onStarted(job);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setStarting('');
     }

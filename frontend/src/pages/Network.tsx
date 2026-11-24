@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import type { NetInterface, NetSample, NetworkResponse, NetworkView, Sample } from '../api/types';
 import { Num } from '../components/Num';
 import { Select } from '../components/Select';
@@ -88,7 +88,7 @@ function Direction({ label, color, rate, avg, peak, total, speed }: { label: str
       {used !== null && (
         <div className="net-link" title={`${used.toFixed(1)}% of the ${speed} Mbit/s link`}>
           <span className="net-link-bar">
-            <span style={{ width: `${Math.max(used, rate > 0 ? 0.6 : 0)}%`, background: color }} />
+            <span className="net-fill" style={fill(Math.max(used, rate > 0 ? 0.6 : 0), color)} />
           </span>
           <span className="num">{used < 1 ? used.toFixed(2) : used.toFixed(0)}% of link</span>
         </div>
@@ -111,10 +111,15 @@ function Direction({ label, color, rate, avg, peak, total, speed }: { label: str
   );
 }
 
+// fill is a bar's fill at a percent: the whole bar slid left, so the browser moves it without laying
+// the page out again. These bars change every second, and growing their width reflowed the page on
+// every frame of each change.
+const fill = (percent: number, color: string) => ({ transform: `translateX(${Math.min(100, percent) - 100}%)`, background: color });
+
 function Bar({ value, max, color }: { value: number; max: number; color: string }) {
   return (
     <span className="net-bar" aria-hidden="true">
-      <span style={{ width: `${value >= 1 && max > 0 ? Math.max(2, (value / max) * 100) : 0}%`, background: color }} />
+      <span className="net-fill" style={fill(value >= 1 && max > 0 ? Math.max(2, (value / max) * 100) : 0, color)} />
     </span>
   );
 }
@@ -400,7 +405,7 @@ function useLocalAttacks(): { node: ReactNode; attacking: boolean } {
       );
       refresh();
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not change the defense', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not change the defense', body: errorText(e) });
     }
   };
   const unblock = async (address: string) => {
@@ -409,7 +414,7 @@ function useLocalAttacks(): { node: ReactNode; attacking: boolean } {
       notify({ tone: 'ok', title: `${address} unblocked`, body: 'Left alone for an hour.' });
       refresh();
     } catch (e) {
-      notify({ tone: 'error', title: `Could not unblock ${address}`, body: (e as Error).message });
+      notify({ tone: 'error', title: `Could not unblock ${address}`, body: errorText(e) });
     }
   };
   return { node: <AttackWatch view={data.attacks} now={now} onToggle={toggle} onUnblock={unblock} />, attacking: data.attacks.attacking };

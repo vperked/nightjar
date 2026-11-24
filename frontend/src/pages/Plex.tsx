@@ -239,7 +239,7 @@ function usePlex() {
     const kept = full.current ?? have;
     return { ...r, plex: { ...now, samples: kept.samples, recent: kept.recent, libraries: kept.libraries } };
   }, []);
-  return usePoll(fetchPlex, 5000);
+  return usePoll(fetchPlex, 5000, true, 'plex');
 }
 
 export function PlexPage() {

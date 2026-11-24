@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { Incident, IncidentCause, IncidentEvent } from '../api/types';
 import { Skeleton } from '../components/Skeleton';
@@ -161,7 +161,7 @@ function Feedback({ inc, onSaved }: { inc: Incident; onSaved: () => void }) {
       setVerdict(null);
       onSaved();
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not save the feedback', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not save the feedback', body: errorText(e) });
     } finally {
       setSaving(false);
     }
@@ -235,7 +235,7 @@ function NoticeEditor({ inc, onSaved }: { inc: Incident; onSaved: () => void }) 
       setOpen(false);
       onSaved();
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not save the notice', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not save the notice', body: errorText(e) });
     }
   };
   return (
@@ -331,7 +331,7 @@ function IncidentCard({ inc, now, open: startOpen, arrived, onChanged }: { inc: 
 export function IncidentsPage() {
   const [days, setDays] = useState(7);
   const fetch = useCallback(() => api.incidents(days), [days]);
-  const { data, error, refresh } = usePoll(fetch, 30000);
+  const { data, error, refresh } = usePoll(fetch, 30000, true, `incidents:${days}`);
   const now = useNow(10000);
   const list = data?.incidents ?? [];
   // An incident that opens while the page is up slides in at the top.

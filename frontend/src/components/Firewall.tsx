@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { AgentFirewall, FirewallDrop, FirewallLock, FirewallPort, FirewallRule, FirewallStatus, SSHAccess } from '../api/types';
 import { BlockSSH, SSHPending, SSHState, useSSHAccess } from './BlockSSH';
@@ -15,8 +15,6 @@ import { Section, Seg } from './ui';
 
 // TOOL says which firewall the machine runs, in words.
 export const TOOL: Record<FirewallStatus['tool'], string> = { ufw: 'ufw', firewalld: 'firewalld', iptables: 'plain iptables' };
-
-const errText = (e: unknown) => (e instanceof ApiError || e instanceof Error ? e.message : String(e));
 
 const ACTION: Record<FirewallRule['action'], string> = { allow: 'Allow', block: 'Block', limit: 'Limit' };
 
@@ -320,7 +318,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
         setError('');
       },
       (e) => {
-        if (epoch.current === at) setError(errText(e));
+        if (epoch.current === at) setError(errorText(e));
       },
     );
   }, [target]);
@@ -354,7 +352,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
       if (ok) notify({ tone: 'ok', ...ok });
       return true;
     } catch (err) {
-      notify({ tone: 'error', title: `Could not change the firewall · ${target.name}`, body: errText(err) });
+      notify({ tone: 'error', title: `Could not change the firewall · ${target.name}`, body: errorText(err) });
       return false;
     } finally {
       epoch.current++;
@@ -414,7 +412,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
           s = await target.add(rest);
           if (s) setSt(withLists(s));
         } catch (err) {
-          notify({ tone: 'error', title: `Added the allow, but not the block for everyone else · ${target.name}`, body: errText(err) });
+          notify({ tone: 'error', title: `Added the allow, but not the block for everyone else · ${target.name}`, body: errorText(err) });
           setDraft(EMPTY);
           setAdding(false);
           return;
@@ -429,7 +427,7 @@ export function FirewallManager({ target }: { target: FirewallTarget }) {
       setEditing(undefined);
       setAdding(false);
     } catch (err) {
-      setFormError(errText(err));
+      setFormError(errorText(err));
     } finally {
       epoch.current++;
       setBusy('');
@@ -805,7 +803,7 @@ function SecureRules({ kind, name, add, busy, onClose }: { kind: SecureKind; nam
         await add(rule);
         added++;
       } catch (err) {
-        const text = errText(err);
+        const text = errorText(err);
         if (/already a rule like that/i.test(text)) continue;
         setError(added ? `Added ${plural(added, 'rule')}, then stopped: ${text}` : text);
         return;

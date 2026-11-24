@@ -64,6 +64,19 @@
   border-radius: 999px;
   transition: width 0.4s ease-out;
 }
+/* A live bar's fill is the whole bar, slid left to its value (see fill in Network.tsx). */
+.net-link-bar > span.net-fill,
+.net-bar > span.net-fill {
+  inset: 0;
+  width: auto;
+  transition: transform 0.4s var(--ease-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  .net-link-bar > span.net-fill,
+  .net-bar > span.net-fill {
+    transition: none;
+  }
+}
 .net-stats {
   display: flex;
   flex-wrap: wrap;
@@ -323,9 +336,6 @@
 .attack-history li {
   display: grid;
   gap: 2px;
-}
-.table-scroll {
-  overflow-x: auto;
 }
 .attack-kinds {
   display: grid;

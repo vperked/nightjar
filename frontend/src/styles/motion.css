@@ -54,7 +54,7 @@
     var(--shadow);
 }
 /* Things you can click lift a touch. */
-:is(.iface, .attention-chip, .setup-pick, .readout-link-card):hover {
+:is(.iface, .attention-chip, .setup-pick):hover {
   transform: translateY(-1px);
   box-shadow: var(--shadow-lift);
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { FirewallRule, FirewallStatus, SSHAccess, SSHKey } from '../api/types';
 import { plural } from '../format';
@@ -11,8 +11,6 @@ import { useToast, type ToastInput } from './Toasts';
 // rules), or add a key to an account and then, if wanted, turn password logins off. Turning them off
 // undoes itself after two minutes unless kept, the way the firewall's default does, so a key that
 // does not work cannot lock anyone out.
-
-const errText = (e: unknown) => (e instanceof ApiError || e instanceof Error ? e.message : String(e));
 
 // SSHAccessState is a machine's SSH logins as last read, shared by the state beside the buttons, the
 // countdown while keys only waits to be kept, and the Block SSH panel.
@@ -49,7 +47,7 @@ export function useSSHAccess(target: SSHTarget | undefined, name: string): SSHAc
         setFailed('');
       },
       (e) => {
-        if (seq.current === at) setFailed(errText(e));
+        if (seq.current === at) setFailed(errorText(e));
       },
     );
   }, [target]);
@@ -79,7 +77,7 @@ export function useSSHAccess(target: SSHTarget | undefined, name: string): SSHAc
       notify({ tone: 'ok', ...ok });
       return true;
     } catch (e) {
-      notify({ tone: 'error', title: `Could not change SSH logins · ${name}`, body: errText(e) });
+      notify({ tone: 'error', title: `Could not change SSH logins · ${name}`, body: errorText(e) });
       return false;
     } finally {
       setBusy(false);
@@ -266,7 +264,7 @@ export function BlockSSH({
       try {
         if (!has) await addRule({ action: 'allow', source: src, port, proto: 'tcp', note: 'SSH' });
       } catch (err) {
-        setError(errText(err));
+        setError(errorText(err));
         setWorking(false);
         return;
       }
@@ -276,7 +274,7 @@ export function BlockSSH({
       try {
         await addRule({ action: 'block', port, proto: 'tcp', note: `SSH for everyone but ${who}` });
       } catch (err) {
-        setError(errText(err));
+        setError(errorText(err));
         setAllowedOnly(src);
         setWorking(false);
         return;
@@ -295,7 +293,7 @@ export function BlockSSH({
         onClose();
       }
     } catch (err) {
-      setError(errText(err));
+      setError(errorText(err));
     } finally {
       setWorking(false);
     }
@@ -308,7 +306,7 @@ export function BlockSSH({
       ssh.set(await target.ssh!.keysOnly(true, asking));
       onClose();
     } catch (err) {
-      setError(errText(err));
+      setError(errorText(err));
       setWorking(false);
     }
   };

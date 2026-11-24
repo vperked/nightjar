@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import { useServices } from '../api/ServicesContext';
 import type { CheckSpec, HistoryPoint } from '../api/types';
@@ -64,7 +64,7 @@ export function ServiceDetail() {
   const [hours, setHours] = useState(24);
   const services = useServices();
   const fetchHistory = useCallback(() => api.history(name, hours), [name, hours]);
-  const history = usePoll(fetchHistory, 30000);
+  const history = usePoll(fetchHistory, 30000, true, `history:${name}:${hours}`);
   const now = useNow(5000);
 
   // Until the new range (or check) answers, the points in hand are another range's: none rather
@@ -94,7 +94,7 @@ export function ServiceDetail() {
       await change(spec);
       services.refresh();
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not change the check', body: (err as Error).message });
+      notify({ tone: 'error', title: 'Could not change the check', body: errorText(err) });
     }
   };
   const edit = () => act(async (spec) => setEditing(spec));

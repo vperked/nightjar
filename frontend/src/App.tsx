@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router';
-import { api, onUnauthorized } from './api/client';
+import { api, onUnauthorized, whenQuiet } from './api/client';
 import { ConfigContext } from './api/ConfigContext';
 import { NotificationsProvider } from './api/NotificationsContext';
 import { ServicesProvider, useServices } from './api/ServicesContext';
@@ -20,6 +20,7 @@ import { DemoBanner } from './components/ui';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { safe, useNewBuild } from './freshness';
 import { formatAgo, plural } from './format';
+import { forgetPolls } from './hooks/usePoll';
 import { useNow } from './hooks/useNow';
 import { Overview } from './pages/Overview';
 import { revealTheme, useCountUp, useEdgeLight, useTitleDecode } from './motion';
@@ -36,6 +37,7 @@ const pages = {
   logs: () => import('./pages/Logs'),
   network: () => import('./pages/Network'),
   firewall: () => import('./pages/Firewall'),
+  tailscale: () => import('./pages/Tailscale'),
   notifications: () => import('./pages/Notifications'),
   qbittorrent: () => import('./pages/QBittorrent'),
   servers: () => import('./pages/Servers'),
@@ -80,6 +82,7 @@ function opened<T>(load: Promise<T>): Promise<T> {
 const PlexPage = lazy(() => opened(pages.plex()).then((m) => ({ default: m.PlexPage })));
 const NetworkPage = lazy(() => opened(pages.network()).then((m) => ({ default: m.NetworkPage })));
 const FirewallPage = lazy(() => opened(pages.firewall()).then((m) => ({ default: m.FirewallPage })));
+const TailscalePage = lazy(() => opened(pages.tailscale()).then((m) => ({ default: m.TailscalePage })));
 const AppsPage = lazy(() => opened(pages.apps()).then((m) => ({ default: m.AppsPage })));
 const LogsPage = lazy(() => opened(pages.logs()).then((m) => ({ default: m.LogsPage })));
 const NotificationsPage = lazy(() => opened(pages.notifications()).then((m) => ({ default: m.NotificationsPage })));
@@ -102,16 +105,39 @@ const PluginsPage = lazy(() => opened(pages.plugins()).then((m) => ({ default: m
 const SystemServicesPage = lazy(() => opened(pages.system()).then((m) => ({ default: m.SystemServicesPage })));
 const UpdatesPage = lazy(() => opened(pages.updates()).then((m) => ({ default: m.UpdatesPage })));
 
+// usePrefetchPages fetches every page's code once the page on screen has what it asked for, so the
+// next tab opens at once. It waits for the browser to be idle and for the page's own requests to be
+// answered, then fetches two at a time, so on a slow link the pages' code never holds up the data
+// on screen. A browser asked to save data fetches nothing ahead.
 function usePrefetchPages(enabled: boolean) {
   useEffect(() => {
     if (!enabled) return;
-    const load = () => Object.values(pages).forEach((p) => p().catch(() => undefined));
+    const saveData = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData;
+    if (saveData) return;
+    let stopped = false;
+    const load = async () => {
+      await whenQuiet();
+      const queue = Object.values(pages);
+      const next = async (): Promise<void> => {
+        const page = queue.shift();
+        if (!page || stopped) return;
+        await page().catch(() => undefined);
+        return next();
+      };
+      await Promise.all([next(), next()]);
+    };
     if ('requestIdleCallback' in window) {
-      const id = requestIdleCallback(load, { timeout: 4000 });
-      return () => cancelIdleCallback(id);
+      const id = requestIdleCallback(() => void load(), { timeout: 4000 });
+      return () => {
+        stopped = true;
+        cancelIdleCallback(id);
+      };
     }
-    const id = setTimeout(load, 2000);
-    return () => clearTimeout(id);
+    const id = setTimeout(() => void load(), 2000);
+    return () => {
+      stopped = true;
+      clearTimeout(id);
+    };
   }, [enabled]);
 }
 
@@ -417,9 +443,13 @@ function Shell() {
     if (config && !statusPage) bootDone();
   }, [config, statusPage]);
   // Signing in or out reloads the config and restarts every poll.
-  const signedIn = () => setAuthKey((k) => k + 1);
+  const signedIn = () => {
+    forgetPolls();
+    setAuthKey((k) => k + 1);
+  };
   const signOut = async () => {
     await api.logout().catch(() => undefined);
+    forgetPolls();
     setAuthKey((k) => k + 1);
   };
 
@@ -548,6 +578,7 @@ function Shell() {
                       <Route path="/plex/cleanup" element={section('media', <CleanupPage />)} />
                       <Route path="/network" element={section('network', <NetworkPage />)} />
                       <Route path="/network/firewall" element={section('network', <FirewallPage />)} />
+                      <Route path="/network/tailscale" element={section('network', <TailscalePage />)} />
                       <Route path="/servers" element={section('servers', <ServersPage />)} />
                       <Route path="/servers/analytics" element={section('servers', <AnalyticsPage />)} />
                       <Route path="/servers/:id" element={section('servers', <ServerDetail />)} />

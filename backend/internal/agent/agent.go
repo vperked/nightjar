@@ -23,6 +23,7 @@ import (
 	"nightjar/internal/firewall"
 	"nightjar/internal/smart"
 	"nightjar/internal/sshd"
+	"nightjar/internal/tailscale"
 )
 
 // Version is the wire format. The dashboard refuses readings from a newer one it cannot read.
@@ -98,6 +99,8 @@ type Sampler struct {
 	port     uint16
 	// sshd manages who may log in over SSH; nil when not running.
 	sshd *sshd.Manager
+	// tailscale manages the machine's Tailscale; nil when not running.
+	tailscale *tailscale.Manager
 	// updates keeps the machine's software up to date; nil when not running.
 	updates *Updates
 
@@ -269,6 +272,7 @@ func Handler(s *Sampler, token string, self *Self, secure bool) http.Handler {
 	mux.HandleFunc("POST "+UpdatePath, updateHandler(self, func() string { return s.updates.Busy() }, authorized, secure))
 	firewallRoutes(mux, s, authorized, secure)
 	sshdRoutes(mux, s, authorized, secure)
+	tailscaleRoutes(mux, s, authorized, secure)
 	updatesRoutes(mux, s, authorized, secure)
 	mux.HandleFunc("GET "+Path, func(w http.ResponseWriter, r *http.Request) {
 		if !authorized(r) {
@@ -345,6 +349,13 @@ func Serve(ctx context.Context, listen, token, build string, plain bool) error {
 		defer close(sshdDone)
 		s.sshd.Run(ctx)
 	}()
+	// A Tailscale change that could cut the dashboard off goes back unless kept in time.
+	s.tailscale = &tailscale.Manager{}
+	tailscaleDone := make(chan struct{})
+	go func() {
+		defer close(tailscaleDone)
+		s.tailscale.Run(ctx)
+	}()
 	// What to keep up to date on this machine, kept and scheduled by the agent itself.
 	s.updates = startUpdates()
 	updatesDone := make(chan struct{})
@@ -382,7 +393,7 @@ func Serve(ctx context.Context, listen, token, build string, plain bool) error {
 	// Keys-only SSH still waiting to be kept goes back as the agent stops, too.
 	wait, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	for _, done := range []chan struct{}{attacksDone, sshdDone} {
+	for _, done := range []chan struct{}{attacksDone, sshdDone, tailscaleDone} {
 		select {
 		case <-done:
 		case <-wait.Done():

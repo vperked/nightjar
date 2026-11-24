@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { ApiError, api, isDemo } from '../api/client';
+import { ApiError, api, isDemo, errorText } from '../api/client';
 import type { Viewer } from '../api/types';
 import { useConfig } from '../api/ConfigContext';
 import { reducedMotion } from '../motion';
@@ -138,7 +138,7 @@ export function CreateAdmin({ onDone }: { onDone: () => void }) {
       await api.createAdmin(username.trim(), password, code);
       onDone();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy(false);
     }
@@ -207,7 +207,7 @@ export function SignIn({ onDone }: { onDone: () => void }) {
       if (needsCode && !askCode) {
         setAskCode(true);
       } else {
-        setError(err instanceof ApiError ? err.message : String(err));
+        setError(errorText(err));
         setFails((n) => n + 1);
       }
       if (!needsCode) setPassword('');
@@ -297,7 +297,7 @@ export function AccountSection() {
       setConfirm('');
       notify({ tone: 'ok', title: 'Password changed', body: 'Other browsers were signed out.' });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy(false);
     }
@@ -351,7 +351,7 @@ function TwoFactor({ on, left }: { on: boolean; left: number }) {
     try {
       await fn();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       sending.current = false;
       setBusy(false);
@@ -485,7 +485,7 @@ export function ViewersSection() {
     if (!admin) return;
     api.viewers().then(
       (r) => setViewers(r.viewers),
-      (err) => setError(err instanceof ApiError ? err.message : String(err)),
+      (err) => setError(errorText(err)),
     );
   }, [admin]);
 
@@ -497,7 +497,7 @@ export function ViewersSection() {
       notify({ tone: 'ok', title: done });
       return true;
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
       return false;
     } finally {
       setBusy(false);

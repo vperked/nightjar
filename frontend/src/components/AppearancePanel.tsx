@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useConfig } from '../api/ConfigContext';
 import type { Appearance } from '../api/types';
 import { DEFAULT_APPEARANCE, previewAppearance } from '../appearance';
@@ -67,7 +67,7 @@ export function AppearancePanel() {
       configChanged();
       notify({ tone: 'ok', title: 'Appearance saved' });
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorText(e));
     } finally {
       setSaving(false);
     }

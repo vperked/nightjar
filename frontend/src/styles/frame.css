@@ -91,20 +91,31 @@
 }
 .brand-mark.bad::after {
   background: var(--crit-mark);
-  animation: brand-alert 2s ease-out infinite;
 }
-/* The dot stays solid; a halo spreads from it. */
+/* The dot stays solid; a halo spreads from it. The halo is its own ring, grown and faded with
+   transform and opacity, which the compositor draws: a spreading box-shadow repainted the header on
+   every frame of every page for as long as something was wrong. */
+.brand-mark.bad::before {
+  content: '';
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--crit-mark) 55%, transparent);
+  animation: brand-alert 2s ease-out infinite;
+  will-change: transform, opacity;
+}
 @keyframes brand-alert {
   0% {
-    box-shadow:
-      0 0 0 2.5px var(--bg),
-      0 0 0 2.5px color-mix(in srgb, var(--crit-mark) 55%, transparent);
+    transform: scale(1);
+    opacity: 1;
   }
   70%,
   100% {
-    box-shadow:
-      0 0 0 2.5px var(--bg),
-      0 0 0 8px transparent;
+    transform: scale(2.6);
+    opacity: 0;
   }
 }
 .nav {
@@ -495,6 +506,7 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .brand-mark,
+  .brand-mark.bad::before,
   .brand-mark.bad::after,
   .account-menu {
     animation: none;

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import { useServices } from '../api/ServicesContext';
 import type { CheckSpec, Service } from '../api/types';
@@ -102,7 +102,7 @@ export function ServicesPage() {
       setEditing(spec);
       document.querySelector('main')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not open the check', body: (err as Error).message });
+      notify({ tone: 'error', title: 'Could not open the check', body: errorText(err) });
     }
   };
   const shown = useMemo(() => list.filter((s) => (filter === 'all' || s.status === filter) && (s.name + ' ' + s.target).toLowerCase().includes(query.toLowerCase())), [list, filter, query]);

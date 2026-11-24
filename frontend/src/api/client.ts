@@ -26,6 +26,8 @@ import type {
   SSHAction,
   SSHKey,
   SSHAccess,
+  TailscaleSettings,
+  TailscaleState,
   LogsResponse,
   NetworkResponse,
   Mute,
@@ -96,6 +98,10 @@ export class ApiError extends Error {
   }
 }
 
+// errorText is what went wrong, in words, for a toast or a note: an error's message, or whatever was
+// thrown, as text.
+export const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 // transport sends API requests: the network normally, the in-browser demo data otherwise.
 let transport: typeof fetch = (input, init) => fetch(input, init);
 let demo = false;
@@ -136,6 +142,23 @@ export function onUnauthorized(handler: () => void): void {
 
 // Changes still waiting for their answer; a reload now would cut them off part-way.
 let writing = 0;
+// Requests of any kind still waiting for their answer.
+let inFlight = 0;
+
+// whenQuiet resolves once no request has been waiting for a moment (or after waitMs regardless),
+// for work that should not hold up what a page is asking for, such as fetching other pages' code.
+export function whenQuiet(waitMs = 8000): Promise<void> {
+  const until = Date.now() + waitMs;
+  return new Promise((resolve) => {
+    let calm = 0;
+    const look = () => {
+      calm = inFlight === 0 ? calm + 1 : 0;
+      if (calm >= 2 || Date.now() >= until) resolve();
+      else setTimeout(look, 150);
+    };
+    look();
+  });
+}
 
 // writesPending reports whether a change (any request but a GET) is still on its way.
 export const writesPending = () => writing > 0;
@@ -144,6 +167,19 @@ export const writesPending = () => writing > 0;
 // authenticator code is checked by login itself). Every other /api/auth/ call needs a session,
 // so a 401 there means it ended.
 const signInPaths = new Set(['/api/auth/login', '/api/auth/setup']);
+
+// earlyConfig is the config request boot.js sent as the page arrived, taken once, by the first look
+// at the config. Demo data answers in the browser, so the real request's answer is not for it.
+function earlyConfig(path: string, method: string): Promise<Response> | undefined {
+  const w = window as unknown as { __nightjarConfig?: Promise<Response> };
+  const early = w.__nightjarConfig;
+  if (!early || path !== '/api/config' || method !== 'GET') return undefined;
+  w.__nightjarConfig = undefined;
+  if (!demo) return early;
+  // Unused, its answer is let go rather than left open.
+  early.then((r) => r.body?.cancel()).catch(() => undefined);
+  return undefined;
+}
 
 async function request<T>(path: string, init: { method?: string; body?: unknown } = {}, timeoutMs = 15000): Promise<T> {
   const method = init.method ?? 'GET';
@@ -156,10 +192,16 @@ async function request<T>(path: string, init: { method?: string; body?: unknown 
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const write = method !== 'GET';
   if (write) writing++;
+  inFlight++;
   try {
-    const res = await transport(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal, cache: 'no-store' });
+    const send = () => transport(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal, cache: 'no-store' });
+    // The early config request failing (offline as the page came) is no answer: ask again.
+    const early = earlyConfig(path, method);
+    const res = early ? await early.catch(send) : await send();
     // A refused sign-in is an answer to show, not a sign that the session ended.
     if (res.status === 401 && !signInPaths.has(path)) {
+      // Nothing reads this answer: let it go, so it does not hold a connection open.
+      res.body?.cancel().catch(() => undefined);
       unauthorizedHandler();
       throw new UnauthorizedError();
     }
@@ -175,6 +217,7 @@ async function request<T>(path: string, init: { method?: string; body?: unknown 
   } finally {
     clearTimeout(timer);
     if (write) writing--;
+    inFlight--;
   }
 }
 
@@ -201,6 +244,10 @@ const hostUpdatePath = (host: string, id?: string) => `/api/hosts/${encodeURICom
 // SSHD_WAIT is how long the browser waits on a change to SSH logins: a little over the minute the
 // server gives sshd to check and reload its config, here or on a server.
 const SSHD_WAIT = 65000;
+
+// TAILSCALE_WAIT is how long the browser waits on a Tailscale change: a little over the minute the
+// server allows (logging in with a key waits on tailscaled connecting).
+const TAILSCALE_WAIT = 65000;
 
 // DETECT_WAIT is how long the browser waits for apps to be looked for: the agent's two minutes, the
 // dashboard's margin on top, and a little more.
@@ -328,6 +375,19 @@ export const api = {
   addSSHDKey: (user: string, key: string) => request<SSHAccess>('/api/sshd/keys', { method: 'POST', body: { user, key } }, SSHD_WAIT),
   setKeysOnly: (on: boolean, user?: string) => request<SSHAccess>('/api/sshd/keys-only', { method: 'PUT', body: { on, user } }, SSHD_WAIT),
   keepKeysOnly: (keep: boolean) => request<SSHAccess>('/api/sshd/keys-only/keep', { method: 'POST', body: { keep } }, SSHD_WAIT),
+  // Tailscale, here or on a server through its agent. action is up, down or logout.
+  tailscale: () => request<TailscaleState>('/api/tailscale', undefined, TAILSCALE_WAIT),
+  tailscaleLogin: (authKey?: string) => request<TailscaleState>('/api/tailscale/login', { method: 'POST', body: { auth_key: authKey ?? '' } }, TAILSCALE_WAIT),
+  tailscaleAction: (action: 'up' | 'down' | 'logout') => request<TailscaleState>(`/api/tailscale/${action}`, { method: 'POST', body: {} }, TAILSCALE_WAIT),
+  setTailscale: (s: Partial<TailscaleSettings>) => request<TailscaleState>('/api/tailscale/settings', { method: 'PUT', body: s }, TAILSCALE_WAIT),
+  keepTailscale: (keep: boolean) => request<TailscaleState>('/api/tailscale/keep', { method: 'POST', body: { keep } }, TAILSCALE_WAIT),
+  hostTailscale: (id: string) => request<TailscaleState>(`/api/hosts/${encodeURIComponent(id)}/tailscale`, undefined, TAILSCALE_WAIT),
+  hostTailscaleLogin: (id: string, authKey?: string) =>
+    request<TailscaleState>(`/api/hosts/${encodeURIComponent(id)}/tailscale/login`, { method: 'POST', body: { auth_key: authKey ?? '' } }, TAILSCALE_WAIT),
+  hostTailscaleAction: (id: string, action: 'up' | 'down' | 'logout') =>
+    request<TailscaleState>(`/api/hosts/${encodeURIComponent(id)}/tailscale/${action}`, { method: 'POST', body: {} }, TAILSCALE_WAIT),
+  setHostTailscale: (id: string, s: Partial<TailscaleSettings>) => request<TailscaleState>(`/api/hosts/${encodeURIComponent(id)}/tailscale/settings`, { method: 'PUT', body: s }, TAILSCALE_WAIT),
+  keepHostTailscale: (id: string, keep: boolean) => request<TailscaleState>(`/api/hosts/${encodeURIComponent(id)}/tailscale/keep`, { method: 'POST', body: { keep } }, TAILSCALE_WAIT),
   hostSSHD: (id: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd`, undefined, SSHD_WAIT),
   addHostSSHDKey: (id: string, user: string, key: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys`, { method: 'POST', body: { user, key } }, SSHD_WAIT),
   setHostKeysOnly: (id: string, on: boolean, user?: string) => request<SSHAccess>(`/api/hosts/${encodeURIComponent(id)}/sshd/keys-only`, { method: 'PUT', body: { on, user } }, SSHD_WAIT),

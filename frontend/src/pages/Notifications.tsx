@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import { useNotifications } from '../api/NotificationsContext';
 import type { AlertLevel, AlertRules, Notification, NotificationRules, QuietHours, Severity } from '../api/types';
@@ -186,7 +186,7 @@ function InboxView() {
       if (shown.current !== filters) return;
       setItems((old) => (old?.at(-1)?.id === last.id ? [...old, ...r.items] : old));
     } catch (e) {
-      if (shown.current === filters) notify({ tone: 'error', title: 'Could not load older notifications', body: (e as Error).message });
+      if (shown.current === filters) notify({ tone: 'error', title: 'Could not load older notifications', body: errorText(e) });
     } finally {
       setLoadingMore(false);
     }
@@ -382,7 +382,7 @@ function RulesView() {
       setQuiet(saved.quiet);
       notify({ tone: 'ok', title: 'Notification rules saved', body: 'They apply to the next alert.' });
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not save the rules', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not save the rules', body: errorText(e) });
     } finally {
       setSaving(false);
     }

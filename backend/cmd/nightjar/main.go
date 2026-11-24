@@ -55,6 +55,7 @@ import (
 	"nightjar/internal/sshd"
 	"nightjar/internal/storage"
 	"nightjar/internal/systemd"
+	"nightjar/internal/tailscale"
 	"nightjar/internal/units"
 	"nightjar/internal/updates"
 )
@@ -314,6 +315,19 @@ func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 		Plugins:      pl,
 		Services:     services.NewMonitor(services.Stored(db, cfg.ServicesFile, func(msg string) { log.Warn(msg) }), db),
 	}
+	// Nightjar's own downtime is not the services': nothing is checked while it is off, a heartbeat
+	// ping sent then was lost, and a check failing while its machine boots or shuts down is failing
+	// because of that.
+	if last := db.LastCheckTime(); last > 0 {
+		now := float64(time.Now().Unix())
+		if excused := ctx.Services.Offline(last, now); len(excused) > 0 {
+			log.Info(fmt.Sprintf("Nightjar was offline for %s: heartbeat runs due then are not counted as missed", format.Duration(now-last)), "checks", strings.Join(excused, ", "))
+		}
+	}
+	booted := collect.BootTime()
+	ctx.Services.Settling = func(now float64) bool {
+		return (booted > 0 && now-booted < settleAfterBoot) || systemd.Settling(systemd.SystemState())
+	}
 	ctx.Docker = docker.New(cfg.DockerSocket)
 	services.DockerCheck = func(s services.Spec) services.Result {
 		c, cancel := context.WithTimeout(context.Background(), time.Duration(s.Timeout*float64(time.Second)))
@@ -369,6 +383,7 @@ func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 			Open: dashboardOpen(cfg.WebPort), OnLock: lockAlerts(wh.hub.Route("attacks"))}
 	}
 	ctx.SSHD = &sshd.Manager{}
+	ctx.Tailscale = &tailscale.Manager{}
 	// A monitor restarting itself to apply settings already announced services that were failed.
 	ctx.Units.AnnounceExisting = os.Getenv(restartedEnv) == ""
 	monitor.LoadDrives(ctx)
@@ -608,6 +623,8 @@ func run(cfg config.Settings, db *storage.Store, envFile string) (restart bool) 
 	// Keys-only SSH left waiting to be kept by the last run goes back now; a new one goes back unless
 	// kept in time.
 	background.Go(func() { ctx.SSHD.Run(stop) })
+	// A Tailscale change that could cut the dashboard off goes back unless kept in time.
+	background.Go(func() { ctx.Tailscale.Run(stop) })
 	// Something once took the monitor's right to switch users while it ran, which broke apt and git;
 	// say so, and when, if it happens again.
 	background.Go(func() {
@@ -683,6 +700,10 @@ func run(cfg config.Settings, db *storage.Store, envFile string) (restart bool) 
 	}
 	return restart
 }
+
+// settleAfterBoot is how long after the machine boots a failing check is not counted: the
+// services on it, and its network, take a while to come up after systemd says it has booted.
+const settleAfterBoot = 5 * 60.0
 
 // waitFor waits for wg, at most d, and reports whether it finished.
 func waitFor(wg *sync.WaitGroup, d time.Duration) bool {

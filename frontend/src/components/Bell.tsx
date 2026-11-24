@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import { useNotifications } from '../api/NotificationsContext';
 import type { Notification, Severity } from '../api/types';
@@ -121,7 +121,7 @@ export function Bell() {
     try {
       await api.markRead();
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not mark them read', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not mark them read', body: errorText(e) });
       return;
     }
     setItems((list) => list?.map((n) => ({ ...n, read: true })));

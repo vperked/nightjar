@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { ApiError, api } from '../../api/client';
+import { api, errorText } from '../../api/client';
 import { useCopy } from '../../clipboard';
 import { useCanEdit } from '../../api/ConfigContext';
 import type { QBAction, QBTorrent } from '../../api/types';
@@ -29,7 +29,7 @@ export function useActions(refresh: () => void) {
       refresh();
       return true;
     } catch (err) {
-      notify({ tone: 'error', title: `Could not ${action} ${torrents.length === 1 ? torrents[0].name : 'the torrents'}`, body: err instanceof ApiError ? err.message : String(err) });
+      notify({ tone: 'error', title: `Could not ${action} ${torrents.length === 1 ? torrents[0].name : 'the torrents'}`, body: errorText(err) });
       return false;
     } finally {
       setBusy(false);

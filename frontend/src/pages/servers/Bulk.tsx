@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ApiError, api } from '../../api/client';
+import { api, errorText } from '../../api/client';
 import { useNotifications } from '../../api/NotificationsContext';
 import type { FirewallRule, RemoteHost, SSHAction } from '../../api/types';
 import { describeRule, SECURE, type SecureKind } from '../../components/Firewall';
@@ -182,7 +182,7 @@ async function addRules(id: string, batch: FirewallBatch): Promise<string> {
       await api.addHostRule(id, rule);
       added++;
     } catch (err) {
-      const text = err instanceof ApiError ? err.message : String(err);
+      const text = errorText(err);
       if (/already a rule like that/i.test(text)) continue;
       throw new Error(added ? `added ${plural(added, 'rule')}, then: ${text}` : text);
     }

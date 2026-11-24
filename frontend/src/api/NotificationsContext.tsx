@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useMemo, type ReactNode } from 
 import { useToast } from '../components/Toasts';
 import { muteSpan } from '../components/notifications';
 import { usePoll } from '../hooks/usePoll';
-import { api } from './client';
+import { api, errorText } from './client';
 import { useCanEdit } from './ConfigContext';
 import type { Mute, NotificationSummary } from './types';
 
@@ -44,7 +44,7 @@ export function NotificationsProvider({ children, enabled }: { children: ReactNo
         );
         refresh();
       } catch (e) {
-        notify({ tone: 'error', title: 'Could not change the mute', body: (e as Error).message });
+        notify({ tone: 'error', title: 'Could not change the mute', body: errorText(e) });
       }
     },
     [notify, refresh, canEdit],

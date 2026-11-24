@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { ApiError } from '../api/client';
+import { errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { HostUpdatesSummary, UpdateSettings, UpdateTarget, UpdatesResponse } from '../api/types';
 import { useHostUpdates, useUpdates } from '../api/UpdatesContext';
@@ -10,7 +10,7 @@ import { Select } from '../components/Select';
 import { Skeleton } from '../components/Skeleton';
 import { ServerTime, TimePicker } from '../components/TimePicker';
 import { useToast } from '../components/Toasts';
-import { AppsTabs, Seg } from '../components/ui';
+import { AppsTabs, Seg, Switch } from '../components/ui';
 import { formatAgo, plural } from '../format';
 import { useDialog } from '../hooks/useDialog';
 import { useNow } from '../hooks/useNow';
@@ -61,16 +61,6 @@ function origin(t: UpdateTarget): string {
   return KIND_LABEL[t.kind];
 }
 
-function Switch({ on, label, title = label, disabled, onChange }: { on: boolean; label: string; title?: string; disabled?: boolean; onChange: (on: boolean) => void }) {
-  return (
-    <label className={`switch ${disabled ? 'disabled' : ''}`} title={title}>
-      <input type="checkbox" role="switch" aria-label={label} checked={on} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
-      <span className="switch-track" aria-hidden="true" />
-      <span className="switch-text">Auto</span>
-    </label>
-  );
-}
-
 // Each part of the page acts through source, on the machine the page shows, then refreshes it.
 interface On {
   source: UpdatesSource;
@@ -85,7 +75,7 @@ function Details({ t, data, onEdit, now, source, refresh }: On & { t: UpdateTarg
       await what();
       refresh();
     } catch (err) {
-      notify({ tone: 'error', title: failed, body: (err as Error).message });
+      notify({ tone: 'error', title: failed, body: errorText(err) });
     }
   };
   const pendingTitle = t.kind === 'git' ? 'New commits' : t.kind === 'system' ? 'Packages to upgrade' : t.kind === 'snap' ? 'Snaps to refresh' : '';
@@ -396,14 +386,22 @@ function TargetRow({ t, data, now, onEdit, followed, source, refresh }: On & { t
   const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
   const [tone, word] = verdict(t);
+  // wantAuto is the Auto switch as just flipped: it shows at once, ahead of the save and the reload
+  // after it (seconds, on a server), and goes back if the save is refused.
+  const [wantAuto, setWantAuto] = useState<boolean>();
+  useEffect(() => {
+    if (wantAuto !== undefined && t.auto === wantAuto) setWantAuto(undefined);
+  }, [t.auto, wantAuto]);
 
   const toggleAuto = async (auto: boolean) => {
+    setWantAuto(auto);
     try {
       await source.save({ ...specOf(t), auto }, false);
       notify({ tone: 'ok', title: auto ? `${t.name} updates automatically` : `${t.name} waits for you`, body: auto ? `Installs ${data.window.label}.` : undefined });
       refresh();
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not change it', body: (err as Error).message });
+      setWantAuto(undefined);
+      notify({ tone: 'error', title: 'Could not change it', body: errorText(err) });
     }
   };
   const update = async () => {
@@ -412,7 +410,7 @@ function TargetRow({ t, data, now, onEdit, followed, source, refresh }: On & { t
       notify({ tone: 'info', title: `Updating ${t.name}`, body: t.self ? 'The monitor restarts when it is done.' : 'You can leave this page.' });
       refresh();
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not start the update', body: err instanceof ApiError ? err.message : String(err) });
+      notify({ tone: 'error', title: 'Could not start the update', body: errorText(err) });
     }
   };
 
@@ -432,7 +430,14 @@ function TargetRow({ t, data, now, onEdit, followed, source, refresh }: On & { t
         </button>
         <div className="upd-controls">
           {/* A viewer still sees whether it updates on its own. */}
-          <Switch on={t.auto} label={`Update ${t.name} automatically`} title={canEdit ? undefined : "Viewers can't change this"} disabled={!t.can_update || !canEdit} onChange={toggleAuto} />
+          <Switch
+            text="Auto"
+            on={wantAuto ?? t.auto}
+            label={`Update ${t.name} automatically`}
+            title={canEdit ? undefined : "Viewers can't change this"}
+            disabled={!t.can_update || !canEdit}
+            onChange={toggleAuto}
+          />
           {t.available && t.can_update && canEdit ? (
             <button className="btn small-btn" disabled={!!t.busy} onClick={update}>
               {t.busy === 'updating' ? 'Updating…' : 'Update'}
@@ -498,7 +503,7 @@ function HostSettings({ source, data, refresh }: On & { data: UpdatesResponse })
       refresh();
     } catch (err) {
       // An agent too old for updates is the likely refusal here, so it is said plainly.
-      setError(tooOld(err) ? `${source.name}'s agent is too old for these settings. It updates itself shortly; try again then.` : err instanceof ApiError ? err.message : String(err));
+      setError(tooOld(err) ? `${source.name}'s agent is too old for these settings. It updates itself shortly; try again then.` : errorText(err));
     } finally {
       setSaving(false);
     }
@@ -661,7 +666,7 @@ function UpdatesView({ source, hosts, onPick }: { source: UpdatesSource; hosts: 
       try {
         await source.apply(id);
       } catch (err) {
-        failed.push({ id, why: err instanceof ApiError ? err.message : String(err) });
+        failed.push({ id, why: errorText(err) });
       }
     }
     if (failed.length) {
@@ -693,7 +698,7 @@ function UpdatesView({ source, hosts, onPick }: { source: UpdatesSource; hosts: 
       await source.check();
       refresh();
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not start the check', body: (err as Error).message });
+      notify({ tone: 'error', title: 'Could not start the check', body: errorText(err) });
     }
   };
   const detect = async () => {
@@ -702,7 +707,7 @@ function UpdatesView({ source, hosts, onPick }: { source: UpdatesSource; hosts: 
       notify({ tone: 'ok', title: added?.length ? `Found ${plural(added.length, 'new target')}` : 'Nothing new found', body: added?.map((a) => a.name).join(', ') });
       refresh();
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not look for apps', body: (err as Error).message });
+      notify({ tone: 'error', title: 'Could not look for apps', body: errorText(err) });
     }
   };
 

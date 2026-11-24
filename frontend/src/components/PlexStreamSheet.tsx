@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ApiError, api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { PlexPlay, PlexResponse, PlexStream } from '../api/types';
 import { formatAgo, formatClock, formatDuration, formatKbps } from '../format';
@@ -169,7 +169,7 @@ export function PlexStreamSheet({ stream, play, onClose, onStopped }: { stream?:
       onStopped?.(r);
       onClose();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
       setConfirming(false);
     } finally {
       setBusy(false);

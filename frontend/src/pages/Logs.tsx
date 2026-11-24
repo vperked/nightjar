@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import type { LogEntry, LogLevel, LogsResponse } from '../api/types';
 import { Diagnosis } from '../components/Diagnosis';
 import { Select } from '../components/Select';
@@ -156,7 +156,7 @@ export function LogsPage() {
         });
         latest.current = Math.max(latest.current, r.latest);
       } catch (e) {
-        if (live) setError((e as Error).message);
+        if (live) setError(errorText(e));
       } finally {
         busy = false;
       }

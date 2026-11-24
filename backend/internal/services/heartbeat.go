@@ -280,6 +280,58 @@ func (m *Monitor) Ping(token, kind, output string, now float64) (string, bool) {
 	return name, true
 }
 
+// Offline tells the heartbeats that Nightjar was not listening from `from` to `to` (its machine was
+// off, or Nightjar was stopped). A ping sent then was lost, and a job on Nightjar's own machine
+// could not run, so a run whose ping was due in that gap is not held against the job: Nightjar
+// counts as having begun listening again at `to`. It returns the heartbeats so excused.
+func (m *Monitor) Offline(from, to float64) []string {
+	if from <= 0 || to <= from {
+		return nil
+	}
+	m.mu.Lock()
+	var excused []string
+	keep := map[string]string{}
+	for _, name := range m.order {
+		s := m.states[name].Spec
+		if s.Type != "heartbeat" {
+			continue
+		}
+		p := m.pings(s.Target, to)
+		if !missable(s, *p, from, to) {
+			continue
+		}
+		p.Seen = to
+		data, _ := json.Marshal(p)
+		keep[pingKey(s.Target)] = string(data)
+		excused = append(excused, name)
+	}
+	m.mu.Unlock()
+	if m.store != nil {
+		for k, v := range keep {
+			m.store.SetMeta(k, v)
+		}
+	}
+	return excused
+}
+
+// missable reports whether a ping s was waiting for could have come while Nightjar was not
+// listening, from `from` to `to`.
+func missable(s Spec, p Pings, from, to float64) bool {
+	sched, err := ParseSchedule(s.Schedule)
+	if err != nil || p.Seen >= to {
+		return false
+	}
+	if sched.cron == nil {
+		// Its next ping was due in the gap, give or take the grace.
+		due := max(p.OK, p.Seen) + sched.Every.Seconds()
+		return due+s.Grace >= from && due-s.Grace <= to
+	}
+	// The first run that could still report at `from`, given the grace; it may report a minute early.
+	t, ok := sched.cron.next(time.Unix(int64(from-s.Grace), 0).Add(-time.Minute))
+	due := float64(t.Unix()) - 60
+	return ok && due <= to && p.OK < due
+}
+
 // Heartbeat judges a heartbeat check from its pings at now.
 func (m *Monitor) Heartbeat(s Spec, now float64) Result {
 	m.mu.Lock()

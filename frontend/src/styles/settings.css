@@ -599,9 +599,6 @@
 }
 
 /* Sections: a grid of switches, saved as soon as one is flipped. */
-.sections-help {
-  margin: 0 0 12px;
-}
 .sections-group + .sections-group {
   margin-top: 14px;
 }

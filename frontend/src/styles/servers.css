@@ -278,18 +278,6 @@
   outline: 2px solid var(--series-1);
   outline-offset: 2px;
 }
-.check-fields {
-  display: grid;
-  gap: 8px;
-}
-.check-fields p {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--ink-3);
-}
-.port-field .field {
-  width: 120px !important;
-}
 .add-steps .check {
   font-size: 13px;
 }
@@ -360,13 +348,6 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 10px;
-}
-.ssh-public {
-  display: grid;
-  gap: 6px;
-}
-.ssh-public .form-help {
-  margin: 0;
 }
 .ssh-login-fields {
   display: grid;

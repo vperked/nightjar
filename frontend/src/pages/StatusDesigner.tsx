@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { ApiError, api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useServices } from '../api/ServicesContext';
 import type { PublicService, PublicStatus, StatusDesign, StatusDesignResponse, StatusProxyResponse, StatusProxyStep } from '../api/types';
 import { useConfig } from '../api/ConfigContext';
@@ -201,7 +201,7 @@ function AddressPanel() {
       setSteps(undefined);
       notify({ tone: 'ok', title: 'Address saved' });
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not save the address', body: (err as Error).message });
+      notify({ tone: 'error', title: 'Could not save the address', body: errorText(err) });
     } finally {
       setSaving(false);
     }
@@ -224,7 +224,7 @@ function AddressPanel() {
               : { tone: 'ok', title: `${savedDomain} is live`, body: 'nginx serves it, with HTTPS.' },
       );
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not reach Nightjar', body: (err as Error).message });
+      notify({ tone: 'error', title: 'Could not reach Nightjar', body: errorText(err) });
     } finally {
       setBusy('');
     }
@@ -484,7 +484,7 @@ export function StatusDesignerPage() {
       setEnabled(on);
       notify({ tone: 'ok', title: on ? 'Status page is public' : 'Status page is off', body: on ? 'Anyone with the address can see it.' : undefined });
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not change it', body: (err as Error).message });
+      notify({ tone: 'error', title: 'Could not change it', body: errorText(err) });
     }
   };
   const save = async () => {
@@ -495,7 +495,7 @@ export function StatusDesignerPage() {
       setDesign(saved);
       notify({ tone: 'ok', title: 'Status page saved', body: enabled ? 'It is live now.' : 'Turn it on to make it public.' });
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not save the status page', body: err instanceof ApiError ? err.message : String(err) });
+      notify({ tone: 'error', title: 'Could not save the status page', body: errorText(err) });
     } finally {
       setSaving(false);
     }

@@ -111,7 +111,7 @@ export function PlexStatsBody({ st }: { st: PlexStats }) {
 export function PlexStatsSection() {
   const [days, setDays] = useState(7);
   const fetch = useCallback(() => api.plexStats(days), [days]);
-  const { data, error, stale } = usePoll(fetch, 60000);
+  const { data, error, stale } = usePoll(fetch, 60000, true, `plex-stats:${days}`);
   // The other range's numbers would sit under this one's label until it answers.
   const st = stale ? undefined : data?.stats;
   return (

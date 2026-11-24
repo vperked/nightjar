@@ -40,6 +40,7 @@ type State struct {
 	runNow              bool // set when the check changed, so it runs on the next cycle
 	running             bool // claimed by a check that has not reported back
 	stale               bool // the running check was for a type or target since changed: its result is dropped
+	held                bool // its last failure came while Nightjar's machine was settling, so it was not counted
 	history             []beat
 	slots               slotRing
 }
@@ -59,6 +60,12 @@ type Monitor struct {
 	// Resting, when set, says whether a check is in planned maintenance at now: it does not run,
 	// so it neither alerts nor counts against uptime, and shows as "maintenance".
 	Resting func(name string, now float64) bool
+	// Settling, when set, says whether the machine Nightjar runs on is starting up or shutting down
+	// at now. A check failing then most likely fails because of that (the network not up yet, a
+	// service on this machine not started yet or already stopped), not because the service is down,
+	// so the failure is held back: it neither counts against uptime nor alerts nor repairs, and the
+	// check is looked at again soon. Once the machine has settled, failures count as usual.
+	Settling func(now float64) bool
 }
 
 // NewMonitor builds a monitor; with an available store it resumes each service's last
@@ -124,7 +131,7 @@ const defaultRetryInterval = 20.0
 // due reports whether the check should run at now.
 func (st *State) due(now float64) bool {
 	wait := st.Spec.Interval
-	if st.ConsecutiveFailures > 0 && st.Status != StatusDown {
+	if (st.ConsecutiveFailures > 0 || st.held) && st.Status != StatusDown {
 		wait = min(wait, cmp.Or(st.Spec.RetryInterval, defaultRetryInterval))
 	}
 	return st.runNow || now-st.LastCheck >= wait
@@ -178,6 +185,7 @@ func (m *Monitor) Record(name string, r Result, now float64) string {
 // the check it was for has been paused, deleted or changed since. A name can pass to another check
 // while one runs, so a result can only be told apart by name so far; the loop uses Report.
 func (m *Monitor) RecordAs(name string, r Result, now float64) (to, change string, recorded bool) {
+	held := m.settling(r, now)
 	m.mu.Lock()
 	st, ok := m.states[name]
 	// A check of this name that is not running has no result coming: this one is for the check
@@ -191,7 +199,7 @@ func (m *Monitor) RecordAs(name string, r Result, now float64) (to, change strin
 		m.mu.Unlock()
 		return name, "", false
 	}
-	change, recorded = m.foldLocked(st, r, now)
+	change, recorded = m.foldLocked(st, r, now, held)
 	m.mu.Unlock()
 	if recorded && m.store != nil {
 		m.store.Record(name, now, r.Up, r.LatencyMS, r.Detail)
@@ -204,6 +212,7 @@ func (m *Monitor) RecordAs(name string, r Result, now float64) (to, change strin
 // all: one for a check deleted, paused or retargeted while it ran is dropped, and must neither
 // alert nor repair.
 func (m *Monitor) Report(run Claimed, r Result, now float64) (spec Spec, change string, recorded bool) {
+	held := m.settling(r, now)
 	m.mu.Lock()
 	st := run.st
 	if st == nil || m.states[st.Spec.Name] != st {
@@ -217,7 +226,7 @@ func (m *Monitor) Report(run Claimed, r Result, now float64) (spec Spec, change 
 			delete(m.renamed, from)
 		}
 	}
-	change, recorded = m.foldLocked(st, r, now)
+	change, recorded = m.foldLocked(st, r, now, held)
 	spec = st.Spec
 	m.mu.Unlock()
 	if recorded && m.store != nil {
@@ -226,15 +235,26 @@ func (m *Monitor) Report(run Claimed, r Result, now float64) (spec Spec, change 
 	return spec, change, recorded
 }
 
+// settling reports whether r is a failure that came while Nightjar's machine was starting up or
+// shutting down, and so is not held against the check. It is asked before m.mu is taken: it may
+// ask systemd.
+func (m *Monitor) settling(r Result, now float64) bool {
+	return !r.Up && m.Settling != nil && m.Settling(now)
+}
+
 // foldLocked ends st's run and folds its result into st, unless the check was paused or changed
-// while it ran. m.mu is held.
-func (m *Monitor) foldLocked(st *State, r Result, now float64) (change string, recorded bool) {
+// while it ran, or held is set: a failure while Nightjar's machine settles is not counted, and the
+// check is looked at again at its retry interval. m.mu is held.
+func (m *Monitor) foldLocked(st *State, r Result, now float64, held bool) (change string, recorded bool) {
 	stale := st.stale
 	st.running, st.stale = false, false
 	if st.Spec.Paused || stale {
 		return "", false
 	}
-	st.LastCheck, st.runNow = now, false
+	st.LastCheck, st.runNow, st.held = now, false, held
+	if held {
+		return "", false
+	}
 	st.LastResult = &r
 	st.history = append(st.history, beat{now, r.Up, r.LatencyMS})
 	st.slots.record(now, r)

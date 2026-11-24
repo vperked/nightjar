@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
+import { Switch } from '../components/ui';
 import { Link } from 'react-router';
-import { ApiError, api, waitForRestart } from '../api/client';
+import { api, waitForRestart, errorText } from '../api/client';
 import type { CheckResult, Plugin, PluginCard, PluginProvides, PluginSetting, PluginsResponse } from '../api/types';
 import { PluginCardBody } from '../components/PluginCards';
 import { Select } from '../components/Select';
@@ -13,16 +14,6 @@ import { useNow } from '../hooks/useNow';
 // plugins folder. A plugin found there starts off; turning it on lets Nightjar run it.
 
 const PROVIDES: Record<PluginProvides, string> = { check: 'Check', card: 'Overview card', notify: 'Alert channel' };
-
-function Switch({ on, label, disabled, onChange }: { on: boolean; label: string; disabled?: boolean; onChange: (on: boolean) => void }) {
-  return (
-    <label className={`switch ${disabled ? 'disabled' : ''}`} title={label}>
-      <input type="checkbox" role="switch" aria-label={label} checked={on} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
-      <span className="switch-track" aria-hidden="true" />
-      <span className="switch-text">{on ? 'On' : 'Off'}</span>
-    </label>
-  );
-}
 
 function Field({ s, value, secretSet, onChange, onClear }: { s: PluginSetting; value: string; secretSet: boolean; onChange: (v: string) => void; onClear: () => void }) {
   const id = `plugin-${s.key}`;
@@ -94,6 +85,7 @@ function PluginItem({ p, onChanged }: { p: Plugin; onChanged: (p: Plugin) => voi
   const [busy, setBusy] = useState('');
   const [argument, setArgument] = useState('');
   const [tried, setTried] = useState<Tried>();
+  const [wantOn, setWantOn] = useState<boolean>();
   const settings = p.settings ?? [];
   // Only values that differ from the saved ones are changes; a secret typed is always one.
   const changed = Object.fromEntries(
@@ -110,6 +102,8 @@ function PluginItem({ p, onChanged }: { p: Plugin; onChanged: (p: Plugin) => voi
   const save = async (enabled?: boolean) => {
     const toggling = enabled !== undefined;
     setBusy(toggling ? 'toggle' : 'save');
+    // The switch moves at once; it goes back if the change is refused.
+    if (toggling) setWantOn(enabled);
     try {
       const { plugin } = await api.configurePlugin(p.id, toggling ? { enabled } : { settings: Object.keys(changed).length ? changed : undefined, clear: clear.length ? clear : undefined });
       if (!toggling) {
@@ -123,9 +117,10 @@ function PluginItem({ p, onChanged }: { p: Plugin; onChanged: (p: Plugin) => voi
         body: enabled && (p.provides ?? []).includes('notify') ? 'Choose what it hears about under Notifications.' : undefined,
       });
     } catch (err) {
-      notify({ tone: 'error', title: `Could not change ${p.name}`, body: err instanceof ApiError ? err.message : String(err) });
+      notify({ tone: 'error', title: `Could not change ${p.name}`, body: errorText(err) });
     } finally {
       setBusy('');
+      setWantOn(undefined);
     }
   };
   const tryIt = async (mode: 'check' | 'card') => {
@@ -134,7 +129,7 @@ function PluginItem({ p, onChanged }: { p: Plugin; onChanged: (p: Plugin) => voi
     try {
       setTried(await api.tryPlugin(p.id, mode, argument));
     } catch (err) {
-      setTried({ error: err instanceof ApiError ? err.message : String(err) });
+      setTried({ error: errorText(err) });
     } finally {
       setBusy('');
     }
@@ -163,7 +158,7 @@ function PluginItem({ p, onChanged }: { p: Plugin; onChanged: (p: Plugin) => voi
             {p.author && <span className="plugin-by">by {p.author}</span>}
           </div>
         </div>
-        <Switch on={p.enabled} label={`Turn ${p.name} ${p.enabled ? 'off' : 'on'}`} disabled={!!p.problem || !!busy} onChange={(on) => save(on)} />
+        <Switch on={wantOn ?? p.enabled} label={`Turn ${p.name} ${(wantOn ?? p.enabled) ? 'off' : 'on'}`} disabled={!!p.problem || !!busy} onChange={(on) => save(on)} />
       </div>
 
       {p.problem && (
@@ -294,7 +289,7 @@ export function PluginsPage() {
       notify({ tone: 'ok', title: 'Looked in the plugins folder', body: next.restarting ? `${found} Restarting to set up its alert channel; the page reconnects by itself.` : found });
       if (next.restarting) await waitForRestart();
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not read the plugins folder', body: err instanceof ApiError ? err.message : String(err) });
+      notify({ tone: 'error', title: 'Could not read the plugins folder', body: errorText(err) });
     } finally {
       setScanning(false);
     }

@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { ApiError, api, isDemo } from '../api/client';
+import { ApiError, api, isDemo, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { AgentBuild, AgentUpdate, AnalyticsPoint, AnalyticsRangeName, HostPoint, RemoteHost, RemoteReadings, Service, SSHAction, SSHKey } from '../api/types';
 import { useServices } from '../api/ServicesContext';
@@ -91,7 +91,7 @@ interface Kept {
 // useStored reads a server's stored minutes for ranges past the live hour; undefined while loading.
 function useStored(id: string, range: AnalyticsRangeName): Kept | undefined {
   const fetchRange = useCallback(() => (range === '1h' ? Promise.resolve(null) : api.hostAnalytics(id, range)), [id, range]);
-  const { data, stale } = usePoll(fetchRange, 60000);
+  const { data, stale } = usePoll(fetchRange, 60000, true, `host-range:${id}:${range}`);
   // Points from the last range are not this one's: loading until the new range answers.
   return range === '1h' || !data || stale ? undefined : { points: data.host.points ?? [], step: data.step };
 }
@@ -422,7 +422,7 @@ function AddServerSheet({ port, builds, onClose, onAdded }: { port: number; buil
       onAdded(host);
     } catch (err) {
       if (err instanceof ApiError && err.hostKey) setHostKey(err.hostKey);
-      else setError(err instanceof ApiError || err instanceof Error ? err.message : String(err));
+      else setError(errorText(err));
     } finally {
       setBusy(false);
     }
@@ -604,7 +604,7 @@ function EditServer({ h, onSaved, onRemoved }: { h: RemoteHost; onSaved: () => v
       setAddress(h.address.replace(/^http:\/\//, 'https://'));
       setMove(`sudo nightjar-agent install -token ${r.token} -tls=true${listen}`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
     }
   };
   const save = async (e: React.FormEvent) => {
@@ -618,7 +618,7 @@ function EditServer({ h, onSaved, onRemoved }: { h: RemoteHost; onSaved: () => v
       setMove('');
       onSaved();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy(false);
     }
@@ -630,7 +630,7 @@ function EditServer({ h, onSaved, onRemoved }: { h: RemoteHost; onSaved: () => v
       notify({ tone: 'ok', title: `${h.name} removed`, body: `${h.kind === 'agent' ? 'Its agent keeps running until you uninstall it. ' : ''}Checks that belonged to it stay, belonging to none.` });
       onRemoved();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
       setBusy(false);
     }
   };
@@ -737,7 +737,7 @@ function ReinstallNow({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
       notify({ tone: 'ok', title: `Agent reinstalled · ${h.name}`, body: 'It updates itself from now on.' });
       refresh();
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not reinstall the agent', body: err instanceof ApiError ? err.message : String(err) });
+      notify({ tone: 'error', title: 'Could not reinstall the agent', body: errorText(err) });
     } finally {
       setBusy(false);
     }
@@ -789,7 +789,7 @@ async function placeKey(l: Login, where: { id?: string; target?: string }, trust
     await api.authorizeSSHKey({ id: where.id, login, password: l.password });
   } catch (err) {
     if (err instanceof ApiError && err.hostKey) throw err;
-    throw new Error(`Could not add the key: ${err instanceof ApiError ? err.message : String(err)}`);
+    throw new Error(`Could not add the key: ${errorText(err)}`);
   }
 }
 
@@ -856,7 +856,7 @@ function SSHLoginFields({
         setKeys(keys);
         onChange((l) => (l.key ? l : { ...l, key: keys[0]?.path || OWN_KEY }));
       },
-      (err) => setError(err instanceof ApiError ? err.message : String(err)),
+      (err) => setError(errorText(err)),
     );
     // Only once: the keys on this machine do not change while the form is open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -877,7 +877,7 @@ function SSHLoginFields({
       const { key: k } = await api.newSSHKey(newName.trim());
       added(k, `Key ${k.name} made`, `Now put it on ${serverName}.`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy('');
     }
@@ -890,7 +890,7 @@ function SSHLoginFields({
       setOwnKey('');
       added(k, `Key ${k.name} added`, 'Kept on this machine, readable only by Nightjar.');
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy('');
     }
@@ -1101,7 +1101,7 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
       refresh();
     } catch (err) {
       if (err instanceof ApiError && err.hostKey) setHostKey(err.hostKey);
-      else setError(err instanceof ApiError || err instanceof Error ? err.message : String(err));
+      else setError(errorText(err));
     } finally {
       setBusy('');
     }
@@ -1117,7 +1117,7 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
       setResult(null);
       refresh();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy('');
     }
@@ -1133,7 +1133,7 @@ function SSHAccess({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
       setResult(action === 'test' ? null : { action, ok: true, text: output });
       if (action !== 'test') notify({ tone: 'ok', title: `${SSH_DONE[action]} · ${h.name}` });
     } catch (err) {
-      if (action !== 'test') setResult({ action, ok: false, text: err instanceof ApiError ? err.message : String(err) });
+      if (action !== 'test') setResult({ action, ok: false, text: errorText(err) });
     } finally {
       setBusy('');
       refresh();
@@ -1375,7 +1375,7 @@ function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
       });
       refresh();
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not change the defense', body: e instanceof ApiError ? e.message : String(e) });
+      notify({ tone: 'error', title: 'Could not change the defense', body: errorText(e) });
     }
   };
   const unblock = async (address: string) => {
@@ -1384,7 +1384,7 @@ function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
       notify({ tone: 'ok', title: `${address} unblocked · ${h.name}`, body: 'Left alone for an hour.' });
       refresh();
     } catch (e) {
-      notify({ tone: 'error', title: `Could not unblock ${address}`, body: e instanceof ApiError ? e.message : String(e) });
+      notify({ tone: 'error', title: `Could not unblock ${address}`, body: errorText(e) });
     }
   };
   const r = h.readings;
@@ -1629,7 +1629,7 @@ function Detail({ h, refresh }: { h: RemoteHost; refresh: () => void }) {
 export function ServerDetail() {
   const { id = '' } = useParams();
   const fetchHost = useCallback(() => api.host(id), [id]);
-  const { data, error, refresh } = usePoll(fetchHost, 10000);
+  const { data, error, refresh } = usePoll(fetchHost, 10000, true, `host:${id}`);
   if (!data) {
     if (error)
       return (

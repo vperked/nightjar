@@ -396,7 +396,7 @@ function useStats() {
     history.current = [...history.current, ...fresh].slice(-maxSamples);
     return { ...s, history: history.current };
   }, []);
-  return usePoll(fetchStats, 5000);
+  return usePoll(fetchStats, 5000, true, 'stats');
 }
 
 export function Overview() {

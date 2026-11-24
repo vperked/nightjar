@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { ApiError, api, waitForRestart } from '../api/client';
+import { ApiError, api, waitForRestart, errorText } from '../api/client';
 import type { CheckSuggestion, SetupStatus, TestTarget } from '../api/types';
 import { Working } from '../components/Skeleton';
 import { useToast } from '../components/Toasts';
@@ -55,7 +55,7 @@ function useSaver(refresh: () => void) {
       notify({ tone: 'ok', title: `${what} saved` });
       refresh();
     } catch (err) {
-      notify({ tone: 'error', title: `Could not save ${what}`, body: err instanceof ApiError ? (Object.values(err.fields)[0] ?? err.message) : (err as Error).message });
+      notify({ tone: 'error', title: `Could not save ${what}`, body: err instanceof ApiError ? (Object.values(err.fields)[0] ?? err.message) : errorText(err) });
     } finally {
       setBusy(undefined);
     }
@@ -73,7 +73,7 @@ function useSaver(refresh: () => void) {
       }
       return r.ok;
     } catch (err) {
-      notify({ tone: 'error', title: 'Could not run the test', body: (err as Error).message });
+      notify({ tone: 'error', title: 'Could not run the test', body: errorText(err) });
       return false;
     } finally {
       setBusy(undefined);
@@ -241,7 +241,7 @@ function ChecksStep({ st, refresh }: { st: SetupStatus; refresh: () => void }) {
       try {
         await api.saveCheck(check(c));
       } catch (err) {
-        failed.push(`${c.name}: ${(err as Error).message}`);
+        failed.push(`${c.name}: ${errorText(err)}`);
       }
     }
     setAdding(false);

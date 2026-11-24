@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
-import { api } from '../api/client';
+import { api, errorText } from '../api/client';
 import { useCanEdit } from '../api/ConfigContext';
 import type { FirewallStatus, RemoteHost } from '../api/types';
 import { plural } from '../format';
@@ -15,7 +15,7 @@ export function FirewallSummary({ h }: { h: Pick<RemoteHost, 'id' | 'name'> }) {
   useEffect(() => {
     api.hostFirewall(h.id).then(
       (v) => setSt(v.firewall),
-      (e) => setError((e as Error).message),
+      (e) => setError(errorText(e)),
     );
   }, [h.id]);
   const to = `/network/firewall?server=${encodeURIComponent(h.id)}`;

@@ -52,3 +52,4 @@ coverage/
 *.orig
 *.rej
 .claude/settings.local.json
+.nightjar_kernel_tracking.json

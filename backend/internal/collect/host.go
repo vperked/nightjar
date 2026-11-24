@@ -454,6 +454,15 @@ func Interfaces() []Interface {
 	return out
 }
 
+// BootTime is when the machine booted, in unix seconds, or 0 when it cannot be read.
+func BootTime() float64 {
+	t, err := host.BootTime()
+	if err != nil {
+		return 0
+	}
+	return float64(t)
+}
+
 // System is host identity and uptime.
 type System struct {
 	Hostname        string `json:"hostname"`

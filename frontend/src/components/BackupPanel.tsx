@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { api, waitForRestart } from '../api/client';
+import { api, waitForRestart, errorText } from '../api/client';
 import { plural } from '../format';
 import { SettingsGroup } from './SettingsGroup';
 import { Working } from './Skeleton';
@@ -34,7 +34,7 @@ export function BackupPanel() {
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not make the backup', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not make the backup', body: errorText(e) });
     }
   };
   const pick = async (f: File | undefined) => {
@@ -44,7 +44,7 @@ export function BackupPanel() {
       if (!data.nightjar) throw new Error('That is not a Nightjar backup.');
       setPending({ name: f.name, data });
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not read the file', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not read the file', body: errorText(e) });
     }
     if (file.current) file.current.value = '';
   };
@@ -66,7 +66,7 @@ export function BackupPanel() {
         await waitForRestart();
       }
     } catch (e) {
-      notify({ tone: 'error', title: 'Could not restore it', body: (e as Error).message });
+      notify({ tone: 'error', title: 'Could not restore it', body: errorText(e) });
     } finally {
       setBusy(false);
     }
