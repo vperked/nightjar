@@ -418,6 +418,15 @@ func buildContext(cfg config.Settings, db *storage.Store) *monitor.Context {
 		if c, err := plex.New(cfg.PlexURL, cfg.PlexToken, cfg.PlexVerifyTLS, 5*time.Second); err == nil {
 			ctx.Plex = plex.NewMonitor(c, cfg.PlexCheckInterval, cfg.PlexRetries)
 			log.Info("Plex monitoring enabled", "url", cfg.PlexURL)
+			if dir := cfg.PlexDataDir; dir != "" {
+				if st, err := os.Stat(dir); err == nil && st.IsDir() {
+					ctx.PlexLogs = plex.NewLogWatcher(dir)
+					ctx.PlexLogs.Poll() // where the log and crash reports stand now
+					log.Info("Plex failure alerts enabled", "dir", dir)
+				} else {
+					log.Info("Plex failure alerts off: no Plex data folder here (set PLEX_DATA_DIR)", "dir", dir)
+				}
+			}
 			if cfg.PlexToken == "" {
 				log.Warn("PLEX_TOKEN is not set; most Plex servers will reject the monitor's requests")
 			}

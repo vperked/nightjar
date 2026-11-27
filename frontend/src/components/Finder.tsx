@@ -105,7 +105,9 @@ export function Finder({ onToggleTheme }: { onToggleTheme: () => void }) {
     if (!settings && canEdit) api.settings().then(setSettings, () => undefined);
   }, [open]); // only on opening: settings arriving later must not clear what was typed
 
+  // Worked out only while open: closed, the checks' poll would rebuild the list for nobody.
   const items = useMemo<Item[]>(() => {
+    if (!open) return [];
     const go = (to: string) => () => navigate(to);
     const out: Item[] = PAGES.map(([label, to, words]) => ({ kind: 'Page', label, words: `${label} ${words}`.toLowerCase(), run: go(to) }));
     for (const d of DOCS) out.push({ kind: 'Help', label: d.title, hint: d.group, words: `${d.title} ${d.words} help docs how`.toLowerCase(), run: go(`/docs/${d.slug}`) });
@@ -141,7 +143,7 @@ export function Finder({ onToggleTheme }: { onToggleTheme: () => void }) {
       }
     }
     return out;
-  }, [checks, units, settings, navigate, notify, onToggleTheme, canEdit]);
+  }, [open, checks, units, settings, navigate, notify, onToggleTheme, canEdit]);
 
   const shown = useMemo(() => match(items, query), [items, query]);
   useEffect(() => setActive(0), [query]);

@@ -2,7 +2,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { ApiError, api, waitForRestart, errorText } from '../api/client';
 import type { SettingField, SettingsResponse, TestTarget } from '../api/types';
-import { AccountSection, ViewersSection } from '../components/Account';
+import { AccountSection, ViewersSection } from '../components/AccountSettings';
 import { SectionsPanel } from '../components/Sections';
 import { ActivityPanel } from '../components/ActivityPanel';
 import { AppearancePanel } from '../components/AppearancePanel';

@@ -6,7 +6,7 @@ import { useMenu } from '../hooks/useMenu';
 import { useNow } from '../hooks/useNow';
 import { MUTE_FOR, timeLeft } from './notifications';
 
-export const BellOffIcon = () => (
+const BellOffIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M8.7 3.9A6 6 0 0 1 18 9c0 3.1.6 5.2 1.3 6.6M17 17H4.5S6 15.5 6 9c0-.6.1-1.2.3-1.8M10.3 21a1.9 1.9 0 0 0 3.4 0M3 3l18 18" />
   </svg>

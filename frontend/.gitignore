@@ -1,2 +1,15 @@
-node_modules
-dist
+# Installed packages and tool caches.
+node_modules/
+.vite/
+
+# Build output. `npm run build` writes into backend/internal/web/dist (ignored from the root);
+# dist/ here is only from a stray `vite build --outDir dist`.
+dist/
+*.tsbuildinfo
+
+# Test coverage.
+coverage/
+
+# Screenshots taken while checking the UI by hand; app icons live in src/assets and public/.
+/audit/
+/*.png

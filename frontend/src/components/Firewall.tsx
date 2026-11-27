@@ -35,7 +35,7 @@ const caught = (hits: FirewallStatus['hits'], id: string) => hits?.[id]?.packets
 
 // UNIT says a rate's unit in words: "6/min" is "6 a minute".
 const UNIT: Record<string, string> = { sec: 'a second', min: 'a minute', hour: 'an hour' };
-export const rateWords = (rate?: string) => {
+const rateWords = (rate?: string) => {
   const [n, unit] = (rate ?? '').split('/');
   return `${n} ${UNIT[unit] ?? unit}`;
 };
@@ -1153,6 +1153,13 @@ function Glance({ st, rules, tool }: { st: FirewallStatus; rules: FirewallRule[]
   );
 }
 
+// SecondsLeft counts down to until (on the browser's clock) by itself, so the panel around it does
+// not redraw every second.
+function SecondsLeft({ until }: { until: number }) {
+  const now = useNow(1000);
+  return <span className="num">{Math.max(0, Math.round(until - now))}s</span>;
+}
+
 // DefaultChoice says what happens to incoming traffic no rule decides, and changes it: dropping it
 // first asks which open ports to keep open, then goes back by itself unless kept within a minute.
 function DefaultChoice({
@@ -1174,7 +1181,6 @@ function DefaultChoice({
   closing: FirewallPort[];
   disabled: boolean;
 }) {
-  const now = useNow(1000);
   const canEdit = useCanEdit();
   const tool = TOOL[st.tool];
   const def = st.default ?? '';
@@ -1208,7 +1214,6 @@ function DefaultChoice({
     await run('default', () => target.setDefault(next));
   };
 
-  const left = st.pending ? Math.max(0, Math.round(browserTime(st, st.pending.until) - now)) : 0;
   // A viewer still sees which way it is set: the choices stay, greyed out.
   const viewerTitle = canEdit ? undefined : "Viewers can't change this";
   return (
@@ -1281,7 +1286,7 @@ function DefaultChoice({
         <div className="fw-pending" role="alert">
           <p>
             <strong>{st.pending.default === 'drop' ? 'Now dropping what no rule allows.' : `Now leaving it to ${tool}.`}</strong> If this page still answers, keep it. It goes back by itself in{' '}
-            <span className="num">{left}s</span>, so a change that cut you off undoes itself.
+            <SecondsLeft until={browserTime(st, st.pending.until)} />, so a change that cut you off undoes itself.
           </p>
           {canEdit && (
             <div className="fw-ask-acts">

@@ -343,6 +343,8 @@ export function TrendChart({ series, height = 180, compact = false, raw = false,
     const rect = ref.current!.getBoundingClientRect();
     const t = t0 + ((e.clientX - rect.left - pad.left) / (rect.width - pad.left - pad.right)) * (t1 - t0);
     const p = nearest(series[0].points, Math.max(t0, Math.min(t1, t)));
+    // Moving within the same reading changes nothing, so it tells the parent nothing either.
+    if ((p ? p.t : null) === hoverT) return;
     setHoverT(p ? p.t : null);
     if (onScrub) onScrub(p ? { time: formatHover(p.t, t1 - t0), values: series.map((s) => nearest(s.points, p.t)?.v ?? null) } : null);
   };

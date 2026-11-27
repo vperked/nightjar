@@ -165,7 +165,7 @@ func (w *Watcher) sample(ctx context.Context, now time.Time) {
 		n, _ := t.Requests(table.BySource, web)
 		requests += n
 	}
-	busy := Busy{}
+	var busy Busy
 	if w.Busy != nil {
 		busy = w.Busy()
 	} else {

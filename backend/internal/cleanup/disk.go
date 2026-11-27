@@ -301,11 +301,6 @@ func or(dirs, def []string) []string {
 	return dirs
 }
 
-// CleanTemp removes files older than maxAgeDays (at least one hour) from the temp directories.
-func (c *Cleaner) CleanTemp(maxAgeDays float64) Stats {
-	return cleanTemp(c.tempDirs(), maxAgeDays)
-}
-
 func (c *Cleaner) tempDirs() []string {
 	return c.ResolveDirs(or(c.Opts.TempDirs, allowedTempBases), allowedTempBases)
 }

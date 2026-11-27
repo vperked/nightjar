@@ -59,7 +59,7 @@ export async function copyText(text: string, show?: Element | null): Promise<Cop
 }
 
 // copyKeys is the shortcut for copying on this machine: ⌘C on a Mac, Ctrl+C elsewhere.
-export const copyKeys = () => (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘C' : 'Ctrl+C');
+const copyKeys = () => (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘C' : 'Ctrl+C');
 
 // useCopy is a copy button's state: copy() copies, and label() says what the button reads now
 // ("Copy", "Copied", or "Press Ctrl+C" when the text could only be selected), back to "Copy" after

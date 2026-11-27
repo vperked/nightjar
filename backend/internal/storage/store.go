@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_ts ON notifications (ts);
 CREATE INDEX IF NOT EXISTS idx_notifications_status ON notifications (status);
+-- The unread ones alone, which the header's bell counts every time it polls.
+CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications (severity) WHERE read = 0;
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, created REAL NOT NULL, seen REAL NOT NULL, agent TEXT NOT NULL DEFAULT '', user TEXT NOT NULL DEFAULT '');
 -- One row per server per minute, for analytics: averages, peaks and the share of checks it answered.
 CREATE TABLE IF NOT EXISTS samples (
@@ -58,6 +60,8 @@ CREATE TABLE IF NOT EXISTS samples (
     mem_max REAL, latency_max REAL
 );
 CREATE INDEX IF NOT EXISTS idx_samples_host_ts ON samples (host, ts);
+-- For rolling up and pruning every host's minutes at once.
+CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples (ts);
 -- The same minutes rolled up into hours, kept far longer than the minutes, for trends over months.
 -- minutes is how many stored minutes each hour holds; averages are over those minutes.
 CREATE TABLE IF NOT EXISTS samples_hourly (
@@ -69,6 +73,7 @@ CREATE TABLE IF NOT EXISTS samples_hourly (
     minutes INTEGER NOT NULL,
     PRIMARY KEY (host, ts)
 );
+CREATE INDEX IF NOT EXISTS idx_samples_hourly_ts ON samples_hourly (ts);
 -- The minutes a server missed most of its checks in, kept as long as the hourly rows, so outages
 -- can be listed over months.
 CREATE TABLE IF NOT EXISTS samples_down (host TEXT NOT NULL, ts REAL NOT NULL, PRIMARY KEY (host, ts));

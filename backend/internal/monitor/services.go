@@ -178,9 +178,9 @@ func (h *serviceChecks) send(spec services.Spec, title string, r services.Result
 		if c := h.why(spec, r, now); c != nil {
 			fields = append(fields, field("Why", c.Text+" ("+c.Confidence+")", false))
 		}
-	}
-	if f, ok := diagnose.Text(r.Detail); ok && !r.Up {
-		fields = append(fields, field("Likely cause", "**"+f.Title+"**\n"+f.Fix, false))
+		if f, ok := diagnose.Text(r.Detail); ok {
+			fields = append(fields, field("Likely cause", "**"+f.Title+"**\n"+f.Fix, false))
+		}
 	}
 	fields = append(fields, extra...)
 	return discord.About(h.ctx.Webhook, "check:"+spec.Name).SendEmbed(spec.Name+" "+title, desc, sev, fields, "Uptime")

@@ -256,15 +256,45 @@ var sessionTitle = regexp.MustCompile(`^sshd(-session)?: [^\s@\[\]]+@\S+$`)
 // sshdSockets reads sshd's processes: the ports sshd listens on (those configured, with those its
 // listening sockets are on; 22 when none says), and the addresses of the connections its logged-in
 // sessions hold to one of them.
+func sshdSockets(proc string) (ports []uint16, logins []Login) {
+	s := scanSSHD(proc)
+	if s.holds() {
+		for _, p := range []string{"/net/tcp", "/net/tcp6"} {
+			f, err := os.Open(proc + p)
+			if err != nil {
+				continue
+			}
+			sc := bufio.NewScanner(f)
+			sc.Buffer(make([]byte, 64<<10), 1<<20)
+			var fl []string
+			for n := 0; sc.Scan() && n < maxSockets; n++ {
+				fl = fields(sc.Text(), fl)
+				s.add(fl)
+			}
+			f.Close()
+		}
+	}
+	return s.result()
+}
+
+// sshdScan is what sshd's processes hold: the sockets of its logged-in sessions and of its other
+// processes (by inode), with the ports its config names, and the connections to them found so far
+// in the connection tables.
 //
 // Only sshd's own processes count: any user can start a program named sshd, with a title like a
 // session's, and must not get its port kept open under a default drop, or its address spared from
 // blocks. A listener must run sshd's program as root. A session runs sshd's program too, as root or
 // as the user it let in (OpenSSH's privilege separation), and then its parent is sshd's root process
 // for that connection: a user cannot make that parent theirs.
-func sshdSockets(proc string) (ports []uint16, logins []Login) {
-	ports = configuredSSHPorts()
-	sessions, others := map[string]bool{}, map[string]bool{}
+type sshdScan struct {
+	ports            []uint16
+	sessions, others map[string]bool
+	held             []Login
+}
+
+// scanSSHD reads sshd's processes from where /proc is.
+func scanSSHD(proc string) *sshdScan {
+	s := &sshdScan{ports: configuredSSHPorts(), sessions: map[string]bool{}, others: map[string]bool{}}
 	dirs, _ := os.ReadDir(proc)
 	for _, d := range dirs {
 		if _, err := strconv.Atoi(d.Name()); err != nil {
@@ -281,9 +311,9 @@ func sshdSockets(proc string) (ports []uint16, logins []Login) {
 		}
 		cmdline, _ := os.ReadFile(filepath.Join(dir, "cmdline"))
 		title := strings.TrimSpace(strings.ReplaceAll(string(cmdline), "\x00", " "))
-		into := others
+		into := s.others
 		if sessionTitle.MatchString(title) {
-			into = sessions
+			into = s.sessions
 			if !p.root {
 				parent := readSSHDProcess(filepath.Join(proc, p.ppid))
 				if p.ppid == "" || !parent.sshd || !parent.root {
@@ -301,44 +331,67 @@ func sshdSockets(proc string) (ports []uint16, logins []Login) {
 			}
 		}
 	}
-	if len(sessions) == 0 && len(others) == 0 {
-		return sshdPorts(ports), nil
+	return s
+}
+
+// holds says whether sshd holds any socket to look for in the connection tables.
+func (s *sshdScan) holds() bool { return len(s.sessions) > 0 || len(s.others) > 0 }
+
+// add takes in the fields of one line of /proc/net/tcp or tcp6.
+func (s *sshdScan) add(fl []string) {
+	if len(fl) < 10 || fl[0] == "sl" {
+		return
 	}
-	// A session also holds the connections it forwards, and with ssh -R or X11 forwarding those
-	// others make to a port it listens on itself: its login is the one to sshd's own port.
-	var held []Login
-	for _, p := range []string{"/net/tcp", "/net/tcp6"} {
-		f, err := os.Open(proc + p)
-		if err != nil {
-			continue
+	switch {
+	case fl[3] == "0A":
+		if port := localPort(fl[1]); s.others[fl[9]] && port != 0 {
+			s.ports = append(s.ports, port)
 		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 64<<10), 1<<20)
-		for n := 0; sc.Scan() && n < maxSockets; n++ {
-			fl := strings.Fields(sc.Text())
-			if len(fl) < 10 || fl[0] == "sl" {
-				continue
-			}
-			switch {
-			case fl[3] == "0A":
-				if port := localPort(fl[1]); others[fl[9]] && port != 0 {
-					ports = append(ports, port)
-				}
-			case fl[3] == "01" && sessions[fl[9]]:
-				if ip := hexAddr(fl[2]); ip != nil {
-					held = append(held, Login{Address: ip.String(), Port: localPort(fl[1])})
-				}
-			}
+	case fl[3] == "01" && s.sessions[fl[9]]:
+		if ip := hexAddr(fl[2]); ip != nil {
+			s.held = append(s.held, Login{Address: ip.String(), Port: localPort(fl[1])})
 		}
-		f.Close()
 	}
-	ports = sshdPorts(ports)
-	for _, l := range held {
+}
+
+// result is the ports sshd listens on, and its logins. A session also holds the connections it
+// forwards, and with ssh -R or X11 forwarding those others make to a port it listens on itself: its
+// login is the one to sshd's own port.
+func (s *sshdScan) result() (ports []uint16, logins []Login) {
+	ports = sshdPorts(slices.Clone(s.ports))
+	if !s.holds() {
+		return ports, nil
+	}
+	for _, l := range s.held {
 		if slices.Contains(ports, l.Port) && !slices.Contains(logins, l) {
 			logins = append(logins, l)
 		}
 	}
 	return ports, logins
+}
+
+// fields is strings.Fields for the connection tables' ASCII lines, into buf's room, so a table of
+// many lines is split without a new slice for each.
+func fields(line string, buf []string) []string {
+	buf = buf[:0]
+	for i := 0; i < len(line); {
+		for i < len(line) && asciiSpace(line[i]) {
+			i++
+		}
+		j := i
+		for j < len(line) && !asciiSpace(line[j]) {
+			j++
+		}
+		if j > i {
+			buf = append(buf, line[i:j])
+		}
+		i = j
+	}
+	return buf
+}
+
+func asciiSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
 // sshdPorts are ports sorted without repeats, 22 when there are none.

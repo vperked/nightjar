@@ -3278,7 +3278,7 @@ function route(method: string, url: URL, body: unknown): Response {
 }
 
 // The demo's admin account: sign in as demo, password demo. The sign-in screen says so in the demo.
-export const DEMO_LOGIN = { username: 'demo', password: 'demo' };
+const DEMO_LOGIN = { username: 'demo', password: 'demo' };
 
 // The demo's viewers: read-only accounts, as the admin makes them under Settings. One comes with the
 // demo (viewer, password "viewer password"), so the read-only dashboard can be tried.

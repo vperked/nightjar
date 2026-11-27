@@ -89,8 +89,9 @@ type Server struct {
 	statsAt  time.Time
 	statsTTL time.Duration
 
-	days dayCache   // the status page's days per check
-	ends endedCache // when recent incidents ended, for the status page's notices
+	days     dayCache     // the status page's days per check
+	ends     endedCache   // when recent incidents ended, for the status page's notices
+	findings findingCache // what the log's warnings point to, for the log viewer
 
 	testMu   sync.Mutex
 	lastTest time.Time // when a test alert last went out
@@ -1128,8 +1129,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if disk.Total > 0 && free < 1 {
 		degrade("Low disk space (<1GB free)")
 	}
-	sys := collect.SystemInfo()
-	checks["system"] = check{Status: "ok", UptimeHours: round(float64(sys.UptimeSeconds)/3600, 1)}
+	checks["system"] = check{Status: "ok", UptimeHours: round(float64(collect.UptimeSeconds())/3600, 1)}
 	if s.ctx.Sensors.Available() {
 		c := check{Status: "ok"}
 		if t := s.ctx.Sensors.CPUTemperature(); t != nil {

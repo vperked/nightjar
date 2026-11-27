@@ -33,7 +33,7 @@ const PAGE: [string, string][] = [
 const COLOR = { good: '#0ca30c', bad: '#d03b3b' };
 
 // MARK is Nightjar's crescent and star on a black tile.
-export const MARK = `<rect width='32' height='32' rx='8' fill='#0a0a0a'/><path d='M26 19.2A10.9 10.9 0 1 1 12.8 6a8.7 8.7 0 0 0 13.2 13.2z' fill='none' stroke='#fff' stroke-width='2.6' stroke-linejoin='round'/><circle cx='22.9' cy='7.6' r='1.9' fill='#fff'/>`;
+const MARK = `<rect width='32' height='32' rx='8' fill='#0a0a0a'/><path d='M26 19.2A10.9 10.9 0 1 1 12.8 6a8.7 8.7 0 0 0 13.2 13.2z' fill='none' stroke='#fff' stroke-width='2.6' stroke-linejoin='round'/><circle cx='22.9' cy='7.6' r='1.9' fill='#fff'/>`;
 
 // favicon is the mark with a green dot while all is well, or a red badge counting the problems,
 // which reads better than the mark at tab size.

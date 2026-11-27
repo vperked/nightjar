@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,33 +38,33 @@ func PerCore() ([]float64, error) {
 
 // Freq returns current, min and max frequency of the first CPU.
 func Freq() CPUFreq {
-	infos, err := cpu.Info()
 	var f CPUFreq
-	if err == nil && len(infos) > 0 {
-		f.Max = infos[0].Mhz
-	}
-	if data, err := os.ReadFile("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"); err == nil {
-		var khz float64
-		if _, err := fmt.Sscan(strings.TrimSpace(string(data)), &khz); err == nil {
-			f.Current = khz / 1000
-		}
-	}
-	if data, err := os.ReadFile("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"); err == nil {
-		var khz float64
-		if _, err := fmt.Sscan(strings.TrimSpace(string(data)), &khz); err == nil {
-			f.Max = khz / 1000
-		}
-	}
-	if data, err := os.ReadFile("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq"); err == nil {
-		var khz float64
-		if _, err := fmt.Sscan(strings.TrimSpace(string(data)), &khz); err == nil {
-			f.Min = khz / 1000
+	f.Current = khzFile("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")
+	f.Max = khzFile("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
+	f.Min = khzFile("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq")
+	// Without cpufreq, the rated speed /proc/cpuinfo gives; parsing it costs more than the rest.
+	if f.Max == 0 {
+		if infos, err := cpu.Info(); err == nil && len(infos) > 0 {
+			f.Max = infos[0].Mhz
 		}
 	}
 	if f.Current == 0 {
 		f.Current = f.Max
 	}
 	return f
+}
+
+// khzFile reads a cpufreq file's kHz as MHz, 0 when it cannot be read.
+func khzFile(path string) float64 {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var khz float64
+	if _, err := fmt.Sscan(strings.TrimSpace(string(data)), &khz); err != nil {
+		return 0
+	}
+	return khz / 1000
 }
 
 // LoadAverage returns the 1, 5 and 15 minute load, or nil where unsupported.
@@ -294,7 +295,7 @@ func physicalDisk(name string) bool {
 
 // DiskIO sums the physical disks' counters (every device's where none can be told apart).
 func DiskIO() (IO, error) {
-	counters, err := disk.IOCounters()
+	counters, err := diskCounters()
 	if err != nil {
 		return IO{}, err
 	}
@@ -313,6 +314,45 @@ func DiskIO() (IO, error) {
 		return physical, nil
 	}
 	return all, nil
+}
+
+// diskCounters is each block device's bytes read and written. On Linux it reads /proc/diskstats
+// itself, as gopsutil's IOCounters does but without the udev lookups that makes for each device's
+// serial number and label, which cost far more than the counters. Devices with every counter at
+// zero are left out, as gopsutil leaves them out.
+func diskCounters() (map[string]IO, error) {
+	out := map[string]IO{}
+	if runtime.GOOS != "linux" {
+		counters, err := disk.IOCounters()
+		for name, c := range counters {
+			out[name] = IO{ReadBytes: c.ReadBytes, WriteBytes: c.WriteBytes}
+		}
+		return out, err
+	}
+	data, err := os.ReadFile(procRoot + "/diskstats")
+	if err != nil {
+		return nil, err
+	}
+	for line := range strings.Lines(string(data)) {
+		// major minor name, then reads, merged reads, sectors read, read time, writes, merged
+		// writes, sectors written, write time, in progress, I/O time, weighted I/O time.
+		f := strings.Fields(line)
+		if len(f) < 14 {
+			continue
+		}
+		var v [11]uint64
+		busy := false
+		for i := range v {
+			if v[i], err = strconv.ParseUint(f[3+i], 10, 64); err != nil {
+				return out, err
+			}
+			busy = busy || v[i] != 0
+		}
+		if busy {
+			out[f[2]] = IO{ReadBytes: v[2] * 512, WriteBytes: v[6] * 512}
+		}
+	}
+	return out, nil
 }
 
 // physicalInterface is a network interface with hardware behind it: not loopback, a bridge, a
@@ -393,6 +433,11 @@ func (m *BandwidthMeter) Read() (Bandwidth, bool) {
 	if err != nil {
 		return Bandwidth{}, false
 	}
+	return m.Add(io)
+}
+
+// Add is Read for counters the caller has just read from NetworkIO.
+func (m *BandwidthMeter) Add(io IO) (Bandwidth, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
@@ -461,6 +506,16 @@ func BootTime() float64 {
 		return 0
 	}
 	return float64(t)
+}
+
+// UptimeSeconds is how long the machine has been up, or 0 when it cannot be read: SystemInfo's
+// uptime without the rest, which reads a good deal more.
+func UptimeSeconds() int64 {
+	up, err := host.Uptime()
+	if err != nil {
+		return 0
+	}
+	return int64(up)
 }
 
 // System is host identity and uptime.

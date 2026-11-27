@@ -14,7 +14,7 @@ const FOCUSABLE = [
 
 // focusables lists what Tab reaches inside root, in order. Ones hidden by CSS (a column hidden on a
 // phone, say) are left out, as Tab skips them; without layout (tests) every one counts.
-export function focusables(root: HTMLElement): HTMLElement[] {
+function focusables(root: HTMLElement): HTMLElement[] {
   const all = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => !el.closest('fieldset:disabled, [inert], [hidden]'));
   const shown = all.filter((el) => el.getClientRects().length > 0);
   return shown.length ? shown : all;

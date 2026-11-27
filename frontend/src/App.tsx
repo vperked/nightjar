@@ -7,7 +7,7 @@ import { NotificationsProvider } from './api/NotificationsContext';
 import { ServicesProvider, useServices } from './api/ServicesContext';
 import type { AppConfig } from './api/types';
 import { UpdatesProvider, useWaitingUpdates } from './api/UpdatesContext';
-import { CreateAdmin, SignIn, ViewerAccountPage } from './components/Account';
+import { CreateAdmin, SignIn } from './components/Account';
 import { AccountMenu } from './components/AccountMenu';
 import { Bell } from './components/Bell';
 import { SectionOff, type SectionID } from './components/Sections';
@@ -54,6 +54,7 @@ const pages = {
   status: () => import('./pages/StatusPage'),
   system: () => import('./pages/SystemServices'),
   updates: () => import('./pages/Updates'),
+  account: () => import('./components/AccountSettings'),
 };
 
 // A tab left open across a UI update can ask for a page file that is no longer there. When a page
@@ -104,6 +105,7 @@ const WeeklyReportPage = lazy(() => opened(pages.report()).then((m) => ({ defaul
 const PluginsPage = lazy(() => opened(pages.plugins()).then((m) => ({ default: m.PluginsPage })));
 const SystemServicesPage = lazy(() => opened(pages.system()).then((m) => ({ default: m.SystemServicesPage })));
 const UpdatesPage = lazy(() => opened(pages.updates()).then((m) => ({ default: m.UpdatesPage })));
+const ViewerAccountPage = lazy(() => opened(pages.account()).then((m) => ({ default: m.ViewerAccountPage })));
 
 // usePrefetchPages fetches every page's code once the page on screen has what it asked for, so the
 // next tab opens at once. It waits for the browser to be idle and for the page's own requests to be

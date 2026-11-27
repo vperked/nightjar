@@ -1,7 +1,8 @@
 // Package agent is the small program that runs on a server the dashboard watches from elsewhere.
 // It samples the machine every few seconds and answers the dashboard's polls with the latest
-// readings: CPU, memory, temperatures, fans, GPU, disks, drives, network and uptime. It only
-// reports; it changes nothing on the machine.
+// readings: CPU, memory, temperatures, fans, GPU, disks, drives, network and uptime. Over the HTTPS
+// its token pins, it also lets the dashboard manage the machine's firewall, SSH logins, Tailscale and
+// software updates, and replace the agent with the dashboard's own build.
 package agent
 
 import (

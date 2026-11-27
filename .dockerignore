@@ -1,16 +1,52 @@
+# The image needs only frontend/ (package files and sources) and backend/ (go.mod, go.sum and
+# sources); see Dockerfile. Everything below stays out of the build context.
+
+# Version control, CI and local tool settings.
 .git
-**/node_modules
-bin
-dist
-*.log
-*.log.*
-*.db*
-.env
-# Build output and this machine's own files: the image builds its own.
-web
+.github
+.claude
+
+# Secrets and this machine's settings, wherever they are.
+**/.env
+**/.env.*
+services.json
+nightjar-*.json
+**/*.pem
+**/*.key
+**/id_rsa*
+**/id_ed25519*
+
+# What Nightjar writes while it runs: databases, logs, kernel monitor state, SSH keys, plugins and
+# repair scripts installed on this machine.
+**/*.db
+**/*.db-*
+**/*.log
+**/*.log.*
+.nightjar_kernel_tracking.json
 ssh
 plugins
+repairs
+
+# Build output: the image builds its own UI and agent. The embed folders keep their .gitkeep.
+**/node_modules
+bin
+backend/bin
+dist
+web
 **/*.tsbuildinfo
-backend/internal/web/dist/assets
-backend/internal/web/dist/index.html
-backend/internal/agentbin/dist/*.gz
+backend/internal/web/dist/*
+!backend/internal/web/dist/.gitkeep
+backend/internal/agentbin/dist/*
+!backend/internal/agentbin/dist/.gitkeep
+
+# Screenshots, test output and editor files.
+frontend/audit
+frontend/*.png
+**/coverage
+**/*.out
+**/*.prof
+**/*.pprof
+**/.DS_Store
+**/.idea
+**/.vscode
+**/*.swp

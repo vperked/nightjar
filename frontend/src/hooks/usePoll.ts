@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { UnauthorizedError } from '../api/client';
 
 export interface Poll<T> {
@@ -21,6 +21,24 @@ const rememberFor = 10 * 60_000;
 
 export function forgetPolls() {
   remembered.clear();
+  asking.clear();
+}
+
+// asking is each poll's request still on its way, by key, so components polling the same thing (the
+// header's health mark and the overview both watch system services) share one request instead of
+// each sending their own. A refresh sends its own: one already out may predate the change.
+const asking = new Map<unknown, Promise<unknown>>();
+
+function ask<T>(key: unknown, fetcher: () => Promise<T>, fresh: boolean): Promise<T> {
+  const out = asking.get(key) as Promise<T> | undefined;
+  if (out && !fresh) return out;
+  const p = fetcher();
+  asking.set(key, p);
+  const done = () => {
+    if (asking.get(key) === p) asking.delete(key);
+  };
+  p.then(done, done);
+  return p;
 }
 
 const recall = <T>(key: unknown): T | undefined => {
@@ -64,7 +82,7 @@ export function usePoll<T>(fetcher: () => Promise<T>, intervalMs: number, enable
     lastRun.current = Date.now();
     const k = keyOf.current;
     try {
-      const next = await f();
+      const next = await ask(k, f, refresh);
       // A reply that may predate a change waits for the one asked for after it.
       if (current.current !== f || again.current) return;
       remembered.set(k, { data: next, at: Date.now() });
@@ -111,6 +129,9 @@ export function usePoll<T>(fetcher: () => Promise<T>, intervalMs: number, enable
     // key goes with the fetcher: a new key alone (same fetcher) asks for nothing new.
   }, [fetcher, run, intervalMs, enabled]);
 
-  // Data is kept when the fetcher changes, so pages that ignore stale do not flicker.
-  return { data: got?.data, error, unauthorized, loading, stale: got !== undefined && got.from !== fetcher, refresh };
+  // Data is kept when the fetcher changes, so pages that ignore stale do not flicker. The result
+  // only changes with what it says, so a context passing it on does not redraw every reader for nothing.
+  const data = got?.data;
+  const stale = got !== undefined && got.from !== fetcher;
+  return useMemo(() => ({ data, error, unauthorized, loading, stale, refresh }), [data, error, unauthorized, loading, stale, refresh]);
 }

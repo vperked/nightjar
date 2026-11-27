@@ -62,17 +62,19 @@ type Context struct {
 	QBittorrentBoard *qbittorrent.Board
 	Services         *services.Monitor
 	Plex             *plex.Monitor
-	Updates          *updates.Manager
-	Units            *units.Monitor
-	Drives           *smart.Reader
-	Network          *netload.Meter        // the dashboard's live network meter
-	Store            *storage.Store        // the database, for state kept across restarts (nil-safe)
-	Apps             *apps.Manager         // the app store
-	Plugins          *plugins.Manager      // the owner's own checks, cards and alert channels
-	Repairs          *repair.Runner        // repairs checks that go down, when they say how
-	Maintenance      *maintenance.Manager  // planned downtime
-	MediaCleanup     *mediacleanup.Manager // removes what nobody watches
-	DiscordBot       *discord.Bot          // when alerts go through a bot, for its button clicks
+	// PlexLogs reads Plex's log and crash reports for failures its API does not show; nil when off.
+	PlexLogs     *plex.LogWatcher
+	Updates      *updates.Manager
+	Units        *units.Monitor
+	Drives       *smart.Reader
+	Network      *netload.Meter        // the dashboard's live network meter
+	Store        *storage.Store        // the database, for state kept across restarts (nil-safe)
+	Apps         *apps.Manager         // the app store
+	Plugins      *plugins.Manager      // the owner's own checks, cards and alert channels
+	Repairs      *repair.Runner        // repairs checks that go down, when they say how
+	Maintenance  *maintenance.Manager  // planned downtime
+	MediaCleanup *mediacleanup.Manager // removes what nobody watches
+	DiscordBot   *discord.Bot          // when alerts go through a bot, for its button clicks
 	// Activity records something done, by whom (for the activity log); nil records nothing.
 	Activity func(who, kind, target, detail string)
 	Docker   *docker.Client    // containers, for container checks and repairs
@@ -351,6 +353,7 @@ func withTimeout[T any](c *Context, timeout time.Duration, def T, name string, f
 		defer func() {
 			if p := recover(); p != nil {
 				log.Error("panic in "+name, "panic", p)
+				ch <- def // rather than leave the loop waiting out the timeout
 			}
 		}()
 		ch <- fn()

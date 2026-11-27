@@ -80,14 +80,15 @@ func (c *collector) collectPeripherals(s *Snapshot) {
 	if ctx.Sensors.Available() {
 		s.CPUTemp = ctx.Sensors.CPUTemperature()
 	}
-	// The loop is the meter's only reader, so each rate covers exactly one cycle.
-	if bw, ok := ctx.Bandwidth.Read(); ok {
-		s.Bandwidth = &bw
-		mbps := (bw.SentPerSec + bw.RecvPerSec) / (1024 * 1024)
-		s.NetworkMBps = &mbps
-	}
+	// The loop is the meter's only reader, so each rate covers exactly one cycle. One read of the
+	// counters serves both.
 	if io, err := collect.NetworkIO(); err == nil {
 		s.NetworkIO = &io
+		if bw, ok := ctx.Bandwidth.Add(io); ok {
+			s.Bandwidth = &bw
+			mbps := (bw.SentPerSec + bw.RecvPerSec) / (1024 * 1024)
+			s.NetworkMBps = &mbps
+		}
 	}
 	if io, err := collect.DiskIO(); err == nil {
 		s.DiskIO = &io

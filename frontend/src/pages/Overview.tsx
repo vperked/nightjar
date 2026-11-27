@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { api } from '../api/client';
 import { useCharts } from '../appearance';
@@ -53,6 +53,8 @@ export function Readout({
   gauge?: boolean;
 }) {
   const [scrub, setScrub] = useState<Scrub | null>(null);
+  // Kept while scrubbing, so the chart is not worked out again at every move of the pointer.
+  const series = useMemo(() => [{ label, color, points }], [label, color, points]);
   const v = scrub?.values[0];
   return (
     <div className={`readout ${scrub ? 'scrubbing' : ''}`} style={{ ['--metric' as string]: color }}>
@@ -62,7 +64,7 @@ export function Readout({
         {unit && <span className="unit">{unit}</span>}
       </div>
       <div className="readout-sub">{scrub ? `at ${scrub.time}` : sub}</div>
-      {gauge ? <Gauge percent={value} /> : <TrendChart series={[{ label, color, points }]} height={60} compact format={pct} onScrub={setScrub} />}
+      {gauge ? <Gauge percent={value} /> : <TrendChart series={series} height={60} compact format={pct} onScrub={setScrub} />}
     </div>
   );
 }
@@ -71,10 +73,13 @@ function NetworkReadout({ stats, rx, tx }: { stats: Stats; rx: Point[]; tx: Poin
   const [scrub, setScrub] = useState<Scrub | null>(null);
   const charts = useCharts();
   const bw = stats.network.bandwidth;
-  const series = [
-    { label: 'In', color: 'var(--series-1)', points: rx },
-    { label: 'Out', color: 'var(--series-2)', points: tx },
-  ];
+  const series = useMemo(
+    () => [
+      { label: 'In', color: 'var(--series-1)', points: rx },
+      { label: 'Out', color: 'var(--series-2)', points: tx },
+    ],
+    [rx, tx],
+  );
   const rate = (i: number, now: number | undefined) => {
     if (scrub) {
       const v = scrub.values[i];

@@ -7,7 +7,7 @@ import { useToast } from './Toasts';
 // Sections are parts of the dashboard that can be turned off in Settings. Monitoring carries on
 // either way: alerts still go out for a hidden section, it only leaves the screen.
 
-export const SECTIONS = [
+const SECTIONS = [
   { id: 'servers', label: 'Servers', group: 'Pages', hint: 'Other machines, watched through their agents' },
   { id: 'network', label: 'Network', group: 'Pages', hint: 'The live network meter tab' },
   { id: 'media', label: 'Media', group: 'Pages', hint: 'Plex and qBittorrent' },

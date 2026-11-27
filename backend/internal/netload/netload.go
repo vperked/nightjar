@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -289,6 +290,13 @@ func (m *Meter) addSockets(now time.Time, socks []Socket) {
 	for _, t := range byProc {
 		slices.Sort(t.PIDs)
 	}
+	// Names are kept for the processes still connected, so a page left open for weeks does not
+	// gather every process that ever was, nor name a new process by the one its PID was before.
+	live := make(map[int]bool, len(m.names))
+	for _, s := range cur {
+		live[s.PID] = true
+	}
+	maps.DeleteFunc(m.names, func(pid int, _ [2]string) bool { return !live[pid] })
 	m.talkers = busiestFirst(byProc, func(t Talker) (float64, int, string) { return t.RX + t.TX, t.Connections, t.Name })
 	m.hosts = busiestFirst(byHost, func(h Host) (float64, int, string) { return h.RX + h.TX, h.Connections, h.Peer })
 	m.hosts = m.hosts[:min(len(m.hosts), topN)]

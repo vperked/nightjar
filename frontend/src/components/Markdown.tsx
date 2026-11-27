@@ -1,4 +1,4 @@
-import { Fragment, useRef, type ReactNode } from 'react';
+import { Fragment, memo, useMemo, useRef, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useCopy } from '../clipboard';
 
@@ -44,7 +44,7 @@ const cells = (line: string) =>
 const listItem = /^(\s*)([-*]|\d+\.)\s+(.*)$/;
 
 // parse splits a document into blocks.
-export function parse(source: string): Block[] {
+function parse(source: string): Block[] {
   const lines = source.replace(/\r\n/g, '\n').split('\n');
   const blocks: Block[] = [];
   let i = 0;
@@ -128,7 +128,7 @@ function DocLink({ href, children }: { href: string; children: ReactNode }) {
 }
 
 // Inline renders a line's code, bold, links and keys.
-export function Inline({ text }: { text: string }) {
+function Inline({ text }: { text: string }) {
   const out: ReactNode[] = [];
   let last = 0;
   for (const m of text.matchAll(token)) {
@@ -343,10 +343,13 @@ function Blocks({ blocks }: { blocks: Block[] }) {
   );
 }
 
-export function Markdown({ source }: { source: string }) {
+// A page is parsed once, and drawn again only when it changes: the docs page around it redraws as
+// the reader scrolls from section to section.
+export const Markdown = memo(function Markdown({ source }: { source: string }) {
+  const blocks = useMemo(() => parse(source), [source]);
   return (
     <div className="doc-body">
-      <Blocks blocks={parse(source)} />
+      <Blocks blocks={blocks} />
     </div>
   );
-}
+});

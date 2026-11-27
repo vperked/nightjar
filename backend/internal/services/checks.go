@@ -210,8 +210,14 @@ func CheckHTTP(s Spec) Result {
 		return down(describeHTTPErr(err, s.Timeout))
 	}
 	defer resp.Body.Close()
-	// A body that stalls or breaks off is a failing server, even after a good status.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	// A body that stalls or breaks off is a failing server, even after a good status. It is only
+	// kept when there is a keyword to look for in it.
+	var body []byte
+	if s.Keyword != "" {
+		body, err = io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	} else {
+		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
+	}
 	if err != nil {
 		return downAfter(start, fmt.Sprintf("HTTP %d, but the response broke off: %s", resp.StatusCode, describeHTTPErr(err, s.Timeout)))
 	}

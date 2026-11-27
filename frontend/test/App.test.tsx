@@ -8,7 +8,8 @@ import { ServicesProvider, useServices } from '../src/api/ServicesContext';
 import type { Notification, PlexStream, QBState, QBTorrent, Service, SettingField, SetupStatus, Unit, UpdateTarget, UpdatesResponse } from '../src/api/types';
 import { UpdatesProvider } from '../src/api/UpdatesContext';
 import { buildIn, useNewBuild } from '../src/freshness';
-import { AccountSection, CreateAdmin, SignIn, ViewerAccountPage, ViewersSection } from '../src/components/Account';
+import { CreateAdmin, SignIn } from '../src/components/Account';
+import { AccountSection, ViewerAccountPage, ViewersSection } from '../src/components/AccountSettings';
 import { AccountMenu } from '../src/components/AccountMenu';
 import { SectionsPanel } from '../src/components/Sections';
 import { AppearancePanel } from '../src/components/AppearancePanel';
@@ -3182,7 +3183,7 @@ describe('SSH for a watched server', () => {
     const key = { path: '/srv/nightjar/ssh/laptop', name: 'laptop', type: 'ED25519', fingerprint: 'SHA256:x', public: 'ssh-ed25519 AAAAMINE laptop', own: true };
     const vps = {
       id: 'v1',
-      name: 'USVA-2',
+      name: 'vps-2',
       address: '203.0.113.40',
       added: 0,
       kind: 'ssh',
@@ -3190,8 +3191,8 @@ describe('SSH for a watched server', () => {
       readings: null,
       history: [],
       problems: [],
-      ssh: { host: '203.0.113.40', port: 655, user: 'root', key: key.path },
-      ssh_command: 'ssh -i /srv/nightjar/ssh/laptop -p 655 root@203.0.113.40',
+      ssh: { host: '203.0.113.40', port: 2222, user: 'root', key: key.path },
+      ssh_command: 'ssh -i /srv/nightjar/ssh/laptop -p 2222 root@203.0.113.40',
     };
     let added: unknown;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
@@ -3204,7 +3205,7 @@ describe('SSH for a watched server', () => {
       if (url === '/api/hosts/token') return json({ token: 'f'.repeat(48), port: 9101 });
       if (url === '/api/ssh/keys') return json({ keys: [key] });
       if (url === '/api/hosts/v1') return json({ host: vps });
-      if (url === '/api/services') return json({ services: [svc({ name: 'USVA-2', target: '203.0.113.40:655', server: 'v1' })] });
+      if (url === '/api/services') return json({ services: [svc({ name: 'vps-2', target: '203.0.113.40:2222', server: 'v1' })] });
       return json({}, 404);
     });
     const { unmount } = render(
@@ -3219,11 +3220,11 @@ describe('SSH for a watched server', () => {
     fireEvent.click(within(sheet).getByLabelText(/SSH only/));
     expect(within(sheet).queryByText(/Download nightjar-agent/)).not.toBeInTheDocument();
     fireEvent.change(within(sheet).getByLabelText('Address'), { target: { value: '203.0.113.40' } });
-    fireEvent.change(within(sheet).getByLabelText('Name'), { target: { value: 'USVA-2' } });
+    fireEvent.change(within(sheet).getByLabelText('Name'), { target: { value: 'vps-2' } });
     expect(await within(sheet).findByText('Is laptop on the server already?')).toBeInTheDocument();
-    fireEvent.change(within(sheet).getByLabelText('Port'), { target: { value: '655' } });
+    fireEvent.change(within(sheet).getByLabelText('Port'), { target: { value: '2222' } });
     fireEvent.click(within(sheet).getByRole('button', { name: 'Add server' }));
-    await waitFor(() => expect(added).toEqual({ kind: 'ssh', name: 'USVA-2', ssh: { key: key.path, user: 'root', port: 655, host: '203.0.113.40' } }));
+    await waitFor(() => expect(added).toEqual({ kind: 'ssh', name: 'vps-2', ssh: { key: key.path, user: 'root', port: 2222, host: '203.0.113.40' } }));
     unmount();
 
     render(
@@ -3237,13 +3238,13 @@ describe('SSH for a watched server', () => {
         </ToastProvider>
       </MemoryRouter>,
     );
-    expect(await screen.findByText('ssh -i /srv/nightjar/ssh/laptop -p 655 root@203.0.113.40')).toBeInTheDocument();
+    expect(await screen.findByText('ssh -i /srv/nightjar/ssh/laptop -p 2222 root@203.0.113.40')).toBeInTheDocument();
     // No agent: nothing to restart, and its login is all it has, so it cannot be forgotten.
     expect(screen.queryByRole('button', { name: 'Restart agent' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Forget…' })).not.toBeInTheDocument();
     expect(screen.queryByText('CPU and memory')).not.toBeInTheDocument();
     const on = screen.getByText('Services on it').closest('section') as HTMLElement;
-    expect(await within(on).findByRole('link', { name: 'USVA-2' })).toBeInTheDocument();
+    expect(await within(on).findByRole('link', { name: 'vps-2' })).toBeInTheDocument();
     expect(screen.queryByLabelText('New token')).not.toBeInTheDocument();
   });
 

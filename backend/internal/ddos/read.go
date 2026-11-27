@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"slices"
 	"strconv"
@@ -113,7 +114,11 @@ const maxSockets = 200_000
 // listens on count: this machine talking to itself is not an attack, and neither are the connections
 // it opens itself, to a proxied app or a storage server. A half-open connection is always one made to
 // it.
-func ParseTCP(r io.Reader, t *Table) {
+func ParseTCP(r io.Reader, t *Table) { parseTCP(r, t, nil) }
+
+// parseTCP is ParseTCP that also hands sshd each line, when it holds sockets, so one read of the
+// table serves both: the kernel builds it afresh at each read, which is most of what reading it costs.
+func parseTCP(r io.Reader, t *Table, sshd *sshdScan) {
 	if t.listening == nil {
 		t.listening = map[uint16]bool{}
 	}
@@ -129,10 +134,17 @@ func ParseTCP(r io.Reader, t *Table) {
 	var later []pending
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	forSSHD := sshd != nil && sshd.holds()
+	var f []string
+	// Each reader stops at its own maxSockets: this one counts the table's connections, sshd's
+	// every line.
 	n := 0
-	for sc.Scan() && n < maxSockets {
-		f := strings.Fields(sc.Text())
-		if len(f) < 4 || f[0] == "sl" {
+	for line := 0; sc.Scan() && (n < maxSockets || forSSHD && line < maxSockets); line++ {
+		f = fields(sc.Text(), f)
+		if forSSHD && line < maxSockets {
+			sshd.add(f)
+		}
+		if n >= maxSockets || len(f) < 4 || f[0] == "sl" {
 			continue
 		}
 		n++
@@ -144,8 +156,8 @@ func ParseTCP(r io.Reader, t *Table) {
 		if state != "01" && state != "03" { // ESTABLISHED, SYN_RECV
 			continue
 		}
-		ip := hexAddr(f[2])
-		if ip == nil || ip.IsLoopback() {
+		ip, ok := decodeHexAddr(f[2])
+		if !ok || ip.IsLoopback() {
 			continue
 		}
 		key := ip.String()
@@ -201,22 +213,48 @@ func localPort(s string) uint16 {
 // hexAddr decodes a /proc/net/tcp address ("0100007F:1F90"): the kernel writes it as 32-bit words in
 // the machine's byte order.
 func hexAddr(s string) net.IP {
-	h, _, ok := strings.Cut(s, ":")
+	ip, ok := decodeHexAddr(s)
 	if !ok {
 		return nil
 	}
-	b, err := hex.DecodeString(h)
-	if err != nil || (len(b) != 4 && len(b) != 16) {
-		return nil
+	return ip.AsSlice()
+}
+
+// decodeHexAddr is hexAddr without allocating, for reading every line of a connection table. An
+// IPv4-mapped address comes back as IPv4.
+func decodeHexAddr(s string) (netip.Addr, bool) {
+	h, _, ok := strings.Cut(s, ":")
+	if !ok || (len(h) != 8 && len(h) != 32) {
+		return netip.Addr{}, false
 	}
-	ip := make(net.IP, len(b))
-	for w := 0; w < len(b); w += 4 {
-		ip[w], ip[w+1], ip[w+2], ip[w+3] = b[w+3], b[w+2], b[w+1], b[w]
+	var b [16]byte
+	for i := 0; i < len(h); i += 2 {
+		hi, ok1 := unhex(h[i])
+		lo, ok2 := unhex(h[i+1])
+		if !ok1 || !ok2 {
+			return netip.Addr{}, false
+		}
+		b[i/2] = hi<<4 | lo
 	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4
+	for w := 0; w < len(h)/2; w += 4 {
+		b[w], b[w+1], b[w+2], b[w+3] = b[w+3], b[w+2], b[w+1], b[w]
 	}
-	return ip
+	if len(h) == 8 {
+		return netip.AddrFrom4([4]byte(b[:4])), true
+	}
+	return netip.AddrFrom16(b).Unmap(), true
+}
+
+func unhex(c byte) (byte, bool) {
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0', true
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10, true
+	case 'A' <= c && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
 }
 
 // ParseUDPPorts reads the local ports of the sockets in a /proc/net/udp table that take packets from
@@ -261,13 +299,15 @@ func tracking(proc string) (conntrack, synCookiesOff bool) {
 
 func readTable(proc string) Table {
 	t := Table{BySource: map[string]*Peer{}}
+	sshd := scanSSHD(proc)
 	for _, p := range []string{"/net/tcp", "/net/tcp6"} {
 		if f, err := os.Open(proc + p); err == nil {
-			ParseTCP(f, &t)
+			parseTCP(f, &t, sshd)
 			f.Close()
 		}
 	}
-	for _, l := range SSHLogins(proc) {
+	_, logins := sshd.result()
+	for _, l := range logins {
 		t.peer(l.Address).SSH = true
 	}
 	return t

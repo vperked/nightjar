@@ -38,7 +38,7 @@ StartLimitBurst=5
 Type=simple
 `)
 	// Root is the default. Naming it anyway costs CAP_SETUID: systemd 255 starts a service with
-	// User=root, NoNewPrivileges and a sandbox option such as ProtectKernelModules without it, and
+	// User=root, NoNewPrivileges and a sandbox option such as ProtectControlGroups without it, and
 	// apt and git as a checkout's owner then cannot switch users.
 	asRoot := user == "" || user == "root"
 	if !asRoot {
@@ -70,7 +70,10 @@ StandardError=journal
 	if asRoot {
 		b.WriteString("NoNewPrivileges=true\n")
 	}
-	b.WriteString("ProtectKernelModules=true\nProtectControlGroups=true\n")
+	// No ProtectKernelModules: it hides /lib/modules from everything the service starts, apt included.
+	// A package upgrade that rebuilds an initramfs (a kernel, udev, systemd) then writes one with no
+	// modules in it, and the machine cannot find its root disk on the next boot.
+	b.WriteString("ProtectControlGroups=true\n")
 	if asRoot {
 		b.WriteString("RestrictSUIDSGID=true\n")
 	}

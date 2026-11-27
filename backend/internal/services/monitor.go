@@ -384,8 +384,10 @@ func (m *Monitor) Summaries(now float64) []Summary {
 		}
 		if st.LastResult != nil {
 			row.LatencyMS, row.Detail = st.LastResult.LatencyMS, st.LastResult.Detail
-			if f, ok := diagnose.Text(row.Detail); ok && !st.LastResult.Up {
-				row.Cause = &f
+			if !st.LastResult.Up {
+				if f, ok := diagnose.Text(row.Detail); ok {
+					row.Cause = &f
+				}
 			}
 		}
 		if st.LastCheck > 0 {

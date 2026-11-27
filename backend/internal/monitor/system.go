@@ -120,6 +120,11 @@ type driveWatcher struct {
 	lastErr  string
 	running  atomic.Bool
 	wg       sync.WaitGroup
+	// baselines and silent are what the database holds of each drive since it was first read here,
+	// so a database that is unavailable, or a read of it that fails, does not announce the same
+	// problem again at every read. Only the reading goroutine, one at a time, uses them.
+	baselines map[string]baseline
+	silent    map[string]bool
 }
 
 func (h *driveWatcher) check(s *Snapshot) {
@@ -213,9 +218,13 @@ func unansweredKey(d smart.Drive) string { return "smart.unanswered." + driveID(
 // unanswered announces, once per outage, a drive that was read before and now cannot be.
 func (h *driveWatcher) unanswered(d smart.Drive) {
 	key := unansweredKey(d)
-	if h.ctx.Store.Meta(key) != "" {
+	if h.silent[key] || h.ctx.Store.Meta(key) != "" {
 		return
 	}
+	if h.silent == nil {
+		h.silent = map[string]bool{}
+	}
+	h.silent[key] = true
 	h.ctx.Store.SetMeta(key, d.Error)
 	h.log.Warn("Drive stopped answering", "drive", driveName(d), "err", d.Error)
 	if hook := discord.About(h.ctx.Webhook, "drive:"+driveID(d)); hook != nil {
@@ -226,7 +235,8 @@ func (h *driveWatcher) unanswered(d smart.Drive) {
 
 // answering clears a drive's outage once it reads again, so the next one is announced too.
 func (h *driveWatcher) answering(d smart.Drive) {
-	if key := unansweredKey(d); h.ctx.Store.Meta(key) != "" {
+	if key := unansweredKey(d); h.silent[key] || h.ctx.Store.Meta(key) != "" {
+		delete(h.silent, key)
 		h.log.Info("Drive answering again", "drive", driveName(d))
 		h.ctx.Store.SetMeta(key, "")
 	}
@@ -235,8 +245,10 @@ func (h *driveWatcher) answering(d smart.Drive) {
 // compare announces what is new about a drive read every interval seconds.
 func (h *driveWatcher) compare(d smart.Drive, now, interval float64) {
 	key := "smart.baseline." + driveID(d)
-	var old baseline
-	json.Unmarshal([]byte(h.ctx.Store.Meta(key)), &old)
+	old, known := h.baselines[key]
+	if !known {
+		json.Unmarshal([]byte(h.ctx.Store.Meta(key)), &old)
+	}
 	cur := baselineOf(d)
 
 	var news []string
@@ -285,6 +297,10 @@ func (h *driveWatcher) compare(d smart.Drive, now, interval float64) {
 			return hook.SendEmbed("Drive running hot: "+driveName(d), msg, discord.Warning, fields, "Disk")
 		}, "drive_temperature", false)
 	}
+	if h.baselines == nil {
+		h.baselines = map[string]baseline{}
+	}
+	h.baselines[key] = cur
 	if data, err := json.Marshal(cur); err == nil {
 		h.ctx.Store.SetMeta(key, string(data))
 	}

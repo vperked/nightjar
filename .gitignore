@@ -3,10 +3,19 @@
 .env
 .env.*
 !frontend/.env.demo
+# The checks to import (SERVICES_FILE); services.example.json is the shared example.
+/services.json
+# Settings backups downloaded from the dashboard; they hold every secret.
+/nightjar-*.json
+# Keys and certificates, wherever they end up.
+*.pem
+*.key
+id_rsa*
+id_ed25519*
 
 # What Nightjar writes while it runs: logs, the database, kernel monitor state (KERNEL_TRACKING_FILE),
-# plugins installed on this machine (the examples live in examples/plugins), and the SSH keys it makes
-# to log in to other servers, private halves included.
+# plugins and repair scripts installed on this machine (the examples live in examples/plugins), and
+# the SSH keys it makes to log in to other servers, private halves included.
 *.log
 *.log.*
 *.db
@@ -15,6 +24,7 @@
 *.db-journal
 .nightjar_kernel_tracking.json
 /plugins/
+/repairs/
 /ssh/
 
 # Build output, made by make, build.sh and deploy-ui.sh; never committed. The two embed folders keep
@@ -26,22 +36,12 @@ backend/internal/web/dist/*
 !backend/internal/web/dist/.gitkeep
 backend/internal/agentbin/dist/*
 !backend/internal/agentbin/dist/.gitkeep
-*.tsbuildinfo
-
-# Frontend tooling.
-node_modules/
-.vite/
-coverage/
 
 # Go test binaries, coverage and profiles.
 *.test
 *.out
 *.prof
 *.pprof
-
-# Screenshots taken while checking the UI by hand; app icons live in frontend/src/assets.
-/frontend/audit/
-/frontend/*.png
 
 # Editors, OS and local tool settings.
 .DS_Store
@@ -52,4 +52,3 @@ coverage/
 *.orig
 *.rej
 .claude/settings.local.json
-.nightjar_kernel_tracking.json

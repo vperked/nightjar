@@ -6,7 +6,7 @@ import { Section } from './ui';
 import { Pager, usePaged } from './Pager';
 
 // The methods, for agents' views (which leave the list out) and before the first answer.
-export const ATTACK_METHODS: AttackMethod[] = [
+const ATTACK_METHODS: AttackMethod[] = [
   {
     id: 'syn_flood',
     name: 'SYN flood',
@@ -25,14 +25,14 @@ const methodOf = (id: string, methods: AttackMethod[]) => methods.find((m) => m.
 const big = (v: number) => (v > 0 && v < 1 ? 'under 1' : v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e4 ? `${Math.round(v / 1e3)}k` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}k` : `${Math.round(v)}`);
 
 // strength says a finding in its method's unit: "9.0k per second", "92% of the link".
-export function strength(f: AttackFinding, methods = ATTACK_METHODS): string {
+function strength(f: AttackFinding, methods = ATTACK_METHODS): string {
   const m = methodOf(f.method, methods);
   return f.method === 'volumetric' ? `${Math.round(f.value * 100)}% ${m.unit}` : `${big(f.value)} ${m.unit}`;
 }
 
 // describe names an attack: its exact kinds when known ("DNS amplification and SYN flood"), else its
 // methods.
-export function describe(a: Attack, methods = ATTACK_METHODS): string {
+function describe(a: Attack, methods = ATTACK_METHODS): string {
   const names = a.kinds?.length ? a.kinds.map((k) => k.name) : a.methods.map((f) => methodOf(f.method, methods).name);
   return names.length <= 1 ? (names[0] ?? 'an attack') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 }

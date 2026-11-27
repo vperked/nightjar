@@ -88,7 +88,7 @@ export function useSSHAccess(target: SSHTarget | undefined, name: string): SSHAc
 
 // sshPorts are the ports SSH listens on: as sshd says, else those the firewall keeps open for SSH,
 // else 22.
-export function sshPorts(access: SSHAccess | undefined, st: FirewallStatus): number[] {
+function sshPorts(access: SSHAccess | undefined, st: FirewallStatus): number[] {
   if (access?.ports.length) return access.ports;
   const open = (st.open ?? []).filter((o) => o.what === 'SSH').map((o) => o.port);
   return open.length ? [...new Set(open)] : [22];
@@ -164,7 +164,7 @@ const PRIVATE = /-----BEGIN [A-Z ]*PRIVATE KEY-----|PuTTY-User-Key-File|^b3BlbnN
 const PUBLIC = /^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp\d+|sk-[\w@.-]+)\s+[A-Za-z0-9+/=]{20,}(\s.*)?$/;
 
 // pastedGap says what is wrong with a pasted key, in words, or '' when it looks like a public key.
-export function pastedGap(text: string): string {
+function pastedGap(text: string): string {
   const key = text.trim();
   if (!key) return 'Paste the public key: one line starting ssh-ed25519, ssh-rsa or ecdsa-sha2-….';
   if (PRIVATE.test(key)) return 'That is a private key, which should never leave your computer. Paste the public half instead: the .pub file, such as ~/.ssh/id_ed25519.pub.';

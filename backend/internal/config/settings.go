@@ -171,6 +171,7 @@ type Settings struct {
 	PlexRetries        int
 	PlexNotifyStreams  bool
 	PlexTranscodeAlert int
+	PlexDataDir        string
 
 	ServicesFile         string
 	PluginsDir           string
@@ -391,6 +392,7 @@ func (s *Settings) declare() []Field {
 			integer(&s.PlexRetries, "PLEX_RETRIES", 2, 0, 20).describe("Retries before down", "", ""),
 			boolean(&s.PlexNotifyStreams, "PLEX_NOTIFY_STREAMS", false).describe("Announce new streams", "", ""),
 			integer(&s.PlexTranscodeAlert, "PLEX_TRANSCODE_ALERT", 0, 0, 100).describe("Alert at transcodes", "", "0 turns it off."),
+			text(&s.PlexDataDir, "PLEX_DATA_DIR", "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server").describe("Plex data folder", "", "Its logs and crash reports, read for alerts when files cannot be played, Plex crashes or its database is damaged. Empty turns them off."),
 		),
 		group("Media cleanup",
 			boolean(&s.MediaCleanup, "MEDIA_CLEANUP", false).describe("Remove what no one watches", "", "Movies and shows nobody has ever played go on a Leaving soon list, then are removed through Sonarr or Radarr, and their torrents once seeded."),

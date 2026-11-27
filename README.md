@@ -1,53 +1,50 @@
 # Nightjar
 
-Host health and service uptime monitoring with Discord alerts, a React dashboard and a public status page.
+Self-hosted monitoring for Linux servers: host health, uptime checks, incidents and alerts, with a React
+dashboard and a public status page.
 
 *A nightjar is a bird that comes alive after dark. This one keeps watch over your servers through the night, and wakes you when a disk fills at 3 am.*
+
+Nightjar is one Go binary with the React dashboard embedded in it. It runs on the machine it watches,
+so it can say not only that something is down but why. Here is what it covers:
+
+- **This machine:** CPU, memory, GPU, temperatures, disks and SMART drive health, network, processes,
+  systemd services and the kernel (crashes, hardware errors, OOM kills, unexpected reboots), with disk
+  cleanup as space runs low and a watchdog for a stalled loop.
+- **Uptime checks:** HTTP(S), TCP, ping, TLS expiry, DNS, PostgreSQL, MySQL, Redis, Docker containers,
+  heartbeats for cron jobs and plugins, with automatic repairs (restart a unit or container, run a script).
+- **Incidents:** each stretch of trouble with its timeline and likely cause, planned maintenance windows,
+  and a weekly report.
+- **Alerts:** Discord, ntfy, Telegram, Slack, email and a JSON webhook, with routing rules, quiet hours,
+  mutes and a 90-day notification history.
+- **Network and security:** a managed firewall, DDoS detection and defense, SSH login management,
+  Tailscale, two-factor sign-in and read-only viewers.
+- **Other servers:** a small agent (or just an SSH login) for each one, with the same readings, firewall,
+  SSH, Tailscale and updates, plus analytics across all of them.
+- **Media and apps:** Plex (streams, transcodes, libraries, failures from its own log), qBittorrent,
+  media cleanup through Sonarr and Radarr, and an app store of self-hosted apps.
+- **Updates:** OS packages, snaps, Sonarr-style apps, git checkouts and GitHub releases, on a schedule.
+- **Also:** a public status page (optionally on its own domain), plugins, backups and restore, and
+  appearance options.
 
 **How to use it** is in the dashboard itself, under **Help and docs** in the account menu (or `/docs`,
 which opens before signing in too): guides for every feature, searchable. The same guides are Markdown
 in [`frontend/src/docs`](frontend/src/docs), readable here on GitHub; add a page there and list it in
 `frontend/src/docs/index.ts`. A test checks that every link in them leads somewhere real.
 
-The monitor is split into two parts:
-
-```
-backend/                      Go service: monitoring loop, alerts, JSON API
-├── cmd/nightjar/        Entry point (-test, -install-systemd, -env)
-├── cmd/nightjar-agent/  The agent for watching other servers (install, uninstall)
-└── internal/
-    ├── config/               .env loading and validated settings
-    ├── collect/              CPU, memory, disks, network, GPU (nvidia-smi), sensors, processes
-    ├── monitor/              The loop and its handlers: resource, disk, log, kernel, freeze,
-    │                         torrent, service and update checks, plus the watchdog
-    ├── services/             HTTP(S) / TCP / ping / TLS-expiry checks with retries
-    ├── history/              SQLite check history (uptime %, response-time series)
-    ├── alerts/               Escalating cooldowns and flap suppression
-    ├── discord/              Webhook client (rate limit, circuit breaker, fallback log) and embeds
-    ├── cleanup/              Log trimming, rotated-log removal, temp and cache cleanup
-    ├── kernel/               Crash, hardware-error, stability and reboot detection
-    ├── qbittorrent/          qBittorrent Web API client and cleanup policy
-    ├── plex/                 Plex Media Server client: streams, transcodes, libraries, updates
-    ├── api/                  HTTP API, auth, and static serving of the built frontend
-    └── systemd/              Service installation
-backend/test/                 Go tests, one folder per package (black-box: public APIs only)
-frontend/                     React + TypeScript (Vite); builds into backend/internal/web/dist (embedded)
-├── src/
-│   ├── pages/                Dashboard, service detail (response-time chart), Plex, public status page
-│   ├── components/           Cards, meters, sparklines, uptime bars, latency chart
-│   └── api/                  Typed API client
-└── test/                     Vitest tests
-```
-
 ## Quick start
 
-You need Go 1.26+ and Node 20.19+. (`go.mod` pins the patched Go 1.27.4 toolchain; with the default `GOTOOLCHAIN=auto` Go downloads it on first build.)
+Nightjar runs on Linux. To build it you need Go 1.26+ and Node 20.19+. (`go.mod` pins the patched Go
+1.27.4 toolchain; with the default `GOTOOLCHAIN=auto`, Go downloads it on the first build.)
 
 ```bash
 cp env.recommended .env        # set WEBHOOK, thresholds, etc.
 make                           # builds the UI and one self-contained binary: bin/nightjar
-./bin/nightjar            # dashboard on WEB_HOST:WEB_PORT (default http://127.0.0.1:8080)
+./bin/nightjar                 # dashboard on WEB_HOST:WEB_PORT (default http://127.0.0.1:8080)
 ```
+
+To keep it running, install it as a systemd service with `make install-service` (or
+`sudo ./bin/nightjar -install-systemd`).
 
 ### The admin account
 
@@ -71,15 +68,15 @@ The React app is embedded in the binary, so `bin/nightjar` is all you deploy. Wi
 `./build.sh` does the same. Other targets (`make help` lists them all):
 
 ```bash
-make dev                       # Go backend + Vite hot reload on :5173 (proxies /api to :8080)
-make test                      # go vet + go test, tsc + vitest
 make release                   # static linux/amd64 and linux/arm64 binaries in dist/
-make docker                    # container image (see Dockerfile)
+make docker                    # container image nightjar:<version> (see Dockerfile)
 make install-service           # build, then install and enable the systemd unit (sudo)
 make ui                        # put a new UI build live with no restart (see below)
-./bin/nightjar -test      # self-test: collectors, services, webhooks
+./bin/nightjar -test           # self-test: collectors, services, webhooks
 ./bin/nightjar -version
 ```
+
+For development targets (`make dev`, `make test`), see [Development](#development).
 
 To change the UI on a running install without restarting it, set
 `FRONTEND_DIR=/path/to/serverMonitor/web/current` in `.env` and restart once. From then on `make ui`
@@ -91,8 +88,11 @@ Docker needs the host's process and filesystem view for host metrics:
 ```bash
 docker run -d --name nightjar --pid=host --network=host \
   -v /:/host:ro -e HOST_PROC=/host/proc -e HOST_SYS=/host/sys -e HOST_ROOT=/host \
-  -v $PWD/data:/data --env-file .env nightjar:dev
+  -v $PWD/data:/data --env-file .env nightjar:<version>
 ```
+
+Features that change the host (firewall, updates, the app store, systemd repairs) need Nightjar running
+directly on it, ideally as the systemd service.
 
 ## Service monitoring
 
@@ -124,6 +124,7 @@ seconds and the dashboard gets a **plex** page:
 Discord alerts go to `PLEX_WEBHOOK` (or the main webhook):
 - Plex goes down after more than `PLEX_RETRIES` failed polls, and when it recovers.
 - `PLEX_TRANSCODE_ALERT` streams are transcoding at once.
+- Plex is up but playback fails: it **can't find a media file** (with a note when the whole folder is unreadable, which means a drive or mount is offline), it **crashed**, or its **database is damaged**. Read from Plex's own log and crash reports under `PLEX_DATA_DIR` (the Linux package's folder by default), so this needs Plex on the same machine.
 - Optionally, every new stream (`PLEX_NOTIFY_STREAMS=true`).
 
 `nightjar -test` checks the Plex connection and token.
@@ -180,6 +181,10 @@ sends a test to every channel and reports which ones failed and why.
 
 While the dashboard is open it also shows a toast when a check goes down or recovers.
 
+Alerts for the same condition are rate-limited with escalating cooldowns, and flapping conditions are
+suppressed. Discord calls are capped at 30 per minute behind a circuit breaker; anything that cannot
+be delivered is written to `ALERT_LOG_PATH`.
+
 ### Notifications
 
 Every alert is kept for 90 days, whether or not it went anywhere. The **bell** in the header counts unread
@@ -197,48 +202,23 @@ the rules, for 1, 4 or 24 hours: its alerts are still kept but go nowhere.
 
 ## API
 
-| Route | Auth | Purpose |
-| --- | --- | --- |
-| `GET /health` | public (details need signing in) | Health probe: 200 ok, 503 degraded, 500 error |
-| `GET /api/config` | public | Whether the admin account exists and you are signed in; which pages are enabled |
-| `GET /api/stats` | signed in | Host metrics for the dashboard |
-| `GET /api/services` | signed in | Every service's status, uptime (24h/7d/30d) and last 60 checks |
-| `GET /api/services/history?name=&hours=` | signed in | Stored results for one service (1–2160 hours) |
-| `GET /api/plex` | signed in | Plex server state, active streams, libraries, stream history |
-| `GET /api/status` | public, when `STATUS_PAGE_ENABLED=true` | Names, status and uptime only |
-| `GET /api/checks` | signed in | Every check's definition |
-| `POST /api/checks`, `PUT /api/checks/{name}`, `DELETE /api/checks/{name}` | signed in | Add, change (or rename) and delete checks |
-| `GET /api/settings` | signed in | Every setting with its value and where it comes from (secrets only say whether they are set) |
-| `POST /api/alerts/test` | signed in | Send a test alert to every channel; returns each channel's result |
-| `GET /api/updates` | signed in | Every update target with installed and latest versions, pending items and recent runs |
-| `POST /api/updates/check`, `POST /api/updates/{id}/check` | signed in | Queue a check of everything, or of one target |
-| `POST /api/updates/{id}/update` | signed in | Queue an update of one target |
-| `POST /api/updates`, `PUT /api/updates/{id}`, `DELETE /api/updates/{id}` | signed in | Add, change and remove targets |
-| `POST /api/updates/detect` | signed in | Add newly detected targets |
-| `PUT /api/settings` | signed in | `{"values": {"KEY": "value"}}`; `""` restores the default. Live settings apply on the next cycle; others restart the monitor (`restarting`, `restart_for`) |
-| `POST /api/settings/test` | signed in | `{"target": "plex"\|"qbittorrent"\|"alerts", "values": {...}}`: try a connection with unsaved values |
-| `GET /api/setup` | signed in | What is set up, and what was found on this machine to offer |
-| `GET /api/notifications?q=&severity=&area=&unread=1&before=` | signed in | Alert history, newest first, 50 at a time, with unread counts |
-| `GET /api/notifications/summary` | signed in | Unread counts, mutes and whether quiet hours are on (the bell polls this) |
-| `POST /api/notifications/read` | signed in | `{"ids": [...]}` or `{"all": true}`, with `"unread": true` to mark them unread |
-| `GET /api/notifications/rules`, `PUT /api/notifications/rules` | signed in | Routing rules (`{"rules": {area: {channel: level}}, "quiet": {...}}`) and quiet hours |
-| `POST /api/notifications/mute` | signed in | `{"subject": "check:Plex", "label": "Plex", "minutes": 60}`; `0` unmutes |
+Everything the dashboard shows comes from a JSON API on the same address. The full list of routes,
+grouped by area, is in [`frontend/src/docs/api.md`](frontend/src/docs/api.md) (also under **Help and
+docs → API** in the dashboard).
+
+```bash
+curl -H "Authorization: Bearer $WEB_AUTH_TOKEN" http://127.0.0.1:8080/api/stats
+```
 
 The dashboard signs in with the admin account and keeps an HttpOnly, SameSite=Strict session cookie
 (Secure over HTTPS, including behind a proxy that sends `X-Forwarded-Proto: https`). Scripts can skip
 signing in with `WEB_AUTH_TOKEN`, sent as `Authorization: Bearer <token>` or `X-Auth-Token`. Ten wrong
-passwords, setup codes or tokens a minute lock that client out for a minute; behind a reverse proxy on the
+passwords, setup codes or tokens a minute lock that client out for a minute. Behind a reverse proxy on the
 same machine, the client is taken from `X-Real-IP` or the last `X-Forwarded-For` hop. Have the proxy set
 `X-Real-IP`, or overwrite or append to `X-Forwarded-For` (nginx: `proxy_set_header X-Real-IP $remote_addr;`
 and `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`), so a client cannot choose its own
-address for those limits. Changes must be JSON and, when the
-browser sends an `Origin`, come from the dashboard's own origin, so another site cannot make them.
-
-| Route | Auth | Purpose |
-| --- | --- | --- |
-| `POST /api/auth/setup` | setup code | `{"username", "password", "setup_code"}`: create the admin account (once) and sign in |
-| `POST /api/auth/login`, `POST /api/auth/logout` | public | Sign in (`{"username", "password"}`) and out |
-| `POST /api/auth/password` | signed in | `{"current", "new"}`: change the password and sign out other browsers |
+address for those limits. Changes must be JSON and, when the browser sends an `Origin`, come from the
+dashboard's own origin, so another site cannot make them.
 
 ## Configuration
 
@@ -273,90 +253,11 @@ the settings that decide how the dashboard itself is reached and stored: `WEB_HO
 `.env` to start. Values in `.env` must not carry inline comments when systemd reads the file
 (`EnvironmentFile=`), since systemd keeps them as part of the value.
 
-## What it watches
-
-- **Resources:** CPU, memory, GPU (nvidia-smi), disks and partitions, temperature (with a likely-cause
-  analysis), network bandwidth and individual processes, each against its threshold.
-- **Disk pressure:** removes old temp files, caches and rotated logs as usage climbs, more aggressively
-  past the emergency threshold, and trims oversized log files.
-- **Kernel:** panics, oopses, hardware errors, memory pressure, unexpected reboots, and a stability risk score.
-- **Freezes:** a watchdog notices a stalled monitoring loop and can restart the service.
-- **Optional:** media directory size, qBittorrent (stalled and finished torrents), Plex, service uptime
-  checks, and updates for OS packages, snaps and self-hosted apps (see [Updates](#updates)).
-
-Alerts for the same condition are rate-limited with escalating cooldowns, and flapping conditions are
-suppressed. Discord calls are capped at 30 per minute behind a circuit breaker; anything that cannot
-be delivered is written to `ALERT_LOG_PATH`.
-
-## Moving from Server Monitor
-
-Nightjar was called Server Monitor, and every name changed with it: the program (`bin/nightjar`), the agent (`nightjar-agent`), the systemd unit (`nightjar.service`) and the default files. A machine that ran the old one moves over by stopping it, renaming its files, and installing the new unit. Checks, history, settings, notifications and the admin account all carry over; browsers sign in again.
-
-```bash
-cd /path/to/the/checkout
-make build
-sudo systemctl disable --now server-monitor
-sqlite3 server_monitor_history.db 'PRAGMA wal_checkpoint(TRUNCATE);'
-mv server_monitor_history.db nightjar.db && rm -f server_monitor_history.db-wal server_monitor_history.db-shm
-mv ~/.servermonitor_kernel_tracking.json ~/.nightjar_kernel_tracking.json 2>/dev/null
-sudo mv /var/log/server-monitor-alerts.log /var/log/nightjar-alerts.log 2>/dev/null
-sudo ./bin/nightjar -install-systemd
-sudo rm /etc/systemd/system/server-monitor.service && sudo systemctl daemon-reload
-sudo systemctl start nightjar
-```
-
-If `.env` sets `HISTORY_DB`, `LOG_FILE`, `ALERT_LOG_PATH`, `KERNEL_TRACKING_FILE` or `SYSTEMD_SERVICE_NAME` itself, those paths are kept as they are, and only the files it doesn't name need moving. The old log, `server_monitor.log`, can stay or go; new lines go to `nightjar.log`.
-
-Agents installed before the rename keep running under their old names, but they pin a key the new dashboard no longer expects, so reinstall each with **Servers → Add a server** (and remove the old one with `sudo servermonitor-agent uninstall`). Apps from the app store keep running; the store lists them again once their manifests move: `sudo mv /etc/servermonitor /etc/nightjar`.
-
-## Development
-
-```bash
-make dev                       # backend + Vite hot reload
-make demo                      # UI only, on demo data: no Go or backend needed
-make test                      # go vet, go test, tsc, vitest
-make format                    # gofmt the Go code, Prettier the frontend
-make lint                      # check formatting, go vet and tsc, changing nothing
-cd backend && go test -race ./...
-```
-
-Frontend work does not need the backend: `npm run dev` (also `npm run demo`, `make demo`) serves the UI
-on generated demo data (`frontend/src/api/demo.ts`). A banner says so, edits to checks and settings last
-for the browser tab, and production builds leave the demo data out entirely. Sign in as `demo` with the
-password `demo`; signing out and in again works as it does on a real monitor. To work against a real
-backend instead, `npm run dev:live` proxies the API to it (`BACKEND_URL`, by default
-http://127.0.0.1:8080) and falls back to demo data when none answers; `make dev` starts both.
-
-### Where things are
-
-| Path | What it holds |
-| --- | --- |
-| `backend/cmd/nightjar` | Startup: reads settings, wires every part together, restarts in place |
-| `backend/internal/monitor` | The monitoring loop and its alert handlers, one file per area |
-| `backend/internal/api` | The HTTP API, one file per area (`checks.go`, `settings.go`, `updates.go`, `network.go`…) |
-| `backend/internal/config` | Every setting, declared once in `settings.go` |
-| `backend/internal/collect`, `netload`, `smart`, `units` | Reading the machine: resources, live network, drive health, systemd |
-| `backend/internal/services`, `plex`, `qbittorrent`, `updates` | Uptime checks and the integrations |
-| `backend/internal/apps` | The app store: its catalog, install and remove scripts, and jobs |
-| `backend/internal/analytics` | Every server's minutes, and the summaries, outages and disk forecasts made from them |
-| `backend/internal/agent`, `agentbin`, `remote` | Watching other servers: the agent (sampling, serving, installing), its builds carried inside the monitor, and the dashboard's poller and alerts |
-| `backend/internal/accounts` | The admin account, its setup code, password hashing (PBKDF2) and sessions |
-| `backend/internal/discord`, `notify`, `alerts` | Alert delivery, channels and cooldowns; `notify/hub.go` keeps, routes, holds and mutes every alert |
-| `backend/internal/storage` | The SQLite database |
-| `frontend/src/pages` | One file per page; larger pages keep their parts in a folder beside them (`overview/`, `qbittorrent/`) |
-| `frontend/src/components` | Pieces shared between pages (charts, dropdown, finder, toasts) |
-| `frontend/src/api` | API client, types, shared polls, and the demo data |
-| `frontend/src/styles` | One stylesheet per area; `styles.css` imports them in cascade order |
-
-All tests live in `backend/test/` and `frontend/test/`. The Go tests only use each package's public API;
-alert scenarios feed synthetic snapshots through `monitor.Loop.Evaluate`, and an end-to-end test runs real
-monitoring cycles and reads them back through the API (`backend/test/api/e2e_test.go`). Fake Discord,
-Plex, qBittorrent and service targets are built on `httptest`.
-
 ## App store
 
-**Apps → App store** installs torrent and media apps from their official releases: qBittorrent,
-Prowlarr, Jackett, Sonarr, Radarr, Lidarr, autobrr, Unpackerr and an ntfy push server. Each gets
+**Apps → App store** installs self-hosted apps from their official releases: qBittorrent, Prowlarr,
+Jackett, Sonarr, Radarr, Lidarr, autobrr, Unpackerr, Navidrome, Ombi, Syncthing, File Browser, AdGuard
+Home, Gitea, Memos and an ntfy push server. Each gets
 `/opt/<app>` for the program, `/var/lib/<app>` for its settings, and its own `<app>.service`, running as
 swizzin's main user when there is one (so it shares downloads with the rest), else `media`. The install
 log streams live; an uptime check can be added for it, and ntfy can be made the monitor's alert channel
@@ -372,9 +273,11 @@ down. `GET /api/apps`, `POST /api/apps/{id}/install` (`{"port", "check"}`), `POS
 
 **Servers** shows other machines next to this one, each either through just an SSH login (whether
 its SSH port answers, its checks, test and reboot) or through a small agent installed on it
-(`nightjar-agent`, about 7 MB, no dependencies) that only reports and changes nothing on the machine:
-CPU, memory, CPU temperature, fans, GPU, disks, SMART drive health and temperatures, network and uptime,
-refreshed every 10 seconds with the last hour charted.
+(`nightjar-agent`, about 10 MB, no dependencies). The agent reports CPU, memory, CPU temperature, fans,
+GPU, disks, SMART drive health and temperatures, network and uptime, refreshed every 10 seconds with the
+last hour charted. It also watches for attacks, and over its pinned HTTPS lets the dashboard manage the
+server's firewall, SSH logins, Tailscale and software updates. The dashboard keeps each agent on its own
+build, sending a new one when it changes.
 
 Something that only needs to answer (a router's page, a port, a ping) is an uptime check under
 **Services**. A check can name the server it runs on, and that server's page lists it under
@@ -395,10 +298,12 @@ Adding an agent:
    chmod +x nightjar-agent-linux-amd64 && sudo ./nightjar-agent-linux-amd64 install -token <token>
    ```
 
-   `install` copies it to `/usr/local/bin`, puts the token in `/etc/nightjar-agent.env` (readable by
-   root only) and starts `nightjar-agent.service`, sandboxed so it can read the machine but write
-   nothing. Drive readings need smartmontools on the server. `-listen :9200` picks another port, and
-   `-tls=false` serves plain HTTP instead of HTTPS.
+   `install` copies it to `/var/lib/nightjar-agent` (linked from `/usr/local/bin/nightjar-agent`), puts
+   the token in `/etc/nightjar-agent.env` (readable by root only) and starts `nightjar-agent.service`,
+   sandboxed so it can read the machine but write only its own folder and what managing SSH logins
+   needs; updates run as transient systemd units outside that sandbox. It also opens its port in ufw, firewalld or iptables when one is
+   on, and installs smartmontools for drive readings (`-firewall=false` and `-smart=false` skip those).
+   `-listen :9200` picks another port, and `-tls=false` serves plain HTTP instead of HTTPS.
 3. Press **Connect**: the dashboard checks that the agent answers with that token before saving it.
 
 The dashboard does the asking; servers never connect to it, so it can stay on 127.0.0.1. Each agent's
@@ -483,3 +388,76 @@ Each log entry is one aligned line: level, component, message, then `key=value` 
   for permission errors.
 - **qBittorrent or Plex unreachable:** `-test` reports the connection result; check the host, port and
   credentials or token.
+
+## Development
+
+```bash
+make dev                       # backend + Vite hot reload
+make demo                      # UI only, on demo data: no Go or backend needed
+make test                      # go vet, go test, tsc, vitest
+make format                    # gofmt the Go code, Prettier the frontend
+make lint                      # check formatting, go vet and tsc, changing nothing
+cd backend && go test -race ./...
+```
+
+Frontend work does not need the backend: `npm run dev` (also `npm run demo`, `make demo`) serves the UI
+on generated demo data (`frontend/src/api/demo.ts`). A banner says so, edits to checks and settings last
+for the browser tab, and production builds leave the demo data out entirely. Sign in as `demo` with the
+password `demo`; signing out and in again works as it does on a real monitor. To work against a real
+backend instead, `npm run dev:live` proxies the API to it (`BACKEND_URL`, by default
+http://127.0.0.1:8080) and falls back to demo data when none answers; `make dev` starts both.
+
+### Where things are
+
+| Path | What it holds |
+| --- | --- |
+| `backend/cmd/nightjar` | Startup: reads settings, wires every part together, restarts in place |
+| `backend/internal/monitor` | The monitoring loop and its alert handlers, one file per area |
+| `backend/internal/api` | The HTTP API, one file per area (`checks.go`, `settings.go`, `updates.go`, `network.go`…) |
+| `backend/internal/config` | Every setting, declared once in `settings.go` |
+| `backend/internal/collect`, `netload`, `smart`, `units`, `kernel` | Reading the machine: resources, live network, drive health, systemd, kernel logs |
+| `backend/internal/cleanup` | Freeing disk space: log trimming, rotated logs, temp files and caches |
+| `backend/internal/services`, `repair`, `docker` | Uptime checks, heartbeats, and the repairs that bring a check back |
+| `backend/internal/incidents`, `maintenance`, `report`, `diagnose` | Incidents and their causes, planned downtime, the weekly report, plain-words log diagnosis |
+| `backend/internal/plex`, `plexstats`, `qbittorrent`, `arr`, `mediacleanup` | Media integrations, and removing what nobody watches |
+| `backend/internal/updates` | Software updates: detection, checks, runs and the update window |
+| `backend/internal/firewall`, `ddos`, `sshd`, `tailscale` | Network and security: firewall rules, attack detection and defense, SSH logins, Tailscale |
+| `backend/internal/statusproxy` | The public status page on its own domain, through nginx and certbot |
+| `backend/internal/apps` | The app store: its catalog, install and remove scripts, and jobs |
+| `backend/internal/plugins` | Owner-written checks, overview cards and alert channels (examples in `examples/plugins`) |
+| `backend/internal/analytics` | Every server's minutes, and the summaries, outages and disk forecasts made from them |
+| `backend/internal/agent`, `agentbin`, `remote` | Watching other servers: the agent (sampling, serving, installing), its builds carried inside the monitor, and the dashboard's poller and alerts |
+| `backend/internal/accounts` | The admin account, viewers, two-factor sign-in, password hashing (PBKDF2) and sessions |
+| `backend/internal/discord`, `notify`, `alerts` | Alert delivery, channels and cooldowns; `notify/hub.go` keeps, routes, holds and mutes every alert |
+| `backend/internal/storage` | The SQLite database |
+| `backend/internal/logx`, `metrics`, `selfcheck`, `setup`, `systemd` | Logging, internal counters, permission self-checks, the setup guide's discovery, and the systemd unit |
+| `frontend/src/pages` | One file per page; larger pages keep their parts in a folder beside them (`overview/`, `qbittorrent/`) |
+| `frontend/src/components` | Pieces shared between pages (charts, dropdown, finder, toasts) |
+| `frontend/src/api` | API client, types, shared polls, and the demo data |
+| `frontend/src/styles` | One stylesheet per area; `styles.css` imports them in cascade order |
+
+All tests live in `backend/test/` and `frontend/test/`. The Go tests only use each package's public API;
+alert scenarios feed synthetic snapshots through `monitor.Loop.Evaluate`, and an end-to-end test runs real
+monitoring cycles and reads them back through the API (`backend/test/api/e2e_test.go`). Fake Discord,
+Plex, qBittorrent and service targets are built on `httptest`.
+
+## Moving from Server Monitor
+
+Nightjar was called Server Monitor, and every name changed with it: the program (`bin/nightjar`), the agent (`nightjar-agent`), the systemd unit (`nightjar.service`) and the default files. A machine that ran the old one moves over by stopping it, renaming its files, and installing the new unit. Checks, history, settings, notifications and the admin account all carry over; browsers sign in again.
+
+```bash
+cd /path/to/the/checkout
+make build
+sudo systemctl disable --now server-monitor
+sqlite3 server_monitor_history.db 'PRAGMA wal_checkpoint(TRUNCATE);'
+mv server_monitor_history.db nightjar.db && rm -f server_monitor_history.db-wal server_monitor_history.db-shm
+mv ~/.servermonitor_kernel_tracking.json ~/.nightjar_kernel_tracking.json 2>/dev/null
+sudo mv /var/log/server-monitor-alerts.log /var/log/nightjar-alerts.log 2>/dev/null
+sudo ./bin/nightjar -install-systemd
+sudo rm /etc/systemd/system/server-monitor.service && sudo systemctl daemon-reload
+sudo systemctl start nightjar
+```
+
+If `.env` sets `HISTORY_DB`, `LOG_FILE`, `ALERT_LOG_PATH`, `KERNEL_TRACKING_FILE` or `SYSTEMD_SERVICE_NAME` itself, those paths are kept as they are, and only the files it doesn't name need moving. The old log, `server_monitor.log`, can stay or go; new lines go to `nightjar.log`.
+
+Agents installed before the rename keep running under their old names, but they pin a key the new dashboard no longer expects, so reinstall each with **Servers → Add a server** (and remove the old one with `sudo servermonitor-agent uninstall`). Apps from the app store keep running; the store lists them again once their manifests move: `sudo mv /etc/servermonitor /etc/nightjar`.

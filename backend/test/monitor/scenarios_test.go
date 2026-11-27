@@ -409,3 +409,44 @@ func TestHardwareErrorDescriptions(t *testing.T) {
 		}
 	}
 }
+
+// Plex up and answering while playback fails: its log says it could not find the file, and a
+// player retrying every few seconds still makes one alert. A crash dump is its own alert.
+func TestPlexFailureAlerts(t *testing.T) {
+	pms := newFakePlex(t)
+	client, _ := plex.New(pms.URL, "tok", true, 2*time.Second)
+	dir := t.TempDir()
+	logs, crashes := filepath.Join(dir, "Logs"), filepath.Join(dir, "Crash Reports", "1.43", "PLEX MEDIA SERVER")
+	os.MkdirAll(logs, 0o755)
+	os.MkdirAll(crashes, 0o755)
+	logPath := filepath.Join(logs, "Plex Media Server.log")
+	write := func(s string) {
+		f, _ := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		f.WriteString(s)
+		f.Close()
+	}
+	write("")
+	wh := &fieldSender{}
+	ctx := testContext(nil)
+	ctx.PlexWebhook, ctx.Plex, ctx.PlexLogs = wh, plex.NewMonitor(client, 15, 1), plex.NewLogWatcher(dir)
+	ctx.PlexLogs.Poll()
+	eval := evaluator(ctx)
+	eval(monitor.Snapshot{Now: 0})
+	expectTitles(t, &wh.fakeSender)
+
+	gone := filepath.Join(dir, "media_hdd", "tv", "Carrie - S01E07.mkv") // its folder does not exist
+	line := "Nov 25, 2026 01:57:55.109 [1] ERROR - Couldn't find the file to stream: " + gone + "\n"
+	write(line + line)
+	eval(monitor.Snapshot{Now: 15})
+	expectTitles(t, &wh.fakeSender, "Plex can't find media files")
+	if text := wh.text(); !strings.Contains(text, "Carrie - S01E07.mkv") || !strings.Contains(text, "is missing") {
+		t.Fatalf("the alert should name the file and its missing folder:\n%s", text)
+	}
+	write(line)
+	eval(monitor.Snapshot{Now: 30}) // the player retries, within the cooldown
+	expectTitles(t, &wh.fakeSender, "Plex can't find media files")
+
+	os.WriteFile(filepath.Join(crashes, "abc.dmp"), []byte("x"), 0o644)
+	eval(monitor.Snapshot{Now: 45})
+	expectTitles(t, &wh.fakeSender, "Plex can't find media files", "Plex crashed")
+}
